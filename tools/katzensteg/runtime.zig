@@ -19,6 +19,7 @@ pub const Runtime = struct {
     engine: ?ts_scene.SceneEngine = null,
     backend: ?ts_kitty.Backend = null,
     frame_builder: FrameBuilder,
+    bg_only: bool = false,
     active: bool = false,
 
     fn init() Runtime {
@@ -28,6 +29,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .logger = logger,
             .frame_builder = FrameBuilder.init(allocator),
+            .bg_only = std.c.getenv("KATZENSTEG_BG_ONLY") != null,
         };
         runtime.tty = DirectTty.init() catch |err| {
             runtime.logger.writeFmt("katzensteg: direct tty init failed: {any}", .{err});
@@ -37,6 +39,7 @@ pub const Runtime = struct {
         runtime.backend = ts_kitty.Backend.init(allocator, runtime.tty.?.file);
         runtime.active = true;
         runtime.logger.write("katzensteg: runtime initialized in direct tty mode");
+        if (runtime.bg_only) runtime.logger.write("katzensteg: background-only debug mode enabled");
         return runtime;
     }
 

@@ -107,14 +107,17 @@ pub export fn ks_SDL_RenderDrawPoint(renderer: ?*sdl.SDL_Renderer, x: c_int, y: 
 
 pub export fn ks_SDL_RenderDrawLine(renderer: ?*sdl.SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) callconv(.c) c_int {
     const rc = sdl.SDL_RenderDrawLine(renderer, x1, y1, x2, y2);
-    if (rc == 0) runtime.get().frame_builder.onRenderDrawLine(renderer, x1, y1, x2, y2);
+    if (rc == 0) {
+        const rt = runtime.get();
+        rt.frame_builder.onRenderDrawLine(&rt.logger, renderer, x1, y1, x2, y2);
+    }
     return rc;
 }
 
 pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
     const rt = runtime.get();
     if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null) {
-        rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer);
+        rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only);
     }
     sdl.SDL_RenderPresent(renderer);
 }

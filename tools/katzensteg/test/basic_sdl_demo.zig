@@ -5,6 +5,7 @@ const tex_w = 128;
 const tex_h = 128;
 const win_w = 640;
 const win_h = 480;
+const run_frames = 900;
 
 fn fillTexture(buf: []u8, tick: usize) void {
     var y: usize = 0;
@@ -30,6 +31,8 @@ pub fn main() !void {
 
     const window = sdl.SDL_CreateWindow("basic-sdl-demo", sdl.SDL_WINDOWPOS_CENTERED, sdl.SDL_WINDOWPOS_CENTERED, win_w, win_h, @intFromEnum(sdl.SDL_WindowFlags.shown)) orelse return error.SDLCreateWindowFailed;
     defer sdl.SDL_DestroyWindow(window);
+    sdl.SDL_ShowWindow(window);
+    sdl.SDL_RaiseWindow(window);
 
     const renderer = sdl.SDL_CreateRenderer(window, -1, @intFromEnum(sdl.SDL_RendererFlags.accelerated) | @intFromEnum(sdl.SDL_RendererFlags.presentvsync)) orelse return error.SDLCreateRendererFailed;
     defer sdl.SDL_DestroyRenderer(renderer);
@@ -48,7 +51,8 @@ pub fn main() !void {
     _ = sdl.SDL_SetTextureBlendMode(surface_texture, sdl.SDL_BLENDMODE_BLEND);
 
     var frame: usize = 0;
-    while (frame < 240) : (frame += 1) {
+    while (frame < run_frames) : (frame += 1) {
+        sdl.SDL_PumpEvents();
         fillTexture(&pixels, frame);
         if (sdl.SDL_UpdateTexture(streaming, null, &pixels, tex_w * 4) != 0) return error.SDLUpdateTextureFailed;
         _ = sdl.SDL_SetTextureColorMod(surface_texture, 255, @intCast((frame * 3) % 255), @intCast((frame * 5) % 255));

@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const backend = @import("../backend.zig");
+const protocol = @import("protocol.zig");
 
 pub const Backend = struct {
     // Backend-local retained state used to make remove/update operations correct.
@@ -49,9 +50,7 @@ pub const Backend = struct {
     }
 
     pub fn registerRawImage(self: *Backend, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
-        var prefix_buf: [128]u8 = undefined;
-        const prefix = try std.fmt.bufPrint(&prefix_buf, "q=2,a=t,f=32,s={d},v={d},i={d}", .{ w, h, image_id });
-        try chunkedApc(self.writer(), prefix, rgba);
+        try protocol.writeTransmitRgba(self.writer(), image_id, rgba, w, h);
     }
 
     pub fn applySpriteOps(self: *Backend, sprite_ops: []const backend.SpriteOp) !void {
@@ -62,44 +61,49 @@ pub const Backend = struct {
                     const node = op.node orelse continue;
                     const image_id = @intFromEnum(node.image);
                     const placement_id = try self.allocatePlacementId();
-                    try moveCursor(self.writer(), node.dest_rect.row, node.dest_rect.col);
-                    try self.writer().print("\x1b_Gq=2,a=p,C=1,i={d},p={d},c={d},r={d},x={d},y={d},w={d},h={d},z={d};\x1b\\", .{
-                        image_id,
-                        placement_id,
-                        node.dest_rect.w,
-                        node.dest_rect.h,
-                        node.source_rect.x,
-                        node.source_rect.y,
-                        node.source_rect.w,
-                        node.source_rect.h,
-                        node.z,
+                    try protocol.writePlace(self.writer(), node.dest_rect.row, node.dest_rect.col, .{
+                        .image_id = image_id,
+                        .placement_id = placement_id,
+                        .cols = node.dest_rect.w,
+                        .rows = node.dest_rect.h,
+                        .src_x = node.source_rect.x,
+                        .src_y = node.source_rect.y,
+                        .src_w = node.source_rect.w,
+                        .src_h = node.source_rect.h,
+                        .z = node.z,
                     });
                     try self.sprites.put(key_int, .{ .image_id = image_id, .placement_id = placement_id });
                 },
                 .update => {
                     const node = op.node orelse continue;
                     const image_id = @intFromEnum(node.image);
-                    const state = self.sprites.get(key_int) orelse blk: {
-                        const placement_id = try self.allocatePlacementId();
-                        break :blk SpriteState{ .image_id = image_id, .placement_id = placement_id };
+                    const old_state = self.sprites.get(key_int);
+                    const placement_id = blk: {
+                        if (old_state) |state| {
+                            if (state.image_id != image_id) {
+                                try protocol.writeDeleteExactPlacement(self.writer(), .{ .image_id = state.image_id, .placement_id = state.placement_id });
+                                break :blk try self.allocatePlacementId();
+                            }
+                            break :blk state.placement_id;
+                        }
+                        break :blk try self.allocatePlacementId();
                     };
-                    try moveCursor(self.writer(), node.dest_rect.row, node.dest_rect.col);
-                    try self.writer().print("\x1b_Gq=2,a=p,C=1,i={d},p={d},c={d},r={d},x={d},y={d},w={d},h={d},z={d};\x1b\\", .{
-                        image_id,
-                        state.placement_id,
-                        node.dest_rect.w,
-                        node.dest_rect.h,
-                        node.source_rect.x,
-                        node.source_rect.y,
-                        node.source_rect.w,
-                        node.source_rect.h,
-                        node.z,
+                    try protocol.writePlace(self.writer(), node.dest_rect.row, node.dest_rect.col, .{
+                        .image_id = image_id,
+                        .placement_id = placement_id,
+                        .cols = node.dest_rect.w,
+                        .rows = node.dest_rect.h,
+                        .src_x = node.source_rect.x,
+                        .src_y = node.source_rect.y,
+                        .src_w = node.source_rect.w,
+                        .src_h = node.source_rect.h,
+                        .z = node.z,
                     });
-                    try self.sprites.put(key_int, .{ .image_id = image_id, .placement_id = state.placement_id });
+                    try self.sprites.put(key_int, .{ .image_id = image_id, .placement_id = placement_id });
                 },
                 .remove => {
                     if (self.sprites.fetchRemove(key_int)) |entry| {
-                        try self.writer().print("\x1b_Gq=2,a=d,d=i,i={d},p={d};\x1b\\", .{ entry.value.image_id, entry.value.placement_id });
+                        try protocol.writeDeleteExactPlacement(self.writer(), .{ .image_id = entry.value.image_id, .placement_id = entry.value.placement_id });
                     }
                 },
             }
@@ -114,11 +118,11 @@ pub const Backend = struct {
                     const node = op.node orelse continue;
                     if (self.texts.get(key_int)) |old| {
                         if (old.row == node.pos.row and old.col == node.pos.col and old.len > node.content.len) {
-                            try moveCursor(self.writer(), old.row, old.col);
+                            try protocol.moveCursor(self.writer(), old.row, old.col);
                             try writeSpaces(self.writer(), old.len);
                         }
                     }
-                    try moveCursor(self.writer(), node.pos.row, node.pos.col);
+                    try protocol.moveCursor(self.writer(), node.pos.row, node.pos.col);
                     if (node.style.bg) |bg| {
                         try self.writer().print("\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, bg.r, bg.g, bg.b, node.content });
                     } else {
@@ -128,40 +132,12 @@ pub const Backend = struct {
                 },
                 .remove => {
                     if (self.texts.fetchRemove(key_int)) |entry| {
-                        try moveCursor(self.writer(), entry.value.row, entry.value.col);
+                        try protocol.moveCursor(self.writer(), entry.value.row, entry.value.col);
                         try writeSpaces(self.writer(), entry.value.len);
                     }
                 },
             }
         }
-    }
-
-    fn chunkedApc(out: std.fs.File.DeprecatedWriter, prefix: []const u8, payload: []const u8) !void {
-        const enc_len = std.base64.standard.Encoder.calcSize(payload.len);
-        const b64 = try std.heap.page_allocator.alloc(u8, enc_len);
-        defer std.heap.page_allocator.free(b64);
-        _ = std.base64.standard.Encoder.encode(b64, payload);
-
-        var offset: usize = 0;
-        const chunk: usize = 3072;
-        while (offset < b64.len) {
-            const end = @min(offset + chunk, b64.len);
-            const more: u8 = if (end < b64.len) '1' else '0';
-            if (offset == 0) {
-                try out.writeAll("\x1b_G");
-                try out.writeAll(prefix);
-                try out.print(",m={c};", .{more});
-            } else {
-                try out.print("\x1b_Gm={c};", .{more});
-            }
-            try out.writeAll(b64[offset..end]);
-            try out.writeAll("\x1b\\");
-            offset = end;
-        }
-    }
-
-    fn moveCursor(out: std.fs.File.DeprecatedWriter, row: i32, col: i32) !void {
-        try out.print("\x1b[{d};{d}H", .{ row, col });
     }
 
     fn keyToInt(key: types.NodeKey) u64 {

@@ -34,6 +34,8 @@ pub const SDL_BLENDMODE_BLEND: c_int = 0x00000001;
 pub extern fn SDL_Init(flags: Uint32) c_int;
 pub extern fn SDL_Quit() void;
 pub extern fn SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: Uint32) ?*SDL_Window;
+pub extern fn SDL_ShowWindow(window: ?*SDL_Window) void;
+pub extern fn SDL_RaiseWindow(window: ?*SDL_Window) void;
 pub extern fn SDL_DestroyWindow(window: ?*SDL_Window) void;
 pub extern fn SDL_CreateRenderer(window: ?*SDL_Window, index: c_int, flags: Uint32) ?*SDL_Renderer;
 pub extern fn SDL_DestroyRenderer(renderer: ?*SDL_Renderer) void;
@@ -55,6 +57,7 @@ pub extern fn SDL_RenderFillRect(renderer: ?*SDL_Renderer, rect: ?*const SDL_Rec
 pub extern fn SDL_RenderDrawPoint(renderer: ?*SDL_Renderer, x: c_int, y: c_int) c_int;
 pub extern fn SDL_RenderDrawLine(renderer: ?*SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) c_int;
 pub extern fn SDL_RenderGetViewport(renderer: ?*SDL_Renderer, rect: *SDL_Rect) void;
+pub extern fn SDL_PumpEvents() void;
 pub extern fn SDL_Delay(ms: Uint32) void;
 pub extern fn SDL_GetError() [*:0]const u8;
 

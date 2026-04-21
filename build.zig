@@ -45,6 +45,17 @@ pub fn build(b: *std.Build) void {
     termscene_demo.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(termscene_demo);
 
+    const kitty_placement_repro = b.addExecutable(.{
+        .name = "kitty-placement-repro",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/kitty-placement-repro/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    kitty_placement_repro.root_module.addImport("termscene", termscene_mod);
+    b.installArtifact(kitty_placement_repro);
+
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",
@@ -103,6 +114,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| termscene_demo_cmd.addArgs(args);
     const termscene_demo_step = b.step("termscene-demo", "Run termscene feature demo");
     termscene_demo_step.dependOn(&termscene_demo_cmd.step);
+
+    const kitty_placement_repro_cmd = b.addRunArtifact(kitty_placement_repro);
+    if (b.args) |args| kitty_placement_repro_cmd.addArgs(args);
+    const kitty_placement_repro_step = b.step("kitty-placement-repro", "Run the standalone kitty placement semantics repro");
+    kitty_placement_repro_step.dependOn(&kitty_placement_repro_cmd.step);
 
     const basic_sdl_demo_cmd = b.addRunArtifact(basic_sdl_demo);
     if (b.args) |args| basic_sdl_demo_cmd.addArgs(args);

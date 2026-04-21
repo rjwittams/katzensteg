@@ -15,8 +15,10 @@ const fill_namespace: u24 = 212;
 const RendererState = struct {
     window_w: i32,
     window_h: i32,
+    draw_color: [4]u8 = .{ 0, 0, 0, 255 },
     clear_color: [4]u8 = .{ 0, 0, 0, 255 },
     had_clear: bool = false,
+    last_logged_bg_image_id: u32 = 0,
     copies: std.ArrayList(RenderCopyOp),
     fills: std.ArrayList(FillRectOp),
     lines: std.ArrayList(LineOp),
@@ -217,12 +219,13 @@ pub const FrameBuilder = struct {
 
     pub fn onSetRenderDrawColor(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        state.clear_color = .{ r, g, b, a };
+        state.draw_color = .{ r, g, b, a };
     }
 
     pub fn onRenderClear(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         state.had_clear = true;
+        state.clear_color = state.draw_color;
         state.copies.clearRetainingCapacity();
         state.fills.clearRetainingCapacity();
         state.lines.clearRetainingCapacity();
@@ -231,17 +234,21 @@ pub const FrameBuilder = struct {
     pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         const fill = rect orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
-        state.fills.append(self.allocator, .{ .rect = fill.*, .color = state.clear_color }) catch {};
+        state.fills.append(self.allocator, .{ .rect = fill.*, .color = state.draw_color }) catch {};
     }
 
     pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        state.fills.append(self.allocator, .{ .rect = .{ .x = x, .y = y, .w = 1, .h = 1 }, .color = state.clear_color }) catch {};
+        state.fills.append(self.allocator, .{ .rect = .{ .x = x, .y = y, .w = 1, .h = 1 }, .color = state.draw_color }) catch {};
     }
 
-    pub fn onRenderDrawLine(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
+    pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        state.lines.append(self.allocator, .{ .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2, .color = state.clear_color }) catch {};
+        if (x1 != x2 and y1 != y2) {
+            logger.writeOnce("katzensteg: diagonal SDL_RenderDrawLine mirroring not implemented yet; skipping line");
+            return;
+        }
+        state.lines.append(self.allocator, .{ .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2, .color = state.draw_color }) catch {};
     }
 
     pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
@@ -256,12 +263,19 @@ pub const FrameBuilder = struct {
         state.copies.append(self.allocator, .{ .texture_key = texture_key, .src = src_rect.*, .dst = dst.?.* }) catch {};
     }
 
-    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer) void {
+    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, bg_only: bool) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
 
         engine.beginScene();
         if (state.had_clear) {
             const bg_image_id = self.ensureSolidImage(logger, backend, state.clear_color);
+            if (bg_image_id != state.last_logged_bg_image_id) {
+                logger.writeFmt(
+                    "katzensteg: bg clear=rgba({d},{d},{d},{d}) image_id={d}",
+                    .{ state.clear_color[0], state.clear_color[1], state.clear_color[2], state.clear_color[3], bg_image_id },
+                );
+                state.last_logged_bg_image_id = bg_image_id;
+            }
             const bg_image: ts_types.ImageHandle = @enumFromInt(bg_image_id);
             engine.sprite(.{
                 .key = ts_types.NodeKey.sprite(bg_namespace, 1),
@@ -272,43 +286,45 @@ pub const FrameBuilder = struct {
             }) catch {};
         }
 
-        for (state.fills.items, 0..) |fill, i| {
-            const fill_image_id = self.ensureSolidImage(logger, backend, fill.color);
-            const fill_image: ts_types.ImageHandle = @enumFromInt(fill_image_id);
-            const fill_dest = mapRectToCells(fill.rect, state.window_w, state.window_h, tty.cols, tty.rows);
-            engine.sprite(.{
-                .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(i + 1))),
-                .image = fill_image,
-                .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
-                .dest_rect = fill_dest,
-                .z = 0,
-            }) catch {};
-        }
+        if (!bg_only) {
+            for (state.fills.items, 0..) |fill, i| {
+                const fill_image_id = self.ensureSolidImage(logger, backend, fill.color);
+                const fill_image: ts_types.ImageHandle = @enumFromInt(fill_image_id);
+                const fill_dest = mapRectToCells(fill.rect, state.window_w, state.window_h, tty.cols, tty.rows);
+                engine.sprite(.{
+                    .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(i + 1))),
+                    .image = fill_image,
+                    .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+                    .dest_rect = fill_dest,
+                    .z = 0,
+                }) catch {};
+            }
 
-        for (state.lines.items, 0..) |line, i| {
-            const line_image_id = self.ensureSolidImage(logger, backend, line.color);
-            const line_image: ts_types.ImageHandle = @enumFromInt(line_image_id);
-            const line_dest = mapLineToCells(line, state.window_w, state.window_h, tty.cols, tty.rows);
-            engine.sprite(.{
-                .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(state.fills.items.len + i + 1))),
-                .image = line_image,
-                .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
-                .dest_rect = line_dest,
-                .z = 1,
-            }) catch {};
-        }
+            for (state.lines.items, 0..) |line, i| {
+                const line_image_id = self.ensureSolidImage(logger, backend, line.color);
+                const line_image: ts_types.ImageHandle = @enumFromInt(line_image_id);
+                const line_dest = mapLineToCells(line, state.window_w, state.window_h, tty.cols, tty.rows);
+                engine.sprite(.{
+                    .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(state.fills.items.len + i + 1))),
+                    .image = line_image,
+                    .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+                    .dest_rect = line_dest,
+                    .z = 1,
+                }) catch {};
+            }
 
-        for (state.copies.items, 0..) |copy, i| {
-            const texture = self.textures.get(copy.texture_key) orelse continue;
-            const dest = mapRectToCells(copy.dst, state.window_w, state.window_h, tty.cols, tty.rows);
-            const image: ts_types.ImageHandle = @enumFromInt(texture.image_id);
-            engine.sprite(.{
-                .key = ts_types.NodeKey.sprite(sprite_namespace, @as(u32, @intCast(i + 1))),
-                .image = image,
-                .source_rect = .{ .x = copy.src.x, .y = copy.src.y, .w = copy.src.w, .h = copy.src.h },
-                .dest_rect = dest,
-                .z = @intCast(100 + i),
-            }) catch {};
+            for (state.copies.items, 0..) |copy, i| {
+                const texture = self.textures.get(copy.texture_key) orelse continue;
+                const dest = mapRectToCells(copy.dst, state.window_w, state.window_h, tty.cols, tty.rows);
+                const image: ts_types.ImageHandle = @enumFromInt(texture.image_id);
+                engine.sprite(.{
+                    .key = ts_types.NodeKey.sprite(sprite_namespace, @as(u32, @intCast(i + 1))),
+                    .image = image,
+                    .source_rect = .{ .x = copy.src.x, .y = copy.src.y, .w = copy.src.w, .h = copy.src.h },
+                    .dest_rect = dest,
+                    .z = @intCast(100 + i),
+                }) catch {};
+            }
         }
 
         engine.diff() catch |err| {
@@ -318,6 +334,14 @@ pub const FrameBuilder = struct {
             state.lines.clearRetainingCapacity();
             return;
         };
+        if (state.had_clear and engine.sprite_ops.items.len > 0) {
+            for (engine.sprite_ops.items) |op| {
+                if (op.key.namespace == bg_namespace and op.key.id == 1) {
+                    logger.writeFmt("katzensteg: bg sprite op={s} total_sprite_ops={d}", .{ @tagName(op.tag), engine.sprite_ops.items.len });
+                    break;
+                }
+            }
+        }
         backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed: {any}", .{err});
         engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed: {any}", .{err});
         state.copies.clearRetainingCapacity();
