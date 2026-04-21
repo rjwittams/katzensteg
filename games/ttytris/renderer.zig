@@ -1,6 +1,6 @@
 const std = @import("std");
-const termscene = @import("termscene/mod.zig");
-const core = @import("ttytris_core.zig");
+const termscene = @import("termscene");
+const core = @import("core.zig");
 
 const ts_types = termscene.types;
 const ts_scene = termscene.scene;

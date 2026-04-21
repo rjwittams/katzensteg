@@ -4,14 +4,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const termscene_mod = b.createModule(.{
+        .root_source_file = b.path("src/termscene/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "ttytris",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("games/ttytris/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+
+    exe.root_module.addImport("termscene", termscene_mod);
 
     if (optimize == .Debug) {
         exe.root_module.strip = false;
@@ -23,11 +31,12 @@ pub fn build(b: *std.Build) void {
     const termscene_demo = b.addExecutable(.{
         .name = "termscene-demo",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/termscene_demo.zig"),
+            .root_source_file = b.path("examples/termscene-demo/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    termscene_demo.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(termscene_demo);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -39,11 +48,12 @@ pub fn build(b: *std.Build) void {
     const debug_exe = b.addExecutable(.{
         .name = "ttytris-debug",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("games/ttytris/main.zig"),
             .target = target,
             .optimize = .Debug,
         }),
     });
+    debug_exe.root_module.addImport("termscene", termscene_mod);
     debug_exe.root_module.strip = false;
     debug_exe.root_module.omit_frame_pointer = false;
     b.installArtifact(debug_exe);

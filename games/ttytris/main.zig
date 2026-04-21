@@ -1,7 +1,7 @@
 const std = @import("std");
-const termscene = @import("termscene/mod.zig");
-const core = @import("ttytris_core.zig");
-const renderer_mod = @import("ttytris_renderer.zig");
+const termscene = @import("termscene");
+const core = @import("core.zig");
+const renderer_mod = @import("renderer.zig");
 
 fn kittyDeleteAll(writer: anytype) !void {
     try writer.writeAll("\x1b_Gq=2,a=d,d=A;\x1b\\");

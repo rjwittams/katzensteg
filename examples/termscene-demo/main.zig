@@ -1,5 +1,5 @@
 const std = @import("std");
-const termscene = @import("termscene/mod.zig");
+const termscene = @import("termscene");
 
 const types = termscene.types;
 const scene_mod = termscene.scene;
