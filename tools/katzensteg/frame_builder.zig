@@ -19,14 +19,22 @@ const RendererState = struct {
     had_clear: bool = false,
     copies: std.ArrayList(RenderCopyOp),
     fills: std.ArrayList(FillRectOp),
+    lines: std.ArrayList(LineOp),
 
     fn init(_: std.mem.Allocator, window_w: i32, window_h: i32) RendererState {
-        return .{ .window_w = window_w, .window_h = window_h, .copies = std.ArrayList(RenderCopyOp).empty, .fills = std.ArrayList(FillRectOp).empty };
+        return .{
+            .window_w = window_w,
+            .window_h = window_h,
+            .copies = std.ArrayList(RenderCopyOp).empty,
+            .fills = std.ArrayList(FillRectOp).empty,
+            .lines = std.ArrayList(LineOp).empty,
+        };
     }
 
     fn deinit(self: *RendererState, allocator: std.mem.Allocator) void {
         self.copies.deinit(allocator);
         self.fills.deinit(allocator);
+        self.lines.deinit(allocator);
     }
 };
 
@@ -54,6 +62,14 @@ const RenderCopyOp = struct {
 
 const FillRectOp = struct {
     rect: sdl.SDL_Rect,
+    color: [4]u8,
+};
+
+const LineOp = struct {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
     color: [4]u8,
 };
 
@@ -209,12 +225,23 @@ pub const FrameBuilder = struct {
         state.had_clear = true;
         state.copies.clearRetainingCapacity();
         state.fills.clearRetainingCapacity();
+        state.lines.clearRetainingCapacity();
     }
 
     pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         const fill = rect orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
         state.fills.append(self.allocator, .{ .rect = fill.*, .color = state.clear_color }) catch {};
+    }
+
+    pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
+        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+        state.fills.append(self.allocator, .{ .rect = .{ .x = x, .y = y, .w = 1, .h = 1 }, .color = state.clear_color }) catch {};
+    }
+
+    pub fn onRenderDrawLine(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
+        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+        state.lines.append(self.allocator, .{ .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2, .color = state.clear_color }) catch {};
     }
 
     pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
@@ -258,6 +285,19 @@ pub const FrameBuilder = struct {
             }) catch {};
         }
 
+        for (state.lines.items, 0..) |line, i| {
+            const line_image_id = self.ensureSolidImage(logger, backend, line.color);
+            const line_image: ts_types.ImageHandle = @enumFromInt(line_image_id);
+            const line_dest = mapLineToCells(line, state.window_w, state.window_h, tty.cols, tty.rows);
+            engine.sprite(.{
+                .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(state.fills.items.len + i + 1))),
+                .image = line_image,
+                .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+                .dest_rect = line_dest,
+                .z = 1,
+            }) catch {};
+        }
+
         for (state.copies.items, 0..) |copy, i| {
             const texture = self.textures.get(copy.texture_key) orelse continue;
             const dest = mapRectToCells(copy.dst, state.window_w, state.window_h, tty.cols, tty.rows);
@@ -275,12 +315,14 @@ pub const FrameBuilder = struct {
             logger.writeFmt("katzensteg: scene diff failed: {any}", .{err});
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
+            state.lines.clearRetainingCapacity();
             return;
         };
         backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed: {any}", .{err});
         engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed: {any}", .{err});
         state.copies.clearRetainingCapacity();
         state.fills.clearRetainingCapacity();
+        state.lines.clearRetainingCapacity();
     }
 
     fn allocImageId(self: *FrameBuilder) u32 {
@@ -351,5 +393,13 @@ pub const FrameBuilder = struct {
         const w = @max(1, @divTrunc(dst.w * cols, @max(window_w, 1)));
         const h = @max(1, @divTrunc(dst.h * rows, @max(window_h, 1)));
         return .{ .col = col, .row = row, .w = w, .h = h };
+    }
+
+    fn mapLineToCells(line: LineOp, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
+        const min_x = @min(line.x1, line.x2);
+        const min_y = @min(line.y1, line.y2);
+        const max_x = @max(line.x1, line.x2);
+        const max_y = @max(line.y1, line.y2);
+        return mapRectToCells(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, tty_cols, tty_rows);
     }
 };

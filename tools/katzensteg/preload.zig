@@ -99,6 +99,18 @@ pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const 
     return rc;
 }
 
+pub export fn ks_SDL_RenderDrawPoint(renderer: ?*sdl.SDL_Renderer, x: c_int, y: c_int) callconv(.c) c_int {
+    const rc = sdl.SDL_RenderDrawPoint(renderer, x, y);
+    if (rc == 0) runtime.get().frame_builder.onRenderDrawPoint(renderer, x, y);
+    return rc;
+}
+
+pub export fn ks_SDL_RenderDrawLine(renderer: ?*sdl.SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) callconv(.c) c_int {
+    const rc = sdl.SDL_RenderDrawLine(renderer, x1, y1, x2, y2);
+    if (rc == 0) runtime.get().frame_builder.onRenderDrawLine(renderer, x1, y1, x2, y2);
+    return rc;
+}
+
 pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
     const rt = runtime.get();
     if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null) {

@@ -52,6 +52,8 @@ pub extern fn SDL_RenderClear(renderer: ?*SDL_Renderer) c_int;
 pub extern fn SDL_RenderCopy(renderer: ?*SDL_Renderer, texture: ?*SDL_Texture, srcrect: ?*const SDL_Rect, dstrect: ?*const SDL_Rect) c_int;
 pub extern fn SDL_RenderPresent(renderer: ?*SDL_Renderer) void;
 pub extern fn SDL_RenderFillRect(renderer: ?*SDL_Renderer, rect: ?*const SDL_Rect) c_int;
+pub extern fn SDL_RenderDrawPoint(renderer: ?*SDL_Renderer, x: c_int, y: c_int) c_int;
+pub extern fn SDL_RenderDrawLine(renderer: ?*SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) c_int;
 pub extern fn SDL_RenderGetViewport(renderer: ?*SDL_Renderer, rect: *SDL_Rect) void;
 pub extern fn SDL_Delay(ms: Uint32) void;
 pub extern fn SDL_GetError() [*:0]const u8;

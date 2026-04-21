@@ -29,6 +29,8 @@ extern int ks_SDL_SetTextureBlendMode(struct SDL_Texture *, int);
 extern int ks_SDL_SetRenderDrawColor(struct SDL_Renderer *, unsigned char, unsigned char, unsigned char, unsigned char);
 extern int ks_SDL_RenderClear(struct SDL_Renderer *);
 extern int ks_SDL_RenderFillRect(struct SDL_Renderer *, const struct SDL_Rect *);
+extern int ks_SDL_RenderDrawPoint(struct SDL_Renderer *, int, int);
+extern int ks_SDL_RenderDrawLine(struct SDL_Renderer *, int, int, int, int);
 extern int ks_SDL_RenderCopy(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *);
 extern void ks_SDL_RenderPresent(struct SDL_Renderer *);
 
@@ -46,6 +48,8 @@ extern int SDL_SetTextureBlendMode(struct SDL_Texture *, int);
 extern int SDL_SetRenderDrawColor(struct SDL_Renderer *, unsigned char, unsigned char, unsigned char, unsigned char);
 extern int SDL_RenderClear(struct SDL_Renderer *);
 extern int SDL_RenderFillRect(struct SDL_Renderer *, const struct SDL_Rect *);
+extern int SDL_RenderDrawPoint(struct SDL_Renderer *, int, int);
+extern int SDL_RenderDrawLine(struct SDL_Renderer *, int, int, int, int);
 extern int SDL_RenderCopy(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *);
 extern void SDL_RenderPresent(struct SDL_Renderer *);
 
@@ -63,6 +67,8 @@ DYLD_INTERPOSE(ks_SDL_SetTextureBlendMode, SDL_SetTextureBlendMode)
 DYLD_INTERPOSE(ks_SDL_SetRenderDrawColor, SDL_SetRenderDrawColor)
 DYLD_INTERPOSE(ks_SDL_RenderClear, SDL_RenderClear)
 DYLD_INTERPOSE(ks_SDL_RenderFillRect, SDL_RenderFillRect)
+DYLD_INTERPOSE(ks_SDL_RenderDrawPoint, SDL_RenderDrawPoint)
+DYLD_INTERPOSE(ks_SDL_RenderDrawLine, SDL_RenderDrawLine)
 DYLD_INTERPOSE(ks_SDL_RenderCopy, SDL_RenderCopy)
 DYLD_INTERPOSE(ks_SDL_RenderPresent, SDL_RenderPresent)
 

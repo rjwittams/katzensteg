@@ -60,6 +60,17 @@ pub fn main() !void {
         const fill = sdl.SDL_Rect{ .x = 32, .y = 32, .w = 96, .h = 96 };
         _ = sdl.SDL_RenderFillRect(renderer, &fill);
 
+        _ = sdl.SDL_SetRenderDrawColor(renderer, 255, 64, 64, 255);
+        _ = sdl.SDL_RenderDrawPoint(renderer, 0, 0);
+        _ = sdl.SDL_RenderDrawPoint(renderer, win_w - 1, 0);
+        _ = sdl.SDL_RenderDrawPoint(renderer, 0, win_h - 1);
+        _ = sdl.SDL_RenderDrawPoint(renderer, win_w - 1, win_h - 1);
+
+        _ = sdl.SDL_SetRenderDrawColor(renderer, 64, 255, 64, 255);
+        _ = sdl.SDL_RenderDrawLine(renderer, 0, win_h / 2, win_w - 1, win_h / 2);
+        _ = sdl.SDL_RenderDrawLine(renderer, win_w / 2, 0, win_w / 2, win_h - 1);
+        _ = sdl.SDL_RenderDrawLine(renderer, 0, 0, win_w - 1, win_h - 1);
+
         const dst_a = sdl.SDL_Rect{
             .x = @intCast(80 + @as(c_int, @intCast((frame * 3) % 240))),
             .y = @intCast(100 + @as(c_int, @intCast((frame * 2) % 160))),
