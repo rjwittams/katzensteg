@@ -1,0 +1,73 @@
+const sdl = @import("katzensteg_sdl");
+const runtime = @import("runtime.zig");
+
+pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Window {
+    const window = sdl.SDL_CreateWindow(title, x, y, w, h, flags);
+    runtime.get().frame_builder.onCreateWindow(window, w, h);
+    return window;
+}
+
+pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    sdl.SDL_DestroyWindow(window);
+}
+
+pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Renderer {
+    const renderer = sdl.SDL_CreateRenderer(window, index, flags);
+    runtime.get().frame_builder.onCreateRenderer(window, renderer);
+    return renderer;
+}
+
+pub export fn ks_SDL_DestroyRenderer(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
+    runtime.get().frame_builder.onDestroyRenderer(renderer);
+    sdl.SDL_DestroyRenderer(renderer);
+}
+
+pub export fn ks_SDL_CreateTexture(renderer: ?*sdl.SDL_Renderer, format: sdl.Uint32, access: c_int, w: c_int, h: c_int) callconv(.c) ?*sdl.SDL_Texture {
+    const texture = sdl.SDL_CreateTexture(renderer, format, access, w, h);
+    runtime.get().frame_builder.onCreateTexture(texture, format, w, h);
+    return texture;
+}
+
+pub export fn ks_SDL_DestroyTexture(texture: ?*sdl.SDL_Texture) callconv(.c) void {
+    runtime.get().frame_builder.onDestroyTexture(texture);
+    sdl.SDL_DestroyTexture(texture);
+}
+
+pub export fn ks_SDL_UpdateTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: c_int) callconv(.c) c_int {
+    const rc = sdl.SDL_UpdateTexture(texture, rect, pixels, pitch);
+    const rt = runtime.get();
+    if (rc == 0 and rt.active and rt.backend != null) {
+        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, rect, pixels, pitch);
+    }
+    return rc;
+}
+
+pub export fn ks_SDL_SetRenderDrawColor(renderer: ?*sdl.SDL_Renderer, r: sdl.Uint8, g: sdl.Uint8, b: sdl.Uint8, a: sdl.Uint8) callconv(.c) c_int {
+    const rc = sdl.SDL_SetRenderDrawColor(renderer, r, g, b, a);
+    if (rc == 0) runtime.get().frame_builder.onSetRenderDrawColor(renderer, r, g, b, a);
+    return rc;
+}
+
+pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_int {
+    const rc = sdl.SDL_RenderClear(renderer);
+    if (rc == 0) runtime.get().frame_builder.onRenderClear(renderer);
+    return rc;
+}
+
+pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, srcrect: ?*const sdl.SDL_Rect, dstrect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
+    const rc = sdl.SDL_RenderCopy(renderer, texture, srcrect, dstrect);
+    if (rc == 0) {
+        const rt = runtime.get();
+        rt.frame_builder.onRenderCopy(&rt.logger, renderer, texture, srcrect, dstrect);
+    }
+    return rc;
+}
+
+pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
+    const rt = runtime.get();
+    if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null) {
+        rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer);
+    }
+    sdl.SDL_RenderPresent(renderer);
+}
+
