@@ -34,25 +34,41 @@ pub fn main() !void {
     const renderer = sdl.SDL_CreateRenderer(window, -1, @intFromEnum(sdl.SDL_RendererFlags.accelerated) | @intFromEnum(sdl.SDL_RendererFlags.presentvsync)) orelse return error.SDLCreateRendererFailed;
     defer sdl.SDL_DestroyRenderer(renderer);
 
-    const texture = sdl.SDL_CreateTexture(renderer, sdl.SDL_PIXELFORMAT_ABGR8888, sdl.SDL_TEXTUREACCESS_STATIC, tex_w, tex_h) orelse return error.SDLCreateTextureFailed;
-    defer sdl.SDL_DestroyTexture(texture);
+    const streaming = sdl.SDL_CreateTexture(renderer, sdl.SDL_PIXELFORMAT_ABGR8888, sdl.SDL_TEXTUREACCESS_STATIC, tex_w, tex_h) orelse return error.SDLCreateTextureFailed;
+    defer sdl.SDL_DestroyTexture(streaming);
 
     var pixels: [tex_w * tex_h * 4]u8 = undefined;
+    fillTexture(&pixels, 0);
+    if (sdl.SDL_UpdateTexture(streaming, null, &pixels, tex_w * 4) != 0) return error.SDLUpdateTextureFailed;
+
+    const surface = sdl.SDL_CreateRGBSurfaceWithFormatFrom(@ptrCast(&pixels), tex_w, tex_h, 32, tex_w * 4, sdl.SDL_PIXELFORMAT_ABGR8888) orelse return error.SDLSurfaceCreateFailed;
+    defer sdl.SDL_FreeSurface(surface);
+    const surface_texture = sdl.SDL_CreateTextureFromSurface(renderer, surface) orelse return error.SDLCreateTextureFromSurfaceFailed;
+    defer sdl.SDL_DestroyTexture(surface_texture);
+    _ = sdl.SDL_SetTextureBlendMode(surface_texture, sdl.SDL_BLENDMODE_BLEND);
+
     var frame: usize = 0;
     while (frame < 240) : (frame += 1) {
         fillTexture(&pixels, frame);
-        if (sdl.SDL_UpdateTexture(texture, null, &pixels, tex_w * 4) != 0) return error.SDLUpdateTextureFailed;
+        if (sdl.SDL_UpdateTexture(streaming, null, &pixels, tex_w * 4) != 0) return error.SDLUpdateTextureFailed;
+        _ = sdl.SDL_SetTextureColorMod(surface_texture, 255, @intCast((frame * 3) % 255), @intCast((frame * 5) % 255));
+        _ = sdl.SDL_SetTextureAlphaMod(surface_texture, @intCast(120 + (frame % 120)));
 
         _ = sdl.SDL_SetRenderDrawColor(renderer, @intCast((frame * 2) % 255), 16, @intCast(60 + ((frame * 3) % 120)), 255);
         _ = sdl.SDL_RenderClear(renderer);
 
-        const dst = sdl.SDL_Rect{
+        const fill = sdl.SDL_Rect{ .x = 32, .y = 32, .w = 96, .h = 96 };
+        _ = sdl.SDL_RenderFillRect(renderer, &fill);
+
+        const dst_a = sdl.SDL_Rect{
             .x = @intCast(80 + @as(c_int, @intCast((frame * 3) % 240))),
             .y = @intCast(100 + @as(c_int, @intCast((frame * 2) % 160))),
             .w = 192,
             .h = 192,
         };
-        _ = sdl.SDL_RenderCopy(renderer, texture, null, &dst);
+        const dst_b = sdl.SDL_Rect{ .x = 360, .y = 180, .w = 160, .h = 160 };
+        _ = sdl.SDL_RenderCopy(renderer, streaming, null, &dst_a);
+        _ = sdl.SDL_RenderCopy(renderer, surface_texture, null, &dst_b);
         sdl.SDL_RenderPresent(renderer);
         sdl.SDL_Delay(16);
     }

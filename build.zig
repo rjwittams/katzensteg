@@ -57,8 +57,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
-    katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    katzensteg_lib.linkSystemLibrary("SDL2");
+    katzensteg_lib.linker_allow_shlib_undefined = true;
     katzensteg_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/interpose_macos.c") });
     b.installArtifact(katzensteg_lib);
 

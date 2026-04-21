@@ -28,6 +28,16 @@ pub export fn ks_SDL_CreateTexture(renderer: ?*sdl.SDL_Renderer, format: sdl.Uin
     return texture;
 }
 
+pub export fn ks_SDL_CreateTextureFromSurface(renderer: ?*sdl.SDL_Renderer, surface: ?*sdl.SDL_Surface) callconv(.c) ?*sdl.SDL_Texture {
+    const texture = sdl.SDL_CreateTextureFromSurface(renderer, surface);
+    const rt = runtime.get();
+    if (texture) |tex| {
+        rt.frame_builder.onCreateTexture(tex, sdl.SDL_PIXELFORMAT_ABGR8888, 0, 0);
+        if (rt.active and rt.backend != null) rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, tex, surface);
+    }
+    return texture;
+}
+
 pub export fn ks_SDL_DestroyTexture(texture: ?*sdl.SDL_Texture) callconv(.c) void {
     runtime.get().frame_builder.onDestroyTexture(texture);
     sdl.SDL_DestroyTexture(texture);
@@ -39,6 +49,26 @@ pub export fn ks_SDL_UpdateTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl
     if (rc == 0 and rt.active and rt.backend != null) {
         rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, rect, pixels, pitch);
     }
+    return rc;
+}
+
+pub export fn ks_SDL_SetTextureColorMod(texture: ?*sdl.SDL_Texture, r: sdl.Uint8, g: sdl.Uint8, b: sdl.Uint8) callconv(.c) c_int {
+    const rc = sdl.SDL_SetTextureColorMod(texture, r, g, b);
+    const rt = runtime.get();
+    if (rc == 0 and rt.active and rt.backend != null) rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, texture, r, g, b);
+    return rc;
+}
+
+pub export fn ks_SDL_SetTextureAlphaMod(texture: ?*sdl.SDL_Texture, a: sdl.Uint8) callconv(.c) c_int {
+    const rc = sdl.SDL_SetTextureAlphaMod(texture, a);
+    const rt = runtime.get();
+    if (rc == 0 and rt.active and rt.backend != null) rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, texture, a);
+    return rc;
+}
+
+pub export fn ks_SDL_SetTextureBlendMode(texture: ?*sdl.SDL_Texture, blendMode: c_int) callconv(.c) c_int {
+    const rc = sdl.SDL_SetTextureBlendMode(texture, blendMode);
+    if (rc == 0) runtime.get().frame_builder.onSetTextureBlendMode(&runtime.get().logger, texture, blendMode);
     return rc;
 }
 
@@ -60,6 +90,12 @@ pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL
         const rt = runtime.get();
         rt.frame_builder.onRenderCopy(&rt.logger, renderer, texture, srcrect, dstrect);
     }
+    return rc;
+}
+
+pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
+    const rc = sdl.SDL_RenderFillRect(renderer, rect);
+    if (rc == 0) runtime.get().frame_builder.onRenderFillRect(renderer, rect);
     return rc;
 }
 

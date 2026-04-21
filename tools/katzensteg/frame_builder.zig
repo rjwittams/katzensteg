@@ -10,6 +10,7 @@ const ts_kitty = termscene.kitty;
 
 const bg_namespace: u24 = 210;
 const sprite_namespace: u24 = 211;
+const fill_namespace: u24 = 212;
 
 const RendererState = struct {
     window_w: i32,
@@ -17,13 +18,15 @@ const RendererState = struct {
     clear_color: [4]u8 = .{ 0, 0, 0, 255 },
     had_clear: bool = false,
     copies: std.ArrayList(RenderCopyOp),
+    fills: std.ArrayList(FillRectOp),
 
     fn init(_: std.mem.Allocator, window_w: i32, window_h: i32) RendererState {
-        return .{ .window_w = window_w, .window_h = window_h, .copies = std.ArrayList(RenderCopyOp).empty };
+        return .{ .window_w = window_w, .window_h = window_h, .copies = std.ArrayList(RenderCopyOp).empty, .fills = std.ArrayList(FillRectOp).empty };
     }
 
     fn deinit(self: *RendererState, allocator: std.mem.Allocator) void {
         self.copies.deinit(allocator);
+        self.fills.deinit(allocator);
     }
 };
 
@@ -32,6 +35,10 @@ const TextureRecord = struct {
     h: i32,
     format: sdl.Uint32,
     image_id: u32,
+    base_rgba: ?[]u8 = null,
+    color_mod: [3]u8 = .{ 255, 255, 255 },
+    alpha_mod: u8 = 255,
+    blend_mode: i32 = sdl.SDL_BLENDMODE_NONE,
 };
 
 const WindowRecord = struct {
@@ -43,6 +50,11 @@ const RenderCopyOp = struct {
     texture_key: usize,
     src: sdl.SDL_Rect,
     dst: sdl.SDL_Rect,
+};
+
+const FillRectOp = struct {
+    rect: sdl.SDL_Rect,
+    color: [4]u8,
 };
 
 pub const FrameBuilder = struct {
@@ -68,6 +80,8 @@ pub const FrameBuilder = struct {
         while (it.next()) |state| state.deinit(self.allocator);
         self.windows.deinit();
         self.renderers.deinit();
+        var tex_it = self.textures.valueIterator();
+        while (tex_it.next()) |tex| if (tex.base_rgba) |buf| self.allocator.free(buf);
         self.textures.deinit();
         self.solid_images.deinit();
     }
@@ -101,12 +115,15 @@ pub const FrameBuilder = struct {
     }
 
     pub fn onDestroyTexture(self: *FrameBuilder, texture: ?*sdl.SDL_Texture) void {
-        _ = self.textures.remove(ptrKey(texture));
+        const key = ptrKey(texture);
+        if (self.textures.fetchRemove(key)) |entry| {
+            if (entry.value.base_rgba) |buf| self.allocator.free(buf);
+        }
     }
 
     pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
         const key = ptrKey(texture);
-        const record = self.textures.get(key) orelse return;
+        const record = self.textures.getPtr(key) orelse return;
         if (rect != null) {
             logger.writeOnce("katzensteg: partial SDL_UpdateTexture rects are not supported in slice 1");
             return;
@@ -125,7 +142,59 @@ pub const FrameBuilder = struct {
         const rgba = self.allocator.alloc(u8, len) catch return;
         defer self.allocator.free(rgba);
         convertAbgrToRgba(rgba, src[0..len]);
-        backend.registerRawImage(record.image_id, rgba, record.w, record.h) catch |err| {
+        if (record.base_rgba) |old| self.allocator.free(old);
+        record.base_rgba = self.allocator.dupe(u8, rgba) catch null;
+        self.uploadTexture(logger, backend, record, rgba);
+    }
+
+    pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
+        const key = ptrKey(texture);
+        const record = self.textures.getPtr(key) orelse return;
+        if (surface == null) return;
+        const converted = sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+            logger.writeOnce("katzensteg: SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
+            return;
+        };
+        defer sdl.SDL_FreeSurface(converted);
+        const surf: *SurfaceView = @ptrCast(@alignCast(converted));
+        record.w = surf.w;
+        record.h = surf.h;
+        record.format = sdl.SDL_PIXELFORMAT_ABGR8888;
+        const len: usize = @intCast(surf.h * surf.pitch);
+        const rgba = self.allocator.alloc(u8, len) catch return;
+        defer self.allocator.free(rgba);
+        const src: [*]const u8 = @ptrCast(surf.pixels.?);
+        convertAbgrToRgba(rgba, src[0..len]);
+        if (record.base_rgba) |old| self.allocator.free(old);
+        record.base_rgba = self.allocator.dupe(u8, rgba) catch null;
+        self.uploadTexture(logger, backend, record, rgba);
+    }
+
+    pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
+        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+        record.color_mod = .{ r, g, b };
+        self.reuploadTexture(logger, backend, record);
+    }
+
+    pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, a: u8) void {
+        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+        record.alpha_mod = a;
+        self.reuploadTexture(logger, backend, record);
+    }
+
+    pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
+        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+        record.blend_mode = blend_mode;
+        if (blend_mode != sdl.SDL_BLENDMODE_NONE and blend_mode != sdl.SDL_BLENDMODE_BLEND) {
+            logger.writeOnce("katzensteg: unsupported SDL texture blend mode; mirroring may be inaccurate");
+        }
+    }
+
+    fn uploadTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord, rgba: []const u8) void {
+        const modulated = self.allocator.alloc(u8, rgba.len) catch return;
+        defer self.allocator.free(modulated);
+        applyMods(modulated, rgba, record.color_mod, record.alpha_mod);
+        backend.registerRawImage(record.image_id, modulated, record.w, record.h) catch |err| {
             logger.writeFmt("katzensteg: registerRawImage failed: {any}", .{err});
         };
     }
@@ -139,6 +208,13 @@ pub const FrameBuilder = struct {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         state.had_clear = true;
         state.copies.clearRetainingCapacity();
+        state.fills.clearRetainingCapacity();
+    }
+
+    pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
+        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+        const fill = rect orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
+        state.fills.append(self.allocator, .{ .rect = fill.*, .color = state.clear_color }) catch {};
     }
 
     pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
@@ -169,6 +245,19 @@ pub const FrameBuilder = struct {
             }) catch {};
         }
 
+        for (state.fills.items, 0..) |fill, i| {
+            const fill_image_id = self.ensureSolidImage(logger, backend, fill.color);
+            const fill_image: ts_types.ImageHandle = @enumFromInt(fill_image_id);
+            const fill_dest = mapRectToCells(fill.rect, state.window_w, state.window_h, tty.cols, tty.rows);
+            engine.sprite(.{
+                .key = ts_types.NodeKey.sprite(fill_namespace, @as(u32, @intCast(i + 1))),
+                .image = fill_image,
+                .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+                .dest_rect = fill_dest,
+                .z = 0,
+            }) catch {};
+        }
+
         for (state.copies.items, 0..) |copy, i| {
             const texture = self.textures.get(copy.texture_key) orelse continue;
             const dest = mapRectToCells(copy.dst, state.window_w, state.window_h, tty.cols, tty.rows);
@@ -178,18 +267,20 @@ pub const FrameBuilder = struct {
                 .image = image,
                 .source_rect = .{ .x = copy.src.x, .y = copy.src.y, .w = copy.src.w, .h = copy.src.h },
                 .dest_rect = dest,
-                .z = @intCast(i),
+                .z = @intCast(100 + i),
             }) catch {};
         }
 
         engine.diff() catch |err| {
             logger.writeFmt("katzensteg: scene diff failed: {any}", .{err});
             state.copies.clearRetainingCapacity();
+            state.fills.clearRetainingCapacity();
             return;
         };
         backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed: {any}", .{err});
         engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed: {any}", .{err});
         state.copies.clearRetainingCapacity();
+        state.fills.clearRetainingCapacity();
     }
 
     fn allocImageId(self: *FrameBuilder) u32 {
@@ -208,6 +299,11 @@ pub const FrameBuilder = struct {
         return image_id;
     }
 
+    fn reuploadTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord) void {
+        const base = record.base_rgba orelse return;
+        self.uploadTexture(logger, backend, record, base);
+    }
+
     fn ptrKey(ptr: anytype) usize {
         return if (ptr) |p| @intFromPtr(p) else 0;
     }
@@ -221,6 +317,31 @@ pub const FrameBuilder = struct {
             dst[i + 3] = src[i + 0];
         }
     }
+
+    fn applyMods(dst: []u8, src: []const u8, color_mod: [3]u8, alpha_mod: u8) void {
+        var i: usize = 0;
+        while (i < src.len) : (i += 4) {
+            dst[i + 0] = @intCast((@as(u16, src[i + 0]) * color_mod[0]) / 255);
+            dst[i + 1] = @intCast((@as(u16, src[i + 1]) * color_mod[1]) / 255);
+            dst[i + 2] = @intCast((@as(u16, src[i + 2]) * color_mod[2]) / 255);
+            dst[i + 3] = @intCast((@as(u16, src[i + 3]) * alpha_mod) / 255);
+        }
+    }
+
+    const SurfaceView = extern struct {
+        flags: u32,
+        format: ?*anyopaque,
+        w: i32,
+        h: i32,
+        pitch: i32,
+        pixels: ?*anyopaque,
+        userdata: ?*anyopaque,
+        locked: i32,
+        lock_data: ?*anyopaque,
+        clip_rect: sdl.SDL_Rect,
+        map: ?*anyopaque,
+        refcount: i32,
+    };
 
     fn mapRectToCells(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const cols: i32 = @intCast(tty_cols);
