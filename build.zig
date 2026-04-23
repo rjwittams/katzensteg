@@ -56,6 +56,17 @@ pub fn build(b: *std.Build) void {
     kitty_placement_repro.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(kitty_placement_repro);
 
+    const kitty_show_ppm = b.addExecutable(.{
+        .name = "kitty-show-ppm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/kitty-show-ppm/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    kitty_show_ppm.root_module.addImport("termscene", termscene_mod);
+    b.installArtifact(kitty_show_ppm);
+
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",
@@ -68,9 +79,26 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
-    katzensteg_lib.linker_allow_shlib_undefined = true;
+    katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    katzensteg_lib.linkSystemLibrary("SDL2");
     katzensteg_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/interpose_macos.c") });
     b.installArtifact(katzensteg_lib);
+
+    const katzensteg_unlinked_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "katzensteg-unlinked",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/katzensteg/preload.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_unlinked_lib.root_module.addImport("termscene", termscene_mod);
+    katzensteg_unlinked_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
+    katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/interpose_macos.c") });
+    b.installArtifact(katzensteg_unlinked_lib);
 
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
@@ -119,6 +147,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| kitty_placement_repro_cmd.addArgs(args);
     const kitty_placement_repro_step = b.step("kitty-placement-repro", "Run the standalone kitty placement semantics repro");
     kitty_placement_repro_step.dependOn(&kitty_placement_repro_cmd.step);
+
+    const kitty_show_ppm_cmd = b.addRunArtifact(kitty_show_ppm);
+    if (b.args) |args| kitty_show_ppm_cmd.addArgs(args);
+    const kitty_show_ppm_step = b.step("kitty-show-ppm", "Show a P6 PPM fullscreen via kitty graphics");
+    kitty_show_ppm_step.dependOn(&kitty_show_ppm_cmd.step);
 
     const basic_sdl_demo_cmd = b.addRunArtifact(basic_sdl_demo);
     if (b.args) |args| basic_sdl_demo_cmd.addArgs(args);

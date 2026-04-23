@@ -1,7 +1,23 @@
-pub const Backend = @import("backend.zig").Backend;
+pub const backend = @import("backend.zig");
+pub const Backend = backend.Backend;
 pub const KittyBackend = Backend;
+pub const Options = backend.Options;
+pub const UploadMedium = backend.UploadMedium;
 pub const protocol = @import("protocol.zig");
+pub const capabilities = @import("capabilities.zig");
+pub const profile = @import("profile.zig");
+pub const Capabilities = capabilities.Capabilities;
+pub const Feature = capabilities.Feature;
+pub const ProbeState = capabilities.ProbeState;
+pub const CompatState = capabilities.CompatState;
+pub const TerminalIdentity = capabilities.TerminalIdentity;
+pub const OutputProfile = profile.OutputProfile;
 
 pub const detect = @import("detect.zig");
 pub const detectGraphicsSupport = detect.detectGraphicsSupport;
+pub const detectGraphicsSupportOnTty = detect.detectGraphicsSupportOnTty;
+pub const detectFileTransmissionSupport = detect.detectFileTransmissionSupport;
+pub const detectFileTransmissionSupportWhole = detect.detectFileTransmissionSupportWhole;
+pub const detectFileTransmissionSupportOffset = detect.detectFileTransmissionSupportOffset;
 pub const readReplies = detect.readReplies;
+pub const readRepliesFromFile = detect.readRepliesFromFile;

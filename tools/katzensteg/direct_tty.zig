@@ -5,6 +5,8 @@ pub const DirectTty = struct {
     original_termios: std.posix.termios,
     rows: u16,
     cols: u16,
+    pixel_width: u16,
+    pixel_height: u16,
 
     pub fn init() !DirectTty {
         const file = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
@@ -24,7 +26,7 @@ pub const DirectTty = struct {
         try writer.interface.flush();
 
         const size = querySize(file.handle);
-        return .{ .file = file, .original_termios = original_termios, .rows = size.rows, .cols = size.cols };
+        return .{ .file = file, .original_termios = original_termios, .rows = size.rows, .cols = size.cols, .pixel_width = size.pixel_width, .pixel_height = size.pixel_height };
     }
 
     pub fn deinit(self: *DirectTty) void {
@@ -35,10 +37,12 @@ pub const DirectTty = struct {
         self.file.close();
     }
 
-    fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16 } {
+    fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 } {
         var wsz: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
         const rc = std.posix.system.ioctl(fd, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
-        if (rc == 0 and wsz.row > 0 and wsz.col > 0) return .{ .rows = wsz.row, .cols = wsz.col };
-        return .{ .rows = 24, .cols = 80 };
+        if (rc == 0 and wsz.row > 0 and wsz.col > 0) {
+            return .{ .rows = wsz.row, .cols = wsz.col, .pixel_width = wsz.xpixel, .pixel_height = wsz.ypixel };
+        }
+        return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
     }
 };

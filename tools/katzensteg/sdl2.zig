@@ -17,6 +17,11 @@ pub const SDL_Rect = extern struct {
     h: c_int,
 };
 
+pub const SDL_Point = extern struct {
+    x: c_int,
+    y: c_int,
+};
+
 pub const SDL_WindowFlags = enum(Uint32) {
     shown = 0x00000004,
 };
@@ -26,10 +31,18 @@ pub const SDL_RendererFlags = enum(Uint32) {
     presentvsync = 0x00000004,
 };
 
+pub const SDL_PIXELFORMAT_RGB565: Uint32 = 353701890;
+pub const SDL_PIXELFORMAT_RGBA4444: Uint32 = 356651010;
+pub const SDL_PIXELFORMAT_ARGB8888: Uint32 = 372645892;
 pub const SDL_PIXELFORMAT_ABGR8888: Uint32 = 376840196;
 pub const SDL_TEXTUREACCESS_STATIC: c_int = 0;
+pub const SDL_TEXTUREACCESS_STREAMING: c_int = 1;
 pub const SDL_BLENDMODE_NONE: c_int = 0x00000000;
 pub const SDL_BLENDMODE_BLEND: c_int = 0x00000001;
+pub const SDL_BLENDMODE_ADD: c_int = 0x00000002;
+pub const SDL_BLENDMODE_MOD: c_int = 0x00000004;
+pub const SDL_BLENDMODE_MUL: c_int = 0x00000008;
+pub const SDL_FLIP_NONE: c_int = 0x00000000;
 
 pub extern fn SDL_Init(flags: Uint32) c_int;
 pub extern fn SDL_Quit() void;
@@ -43,6 +56,8 @@ pub extern fn SDL_CreateTexture(renderer: ?*SDL_Renderer, format: Uint32, access
 pub extern fn SDL_CreateTextureFromSurface(renderer: ?*SDL_Renderer, surface: ?*SDL_Surface) ?*SDL_Texture;
 pub extern fn SDL_DestroyTexture(texture: ?*SDL_Texture) void;
 pub extern fn SDL_UpdateTexture(texture: ?*SDL_Texture, rect: ?*const SDL_Rect, pixels: ?*const anyopaque, pitch: c_int) c_int;
+pub extern fn SDL_LockTexture(texture: ?*SDL_Texture, rect: ?*const SDL_Rect, pixels: *?*anyopaque, pitch: *c_int) c_int;
+pub extern fn SDL_UnlockTexture(texture: ?*SDL_Texture) void;
 pub extern fn SDL_CreateRGBSurfaceWithFormatFrom(pixels: ?*anyopaque, width: c_int, height: c_int, depth: c_int, pitch: c_int, format: Uint32) ?*SDL_Surface;
 pub extern fn SDL_ConvertSurfaceFormat(surface: ?*SDL_Surface, pixel_format: Uint32, flags: Uint32) ?*SDL_Surface;
 pub extern fn SDL_FreeSurface(surface: ?*SDL_Surface) void;
@@ -52,10 +67,13 @@ pub extern fn SDL_SetTextureAlphaMod(texture: ?*SDL_Texture, a: Uint8) c_int;
 pub extern fn SDL_SetTextureBlendMode(texture: ?*SDL_Texture, blendMode: c_int) c_int;
 pub extern fn SDL_RenderClear(renderer: ?*SDL_Renderer) c_int;
 pub extern fn SDL_RenderCopy(renderer: ?*SDL_Renderer, texture: ?*SDL_Texture, srcrect: ?*const SDL_Rect, dstrect: ?*const SDL_Rect) c_int;
+pub extern fn SDL_RenderCopyEx(renderer: ?*SDL_Renderer, texture: ?*SDL_Texture, srcrect: ?*const SDL_Rect, dstrect: ?*const SDL_Rect, angle: f64, center: ?*const SDL_Point, flip: c_int) c_int;
 pub extern fn SDL_RenderPresent(renderer: ?*SDL_Renderer) void;
 pub extern fn SDL_RenderFillRect(renderer: ?*SDL_Renderer, rect: ?*const SDL_Rect) c_int;
 pub extern fn SDL_RenderDrawPoint(renderer: ?*SDL_Renderer, x: c_int, y: c_int) c_int;
 pub extern fn SDL_RenderDrawLine(renderer: ?*SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) c_int;
+pub extern fn SDL_RenderSetViewport(renderer: ?*SDL_Renderer, rect: ?*const SDL_Rect) c_int;
+pub extern fn SDL_RenderSetClipRect(renderer: ?*SDL_Renderer, rect: ?*const SDL_Rect) c_int;
 pub extern fn SDL_RenderGetViewport(renderer: ?*SDL_Renderer, rect: *SDL_Rect) void;
 pub extern fn SDL_PumpEvents() void;
 pub extern fn SDL_Delay(ms: Uint32) void;
