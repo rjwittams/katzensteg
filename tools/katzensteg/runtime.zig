@@ -3,20 +3,104 @@ const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
+const intercept_sink = @import("intercept_sink.zig");
+const inspector_mod = @import("inspector.zig");
+const input_mod = @import("input.zig");
+const whiskers_client_mod = @import("whiskers_client.zig");
+const sdl = @import("katzensteg_sdl");
+const Inspector = inspector_mod.Inspector;
+const WhiskersClient = whiskers_client_mod.WhiskersClient;
+const InspectResource = frame_builder_mod.InspectResource;
+const ResourceRecord = inspector_mod.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
 const CompositeMode = frame_builder_mod.CompositeMode;
+const InterceptMode = intercept_sink.InterceptMode;
+const Command = intercept_sink.Command;
+
+const queue_compact_threshold = 4096;
+const payload_pool_max_buffers = 64;
+const payload_pool_max_bytes = 64 * 1024 * 1024;
+
+const QueuedLockCapture = struct {
+    rect: ?@import("katzensteg_sdl").SDL_Rect,
+    pixels: ?*anyopaque,
+    pitch: i32,
+};
 
 const ts_scene = termscene.scene;
 const ts_kitty = termscene.kitty;
 
 var global_mutex: std.Thread.Mutex = .{};
 var global_runtime: ?Runtime = null;
-var atexit_registered = false;
-extern fn atexit(func: *const fn () callconv(.c) void) c_int;
 
 const RuntimeConfig = struct {
     composite_mode: CompositeMode = .tiled_strip,
+    intercept_mode: InterceptMode = .sync_compose,
     present_fps: u32 = 0,
+};
+
+pub const ProducerStatKind = enum {
+    generic,
+    update_texture,
+    unlock_texture,
+    create_texture_from_surface,
+    render_present,
+};
+
+const ProducerBucket = struct {
+    calls: u64 = 0,
+    total_ns: u64 = 0,
+    max_ns: u64 = 0,
+};
+
+const ProducerStats = struct {
+    enabled: bool = false,
+    last_report_ns: i128 = 0,
+    generic: ProducerBucket = .{},
+    update_texture: ProducerBucket = .{},
+    unlock_texture: ProducerBucket = .{},
+    create_texture_from_surface: ProducerBucket = .{},
+    render_present: ProducerBucket = .{},
+};
+
+const PayloadBufferPool = struct {
+    buffers: std.ArrayList([]u8) = .empty,
+    bytes: usize = 0,
+
+    fn acquire(self: *PayloadBufferPool, allocator: std.mem.Allocator, len: usize) ![]u8 {
+        var idx: usize = self.buffers.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const buf = self.buffers.items[idx];
+            if (buf.len != len) continue;
+            _ = self.buffers.swapRemove(idx);
+            self.bytes -= buf.len;
+            return buf;
+        }
+        return allocator.alloc(u8, len);
+    }
+
+    fn release(self: *PayloadBufferPool, allocator: std.mem.Allocator, buf: []u8) void {
+        if (buf.len == 0) {
+            allocator.free(buf);
+            return;
+        }
+        if (self.buffers.items.len >= payload_pool_max_buffers or self.bytes + buf.len > payload_pool_max_bytes) {
+            allocator.free(buf);
+            return;
+        }
+        self.buffers.append(allocator, buf) catch {
+            allocator.free(buf);
+            return;
+        };
+        self.bytes += buf.len;
+    }
+
+    fn deinit(self: *PayloadBufferPool, allocator: std.mem.Allocator) void {
+        for (self.buffers.items) |buf| allocator.free(buf);
+        self.buffers.deinit(allocator);
+        self.* = .{};
+    }
 };
 
 pub const Runtime = struct {
@@ -30,13 +114,35 @@ pub const Runtime = struct {
     stats: bool = false,
     debug_protocol_replies: bool = false,
     image_gc: bool = false,
+    input_enabled: bool = false,
     dump_composites: bool = false,
     debug_composite: bool = false,
+    intercept_mode: InterceptMode = .sync_compose,
+    terminal_identity: []const u8 = "unknown",
+    output_profile_name: []const u8 = "unknown",
+    logged_queued_replay_stub: bool = false,
     active: bool = false,
+    queue_mutex: std.Thread.Mutex = .{},
+    queue_cond: std.Thread.Condition = .{},
+    queue: std.ArrayList(Command),
+    payload_pool: PayloadBufferPool = .{},
+    inspect_resources: std.ArrayList(InspectResource),
+    inspect_resource_records: std.ArrayList(ResourceRecord),
+    queue_head: usize = 0,
+    pending_presents: usize = 0,
+    worker_thread: ?std.Thread = null,
+    inspector: ?Inspector = null,
+    whiskers_client: ?WhiskersClient = null,
+    shutdown_worker: bool = false,
+    queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
+    input_parser: ?input_mod.TerminalInputParser = null,
+    input_window_w: i32 = 640,
+    input_window_h: i32 = 480,
     present_interval_ns: i128 = 0,
     adaptive_present_target_ns: i128 = std.time.ns_per_s / 60,
     next_present_ns: i128 = 0,
     skipped_presents: u64 = 0,
+    producer_stats: ProducerStats,
 
     fn init() Runtime {
         const allocator = std.heap.c_allocator;
@@ -46,6 +152,7 @@ pub const Runtime = struct {
         const stats = std.c.getenv("KATZENSTEG_STATS") != null;
         const debug_protocol_replies = std.c.getenv("KATZENSTEG_KITTY_DEBUG_REPLIES") != null;
         const image_gc = std.c.getenv("KATZENSTEG_IMAGE_GC") != null;
+        const input_enabled = parseInputEnabledValue(if (std.c.getenv("KATZENSTEG_INPUT")) |value| std.mem.span(value) else null);
         const dump_composites = std.c.getenv("KATZENSTEG_COMPOSITE_DUMP") != null;
         const debug_composite = std.c.getenv("KATZENSTEG_COMPOSITE_DEBUG") != null;
         var runtime = Runtime{
@@ -56,10 +163,55 @@ pub const Runtime = struct {
             .stats = stats,
             .debug_protocol_replies = debug_protocol_replies,
             .image_gc = image_gc,
+            .input_enabled = input_enabled,
             .dump_composites = dump_composites,
             .debug_composite = debug_composite,
+            .intercept_mode = config.intercept_mode,
+            .queue = std.ArrayList(Command).empty,
+            .inspect_resources = std.ArrayList(InspectResource).empty,
+            .inspect_resource_records = std.ArrayList(ResourceRecord).empty,
+            .queue_head = 0,
+            .pending_presents = 0,
+            .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
             .present_interval_ns = if (config.present_fps > 0) @divTrunc(std.time.ns_per_s, config.present_fps) else 0,
+            .producer_stats = .{ .enabled = stats, .last_report_ns = std.time.nanoTimestamp() },
         };
+        if (std.c.getenv("KATZENSTEG_INSPECT_SOCKET")) |path_z| {
+            runtime.inspector = Inspector.init(allocator, &runtime.logger, std.mem.span(path_z)) catch |err| blk: {
+                runtime.logger.writeFmt("katzensteg: inspector init failed: {any}", .{err});
+                break :blk null;
+            };
+        }
+        if (std.c.getenv("KATZENSTEG_WHISKERS_SOCKET")) |path_z| {
+            var free_producer_hello = true;
+            const producer_hello = runtime.buildWhiskersHello() catch |err| blk: {
+                runtime.logger.writeFmt("katzensteg: whiskers hello build failed: {any}", .{err});
+                free_producer_hello = false;
+                break :blk whiskers_client_mod.ProducerHello{
+                    .producer_kind = "katzensteg",
+                    .producer_name_hint = null,
+                    .program = null,
+                    .cmdline = &.{},
+                    .cwd = null,
+                    .terminal = runtime.terminal_identity,
+                };
+            };
+            runtime.logger.writeFmt("katzensteg: whiskers socket configured: {s}", .{std.mem.span(path_z)});
+            defer if (free_producer_hello) runtime.freeWhiskersHello(producer_hello);
+            runtime.whiskers_client = WhiskersClient.init(allocator, &runtime.logger, std.mem.span(path_z), producer_hello) catch |err| blk: {
+                runtime.logger.writeFmt("katzensteg: whiskers client init failed: {any}", .{err});
+                break :blk null;
+            };
+            if (runtime.whiskers_client) |*client| {
+                if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") != null) {
+                    client.capture_enabled.store(true, .release);
+                    runtime.logger.write("katzensteg: whiskers force capture enabled");
+                } else {
+                    client.start();
+                }
+                runtime.logger.writeFmt("katzensteg: whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
+            }
+        }
         runtime.tty = DirectTty.init() catch |err| {
             runtime.logger.writeFmt("katzensteg: direct tty init failed: {any}", .{err});
             return runtime;
@@ -70,9 +222,11 @@ pub const Runtime = struct {
             runtime.logger.writeFmt("katzensteg: upload transport selection failed; falling back to direct APC: {any}", .{err});
             break :blk ts_kitty.Options{};
         };
+        var actual_upload_medium = backend_options.upload_medium;
         runtime.backend = ts_kitty.Backend.initWithOptions(allocator, runtime.tty.?.file, backend_options) catch |err| blk: {
             runtime.logger.writeFmt("katzensteg: backend init failed: {any}", .{err});
             runtime.logger.write("katzensteg: retrying backend init with direct APC fallback");
+            actual_upload_medium = .direct;
             break :blk ts_kitty.Backend.initWithOptions(allocator, runtime.tty.?.file, .{
                 .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail,
             }) catch |fallback_err| {
@@ -81,35 +235,212 @@ pub const Runtime = struct {
             };
         };
         runtime.active = true;
+        runtime.output_profile_name = switch (actual_upload_medium) {
+            .direct => "direct_apc",
+            .file_whole => "file_whole",
+            .file_offset => "file_offset_ring",
+        };
         runtime.logger.write("katzensteg: runtime initialized in direct tty mode");
-        switch (backend_options.upload_medium) {
+        switch (actual_upload_medium) {
             .direct => runtime.logger.write("katzensteg: upload transport profile = direct_apc"),
             .file_whole => {
                 runtime.logger.writeFmt("katzensteg: upload transport profile = file_whole path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
-                allocator.free(backend_options.upload_file_path.?);
             },
             .file_offset => {
                 runtime.logger.writeFmt("katzensteg: upload transport profile = file_offset_ring path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
-                allocator.free(backend_options.upload_file_path.?);
             },
         }
+        if (backend_options.upload_file_path) |path| allocator.free(path);
         if (runtime.bg_only) runtime.logger.write("katzensteg: background-only debug mode enabled");
         if (runtime.stats) runtime.logger.write("katzensteg: periodic stats enabled");
         if (runtime.debug_protocol_replies) runtime.logger.write("katzensteg: kitty protocol reply logging enabled (q=0)");
         runtime.logger.writeFmt("katzensteg: composite mode = {s}", .{@tagName(config.composite_mode)});
+        runtime.logger.writeFmt("katzensteg: intercept mode = {s}", .{@tagName(config.intercept_mode)});
+        if (runtime.inspector) |*inspector| inspector.configureSession(.{
+            .terminal_identity = runtime.terminal_identity,
+            .composite_mode = @tagName(config.composite_mode),
+            .intercept_mode = @tagName(config.intercept_mode),
+            .output_profile = runtime.output_profile_name,
+            .present_fps = config.present_fps,
+        });
         if (config.present_fps > 0) runtime.logger.writeFmt("katzensteg: present fps cap = {d}", .{config.present_fps});
         if (runtime.image_gc) runtime.logger.write("katzensteg: old image GC enabled");
+        if (runtime.input_enabled) {
+            runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
+            runtime.updateInputTarget();
+            runtime.tty.?.enableInputCapture() catch |err| {
+                runtime.logger.writeFmt("katzensteg: terminal input capture enable failed: {any}", .{err});
+                if (runtime.input_parser) |*parser| parser.deinit();
+                runtime.input_parser = null;
+                runtime.input_enabled = false;
+            };
+            if (runtime.input_enabled) runtime.logger.write("katzensteg: terminal input capture enabled");
+        }
         if (runtime.dump_composites) runtime.logger.write("katzensteg: composite framebuffer dump enabled");
         if (runtime.debug_composite) runtime.logger.write("katzensteg: composite debug logging enabled");
         return runtime;
     }
 
+    fn buildWhiskersHello(self: *Runtime) !whiskers_client_mod.ProducerHello {
+        const argv = try std.process.argsAlloc(self.allocator);
+        defer std.process.argsFree(self.allocator, argv);
+        const cmdline = try self.allocator.alloc([]const u8, argv.len);
+        for (argv, 0..) |arg, i| cmdline[i] = try self.allocator.dupe(u8, arg);
+        errdefer {
+            for (cmdline) |arg| self.allocator.free(arg);
+            self.allocator.free(cmdline);
+        }
+        const program_name = if (argv.len > 0) std.fs.path.basename(argv[0]) else "producer";
+        const program = if (argv.len > 0) try self.allocator.dupe(u8, program_name) else null;
+        errdefer if (program) |p| self.allocator.free(p);
+        const producer_name_hint = try std.fmt.allocPrint(self.allocator, "katzensteg: {s}", .{program_name});
+        errdefer self.allocator.free(producer_name_hint);
+        const cwd = std.process.getCwdAlloc(self.allocator) catch null;
+        return .{
+            .producer_kind = "katzensteg",
+            .producer_name_hint = producer_name_hint,
+            .program = program,
+            .cmdline = cmdline,
+            .cwd = cwd,
+            .terminal = self.terminal_identity,
+        };
+    }
+
+    fn freeWhiskersHello(self: *Runtime, hello: whiskers_client_mod.ProducerHello) void {
+        if (hello.producer_name_hint) |s| self.allocator.free(s);
+        if (hello.program) |s| self.allocator.free(s);
+        if (hello.cwd) |s| self.allocator.free(s);
+        for (hello.cmdline) |arg| self.allocator.free(arg);
+        self.allocator.free(hello.cmdline);
+    }
+
     fn deinit(self: *Runtime) void {
+        self.queue_mutex.lock();
+        self.shutdown_worker = true;
+        self.queue_cond.signal();
+        self.queue_mutex.unlock();
+        if (self.worker_thread) |thread| thread.join();
+        if (self.whiskers_client) |*client| client.deinit();
+        if (self.inspector) |*inspector| inspector.deinit();
+        for (self.queue.items[self.queue_head..]) |*cmd| cmd.deinit(self.allocator);
+        self.queue.deinit(self.allocator);
+        self.payload_pool.deinit(self.allocator);
+        self.inspect_resources.deinit(self.allocator);
+        self.inspect_resource_records.deinit(self.allocator);
+        self.queued_lock_captures.deinit();
+        if (self.tty) |*tty| {
+            tty.disableInputCapture() catch {};
+            self.pollTerminalInput();
+        }
+        if (self.input_parser) |*parser| parser.deinit();
         self.frame_builder.deinit();
         if (self.backend) |*backend| backend.deinit();
         if (self.engine) |*engine| engine.deinit();
         if (self.tty) |*tty| tty.deinit();
         self.logger.deinit();
+    }
+
+    pub fn noteProducerTime(self: *Runtime, kind: ProducerStatKind, duration_ns: u64) void {
+        if (!self.producer_stats.enabled) return;
+        const bucket = switch (kind) {
+            .generic => &self.producer_stats.generic,
+            .update_texture => &self.producer_stats.update_texture,
+            .unlock_texture => &self.producer_stats.unlock_texture,
+            .create_texture_from_surface => &self.producer_stats.create_texture_from_surface,
+            .render_present => &self.producer_stats.render_present,
+        };
+        bucket.calls += 1;
+        bucket.total_ns += duration_ns;
+        bucket.max_ns = @max(bucket.max_ns, duration_ns);
+        self.maybeReportProducerStats();
+    }
+
+    pub fn noteInputWindowSize(self: *Runtime, w: i32, h: i32) void {
+        self.input_window_w = @max(1, w);
+        self.input_window_h = @max(1, h);
+        self.updateInputTarget();
+    }
+
+    pub fn pollTerminalInput(self: *Runtime) void {
+        if (!self.input_enabled) return;
+        const tty = &(self.tty orelse return);
+        var parser = &(self.input_parser orelse return);
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(tty.file.handle, &buf) catch |err| {
+                switch (err) {
+                    error.WouldBlock => return,
+                    else => {
+                        self.logger.writeFmt("katzensteg: terminal input read failed: {any}", .{err});
+                        return;
+                    },
+                }
+            };
+            if (n == 0) {
+                parser.flushStandaloneEscape() catch |err| {
+                    self.logger.writeFmt("katzensteg: terminal input escape flush failed: {any}", .{err});
+                };
+                return;
+            }
+            parser.feed(buf[0..n]) catch |err| {
+                self.logger.writeFmt("katzensteg: terminal input parse failed: {any}", .{err});
+                return;
+            };
+            if (n < buf.len) return;
+        }
+    }
+
+    pub fn popSdlInputEvent(self: *Runtime, event: ?*sdl.SDL_Event) bool {
+        if (!self.input_enabled) return false;
+        var parser = &(self.input_parser orelse return false);
+        const input_event = parser.pop() orelse return false;
+        const out = event orelse return true;
+        fillSdlEvent(out, input_event);
+        return true;
+    }
+
+    pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
+        if (!self.input_enabled) return null;
+        const parser = &(self.input_parser orelse return null);
+        return parser.mouseState();
+    }
+
+    fn updateInputTarget(self: *Runtime) void {
+        var parser = &(self.input_parser orelse return);
+        const tty = self.tty orelse return;
+        parser.setTarget(.{
+            .cols = tty.cols,
+            .rows = tty.rows,
+            .w = self.input_window_w,
+            .h = self.input_window_h,
+        });
+    }
+
+    fn maybeReportProducerStats(self: *Runtime) void {
+        if (!self.producer_stats.enabled) return;
+        const now = std.time.nanoTimestamp();
+        if (now - self.producer_stats.last_report_ns < std.time.ns_per_s) return;
+        const g = self.producer_stats.generic;
+        const u = self.producer_stats.update_texture;
+        const unl = self.producer_stats.unlock_texture;
+        const c = self.producer_stats.create_texture_from_surface;
+        const p = self.producer_stats.render_present;
+        self.logger.writeFmt(
+            "katzensteg: producer generic={d}({d:.1}us avg/{d:.1}us max) update={d}({d:.1}us/{d:.1}us) unlock={d}({d:.1}us/{d:.1}us) ctfs={d}({d:.1}us/{d:.1}us) present={d}({d:.1}us/{d:.1}us)",
+            .{
+                g.calls,   avgMicros(g),   maxMicros(g),
+                u.calls,   avgMicros(u),   maxMicros(u),
+                unl.calls, avgMicros(unl), maxMicros(unl),
+                c.calls,   avgMicros(c),   maxMicros(c),
+                p.calls,   avgMicros(p),   maxMicros(p),
+            },
+        );
+        self.producer_stats.generic = .{};
+        self.producer_stats.update_texture = .{};
+        self.producer_stats.unlock_texture = .{};
+        self.producer_stats.create_texture_from_surface = .{};
+        self.producer_stats.render_present = .{};
+        self.producer_stats.last_report_ns = now;
     }
 
     pub fn shouldPresent(self: *Runtime) bool {
@@ -131,16 +462,238 @@ pub const Runtime = struct {
         const extra = duration_ns - self.adaptive_present_target_ns;
         self.next_present_ns = std.time.nanoTimestamp() + extra;
     }
+
+    pub fn rememberQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture, rect: ?*const @import("katzensteg_sdl").SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
+        const key = if (texture) |t| @intFromPtr(t) else return;
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        self.queued_lock_captures.put(key, .{ .rect = if (rect) |r| r.* else null, .pixels = pixels, .pitch = pitch }) catch |err| {
+            self.logger.writeFmt("katzensteg: failed to remember queued lock capture: {any}", .{err});
+        };
+    }
+
+    pub fn takeQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture) ?QueuedLockCapture {
+        const key = if (texture) |t| @intFromPtr(t) else return null;
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        if (self.queued_lock_captures.fetchRemove(key)) |entry| return entry.value;
+        return null;
+    }
+
+    pub fn currentQueueDepth(self: *Runtime) usize {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        return self.queue.items.len - self.queue_head;
+    }
+
+    pub fn enqueueCommand(self: *Runtime, cmd: Command) void {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        var owned = cmd;
+        if (owned == .render_present and self.pending_presents > 0) {
+            self.dropQueuedFrameLocalsBeforeLatestPresent();
+        }
+        self.queue.append(self.allocator, owned) catch |err| {
+            self.logger.writeFmt("katzensteg: failed to enqueue command: {any}", .{err});
+            owned.deinit(self.allocator);
+            return;
+        };
+        if (owned == .render_present) self.pending_presents += 1;
+        self.maybeCompactQueue();
+        self.queue_cond.signal();
+    }
+
+    pub fn acquirePayloadBuffer(self: *Runtime, len: usize) ![]u8 {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        return self.payload_pool.acquire(self.allocator, len);
+    }
+
+    pub fn recycleCommand(self: *Runtime, cmd: *Command) void {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        self.recycleCommandLocked(cmd);
+    }
+
+    fn recycleCommandLocked(self: *Runtime, cmd: *Command) void {
+        switch (cmd.*) {
+            .update_texture => |*c| {
+                if (c.pixels) |buf| self.payload_pool.release(self.allocator, buf);
+            },
+            .update_yuv_texture => |*c| {
+                if (c.yplane) |buf| self.payload_pool.release(self.allocator, buf);
+                if (c.uplane) |buf| self.payload_pool.release(self.allocator, buf);
+                if (c.vplane) |buf| self.payload_pool.release(self.allocator, buf);
+            },
+            .update_nv_texture => |*c| {
+                if (c.yplane) |buf| self.payload_pool.release(self.allocator, buf);
+                if (c.uvplane) |buf| self.payload_pool.release(self.allocator, buf);
+            },
+            else => {},
+        }
+        cmd.* = undefined;
+    }
+
+    fn maybeCompactQueue(self: *Runtime) void {
+        if (self.queue_head == 0) return;
+        if (self.queue_head < queue_compact_threshold and self.queue_head * 2 < self.queue.items.len) return;
+        std.mem.copyForwards(Command, self.queue.items[0 .. self.queue.items.len - self.queue_head], self.queue.items[self.queue_head..]);
+        self.queue.items.len -= self.queue_head;
+        self.queue_head = 0;
+    }
+
+    fn dropQueuedFrameLocalsBeforeLatestPresent(self: *Runtime) void {
+        var last_present_idx: ?usize = null;
+        for (self.queue.items[self.queue_head..], self.queue_head..) |cmd, idx| {
+            if (cmd == .render_present) last_present_idx = idx;
+        }
+        const cutoff = last_present_idx orelse return;
+        var write_idx = self.queue_head;
+        var dropped_any = false;
+        var idx = self.queue_head;
+        while (idx <= cutoff) : (idx += 1) {
+            const cmd = self.queue.items[idx];
+            if (isFrameLocalCommand(cmd)) {
+                var doomed = cmd;
+                doomed.deinit(self.allocator);
+                dropped_any = true;
+                continue;
+            }
+            if (write_idx != idx) self.queue.items[write_idx] = cmd;
+            write_idx += 1;
+        }
+        idx = cutoff + 1;
+        while (idx < self.queue.items.len) : (idx += 1) {
+            if (write_idx != idx) self.queue.items[write_idx] = self.queue.items[idx];
+            write_idx += 1;
+        }
+        self.queue.items.len = write_idx;
+        self.pending_presents = 0;
+        for (self.queue.items[self.queue_head..]) |queued| {
+            if (queued == .render_present) self.pending_presents += 1;
+        }
+        if (dropped_any) self.logger.write("katzensteg: dropped stale queued frame-local commands before latest present");
+    }
 };
+
+fn isFrameLocalCommand(cmd: Command) bool {
+    return switch (cmd) {
+        .set_render_draw_color,
+        .render_clear,
+        .render_copy,
+        .render_copy_ex,
+        .render_fill_rect,
+        .render_draw_point,
+        .render_draw_line,
+        .render_set_viewport,
+        .render_set_clip_rect,
+        .render_present,
+        => true,
+        else => false,
+    };
+}
+
+fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input_mod.InputEvent) void {
+    @memset(&event.padding, 0);
+    const now = sdl.SDL_GetTicks();
+    switch (input_event) {
+        .key_down => |key| event.key = .{
+            .type = sdl.SDL_KEYDOWN,
+            .timestamp = now,
+            .windowID = 0,
+            .state = sdl.SDL_PRESSED,
+            .repeat = 0,
+            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
+        },
+        .key_up => |key| event.key = .{
+            .type = sdl.SDL_KEYUP,
+            .timestamp = now,
+            .windowID = 0,
+            .state = sdl.SDL_RELEASED,
+            .repeat = 0,
+            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
+        },
+        .text => |text| {
+            event.text = .{ .type = sdl.SDL_TEXTINPUT, .timestamp = now, .windowID = 0, .text = text.buf };
+        },
+        .mouse_motion => |motion| event.motion = .{
+            .type = sdl.SDL_MOUSEMOTION,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .state = motion.buttons,
+            .x = motion.x,
+            .y = motion.y,
+            .xrel = motion.xrel,
+            .yrel = motion.yrel,
+        },
+        .mouse_button => |button| event.button = .{
+            .type = if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .button = button.button,
+            .state = if (button.pressed) sdl.SDL_PRESSED else sdl.SDL_RELEASED,
+            .clicks = button.clicks,
+            .x = button.x,
+            .y = button.y,
+        },
+        .mouse_wheel => |wheel| event.wheel = .{
+            .type = sdl.SDL_MOUSEWHEEL,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .x = wheel.x,
+            .y = wheel.y,
+            .direction = sdl.SDL_MOUSEWHEEL_NORMAL,
+            .preciseX = @floatFromInt(wheel.x),
+            .preciseY = @floatFromInt(wheel.y),
+            .mouseX = wheel.mouse_x,
+            .mouseY = wheel.mouse_y,
+        },
+    }
+}
+
+fn workerMain(runtime: *Runtime) void {
+    runtime.logger.write("katzensteg: queued replay worker started");
+    while (true) {
+        runtime.queue_mutex.lock();
+        while (!runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
+            runtime.queue_cond.wait(&runtime.queue_mutex);
+        }
+        if (runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
+            runtime.queue_mutex.unlock();
+            runtime.logger.write("katzensteg: queued replay worker exiting");
+            return;
+        }
+        var cmd = runtime.queue.items[runtime.queue_head];
+        runtime.queue_head += 1;
+        if (cmd == .render_present and runtime.pending_presents > 0) runtime.pending_presents -= 1;
+        runtime.maybeCompactQueue();
+        runtime.queue_mutex.unlock();
+        intercept_sink.handleCommand(runtime, cmd);
+        runtime.recycleCommand(&cmd);
+    }
+}
 
 pub fn get() *Runtime {
     global_mutex.lock();
     defer global_mutex.unlock();
     if (global_runtime == null) {
         global_runtime = Runtime.init();
-        if (!atexit_registered) {
-            _ = atexit(onExit);
-            atexit_registered = true;
+        if (global_runtime) |*runtime| {
+            if (runtime.inspector) |*inspector| {
+                inspector.logger = &runtime.logger;
+                inspector.start();
+            }
+            if (runtime.intercept_mode == .queued_replay) {
+                if (std.Thread.spawn(.{}, workerMain, .{runtime})) |thread| {
+                    runtime.worker_thread = thread;
+                } else |err| {
+                    runtime.logger.writeFmt("katzensteg: failed to start queued replay worker: {any}", .{err});
+                    runtime.active = false;
+                }
+            }
         }
     }
     return &global_runtime.?;
@@ -168,6 +721,14 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
                 };
             }
         }
+        if (parsed.value.object.get("intercept_mode")) |value| {
+            if (value == .string) {
+                config.intercept_mode = parseInterceptMode(value.string) orelse blk: {
+                    logger.writeFmt("katzensteg: unknown intercept_mode in config: {s}", .{value.string});
+                    break :blk config.intercept_mode;
+                };
+            }
+        }
         if (parsed.value.object.get("present_fps")) |value| {
             switch (value) {
                 .integer => |n| {
@@ -186,11 +747,28 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
             logger.writeFmt("katzensteg: unknown KATZENSTEG_COMPOSITE_MODE value: {s}", .{mode});
         }
     }
+    if (std.c.getenv("KATZENSTEG_INTERCEPT_MODE")) |mode_z| {
+        const mode = std.mem.span(mode_z);
+        if (parseInterceptMode(mode)) |parsed| {
+            config.intercept_mode = parsed;
+        } else {
+            logger.writeFmt("katzensteg: unknown KATZENSTEG_INTERCEPT_MODE value: {s}", .{mode});
+        }
+    }
     if (std.c.getenv("KATZENSTEG_PRESENT_FPS")) |fps_z| {
         const fps = std.fmt.parseInt(u32, std.mem.span(fps_z), 10) catch 0;
         config.present_fps = fps;
     }
     return config;
+}
+
+fn avgMicros(bucket: ProducerBucket) f64 {
+    if (bucket.calls == 0) return 0;
+    return @as(f64, @floatFromInt(bucket.total_ns)) / @as(f64, @floatFromInt(bucket.calls)) / 1000.0;
+}
+
+fn maxMicros(bucket: ProducerBucket) f64 {
+    return @as(f64, @floatFromInt(bucket.max_ns)) / 1000.0;
 }
 
 fn parseCompositeMode(value: []const u8) ?CompositeMode {
@@ -199,7 +777,13 @@ fn parseCompositeMode(value: []const u8) ?CompositeMode {
     return null;
 }
 
-fn onExit() callconv(.c) void {
+fn parseInterceptMode(value: []const u8) ?InterceptMode {
+    if (std.mem.eql(u8, value, "sync_compose")) return .sync_compose;
+    if (std.mem.eql(u8, value, "queued_replay")) return .queued_replay;
+    return null;
+}
+
+pub fn shutdownGlobal() callconv(.c) void {
     global_mutex.lock();
     defer global_mutex.unlock();
     if (global_runtime) |*runtime| {
@@ -228,6 +812,7 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
     try probe_file.writeAll(&probe_pixel);
 
     const caps = try ts_kitty.capabilities.probe(allocator, tty, upload_path);
+    runtime.terminal_identity = @tagName(caps.terminal);
     runtime.logger.writeFmt(
         "katzensteg: terminal={s} graphics={s} file_whole={s}/{s} file_offset={s}/{s}",
         .{
@@ -283,4 +868,33 @@ fn parseForcedOutputProfile() ?ts_kitty.OutputProfile {
     if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
     if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
     return null;
+}
+
+fn parseInputEnabledValue(value: ?[]const u8) bool {
+    const raw = value orelse return true;
+    return !std.mem.eql(u8, raw, "0");
+}
+
+test "payload buffer pool reuses exact-sized buffers" {
+    var pool = PayloadBufferPool{};
+    defer pool.deinit(std.testing.allocator);
+
+    const first = try pool.acquire(std.testing.allocator, 32);
+    const first_ptr = first.ptr;
+    pool.release(std.testing.allocator, first);
+
+    const second = try pool.acquire(std.testing.allocator, 32);
+    try std.testing.expectEqual(first_ptr, second.ptr);
+    pool.release(std.testing.allocator, second);
+
+    const third = try pool.acquire(std.testing.allocator, 16);
+    try std.testing.expect(third.ptr != first_ptr);
+    pool.release(std.testing.allocator, third);
+}
+
+test "terminal input capture defaults on and can be disabled" {
+    try std.testing.expect(parseInputEnabledValue(null));
+    try std.testing.expect(parseInputEnabledValue("1"));
+    try std.testing.expect(parseInputEnabledValue("true"));
+    try std.testing.expect(!parseInputEnabledValue("0"));
 }
