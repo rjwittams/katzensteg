@@ -49,6 +49,7 @@ pub const Command = union(enum) {
     render_set_viewport: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
     render_set_clip_rect: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
     render_present: struct { renderer: ?*sdl.SDL_Renderer },
+    external_framebuffer_present: struct { width: i32, height: i32, rgba: ?[]u8 },
 
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -62,6 +63,7 @@ pub const Command = union(enum) {
                 if (c.yplane) |buf| allocator.free(buf);
                 if (c.uvplane) |buf| allocator.free(buf);
             },
+            .external_framebuffer_present => |*c| if (c.rgba) |buf| allocator.free(buf),
             else => {},
         }
         self.* = undefined;
@@ -152,6 +154,11 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
         .render_set_viewport => |c| .{ .render_set_viewport = c },
         .render_set_clip_rect => |c| .{ .render_set_clip_rect = c },
         .render_present => |c| .{ .render_present = c },
+        .external_framebuffer_present => |c| .{ .external_framebuffer_present = .{
+            .width = c.width,
+            .height = c.height,
+            .rgba = try cloneBytes(rt, c.rgba),
+        } },
     };
 }
 
@@ -287,6 +294,23 @@ fn copyPlanePayload(rt: *runtime_mod.Runtime, plane: ?[*]const u8, pitch: i32, r
     const copied = rt.acquirePayloadBuffer(byte_len) catch return null;
     @memcpy(copied, src[0..byte_len]);
     return copied;
+}
+
+pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, rgba: []const u8) void {
+    const start_ns = std.time.nanoTimestamp();
+    defer rt.noteProducerTime(.render_present, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    if (width <= 0 or height <= 0) return;
+    const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+    if (rgba.len < byte_len) {
+        rt.logger.writeFmt("katzensteg: external framebuffer payload too small: got={d} want={d}", .{ rgba.len, byte_len });
+        return;
+    }
+    const copied = rt.acquirePayloadBuffer(byte_len) catch {
+        rt.logger.write("katzensteg: alloc failed in enqueueExternalFramebufferPresent");
+        return;
+    };
+    @memcpy(copied, rgba[0..byte_len]);
+    rt.enqueueCommand(.{ .external_framebuffer_present = .{ .width = width, .height = height, .rgba = copied } });
 }
 
 pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
@@ -527,6 +551,10 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
     }
 }
 
+pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, rgba: []const u8) void {
+    rt.presentExternalFramebuffer(width, height, rgba);
+}
+
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
         .create_window => |c| onCreateWindow(rt, c.window, c.w, c.h),
@@ -553,5 +581,6 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         .render_set_viewport => |c| onRenderSetViewport(rt, c.renderer, if (c.rect) |*r| r else null),
         .render_set_clip_rect => |c| onRenderSetClipRect(rt, c.renderer, if (c.rect) |*r| r else null),
         .render_present => |c| onRenderPresent(rt, c.renderer),
+        .external_framebuffer_present => |c| if (c.rgba) |buf| onExternalFramebufferPresent(rt, c.width, c.height, buf),
     }
 }

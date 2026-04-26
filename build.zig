@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         katzensteg_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/yuv_convert_macos.c") });
         katzensteg_lib.linkFramework("Accelerate");
+        katzensteg_lib.linkFramework("OpenGL");
     }
     b.installArtifact(katzensteg_lib);
 
@@ -110,6 +111,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/yuv_convert_macos.c") });
         katzensteg_unlinked_lib.linkFramework("Accelerate");
+        katzensteg_unlinked_lib.linkFramework("OpenGL");
     }
     b.installArtifact(katzensteg_unlinked_lib);
     if (target.result.os.tag == .macos and builtin.os.tag == .macos) {
@@ -155,6 +157,25 @@ pub fn build(b: *std.Build) void {
     katzensteg_input_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_input_probe.linkSystemLibrary("SDL2");
     b.installArtifact(katzensteg_input_probe);
+
+    const katzensteg_gl_probe = b.addExecutable(.{
+        .name = "katzensteg-gl-probe",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_gl_probe.addCSourceFile(.{ .file = b.path("tools/katzensteg/test/gl_probe.c") });
+    katzensteg_gl_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+    katzensteg_gl_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    katzensteg_gl_probe.linkSystemLibrary("SDL2");
+    if (target.result.os.tag == .macos) {
+        katzensteg_gl_probe.linkFramework("OpenGL");
+    } else {
+        katzensteg_gl_probe.linkSystemLibrary("GL");
+    }
+    b.installArtifact(katzensteg_gl_probe);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
@@ -207,4 +228,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_input_probe_cmd.addArgs(args);
     const katzensteg_input_probe_step = b.step("run-katzensteg-input-probe", "Run the SDL2 input probe used for Katzensteg input injection work");
     katzensteg_input_probe_step.dependOn(&katzensteg_input_probe_cmd.step);
+
+    const katzensteg_gl_probe_build_step = b.step("katzensteg-gl-probe", "Build the SDL2 OpenGL probe used for Katzensteg GL capture work");
+    katzensteg_gl_probe_build_step.dependOn(&katzensteg_gl_probe.step);
+
+    const katzensteg_gl_probe_cmd = b.addRunArtifact(katzensteg_gl_probe);
+    if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
+    const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
+    katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
 }

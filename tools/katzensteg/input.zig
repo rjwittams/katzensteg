@@ -60,7 +60,48 @@ pub const MouseWheelEvent = struct {
 pub const MouseState = struct {
     x: i32,
     y: i32,
+    xrel: i32 = 0,
+    yrel: i32 = 0,
     buttons: u32,
+};
+
+pub const RelativeMouseBaseline = struct {
+    x: i32 = 0,
+    y: i32 = 0,
+
+    pub fn snap(self: *RelativeMouseBaseline, current: MouseState) MouseState {
+        const relative = MouseState{
+            .x = current.x,
+            .y = current.y,
+            .xrel = current.x - self.x,
+            .yrel = current.y - self.y,
+            .buttons = current.buttons,
+        };
+        self.x = current.x;
+        self.y = current.y;
+        return relative;
+    }
+};
+
+pub const MouseOwner = enum {
+    terminal,
+    real_window,
+};
+
+pub const MouseOwnership = struct {
+    owner: MouseOwner = .terminal,
+
+    pub fn claimTerminal(self: *MouseOwnership) void {
+        self.owner = .terminal;
+    }
+
+    pub fn claimRealWindow(self: *MouseOwnership) void {
+        self.owner = .real_window;
+    }
+
+    pub fn terminalOwns(self: MouseOwnership) bool {
+        return self.owner == .terminal;
+    }
 };
 
 pub const InputEvent = union(enum) {
@@ -80,6 +121,7 @@ pub const TerminalInputParser = struct {
     last_mouse_x: i32 = 0,
     last_mouse_y: i32 = 0,
     mouse_buttons: u32 = 0,
+    mouse_activity: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{
@@ -121,6 +163,12 @@ pub const TerminalInputParser = struct {
             .y = self.last_mouse_y,
             .buttons = self.mouse_buttons,
         };
+    }
+
+    pub fn takeMouseActivity(self: *TerminalInputParser) bool {
+        const active = self.mouse_activity;
+        self.mouse_activity = false;
+        return active;
     }
 
     pub fn pop(self: *TerminalInputParser) ?InputEvent {
@@ -236,6 +284,8 @@ pub const TerminalInputParser = struct {
         };
         const x = point.x;
         const y = point.y;
+        const xrel = x - self.last_mouse_x;
+        const yrel = y - self.last_mouse_y;
 
         if ((b & 64) != 0) {
             try self.queue.append(self.allocator, .{ .mouse_wheel = .{
@@ -248,8 +298,8 @@ pub const TerminalInputParser = struct {
             try self.queue.append(self.allocator, .{ .mouse_motion = .{
                 .x = x,
                 .y = y,
-                .xrel = x - self.last_mouse_x,
-                .yrel = y - self.last_mouse_y,
+                .xrel = xrel,
+                .yrel = yrel,
                 .buttons = self.mouse_buttons,
             } });
         } else {
@@ -269,6 +319,7 @@ pub const TerminalInputParser = struct {
         }
         self.last_mouse_x = x;
         self.last_mouse_y = y;
+        self.mouse_activity = true;
         return final + 1;
     }
 
@@ -444,4 +495,50 @@ test "terminal input parser tracks mouse button state for polling" {
 
     try parser.feed("\x1b[<0;51;26m");
     try std.testing.expectEqual(@as(u32, 0), parser.mouseState().buttons);
+}
+
+test "relative mouse baseline snaps to current position after polling" {
+    var baseline = RelativeMouseBaseline{};
+
+    const first = baseline.snap(.{ .x = 80, .y = 80, .buttons = 1 });
+    try std.testing.expectEqual(@as(i32, 80), first.x);
+    try std.testing.expectEqual(@as(i32, 80), first.y);
+    try std.testing.expectEqual(@as(i32, 80), first.xrel);
+    try std.testing.expectEqual(@as(i32, 80), first.yrel);
+    try std.testing.expectEqual(@as(u32, 1), first.buttons);
+
+    const second = baseline.snap(.{ .x = 160, .y = 120, .buttons = 1 });
+    try std.testing.expectEqual(@as(i32, 160), second.x);
+    try std.testing.expectEqual(@as(i32, 120), second.y);
+    try std.testing.expectEqual(@as(i32, 80), second.xrel);
+    try std.testing.expectEqual(@as(i32, 40), second.yrel);
+
+    const third = baseline.snap(.{ .x = 160, .y = 120, .buttons = 0 });
+    try std.testing.expectEqual(@as(i32, 0), third.xrel);
+    try std.testing.expectEqual(@as(i32, 0), third.yrel);
+    try std.testing.expectEqual(@as(u32, 0), third.buttons);
+}
+
+test "mouse ownership switches between terminal and real window" {
+    var ownership = MouseOwnership{};
+    try std.testing.expect(ownership.terminalOwns());
+
+    ownership.claimRealWindow();
+    try std.testing.expect(!ownership.terminalOwns());
+
+    ownership.claimTerminal();
+    try std.testing.expect(ownership.terminalOwns());
+}
+
+test "terminal input parser reports mouse activity once" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try std.testing.expect(!parser.takeMouseActivity());
+
+    try parser.feed("\x1b[<35;11;11M");
+
+    try std.testing.expect(parser.takeMouseActivity());
+    try std.testing.expect(!parser.takeMouseActivity());
 }

@@ -25,6 +25,7 @@ const composite_tile_cols: i32 = 8;
 const composite_tile_rows: i32 = 4;
 const composite_strip_max_w: i32 = 4096;
 const primitive_composite_threshold: usize = 128;
+const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 
 extern fn ks_fast_i420_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uplane: [*]const u8, upitch: c_int, vplane: [*]const u8, vpitch: c_int) callconv(.c) c_int;
 extern fn ks_fast_nv12_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uvplane: [*]const u8, uvpitch: c_int) callconv(.c) c_int;
@@ -164,6 +165,11 @@ pub const CompositeMode = enum {
     tiled_strip,
 };
 
+pub const PixelSize = struct {
+    w: i32,
+    h: i32,
+};
+
 pub const InspectFrameSummary = struct {
     render_strategy: []const u8 = "sprite",
     strategy_short: []const u8 = "sprite",
@@ -282,6 +288,60 @@ pub const FrameBuilder = struct {
         if (self.renderers.fetchRemove(key)) |entry| {
             var state = entry.value;
             state.deinit(self.allocator);
+        }
+    }
+
+    pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, rgba: []const u8, debug_protocol_replies: bool, image_gc: bool) void {
+        if (width <= 0 or height <= 0) return;
+        const expected_len: usize = @intCast(width * height * 4);
+        if (rgba.len < expected_len) return;
+
+        const result = self.renderers.getOrPut(external_framebuffer_renderer_key) catch |err| {
+            logger.writeFmt("katzensteg: GL framebuffer state allocation failed: {any}", .{err});
+            return;
+        };
+        if (!result.found_existing) {
+            result.value_ptr.* = RendererState.init(self.allocator, width, height);
+        } else if (result.value_ptr.window_w != width or result.value_ptr.window_h != height) {
+            result.value_ptr.window_w = width;
+            result.value_ptr.window_h = height;
+            result.value_ptr.viewport = .{ .x = 0, .y = 0, .w = width, .h = height };
+            if (result.value_ptr.composite_last_presented) |last| @memset(last, 0);
+        }
+        const state = result.value_ptr;
+
+        engine.beginScene();
+        engine.diff() catch |err| {
+            logger.writeFmt("katzensteg: scene diff failed while entering GL framebuffer mode: {any}", .{err});
+            return;
+        };
+        backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
+        engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed while entering GL framebuffer mode: {any}", .{err});
+
+        if (state.composite_rgba == null or state.composite_rgba.?.len != expected_len) {
+            if (state.composite_rgba) |old| self.allocator.free(old);
+            state.composite_rgba = self.allocator.alloc(u8, expected_len) catch |err| {
+                logger.writeFmt("katzensteg: GL framebuffer copy allocation failed: {any}", .{err});
+                return;
+            };
+        }
+        @memcpy(state.composite_rgba.?, rgba[0..expected_len]);
+        state.composite_mode_active = true;
+
+        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: GL framebuffer present failed: {any}", .{err});
+
+        var job = PresentJob{ .framebuffer = .{
+            .width = width,
+            .height = height,
+            .rgba = state.composite_rgba.?,
+            .owns_rgba = false,
+        } };
+        self.last_inspect_summary = self.buildInspectSummary(state, &job);
+        if (image_gc) self.deleteRetiredImages(logger, backend);
+        if (debug_protocol_replies) self.drainKittyReplies(logger, tty);
+        if (self.stats.enabled) {
+            self.stats.frame_count += 1;
+            self.maybeReportStats(logger);
         }
     }
 
@@ -895,6 +955,20 @@ pub const FrameBuilder = struct {
             .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
         }
         return layout;
+    }
+
+    pub fn presentationLayoutForExternalFramebuffer(self: *FrameBuilder, tty: *const DirectTty) presentation_layout.PresentationLayout {
+        var layout = presentation_layout.PresentationLayout{};
+        const state = self.renderers.getPtr(external_framebuffer_renderer_key) orelse return layout;
+        if (!state.composite_mode_active) return layout;
+        layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty));
+        return layout;
+    }
+
+    pub fn externalFramebufferUploadSize(self: *FrameBuilder, tty: *const DirectTty, source_w: i32, source_h: i32) PixelSize {
+        _ = self;
+        const dest = fullscreenCompositeCellRect(source_w, source_h, tty);
+        return fullscreenCompositeUploadSize(dest, source_w, source_h, tty);
     }
 
     pub fn inspectSummary(self: *const FrameBuilder) InspectFrameSummary {
@@ -2469,7 +2543,7 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn fullscreenCompositeUploadSize(dest: ts_types.CellRect, source_w: i32, source_h: i32, tty: *const DirectTty) struct { w: i32, h: i32 } {
+    fn fullscreenCompositeUploadSize(dest: ts_types.CellRect, source_w: i32, source_h: i32, tty: *const DirectTty) PixelSize {
         const cols: i32 = @intCast(tty.cols);
         const rows: i32 = @intCast(tty.rows);
         if (tty.pixel_width == 0 or tty.pixel_height == 0 or cols <= 0 or rows <= 0) return .{ .w = source_w, .h = source_h };

@@ -6,6 +6,7 @@ const frame_builder_mod = @import("frame_builder.zig");
 const intercept_sink = @import("intercept_sink.zig");
 const inspector_mod = @import("inspector.zig");
 const input_mod = @import("input.zig");
+const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
@@ -18,6 +19,7 @@ const FrameBuilder = frame_builder_mod.FrameBuilder;
 const CompositeMode = frame_builder_mod.CompositeMode;
 const InterceptMode = intercept_sink.InterceptMode;
 const Command = intercept_sink.Command;
+const PixelSize = frame_builder_mod.PixelSize;
 
 const queue_compact_threshold = 4096;
 const payload_pool_max_buffers = 64;
@@ -39,6 +41,7 @@ const RuntimeConfig = struct {
     composite_mode: CompositeMode = .fullscreen,
     intercept_mode: InterceptMode = .sync_compose,
     window_policy: window_policy_mod.WindowPresentationPolicy = .mirror,
+    real_window_visibility: window_policy_mod.RealWindowVisibility = .show,
     present_fps: u32 = 0,
 };
 
@@ -123,6 +126,7 @@ pub const Runtime = struct {
     debug_composite: bool = false,
     intercept_mode: InterceptMode = .sync_compose,
     window_policy: window_policy_mod.WindowPresentationPolicy = .mirror,
+    real_window_visibility: window_policy_mod.RealWindowVisibility = .show,
     terminal_identity: []const u8 = "unknown",
     output_profile_name: []const u8 = "unknown",
     logged_queued_replay_stub: bool = false,
@@ -141,6 +145,8 @@ pub const Runtime = struct {
     shutdown_worker: bool = false,
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
     input_parser: ?input_mod.TerminalInputParser = null,
+    relative_mouse_baseline: input_mod.RelativeMouseBaseline = .{},
+    mouse_ownership: input_mod.MouseOwnership = .{},
     input_window_w: i32 = 640,
     input_window_h: i32 = 480,
     presentation_layout: presentation_layout_mod.PresentationLayout = .{},
@@ -149,6 +155,9 @@ pub const Runtime = struct {
     next_present_ns: i128 = 0,
     skipped_presents: u64 = 0,
     producer_stats: ProducerStats,
+    gl_capture_buffers: gl_capture_mod.Buffers = .{},
+    gl_capture_pbo: gl_capture_mod.PboState = .{},
+    gl_capture_downscale: gl_capture_mod.DownscaleState = .{},
 
     fn init() Runtime {
         const allocator = std.heap.c_allocator;
@@ -176,6 +185,7 @@ pub const Runtime = struct {
             .debug_composite = debug_composite,
             .intercept_mode = config.intercept_mode,
             .window_policy = config.window_policy,
+            .real_window_visibility = config.real_window_visibility,
             .queue = std.ArrayList(Command).empty,
             .inspect_resources = std.ArrayList(InspectResource).empty,
             .inspect_resource_records = std.ArrayList(ResourceRecord).empty,
@@ -331,9 +341,10 @@ pub const Runtime = struct {
         if (self.worker_thread) |thread| thread.join();
         if (self.whiskers_client) |*client| client.deinit();
         if (self.inspector) |*inspector| inspector.deinit();
-        for (self.queue.items[self.queue_head..]) |*cmd| cmd.deinit(self.allocator);
+        for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);
         self.queue.deinit(self.allocator);
         self.payload_pool.deinit(self.allocator);
+        self.gl_capture_buffers.deinit(self.allocator);
         self.inspect_resources.deinit(self.allocator);
         self.inspect_resource_records.deinit(self.allocator);
         self.queued_lock_captures.deinit();
@@ -400,6 +411,7 @@ pub const Runtime = struct {
                 self.logger.writeFmt("katzensteg: terminal input parse failed: {any}", .{err});
                 return;
             };
+            if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             if (n < buf.len) return;
         }
     }
@@ -408,6 +420,7 @@ pub const Runtime = struct {
         if (!self.input_enabled) return false;
         var parser = &(self.input_parser orelse return false);
         const input_event = parser.pop() orelse return false;
+        if (inputEventIsMouse(input_event)) self.mouse_ownership.claimTerminal();
         const out = event orelse return true;
         fillSdlEvent(out, input_event);
         return true;
@@ -415,8 +428,24 @@ pub const Runtime = struct {
 
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
+        if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
         return parser.mouseState();
+    }
+
+    pub fn terminalRelativeMouseState(self: *Runtime) ?input_mod.MouseState {
+        if (!self.input_enabled) return null;
+        if (!self.mouse_ownership.terminalOwns()) return null;
+        const parser = &(self.input_parser orelse return null);
+        return self.relative_mouse_baseline.snap(parser.mouseState());
+    }
+
+    pub fn noteRealSdlEvent(self: *Runtime, event: *const sdl.SDL_Event) void {
+        if (eventIsMouse(event.*)) self.mouse_ownership.claimRealWindow();
+    }
+
+    pub fn claimRealWindowMouse(self: *Runtime) void {
+        self.mouse_ownership.claimRealWindow();
     }
 
     pub fn claimedWindowFlags(self: *const Runtime, flags: u32) u32 {
@@ -444,6 +473,52 @@ pub const Runtime = struct {
     pub fn realWindowEnabled(self: *const Runtime, window: ?*sdl.SDL_Window) bool {
         _ = window;
         return self.window_policy.realWindowEnabled();
+    }
+
+    pub fn realWindowCreateAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
+        _ = window;
+        return self.real_window_visibility.createAction();
+    }
+
+    pub fn realWindowShowAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
+        _ = window;
+        return self.real_window_visibility.showAction();
+    }
+
+    pub fn realWindowRestoreAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
+        _ = window;
+        return self.real_window_visibility.restoreAction();
+    }
+
+    pub fn shouldCaptureExternalFrame(self: *Runtime, window: ?*sdl.SDL_Window) bool {
+        if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return false;
+        if (!self.terminalRenderingEnabled(window, null)) {
+            self.notePresentationLayout(.{});
+            return false;
+        }
+        return self.shouldPresent();
+    }
+
+    pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, rgba: []const u8) void {
+        if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
+        const start_ns = std.time.nanoTimestamp();
+        self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, rgba, self.debug_protocol_replies, self.image_gc);
+        self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
+        const duration = std.time.nanoTimestamp() - start_ns;
+        self.notePresentDuration(duration);
+    }
+
+    pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
+        const tty = &(self.tty orelse return .{ .w = source_w, .h = source_h });
+        return self.frame_builder.externalFramebufferUploadSize(tty, source_w, source_h);
+    }
+
+    pub fn ensureGlCaptureBuffers(self: *Runtime, len: usize) ?*gl_capture_mod.Buffers {
+        self.gl_capture_buffers.ensure(self.allocator, len) catch |err| {
+            self.logger.writeFmt("katzensteg: GL capture buffer allocation failed: {any}", .{err});
+            return null;
+        };
+        return &self.gl_capture_buffers;
     }
 
     fn updateInputTarget(self: *Runtime) void {
@@ -526,15 +601,15 @@ pub const Runtime = struct {
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
         var owned = cmd;
-        if (owned == .render_present and self.pending_presents > 0) {
+        if (isPresentCommand(owned) and self.pending_presents > 0) {
             self.dropQueuedFrameLocalsBeforeLatestPresent();
         }
         self.queue.append(self.allocator, owned) catch |err| {
             self.logger.writeFmt("katzensteg: failed to enqueue command: {any}", .{err});
-            owned.deinit(self.allocator);
+            self.recycleCommandLocked(&owned);
             return;
         };
-        if (owned == .render_present) self.pending_presents += 1;
+        if (isPresentCommand(owned)) self.pending_presents += 1;
         self.maybeCompactQueue();
         self.queue_cond.signal();
     }
@@ -565,6 +640,9 @@ pub const Runtime = struct {
                 if (c.yplane) |buf| self.payload_pool.release(self.allocator, buf);
                 if (c.uvplane) |buf| self.payload_pool.release(self.allocator, buf);
             },
+            .external_framebuffer_present => |*c| {
+                if (c.rgba) |buf| self.payload_pool.release(self.allocator, buf);
+            },
             else => {},
         }
         cmd.* = undefined;
@@ -581,7 +659,7 @@ pub const Runtime = struct {
     fn dropQueuedFrameLocalsBeforeLatestPresent(self: *Runtime) void {
         var last_present_idx: ?usize = null;
         for (self.queue.items[self.queue_head..], self.queue_head..) |cmd, idx| {
-            if (cmd == .render_present) last_present_idx = idx;
+            if (isPresentCommand(cmd)) last_present_idx = idx;
         }
         const cutoff = last_present_idx orelse return;
         var write_idx = self.queue_head;
@@ -591,7 +669,7 @@ pub const Runtime = struct {
             const cmd = self.queue.items[idx];
             if (isFrameLocalCommand(cmd)) {
                 var doomed = cmd;
-                doomed.deinit(self.allocator);
+                self.recycleCommandLocked(&doomed);
                 dropped_any = true;
                 continue;
             }
@@ -606,11 +684,20 @@ pub const Runtime = struct {
         self.queue.items.len = write_idx;
         self.pending_presents = 0;
         for (self.queue.items[self.queue_head..]) |queued| {
-            if (queued == .render_present) self.pending_presents += 1;
+            if (isPresentCommand(queued)) self.pending_presents += 1;
         }
         if (dropped_any) self.logger.write("katzensteg: dropped stale queued frame-local commands before latest present");
     }
 };
+
+fn isPresentCommand(cmd: Command) bool {
+    return switch (cmd) {
+        .render_present,
+        .external_framebuffer_present,
+        => true,
+        else => false,
+    };
+}
 
 fn isFrameLocalCommand(cmd: Command) bool {
     return switch (cmd) {
@@ -624,9 +711,45 @@ fn isFrameLocalCommand(cmd: Command) bool {
         .render_set_viewport,
         .render_set_clip_rect,
         .render_present,
+        .external_framebuffer_present,
         => true,
         else => false,
     };
+}
+
+fn inputEventIsMouse(event: input_mod.InputEvent) bool {
+    return switch (event) {
+        .mouse_motion,
+        .mouse_button,
+        .mouse_wheel,
+        => true,
+        else => false,
+    };
+}
+
+fn eventIsMouse(event: sdl.SDL_Event) bool {
+    return switch (event.type) {
+        sdl.SDL_MOUSEMOTION,
+        sdl.SDL_MOUSEBUTTONDOWN,
+        sdl.SDL_MOUSEBUTTONUP,
+        sdl.SDL_MOUSEWHEEL,
+        => true,
+        else => false,
+    };
+}
+
+test "external framebuffer present is a frame-local present command" {
+    const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .rgba = null } };
+    try std.testing.expect(isFrameLocalCommand(cmd));
+    try std.testing.expect(isPresentCommand(cmd));
+}
+
+test "SDL mouse events are recognized for ownership handoff" {
+    var event: sdl.SDL_Event = undefined;
+    event.type = sdl.SDL_MOUSEMOTION;
+    try std.testing.expect(eventIsMouse(event));
+    event.type = sdl.SDL_KEYDOWN;
+    try std.testing.expect(!eventIsMouse(event));
 }
 
 fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input_mod.InputEvent) void {
@@ -714,7 +837,7 @@ fn workerMain(runtime: *Runtime) void {
         }
         var cmd = runtime.queue.items[runtime.queue_head];
         runtime.queue_head += 1;
-        if (cmd == .render_present and runtime.pending_presents > 0) runtime.pending_presents -= 1;
+        if (isPresentCommand(cmd) and runtime.pending_presents > 0) runtime.pending_presents -= 1;
         runtime.maybeCompactQueue();
         runtime.queue_mutex.unlock();
         intercept_sink.handleCommand(runtime, cmd);
@@ -783,6 +906,14 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
                 }
             }
         }
+        if (parsed.value.object.get("real_window")) |value| {
+            if (value == .string) {
+                config.real_window_visibility = parseRealWindowVisibilityValue(value.string, config.real_window_visibility);
+                if (window_policy_mod.parseRealWindowVisibility(value.string) == null) {
+                    logger.writeFmt("katzensteg: unknown real_window in config: {s}", .{value.string});
+                }
+            }
+        }
         if (parsed.value.object.get("present_fps")) |value| {
             switch (value) {
                 .integer => |n| {
@@ -817,6 +948,14 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
             logger.writeFmt("katzensteg: unknown KATZENSTEG_WINDOW_POLICY value: {s}", .{policy});
         }
     }
+    if (std.c.getenv("KATZENSTEG_REAL_WINDOW")) |visibility_z| {
+        const visibility = std.mem.span(visibility_z);
+        const before = config.real_window_visibility;
+        config.real_window_visibility = parseRealWindowVisibilityValue(visibility, config.real_window_visibility);
+        if (config.real_window_visibility == before and window_policy_mod.parseRealWindowVisibility(visibility) == null) {
+            logger.writeFmt("katzensteg: unknown KATZENSTEG_REAL_WINDOW value: {s}", .{visibility});
+        }
+    }
     if (std.c.getenv("KATZENSTEG_PRESENT_FPS")) |fps_z| {
         const fps = std.fmt.parseInt(u32, std.mem.span(fps_z), 10) catch 0;
         config.present_fps = fps;
@@ -848,6 +987,11 @@ fn parseInterceptMode(value: []const u8) ?InterceptMode {
 fn parseWindowPolicyValue(value: ?[]const u8, fallback: window_policy_mod.WindowPresentationPolicy) window_policy_mod.WindowPresentationPolicy {
     const raw = value orelse return fallback;
     return window_policy_mod.parse(raw) orelse fallback;
+}
+
+fn parseRealWindowVisibilityValue(value: ?[]const u8, fallback: window_policy_mod.RealWindowVisibility) window_policy_mod.RealWindowVisibility {
+    const raw = value orelse return fallback;
+    return window_policy_mod.parseRealWindowVisibility(raw) orelse fallback;
 }
 
 fn routeTerminalRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
@@ -997,6 +1141,7 @@ test "terminal input capture defaults on and can be disabled" {
 test "runtime config defaults to fullscreen composite" {
     const config = RuntimeConfig{};
     try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
+    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.show, config.real_window_visibility);
 }
 
 test "window policy value parser defaults and falls back" {
@@ -1004,6 +1149,13 @@ test "window policy value parser defaults and falls back" {
     try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("terminal_only", .mirror));
     try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.real_only, parseWindowPolicyValue("real_only", .mirror));
     try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("bad", .terminal_only));
+}
+
+test "real window visibility value parser defaults and falls back" {
+    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.show, parseRealWindowVisibilityValue(null, .show));
+    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.hide, parseRealWindowVisibilityValue("hide", .show));
+    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.minimize, parseRealWindowVisibilityValue("minimize", .show));
+    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.hide, parseRealWindowVisibilityValue("bad", .hide));
 }
 
 test "window policy controls terminal and real render routes" {

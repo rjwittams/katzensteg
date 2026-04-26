@@ -3,6 +3,7 @@ const sdl = @import("katzensteg_sdl");
 const runtime = @import("runtime.zig");
 const sink = @import("intercept_sink.zig");
 const window_policy = @import("window_policy.zig");
+const gl_capture = @import("gl_capture.zig");
 
 var trace_create_window: usize = 0;
 var trace_create_renderer: usize = 0;
@@ -21,7 +22,56 @@ var trace_render_present: usize = 0;
 var trace_gl_create_context: usize = 0;
 var trace_gl_make_current: usize = 0;
 var trace_gl_swap_window: usize = 0;
+var trace_gl_capture_error: usize = 0;
+var trace_gl_downscale_target: usize = 0;
 var trace_upper_blit: usize = 0;
+
+const GL_BACK: c_uint = 0x0405;
+const GL_RGBA: c_uint = 0x1908;
+const GL_UNSIGNED_BYTE: c_uint = 0x1401;
+const GL_PACK_ALIGNMENT: c_uint = 0x0D05;
+const GL_READ_BUFFER: c_uint = 0x0C02;
+const GL_PIXEL_PACK_BUFFER: c_uint = 0x88EB;
+const GL_PIXEL_PACK_BUFFER_BINDING: c_uint = 0x88ED;
+const GL_STREAM_READ: c_uint = 0x88E1;
+const GL_READ_ONLY: c_uint = 0x88B8;
+const GL_TEXTURE_2D: c_uint = 0x0DE1;
+const GL_TEXTURE_MIN_FILTER: c_uint = 0x2801;
+const GL_TEXTURE_MAG_FILTER: c_uint = 0x2800;
+const GL_LINEAR: c_uint = 0x2601;
+const GL_COLOR_BUFFER_BIT: c_uint = 0x00004000;
+const GL_FRAMEBUFFER: c_uint = 0x8D40;
+const GL_READ_FRAMEBUFFER: c_uint = 0x8CA8;
+const GL_DRAW_FRAMEBUFFER: c_uint = 0x8CA9;
+const GL_FRAMEBUFFER_BINDING: c_uint = 0x8CA6;
+const GL_READ_FRAMEBUFFER_BINDING: c_uint = 0x8CAA;
+const GL_DRAW_FRAMEBUFFER_BINDING: c_uint = 0x8CA6;
+const GL_COLOR_ATTACHMENT0: c_uint = 0x8CE0;
+const GL_FRAMEBUFFER_COMPLETE: c_uint = 0x8CD5;
+const GL_NO_ERROR: c_uint = 0;
+
+extern fn glReadBuffer(mode: c_uint) void;
+extern fn glPixelStorei(pname: c_uint, param: c_int) void;
+extern fn glGetIntegerv(pname: c_uint, data: *c_int) void;
+extern fn glReadPixels(x: c_int, y: c_int, width: c_int, height: c_int, format: c_uint, typ: c_uint, pixels: ?*anyopaque) void;
+extern fn glGetError() c_uint;
+extern fn glGenBuffers(n: c_int, buffers: *c_uint) void;
+extern fn glDeleteBuffers(n: c_int, buffers: *const c_uint) void;
+extern fn glBindBuffer(target: c_uint, buffer: c_uint) void;
+extern fn glBufferData(target: c_uint, size: isize, data: ?*const anyopaque, usage: c_uint) void;
+extern fn glMapBuffer(target: c_uint, access: c_uint) ?*anyopaque;
+extern fn glUnmapBuffer(target: c_uint) u8;
+extern fn glGenFramebuffers(n: c_int, framebuffers: *c_uint) void;
+extern fn glDeleteFramebuffers(n: c_int, framebuffers: *const c_uint) void;
+extern fn glBindFramebuffer(target: c_uint, framebuffer: c_uint) void;
+extern fn glCheckFramebufferStatus(target: c_uint) c_uint;
+extern fn glFramebufferTexture2D(target: c_uint, attachment: c_uint, textarget: c_uint, texture: c_uint, level: c_int) void;
+extern fn glGenTextures(n: c_int, textures: *c_uint) void;
+extern fn glDeleteTextures(n: c_int, textures: *const c_uint) void;
+extern fn glBindTexture(target: c_uint, texture: c_uint) void;
+extern fn glTexParameteri(target: c_uint, pname: c_uint, param: c_int) void;
+extern fn glTexImage2D(target: c_uint, level: c_int, internalformat: c_int, width: c_int, height: c_int, border: c_int, format: c_uint, typ: c_uint, pixels: ?*const anyopaque) void;
+extern fn glBlitFramebuffer(srcX0: c_int, srcY0: c_int, srcX1: c_int, srcY1: c_int, dstX0: c_int, dstY0: c_int, dstX1: c_int, dstY1: c_int, mask: c_uint, filter: c_uint) void;
 
 const SurfaceTraceView = extern struct {
     flags: u32,
@@ -76,6 +126,20 @@ fn applyBackgroundGamepadHint() void {
 
 fn shouldForwardRealRendererCall(policy: window_policy.WindowPresentationPolicy) bool {
     return policy.realRenderEnabled();
+}
+
+fn glCaptureMode() gl_capture.CaptureMode {
+    return gl_capture.modeFromEnv(if (std.c.getenv("KATZENSTEG_GL_CAPTURE")) |value| std.mem.span(value) else null);
+}
+
+fn applyRealWindowAction(action: window_policy.RealWindowAction, window: ?*sdl.SDL_Window) void {
+    switch (action) {
+        .none => {},
+        .show => sdl.SDL_ShowWindow(window),
+        .hide => sdl.SDL_HideWindow(window),
+        .minimize => sdl.SDL_MinimizeWindow(window),
+        .restore => sdl.SDL_RestoreWindow(window),
+    }
 }
 
 fn isKatzenstegTextureFormatSupported(format: sdl.Uint32) bool {
@@ -163,12 +227,53 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
         .sync_compose => sink.onCreateWindow(rt, window, w, h),
         .queued_replay => sink.dispatchCommand(rt, .{ .create_window = .{ .window = window, .w = w, .h = h } }),
     }
+    applyRealWindowAction(rt.realWindowCreateAction(window), window);
     return window;
 }
 
 pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.Uint32 {
     const flags = sdl.SDL_GetWindowFlags(window);
     return runtime.get().claimedWindowFlags(flags);
+}
+
+pub export fn ks_SDL_ShowWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const rt = runtime.get();
+    applyRealWindowAction(rt.realWindowShowAction(window), window);
+}
+
+pub export fn ks_SDL_HideWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const rt = runtime.get();
+    const action = rt.realWindowCreateAction(window);
+    if (action == .none) {
+        sdl.SDL_HideWindow(window);
+    } else {
+        applyRealWindowAction(action, window);
+    }
+}
+
+pub export fn ks_SDL_MinimizeWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const rt = runtime.get();
+    const action = rt.realWindowCreateAction(window);
+    if (action == .none) {
+        sdl.SDL_MinimizeWindow(window);
+    } else {
+        applyRealWindowAction(action, window);
+    }
+}
+
+pub export fn ks_SDL_RestoreWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const rt = runtime.get();
+    applyRealWindowAction(rt.realWindowRestoreAction(window), window);
+}
+
+pub export fn ks_SDL_RaiseWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const rt = runtime.get();
+    const action = rt.realWindowShowAction(window);
+    if (action == .show) {
+        sdl.SDL_RaiseWindow(window);
+    } else {
+        applyRealWindowAction(action, window);
+    }
 }
 
 pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
@@ -500,30 +605,275 @@ pub export fn ks_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_G
 pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_swap_window, "katzensteg-trace: SDL_GL_SwapWindow window={x}", .{if (window) |p| @intFromPtr(p) else 0});
+    switch (glCaptureMode()) {
+        .disabled => {},
+        .sync => captureGlFramebufferSync(rt, window),
+        .pbo => captureGlFramebufferPbo(rt, window),
+    }
     sdl.SDL_GL_SwapWindow(window);
+}
+
+fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct { w: c_int, h: c_int, len: usize } {
+    var w: c_int = 0;
+    var h: c_int = 0;
+    sdl.SDL_GL_GetDrawableSize(window, &w, &h);
+    if (w <= 0 or h <= 0) return null;
+    if (!rt.shouldCaptureExternalFrame(window)) return null;
+    return .{ .w = w, .h = h, .len = @as(usize, @intCast(w)) * @as(usize, @intCast(h)) * 4 };
+}
+
+fn captureGlFramebufferSync(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void {
+    const size = drawableCaptureSize(rt, window) orelse return;
+
+    const buffers = rt.ensureGlCaptureBuffers(size.len) orelse return;
+
+    var old_read_buffer: c_int = 0;
+    var old_pack_alignment: c_int = 4;
+    var old_pack_buffer: c_int = 0;
+    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
+    defer glReadBuffer(@intCast(old_read_buffer));
+    defer glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+    defer glBindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, size.w, size.h, GL_RGBA, GL_UNSIGNED_BYTE, buffers.raw.ptr);
+    const err = glGetError();
+    if (err != GL_NO_ERROR) {
+        trace_gl_capture_error += 1;
+        if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
+            rt.logger.writeFmt("katzensteg: GL capture glReadPixels failed err=0x{x} size={d}x{d}", .{ err, size.w, size.h });
+        }
+        return;
+    }
+
+    gl_capture.flipRgbaRows(buffers.rgba, buffers.raw, size.w, size.h);
+    publishGlFramebuffer(rt, size.w, size.h, buffers.rgba);
+}
+
+fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void {
+    const size = drawableCaptureSize(rt, window) orelse return;
+    const target = rt.externalFramebufferUploadSize(size.w, size.h);
+    if (!ensureGlDownscaleTarget(rt, target.w, target.h)) return;
+    const target_len = @as(usize, @intCast(target.w)) * @as(usize, @intCast(target.h)) * 4;
+    const buffers = rt.ensureGlCaptureBuffers(target_len) orelse return;
+    if (!ensureGlPboState(rt, target_len)) return;
+    const state = &rt.gl_capture_pbo;
+
+    var old_read_buffer: c_int = 0;
+    var old_pack_alignment: c_int = 4;
+    var old_pack_buffer: c_int = 0;
+    var old_framebuffer: c_int = 0;
+    var old_read_framebuffer: c_int = 0;
+    var old_draw_framebuffer: c_int = 0;
+    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_framebuffer);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw_framebuffer);
+    defer glReadBuffer(@intCast(old_read_buffer));
+    defer glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+    defer glBindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
+    defer glBindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
+    defer glBindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_read_framebuffer));
+    defer glBindFramebuffer(GL_DRAW_FRAMEBUFFER, @intCast(old_draw_framebuffer));
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_framebuffer));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
+    glBlitFramebuffer(0, 0, size.w, size.h, 0, 0, target.w, target.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    const blit_err = glGetError();
+    if (blit_err != GL_NO_ERROR) {
+        trace_gl_capture_error += 1;
+        if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
+            rt.logger.writeFmt("katzensteg: GL FBO downscale blit failed err=0x{x} source={d}x{d} target={d}x{d}", .{ blit_err, size.w, size.h, target.w, target.h });
+        }
+        return;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
+    const read_index = state.index;
+    const map_index = (state.index + 1) % state.ids.len;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[read_index]);
+    glReadPixels(0, 0, target.w, target.h, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    const read_err = glGetError();
+    if (read_err != GL_NO_ERROR) {
+        trace_gl_capture_error += 1;
+        if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
+            rt.logger.writeFmt("katzensteg: GL PBO glReadPixels failed err=0x{x} size={d}x{d}", .{ read_err, target.w, target.h });
+        }
+        return;
+    }
+
+    if (state.primed) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[map_index]);
+        if (glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY)) |mapped| {
+            const mapped_bytes = @as([*]const u8, @ptrCast(mapped))[0..target_len];
+            gl_capture.flipRgbaRows(buffers.rgba, mapped_bytes, target.w, target.h);
+            if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) == 0) {
+                rt.logger.write("katzensteg: GL PBO unmap reported data invalid");
+            } else {
+                publishGlFramebuffer(rt, target.w, target.h, buffers.rgba);
+            }
+        } else {
+            const map_err = glGetError();
+            trace_gl_capture_error += 1;
+            if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
+                rt.logger.writeFmt("katzensteg: GL PBO map failed err=0x{x} size={d}", .{ map_err, target_len });
+            }
+        }
+    } else {
+        state.primed = true;
+    }
+    state.index = map_index;
+}
+
+fn publishGlFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, rgba: []const u8) void {
+    switch (rt.intercept_mode) {
+        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, rgba),
+        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, rgba),
+    }
+}
+
+fn ensureGlDownscaleTarget(rt: *runtime.Runtime, w: i32, h: i32) bool {
+    const state = &rt.gl_capture_downscale;
+    if (state.fbo != 0 and state.texture != 0 and state.w == w and state.h == h) return true;
+
+    if (state.fbo != 0) glDeleteFramebuffers(1, &state.fbo);
+    if (state.texture != 0) glDeleteTextures(1, &state.texture);
+    state.reset();
+
+    glGenFramebuffers(1, &state.fbo);
+    glGenTextures(1, &state.texture);
+    if (state.fbo == 0 or state.texture == 0) {
+        rt.logger.write("katzensteg: GL FBO downscale allocation returned id 0");
+        state.reset();
+        return false;
+    }
+
+    var old_texture: c_int = 0;
+    var old_framebuffer: c_int = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
+    glGetIntegerv(0x8069, &old_texture);
+    defer glBindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
+    defer glBindTexture(GL_TEXTURE_2D, @intCast(old_texture));
+
+    glBindTexture(GL_TEXTURE_2D, state.texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, @intCast(GL_LINEAR));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, @intCast(GL_LINEAR));
+    glTexImage2D(GL_TEXTURE_2D, 0, @intCast(GL_RGBA), w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.texture, 0);
+    const status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    const err = glGetError();
+    if (status != GL_FRAMEBUFFER_COMPLETE or err != GL_NO_ERROR) {
+        rt.logger.writeFmt("katzensteg: GL FBO downscale setup failed status=0x{x} err=0x{x} size={d}x{d}", .{ status, err, w, h });
+        glDeleteFramebuffers(1, &state.fbo);
+        glDeleteTextures(1, &state.texture);
+        state.reset();
+        return false;
+    }
+    state.w = w;
+    state.h = h;
+    rt.gl_capture_pbo.reset();
+    traceLimited(rt, &trace_gl_downscale_target, "katzensteg-trace: GL downscale target fbo={d} texture={d} size={d}x{d}", .{ state.fbo, state.texture, w, h });
+    return true;
+}
+
+fn ensureGlPboState(rt: *runtime.Runtime, len: usize) bool {
+    const state = &rt.gl_capture_pbo;
+    if (state.len == len and state.ids[0] != 0 and state.ids[1] != 0) return true;
+
+    if (state.ids[0] != 0 or state.ids[1] != 0) {
+        glDeleteBuffers(2, &state.ids[0]);
+        state.reset();
+    }
+
+    glGenBuffers(2, &state.ids[0]);
+    var i: usize = 0;
+    while (i < state.ids.len) : (i += 1) {
+        if (state.ids[i] == 0) {
+            rt.logger.write("katzensteg: GL PBO allocation returned id 0");
+            state.reset();
+            return false;
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, @intCast(len), null, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    const err = glGetError();
+    if (err != GL_NO_ERROR) {
+        rt.logger.writeFmt("katzensteg: GL PBO setup failed err=0x{x} len={d}", .{ err, len });
+        glDeleteBuffers(2, &state.ids[0]);
+        state.reset();
+        return false;
+    }
+    state.len = len;
+    state.index = 0;
+    state.primed = false;
+    return true;
 }
 
 pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     const rt = runtime.get();
     rt.pollTerminalInput();
-    if (rt.popSdlInputEvent(event)) return 1;
+    if (realMouseFocused()) {
+        rt.claimRealWindowMouse();
+    } else if (rt.popSdlInputEvent(event)) return 1;
     const out = event orelse return sdl.SDL_PollEvent(event);
     while (true) {
         const rc = sdl.SDL_PollEvent(out);
         if (rc == 0) return 0;
-        if (!rt.shouldSuppressSdlEvent(out)) return rc;
+        if (!rt.shouldSuppressSdlEvent(out)) {
+            rt.noteRealSdlEvent(out);
+            return rc;
+        }
     }
 }
 
 pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
     const rt = runtime.get();
     rt.pollTerminalInput();
+    if (realMouseFocused()) {
+        rt.claimRealWindowMouse();
+        return sdl.SDL_GetMouseState(x, y);
+    }
     if (rt.terminalMouseState()) |state| {
         if (x) |out_x| out_x.* = state.x;
         if (y) |out_y| out_y.* = state.y;
         return state.buttons;
     }
-    return sdl.SDL_GetMouseState(x, y);
+    const buttons = sdl.SDL_GetMouseState(x, y);
+    if (buttons != 0) rt.claimRealWindowMouse();
+    return buttons;
+}
+
+pub export fn ks_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
+    const rt = runtime.get();
+    rt.pollTerminalInput();
+    if (realMouseFocused()) {
+        rt.claimRealWindowMouse();
+        return sdl.SDL_GetRelativeMouseState(x, y);
+    }
+    if (rt.terminalRelativeMouseState()) |state| {
+        if (x) |out_x| out_x.* = state.xrel;
+        if (y) |out_y| out_y.* = state.yrel;
+        return state.buttons;
+    }
+    const buttons = sdl.SDL_GetRelativeMouseState(x, y);
+    const xrel = if (x) |out_x| out_x.* else 0;
+    const yrel = if (y) |out_y| out_y.* else 0;
+    if (buttons != 0 or xrel != 0 or yrel != 0) rt.claimRealWindowMouse();
+    return buttons;
+}
+
+fn realMouseFocused() bool {
+    return sdl.SDL_GetMouseFocus() != null;
 }
 
 pub export fn ks_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*sdl.SDL_Rect) callconv(.c) c_int {

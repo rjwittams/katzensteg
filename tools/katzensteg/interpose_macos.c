@@ -24,6 +24,11 @@ extern int ks_SDL_Init(unsigned int);
 extern int ks_SDL_InitSubSystem(unsigned int);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
+extern void ks_SDL_ShowWindow(struct SDL_Window *);
+extern void ks_SDL_HideWindow(struct SDL_Window *);
+extern void ks_SDL_MinimizeWindow(struct SDL_Window *);
+extern void ks_SDL_RestoreWindow(struct SDL_Window *);
+extern void ks_SDL_RaiseWindow(struct SDL_Window *);
 extern void ks_SDL_DestroyWindow(struct SDL_Window *);
 extern struct SDL_Renderer *ks_SDL_CreateRenderer(struct SDL_Window *, int, unsigned int);
 extern int ks_SDL_GetRendererInfo(struct SDL_Renderer *, struct SDL_RendererInfo *);
@@ -55,6 +60,7 @@ extern int ks_SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
 extern int ks_SDL_PollEvent(union SDL_Event *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
+extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
 extern void ks_katzensteg_shutdown(void);
 
@@ -67,6 +73,11 @@ static void (*katzensteg_module_destructor_ptr)(void) = katzensteg_module_destru
 
 extern struct SDL_Window *SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern void SDL_DestroyWindow(struct SDL_Window *);
+extern void SDL_ShowWindow(struct SDL_Window *);
+extern void SDL_HideWindow(struct SDL_Window *);
+extern void SDL_MinimizeWindow(struct SDL_Window *);
+extern void SDL_RestoreWindow(struct SDL_Window *);
+extern void SDL_RaiseWindow(struct SDL_Window *);
 extern struct SDL_Renderer *SDL_CreateRenderer(struct SDL_Window *, int, unsigned int);
 extern int SDL_GetRendererInfo(struct SDL_Renderer *, struct SDL_RendererInfo *);
 extern void SDL_DestroyRenderer(struct SDL_Renderer *);
@@ -97,6 +108,7 @@ extern int SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void SDL_GL_SwapWindow(struct SDL_Window *);
 extern int SDL_PollEvent(union SDL_Event *);
 extern unsigned int SDL_GetMouseState(int *, int *);
+extern unsigned int SDL_GetRelativeMouseState(int *, int *);
 extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
@@ -110,6 +122,11 @@ DYLD_INTERPOSE(ks_SDL_QuitSubSystem, SDL_QuitSubSystem)
 DYLD_INTERPOSE(ks_SDL_Quit, SDL_Quit)
 DYLD_INTERPOSE(ks_SDL_CreateWindow, SDL_CreateWindow)
 DYLD_INTERPOSE(ks_SDL_GetWindowFlags, SDL_GetWindowFlags)
+DYLD_INTERPOSE(ks_SDL_ShowWindow, SDL_ShowWindow)
+DYLD_INTERPOSE(ks_SDL_HideWindow, SDL_HideWindow)
+DYLD_INTERPOSE(ks_SDL_MinimizeWindow, SDL_MinimizeWindow)
+DYLD_INTERPOSE(ks_SDL_RestoreWindow, SDL_RestoreWindow)
+DYLD_INTERPOSE(ks_SDL_RaiseWindow, SDL_RaiseWindow)
 DYLD_INTERPOSE(ks_SDL_DestroyWindow, SDL_DestroyWindow)
 DYLD_INTERPOSE(ks_SDL_CreateRenderer, SDL_CreateRenderer)
 DYLD_INTERPOSE(ks_SDL_GetRendererInfo, SDL_GetRendererInfo)
@@ -141,6 +158,7 @@ DYLD_INTERPOSE(ks_SDL_GL_MakeCurrent, SDL_GL_MakeCurrent)
 DYLD_INTERPOSE(ks_SDL_GL_SwapWindow, SDL_GL_SwapWindow)
 DYLD_INTERPOSE(ks_SDL_PollEvent, SDL_PollEvent)
 DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
+DYLD_INTERPOSE(ks_SDL_GetRelativeMouseState, SDL_GetRelativeMouseState)
 DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)
 
 #endif
