@@ -4,6 +4,7 @@ const sdl = @import("katzensteg_sdl");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
+const presentation_layout = @import("presentation_layout.zig");
 const present_job = @import("present_job.zig");
 
 const ts_types = termscene.types;
@@ -884,6 +885,16 @@ pub const FrameBuilder = struct {
         state.copies.clearRetainingCapacity();
         state.fills.clearRetainingCapacity();
         state.lines.clearRetainingCapacity();
+    }
+
+    pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer) presentation_layout.PresentationLayout {
+        var layout = presentation_layout.PresentationLayout{};
+        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return layout;
+        if (!state.composite_mode_active) return layout;
+        switch (self.composite_mode) {
+            .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
+        }
+        return layout;
     }
 
     pub fn inspectSummary(self: *const FrameBuilder) InspectFrameSummary {
@@ -2448,6 +2459,16 @@ pub const FrameBuilder = struct {
         return containedCellRect(window_w, window_h, tty);
     }
 
+    fn fullscreenCompositePresentationRegion(window_w: i32, window_h: i32, tty: *const DirectTty) presentation_layout.PresentationRegion {
+        const dest = fullscreenCompositeCellRect(window_w, window_h, tty);
+        return .{
+            .kind = .sdl_window,
+            .tty_rect = .{ .col = dest.col, .row = dest.row, .w = dest.w, .h = dest.h },
+            .sdl_rect = .{ .x = 0, .y = 0, .w = window_w, .h = window_h },
+            .z = 0,
+        };
+    }
+
     fn fullscreenCompositeUploadSize(dest: ts_types.CellRect, source_w: i32, source_h: i32, tty: *const DirectTty) struct { w: i32, h: i32 } {
         const cols: i32 = @intCast(tty.cols);
         const rows: i32 = @intCast(tty.rows);
@@ -2804,6 +2825,25 @@ test "fullscreen composite upload size matches destination cell pixels" {
     const upload = FrameBuilder.fullscreenCompositeUploadSize(dest, 320, 240, &tty);
     try std.testing.expectEqual(@as(i32, 1000), upload.w);
     try std.testing.expectEqual(@as(i32, 760), upload.h);
+}
+
+test "fullscreen composite presentation region matches placed image rect" {
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    const dest = FrameBuilder.fullscreenCompositeCellRect(320, 240, &tty);
+    const region = FrameBuilder.fullscreenCompositePresentationRegion(320, 240, &tty);
+
+    try std.testing.expectEqual(presentation_layout.CellRect{
+        .col = dest.col,
+        .row = dest.row,
+        .w = dest.w,
+        .h = dest.h,
+    }, region.tty_rect);
+    try std.testing.expectEqual(presentation_layout.SdlRect{ .x = 0, .y = 0, .w = 320, .h = 240 }, region.sdl_rect);
 }
 
 test "fullscreen composite upload size falls back to source without terminal pixels" {

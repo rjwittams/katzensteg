@@ -446,6 +446,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
     if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
         const start_ns = std.time.nanoTimestamp();
         rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.debug_protocol_replies, rt.image_gc);
+        rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
         const duration = std.time.nanoTimestamp() - start_ns;
         rt.notePresentDuration(duration);
         const summary = rt.frame_builder.inspectSummary();

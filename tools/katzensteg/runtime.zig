@@ -6,6 +6,7 @@ const frame_builder_mod = @import("frame_builder.zig");
 const intercept_sink = @import("intercept_sink.zig");
 const inspector_mod = @import("inspector.zig");
 const input_mod = @import("input.zig");
+const presentation_layout_mod = @import("presentation_layout.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const sdl = @import("katzensteg_sdl");
 const Inspector = inspector_mod.Inspector;
@@ -139,6 +140,7 @@ pub const Runtime = struct {
     input_parser: ?input_mod.TerminalInputParser = null,
     input_window_w: i32 = 640,
     input_window_h: i32 = 480,
+    presentation_layout: presentation_layout_mod.PresentationLayout = .{},
     present_interval_ns: i128 = 0,
     adaptive_present_target_ns: i128 = std.time.ns_per_s / 60,
     next_present_ns: i128 = 0,
@@ -364,6 +366,11 @@ pub const Runtime = struct {
         self.updateInputTarget();
     }
 
+    pub fn notePresentationLayout(self: *Runtime, layout: presentation_layout_mod.PresentationLayout) void {
+        self.presentation_layout = layout;
+        self.updateInputTarget();
+    }
+
     pub fn pollTerminalInput(self: *Runtime) void {
         if (!self.input_enabled) return;
         const tty = &(self.tty orelse return);
@@ -421,12 +428,7 @@ pub const Runtime = struct {
     fn updateInputTarget(self: *Runtime) void {
         var parser = &(self.input_parser orelse return);
         const tty = self.tty orelse return;
-        parser.setTarget(.{
-            .cols = tty.cols,
-            .rows = tty.rows,
-            .w = self.input_window_w,
-            .h = self.input_window_h,
-        });
+        parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, self.presentation_layout));
     }
 
     fn maybeReportProducerStats(self: *Runtime) void {
@@ -665,6 +667,16 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input_mod.InputEvent) void {
             .mouseY = wheel.mouse_y,
         },
     }
+}
+
+fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_layout_mod.PresentationLayout) input_mod.Target {
+    return .{
+        .cols = tty.cols,
+        .rows = tty.rows,
+        .w = w,
+        .h = h,
+        .layout = layout,
+    };
 }
 
 fn workerMain(runtime: *Runtime) void {
@@ -935,6 +947,27 @@ test "terminal input capture defaults on and can be disabled" {
 test "runtime config defaults to fullscreen composite" {
     const config = RuntimeConfig{};
     try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
+}
+
+test "runtime input target includes latest presentation layout" {
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    var layout = presentation_layout_mod.PresentationLayout{};
+    layout.setSingleSdlRegion(.{
+        .kind = .sdl_window,
+        .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 },
+        .sdl_rect = .{ .x = 0, .y = 0, .w = 320, .h = 240 },
+        .z = 0,
+    });
+
+    const target = buildInputTarget(&tty, 320, 240, layout);
+
+    try std.testing.expectEqual(@as(i32, 100), target.cols);
+    try std.testing.expectEqual(@as(i32, 40), target.rows);
+    try std.testing.expectEqual(@as(i32, 320), target.w);
+    try std.testing.expectEqual(@as(i32, 240), target.h);
+    try std.testing.expectEqual(presentation_layout_mod.Point{ .x = 0, .y = 0 }, target.layout.mapCellToSdl(11, 6).?);
 }
 
 test "claimed input keeps SDL window focused locally" {

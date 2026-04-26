@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdl = @import("katzensteg_sdl");
+const presentation_layout = @import("presentation_layout.zig");
 
 const max_pending_bytes = 256;
 
@@ -8,6 +9,7 @@ pub const Target = struct {
     rows: i32 = 24,
     w: i32 = 640,
     h: i32 = 480,
+    layout: presentation_layout.PresentationLayout = .{},
 };
 
 pub const KeyEvent = struct {
@@ -98,6 +100,7 @@ pub const TerminalInputParser = struct {
             .rows = @max(1, target.rows),
             .w = @max(1, target.w),
             .h = @max(1, target.h),
+            .layout = target.layout,
         };
     }
 
@@ -225,8 +228,14 @@ pub const TerminalInputParser = struct {
         const cell_x = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_y = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const pressed = bytes[final] == 'M';
-        const x = self.mapCellX(cell_x);
-        const y = self.mapCellY(cell_y);
+        const point = self.mapCellToSdl(cell_x, cell_y) orelse {
+            // For now, terminal chrome/letterbox cells do not target SDL. Keep
+            // button state and last mouse position unchanged until region
+            // routing can synthesize enter/leave or chrome-owned events.
+            return final + 1;
+        };
+        const x = point.x;
+        const y = point.y;
 
         if ((b & 64) != 0) {
             try self.queue.append(self.allocator, .{ .mouse_wheel = .{
@@ -280,6 +289,14 @@ pub const TerminalInputParser = struct {
 
     fn mapCellY(self: *const TerminalInputParser, cell_y: i32) i32 {
         return @divTrunc((std.math.clamp(cell_y, 1, self.target.rows) - 1) * self.target.h, self.target.rows);
+    }
+
+    fn mapCellToSdl(self: *const TerminalInputParser, cell_x: i32, cell_y: i32) ?presentation_layout.Point {
+        if (self.target.layout.len > 0) return self.target.layout.mapCellToSdl(cell_x, cell_y);
+        return .{
+            .x = self.mapCellX(cell_x),
+            .y = self.mapCellY(cell_y),
+        };
     }
 };
 
@@ -374,6 +391,45 @@ test "terminal input parser emits SGR mouse motion in SDL coordinates" {
 
     try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
     try std.testing.expectEqual(InputEvent{ .mouse_motion = .{ .x = 400, .y = 200, .xrel = 400, .yrel = 200, .buttons = 0 } }, parser.pop().?);
+}
+
+test "terminal input parser maps mouse through presentation layout" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var layout = presentation_layout.PresentationLayout{};
+    layout.setSingleSdlRegion(.{
+        .kind = .sdl_window,
+        .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 },
+        .sdl_rect = .{ .x = 0, .y = 0, .w = 320, .h = 240 },
+        .z = 0,
+    });
+    parser.setTarget(.{ .cols = 100, .rows = 40, .w = 320, .h = 240, .layout = layout });
+
+    try parser.feed("\x1b[<35;11;6M");
+    try std.testing.expectEqual(InputEvent{ .mouse_motion = .{ .x = 0, .y = 0, .xrel = 0, .yrel = 0, .buttons = 0 } }, parser.pop().?);
+
+    try parser.feed("\x1b[<35;50;20M");
+    try std.testing.expectEqual(InputEvent{ .mouse_motion = .{ .x = 156, .y = 112, .xrel = 156, .yrel = 112, .buttons = 0 } }, parser.pop().?);
+}
+
+test "terminal input parser suppresses mouse outside presentation layout" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var layout = presentation_layout.PresentationLayout{};
+    layout.setSingleSdlRegion(.{
+        .kind = .sdl_window,
+        .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 },
+        .sdl_rect = .{ .x = 0, .y = 0, .w = 320, .h = 240 },
+        .z = 0,
+    });
+    parser.setTarget(.{ .cols = 100, .rows = 40, .w = 320, .h = 240, .layout = layout });
+
+    try parser.feed("\x1b[<35;5;20M");
+
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+    try std.testing.expectEqual(@as(i32, 0), parser.mouseState().x);
+    try std.testing.expectEqual(@as(i32, 0), parser.mouseState().y);
+    try std.testing.expectEqual(@as(u32, 0), parser.mouseState().buttons);
 }
 
 test "terminal input parser tracks mouse button state for polling" {
