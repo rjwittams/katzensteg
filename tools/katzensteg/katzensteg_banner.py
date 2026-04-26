@@ -261,16 +261,59 @@ def render_stabilize(
 # --- Dispatcher ------------------------------------------------------------
 
 
-def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
-    """Dispatch to the phase active at t_global. Phase blending arrives
-    in a later task; for now spark/scan fall through to stabilize."""
+def phase_for(t_global: float) -> str:
     if t_global < T_SPARK_END:
-        return render_spark(t_global, term_w, no_color)
+        return "spark"
     if t_global < T_SCAN_END:
-        return render_scan(t_global - T_SPARK_END, t_global, term_w, no_color)
+        return "scan"
     if t_global < T_STABILIZE_END:
-        return render_stabilize(t_global - T_SCAN_END, t_global, term_w, no_color)
+        return "stabilize"
+    return "steady"
+
+
+def _render_phase(name: str, t_global: float, term_w: int, no_color: bool) -> List[str]:
+    if name == "spark":
+        return render_spark(t_global, term_w, no_color)
+    if name == "scan":
+        return render_scan(t_global - T_SPARK_END, t_global, term_w, no_color)
+    if name == "stabilize":
+        return render_stabilize(
+            t_global - T_SCAN_END, t_global, term_w, no_color
+        )
     return render_steady(t_global, term_w, no_color)
+
+
+def _blend_lines(a: List[str], b: List[str], t: float) -> List[str]:
+    """Line-wise crossfade from a to b. Character-level blending would
+    require parsing ANSI; line-wise is fine because BLEND ≈ 100 ms."""
+    if t <= 0.0:
+        return a
+    if t >= 1.0:
+        return b
+    n = max(len(a), len(b))
+    cut = int(round(t * n))
+    out: List[str] = []
+    for i in range(n):
+        a_line = a[i] if i < len(a) else ""
+        b_line = b[i] if i < len(b) else ""
+        out.append(b_line if i < cut else a_line)
+    return out
+
+
+def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
+    name = phase_for(t_global)
+    boundaries = (
+        ("spark", "scan", T_SPARK_END),
+        ("scan", "stabilize", T_SCAN_END),
+        ("stabilize", "steady", T_STABILIZE_END),
+    )
+    for prev, nxt, boundary in boundaries:
+        if abs(t_global - boundary) <= BLEND:
+            t = (t_global - (boundary - BLEND)) / (2 * BLEND)
+            a = _render_phase(prev, t_global, term_w, no_color)
+            b = _render_phase(nxt, t_global, term_w, no_color)
+            return _blend_lines(a, b, t)
+    return _render_phase(name, t_global, term_w, no_color)
 
 
 # --- Entrypoint --------------------------------------------------------------

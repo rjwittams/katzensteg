@@ -47,5 +47,23 @@ class TestSampleGradient(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class TestPhaseFor(unittest.TestCase):
+    def test_spark(self):
+        self.assertEqual(kb.phase_for(0.0), "spark")
+        self.assertEqual(kb.phase_for(0.29), "spark")
+
+    def test_scan(self):
+        self.assertEqual(kb.phase_for(0.31), "scan")
+        self.assertEqual(kb.phase_for(0.89), "scan")
+
+    def test_stabilize(self):
+        self.assertEqual(kb.phase_for(0.91), "stabilize")
+        self.assertEqual(kb.phase_for(1.59), "stabilize")
+
+    def test_steady(self):
+        self.assertEqual(kb.phase_for(1.61), "steady")
+        self.assertEqual(kb.phase_for(120.0), "steady")
+
+
 if __name__ == "__main__":
     unittest.main()
