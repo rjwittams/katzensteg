@@ -142,6 +142,35 @@ def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
     return out
 
 
+# --- Phase: spark ----------------------------------------------------------
+
+
+def render_spark(t_phase: float, term_w: int, no_color: bool) -> List[str]:
+    """Single bright horizontal line at the vertical centre of the art
+    block, with a fast flicker."""
+    lines = art_lines()
+    h = len(lines)
+    w = max(len(ln) for ln in lines)
+    centre_row = h // 2
+    flicker = 0.7 + 0.3 * math.sin(t_phase * 60.0)
+    envelope = max(0.0, min(1.0, t_phase / T_SPARK_END))
+    brightness = flicker * (0.5 + 0.5 * envelope)
+    out: List[str] = []
+    for yi in range(h):
+        if yi != centre_row:
+            out.append(" " * w)
+            continue
+        if no_color:
+            out.append(centre("─" * w, term_w, w))
+            continue
+        r = int(SPARK[0] * brightness)
+        g = int(SPARK[1] * brightness)
+        b = int(SPARK[2] * brightness)
+        line = rgb_fg(r, g, b) + ("─" * w) + RESET
+        out.append(centre(line, term_w, w))
+    return out
+
+
 # --- Phase: vertical scan --------------------------------------------------
 
 
@@ -236,7 +265,7 @@ def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
     """Dispatch to the phase active at t_global. Phase blending arrives
     in a later task; for now spark/scan fall through to stabilize."""
     if t_global < T_SPARK_END:
-        return render_stabilize(0.0, t_global, term_w, no_color)
+        return render_spark(t_global, term_w, no_color)
     if t_global < T_SCAN_END:
         return render_scan(t_global - T_SPARK_END, t_global, term_w, no_color)
     if t_global < T_STABILIZE_END:
