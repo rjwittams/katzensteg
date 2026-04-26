@@ -62,7 +62,15 @@ class TestPhaseFor(unittest.TestCase):
 
     def test_steady(self):
         self.assertEqual(kb.phase_for(1.61), "steady")
-        self.assertEqual(kb.phase_for(120.0), "steady")
+        self.assertEqual(kb.phase_for(3.59), "steady")
+
+    def test_upgrade(self):
+        self.assertEqual(kb.phase_for(3.61), "upgrade")
+        self.assertEqual(kb.phase_for(5.59), "upgrade")
+
+    def test_modern_steady(self):
+        self.assertEqual(kb.phase_for(5.61), "modern_steady")
+        self.assertEqual(kb.phase_for(120.0), "modern_steady")
 
 
 import io

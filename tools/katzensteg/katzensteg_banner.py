@@ -41,9 +41,23 @@ SPARK = (200, 255, 220)  # bright white-green for the initial scan line
 T_SPARK_END = 0.3
 T_SCAN_END = 0.9
 T_STABILIZE_END = 1.6
-T_INTRO_END = T_STABILIZE_END
+T_LINGER_END = 3.6  # ASCII steady state holds for 2s
+T_UPGRADE_END = 5.6  # glyph ripple sweeps over 2s
+T_INTRO_END = T_UPGRADE_END
 # Boundary blend half-width: each transition crossfades over 2*BLEND seconds.
 BLEND = 0.05
+
+# ASCII -> Unicode box-drawing glyphs for the post-steady upgrade.
+MODERN_GLYPHS = {
+    "_": "━",
+    "|": "┃",
+    "/": "╱",
+    "\\": "╲",
+    "<": "◁",
+    "'": "▔",
+    "`": "▔",
+    ",": "▖",
+}
 
 
 # --- ANSI / colour helpers --------------------------------------------------
@@ -103,6 +117,20 @@ def art_lines() -> List[str]:
     while raw and not raw[-1].strip():
         raw.pop()
     return raw or [""]
+
+
+def upgrade_line(line: str, threshold_xi: float) -> str:
+    """Swap ASCII strokes at xi < threshold_xi for Unicode box-drawing
+    equivalents. Caller controls the ripple by varying threshold_xi."""
+    if threshold_xi <= 0:
+        return line
+    parts: List[str] = []
+    for xi, ch in enumerate(line):
+        if xi < threshold_xi and ch in MODERN_GLYPHS:
+            parts.append(MODERN_GLYPHS[ch])
+        else:
+            parts.append(ch)
+    return "".join(parts)
 
 
 # --- Phase: spark ----------------------------------------------------------
@@ -223,8 +251,15 @@ def render_stabilize(
 # --- Phase: steady ---------------------------------------------------------
 
 
-def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
+def render_steady(
+    t_global: float,
+    term_w: int,
+    no_color: bool,
+    glyph_threshold: float = 0.0,
+) -> List[str]:
     lines = art_lines()
+    if glyph_threshold > 0:
+        lines = [upgrade_line(ln, glyph_threshold) for ln in lines]
     w_letters = max(len(ln) for ln in lines)
     pulse = 0.5 + 0.5 * math.sin(t_global * 1.6)
     brightness = 0.65 + 0.35 * pulse
@@ -260,6 +295,25 @@ def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
     return out
 
 
+# --- Phase: glyph upgrade --------------------------------------------------
+
+
+def render_upgrade(
+    t_phase: float, t_global: float, term_w: int, no_color: bool
+) -> List[str]:
+    """Ripple sweeps left-to-right swapping ASCII for Unicode box-drawing.
+    t_phase ranges 0..(T_UPGRADE_END - T_LINGER_END)."""
+    duration = T_UPGRADE_END - T_LINGER_END
+    p = max(0.0, min(1.0, t_phase / duration))
+    w_letters = max(len(ln) for ln in art_lines())
+    threshold = p * (w_letters + 2)
+    return render_steady(t_global, term_w, no_color, glyph_threshold=threshold)
+
+
+def render_modern_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
+    return render_steady(t_global, term_w, no_color, glyph_threshold=float("inf"))
+
+
 # --- Dispatcher ------------------------------------------------------------
 
 
@@ -270,7 +324,11 @@ def phase_for(t_global: float) -> str:
         return "scan"
     if t_global < T_STABILIZE_END:
         return "stabilize"
-    return "steady"
+    if t_global < T_LINGER_END:
+        return "steady"
+    if t_global < T_UPGRADE_END:
+        return "upgrade"
+    return "modern_steady"
 
 
 def _render_phase(name: str, t_global: float, term_w: int, no_color: bool) -> List[str]:
@@ -282,6 +340,12 @@ def _render_phase(name: str, t_global: float, term_w: int, no_color: bool) -> Li
         return render_stabilize(
             t_global - T_SCAN_END, t_global, term_w, no_color
         )
+    if name == "upgrade":
+        return render_upgrade(
+            t_global - T_LINGER_END, t_global, term_w, no_color
+        )
+    if name == "modern_steady":
+        return render_modern_steady(t_global, term_w, no_color)
     return render_steady(t_global, term_w, no_color)
 
 
@@ -308,6 +372,8 @@ def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
         ("spark", "scan", T_SPARK_END),
         ("scan", "stabilize", T_SCAN_END),
         ("stabilize", "steady", T_STABILIZE_END),
+        ("steady", "upgrade", T_LINGER_END),
+        ("upgrade", "modern_steady", T_UPGRADE_END),
     )
     for prev, nxt, boundary in boundaries:
         if abs(t_global - boundary) <= BLEND:
