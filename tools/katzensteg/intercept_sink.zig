@@ -2,6 +2,7 @@ const std = @import("std");
 const sdl = @import("katzensteg_sdl");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
+const inspector_mod = @import("inspector.zig");
 
 pub const InterceptMode = enum {
     sync_compose,
@@ -447,28 +448,29 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
         rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.debug_protocol_replies, rt.image_gc);
         const duration = std.time.nanoTimestamp() - start_ns;
         rt.notePresentDuration(duration);
+        const summary = rt.frame_builder.inspectSummary();
+        const whiskers_frame: inspector_mod.FrameRecord = .{
+            .id = 0,
+            .ts_ns = std.time.nanoTimestamp(),
+            .present_ns = duration,
+            .queue_depth = rt.currentQueueDepth(),
+            .skipped_presents = rt.skipped_presents,
+            .render_strategy = summary.render_strategy,
+            .strategy_short = summary.strategy_short,
+            .copies = summary.copies,
+            .fills = summary.fills,
+            .lines = summary.lines,
+            .uploads = summary.uploads,
+            .placements = summary.placements,
+            .bytes_uploaded = summary.bytes_uploaded,
+            .fallback_texture_key = summary.fallback_texture_key,
+            .fallback_reason = summary.fallback_reason,
+            .image_id = summary.image_id,
+            .placement_id = summary.placement_id,
+        };
         if (rt.inspector) |*inspector| {
             if (inspector.isEnabled()) {
-                const summary = rt.frame_builder.inspectSummary();
-                inspector.noteFrame(.{
-                .id = 0,
-                .ts_ns = std.time.nanoTimestamp(),
-                .present_ns = duration,
-                .queue_depth = rt.currentQueueDepth(),
-                .skipped_presents = rt.skipped_presents,
-                .render_strategy = summary.render_strategy,
-                .strategy_short = summary.strategy_short,
-                .copies = summary.copies,
-                .fills = summary.fills,
-                .lines = summary.lines,
-                .uploads = summary.uploads,
-                .placements = summary.placements,
-                .bytes_uploaded = summary.bytes_uploaded,
-                .fallback_texture_key = summary.fallback_texture_key,
-                .fallback_reason = summary.fallback_reason,
-                .image_id = summary.image_id,
-                .placement_id = summary.placement_id,
-            });
+                inspector.noteFrame(whiskers_frame);
                 rt.inspect_resources.clearRetainingCapacity();
                 rt.frame_builder.appendSnapshotResources(rt.allocator, &rt.inspect_resources) catch return;
                 rt.inspect_resource_records.clearRetainingCapacity();
@@ -515,7 +517,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
                     .image_id = res.image_id,
                 }) catch {};
             }
-            client.notePresent(rt.inspect_resource_records.items.len);
+            client.notePresent(whiskers_frame, rt.inspect_resource_records.items);
         }
     }
 }
