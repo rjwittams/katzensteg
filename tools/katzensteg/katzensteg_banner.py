@@ -42,6 +42,44 @@ T_STABILIZE_END = 1.6
 BLEND = 0.05
 
 
+# --- ANSI / colour helpers --------------------------------------------------
+
+
+def lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def lerp3(
+    a: Tuple[int, int, int], b: Tuple[int, int, int], t: float
+) -> Tuple[int, int, int]:
+    t = max(0.0, min(1.0, t))
+    return (
+        int(lerp(a[0], b[0], t)),
+        int(lerp(a[1], b[1], t)),
+        int(lerp(a[2], b[2], t)),
+    )
+
+
+def rgb_fg(r: int, g: int, b: int) -> str:
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+
+
+# --- Gradient sampler -------------------------------------------------------
+
+
+def sample_gradient(x: float, y: float, t: float) -> Tuple[int, int, int]:
+    """Rotating diagonal sweep between GREEN and AMBER."""
+    ang = t * 0.7
+    u = x * math.cos(ang) + y * math.sin(ang)
+    wave = 0.5 * math.sin(u * 0.35 - t * 1.2) + 0.5
+    wave = max(0.0, min(1.0, wave))
+    return lerp3(GREEN, AMBER, wave)
+
+
 # --- Entrypoint --------------------------------------------------------------
 
 
