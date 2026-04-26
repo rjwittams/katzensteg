@@ -49,7 +49,6 @@ pub const Backend = struct {
     };
 
     const RotatingFileUploadState = struct {
-        files: [rotating_file_count]std.fs.File,
         paths: [rotating_file_count][]u8,
         file_lens: [rotating_file_count]u64,
         next_index: usize,
@@ -93,8 +92,7 @@ pub const Backend = struct {
         switch (self.upload) {
             .direct => {},
             .file_whole => |*state| {
-                for (&state.files, &state.paths) |*file, *path| {
-                    file.close();
+                for (&state.paths) |*path| {
                     std.fs.deleteFileAbsolute(path.*) catch {};
                     self.allocator.free(path.*);
                 }
@@ -123,14 +121,16 @@ pub const Backend = struct {
             .direct => try protocol.writeTransmitRgbaWithQuiet(self.writer(), self.quiet, image_id, rgba, w, h),
             .file_whole => |*state| {
                 const index = state.next_index;
-                state.next_index = (state.next_index + 1) % state.files.len;
-                try state.files[index].pwriteAll(rgba, 0);
+                state.next_index = (state.next_index + 1) % state.paths.len;
+                var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
+                defer file.close();
+                try file.pwriteAll(rgba, 0);
                 const rgba_len_u64: u64 = @intCast(rgba.len);
                 if (rgba_len_u64 > state.file_lens[index]) {
-                    try state.files[index].setEndPos(rgba.len);
+                    try file.setEndPos(rgba.len);
                     state.file_lens[index] = rgba_len_u64;
                 }
-                try state.files[index].sync();
+                try file.sync();
                 try protocol.writeTransmitRgbaFileWholeWithQuiet(self.writer(), self.quiet, image_id, state.paths[index], w, h);
             },
             .file_offset => |*state| {
@@ -279,24 +279,21 @@ pub const Backend = struct {
     }
 
     fn initRotatingFileUploadState(allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
-        var files: [rotating_file_count]std.fs.File = undefined;
         var paths: [rotating_file_count][]u8 = undefined;
         const file_lens: [rotating_file_count]u64 = [_]u64{0} ** rotating_file_count;
         var initialized: usize = 0;
         errdefer {
             var i: usize = 0;
             while (i < initialized) : (i += 1) {
-                files[i].close();
                 allocator.free(paths[i]);
             }
         }
         for (0..rotating_file_count) |i| {
             paths[i] = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ base_path, i });
-            files[i] = try std.fs.createFileAbsolute(paths[i], .{ .read = true, .truncate = false });
+            std.fs.deleteFileAbsolute(paths[i]) catch {};
             initialized += 1;
         }
         return .{
-            .files = files,
             .paths = paths,
             .file_lens = file_lens,
             .next_index = 0,

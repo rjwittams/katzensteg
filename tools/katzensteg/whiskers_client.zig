@@ -17,6 +17,17 @@ const ProducerHelloResponse = struct {
     capture_enabled: bool,
 };
 
+const ProducerSelfResponse = struct {
+    producer_id: []const u8,
+    display_name: []const u8,
+    producer_kind: []const u8,
+    program: ?[]const u8,
+    cmdline: []const []const u8,
+    cwd: ?[]const u8,
+    terminal: ?[]const u8,
+    capture_enabled: bool,
+};
+
 const SegmentStartRequest = struct { segment_id: []const u8 };
 const SegmentStopRequest = struct { segment_id: []const u8 };
 const FrameBatchRequest = struct { frame_ids: []const []const u8 };
@@ -36,6 +47,7 @@ pub const WhiskersClient = struct {
     mutex: std.Thread.Mutex = .{},
     current_segment_id: ?[]u8 = null,
     next_segment_seq: u64 = 1,
+    last_capture_poll_ns: i128 = 0,
     next_frame_seq: u64 = 1,
     next_resource_seq: u64 = 1,
 
@@ -87,6 +99,9 @@ pub const WhiskersClient = struct {
     }
 
     pub fn notePresent(self: *WhiskersClient, resource_count: usize) void {
+        self.pollCaptureState() catch |err| {
+            self.logger.writeFmt("katzensteg: whiskers capture poll failed: {any}", .{err});
+        };
         if (!self.isCaptureEnabled()) return;
 
         var maybe_start_segment_id: ?[]u8 = null;
@@ -165,6 +180,27 @@ pub const WhiskersClient = struct {
         if (segment_id_owned) |segment_id| {
             defer self.allocator.free(segment_id);
             try postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/segments/stop", SegmentStopRequest{ .segment_id = segment_id });
+        }
+    }
+
+    fn pollCaptureState(self: *WhiskersClient) !void {
+        const now = std.time.nanoTimestamp();
+        if (now - self.last_capture_poll_ns < std.time.ns_per_s) return;
+        self.last_capture_poll_ns = now;
+        const body = try requestForBody(self.allocator, self.socket_path, "GET", "/v0/producers/self", self.bearer_token, "");
+        defer self.allocator.free(body);
+        const parsed = try std.json.parseFromSlice(ProducerSelfResponse, self.allocator, body, .{});
+        defer parsed.deinit();
+        const desired = parsed.value.capture_enabled;
+        const current = self.capture_enabled.load(.monotonic);
+        if (desired != current) {
+            self.capture_enabled.store(desired, .release);
+            if (!desired) {
+                self.stopActiveSegmentNow() catch |err| {
+                    self.logger.writeFmt("katzensteg: whiskers segment stop on poll failed: {any}", .{err});
+                };
+            }
+            self.logger.writeFmt("katzensteg: whiskers capture poll state -> {}", .{desired});
         }
     }
 

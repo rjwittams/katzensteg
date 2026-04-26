@@ -1,2 +1,13 @@
 .zig-cache/
+.zig-global-cache/
 zig-out/
+.codex-tmp/
+
+__pycache__/
+*.pyc
+
+test-results/
+*.trace/
+
+*crash*.txt
+*-crash*.txt

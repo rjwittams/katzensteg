@@ -15,15 +15,22 @@ struct SDL_Texture;
 struct SDL_Surface;
 struct SDL_Rect;
 struct SDL_Point;
+struct SDL_RendererInfo;
+union SDL_Event;
 
+extern void ks_SDL_QuitSubSystem(unsigned int);
+extern void ks_SDL_Quit(void);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern void ks_SDL_DestroyWindow(struct SDL_Window *);
 extern struct SDL_Renderer *ks_SDL_CreateRenderer(struct SDL_Window *, int, unsigned int);
+extern int ks_SDL_GetRendererInfo(struct SDL_Renderer *, struct SDL_RendererInfo *);
 extern void ks_SDL_DestroyRenderer(struct SDL_Renderer *);
 extern struct SDL_Texture *ks_SDL_CreateTexture(struct SDL_Renderer *, unsigned int, int, int, int);
 extern struct SDL_Texture *ks_SDL_CreateTextureFromSurface(struct SDL_Renderer *, struct SDL_Surface *);
 extern void ks_SDL_DestroyTexture(struct SDL_Texture *);
 extern int ks_SDL_UpdateTexture(struct SDL_Texture *, const struct SDL_Rect *, const void *, int);
+extern int ks_SDL_UpdateYUVTexture(struct SDL_Texture *, const struct SDL_Rect *, const unsigned char *, int, const unsigned char *, int, const unsigned char *, int);
+extern int ks_SDL_UpdateNVTexture(struct SDL_Texture *, const struct SDL_Rect *, const unsigned char *, int, const unsigned char *, int);
 extern int ks_SDL_LockTexture(struct SDL_Texture *, const struct SDL_Rect *, void **, int *);
 extern void ks_SDL_UnlockTexture(struct SDL_Texture *);
 extern int ks_SDL_SetTextureColorMod(struct SDL_Texture *, unsigned char, unsigned char, unsigned char);
@@ -38,16 +45,34 @@ extern int ks_SDL_RenderSetViewport(struct SDL_Renderer *, const struct SDL_Rect
 extern int ks_SDL_RenderSetClipRect(struct SDL_Renderer *, const struct SDL_Rect *);
 extern int ks_SDL_RenderCopy(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *);
 extern int ks_SDL_RenderCopyEx(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *, double, const struct SDL_Point *, int);
+extern int ks_SDL_RenderGeometryRaw(struct SDL_Renderer *, struct SDL_Texture *, const float *, int, const void *, int, const float *, int, int, const void *, int, int);
 extern void ks_SDL_RenderPresent(struct SDL_Renderer *);
+extern void *ks_SDL_GL_CreateContext(struct SDL_Window *);
+extern int ks_SDL_GL_MakeCurrent(struct SDL_Window *, void *);
+extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
+extern int ks_SDL_PollEvent(union SDL_Event *);
+extern unsigned int ks_SDL_GetMouseState(int *, int *);
+extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern void ks_katzensteg_shutdown(void);
+
+static void katzensteg_module_destructor(void) {
+    ks_katzensteg_shutdown();
+}
+
+__attribute__((used, section("__DATA,__mod_term_func")))
+static void (*katzensteg_module_destructor_ptr)(void) = katzensteg_module_destructor;
 
 extern struct SDL_Window *SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern void SDL_DestroyWindow(struct SDL_Window *);
 extern struct SDL_Renderer *SDL_CreateRenderer(struct SDL_Window *, int, unsigned int);
+extern int SDL_GetRendererInfo(struct SDL_Renderer *, struct SDL_RendererInfo *);
 extern void SDL_DestroyRenderer(struct SDL_Renderer *);
 extern struct SDL_Texture *SDL_CreateTexture(struct SDL_Renderer *, unsigned int, int, int, int);
 extern struct SDL_Texture *SDL_CreateTextureFromSurface(struct SDL_Renderer *, struct SDL_Surface *);
 extern void SDL_DestroyTexture(struct SDL_Texture *);
 extern int SDL_UpdateTexture(struct SDL_Texture *, const struct SDL_Rect *, const void *, int);
+extern int SDL_UpdateYUVTexture(struct SDL_Texture *, const struct SDL_Rect *, const unsigned char *, int, const unsigned char *, int, const unsigned char *, int);
+extern int SDL_UpdateNVTexture(struct SDL_Texture *, const struct SDL_Rect *, const unsigned char *, int, const unsigned char *, int);
 extern int SDL_LockTexture(struct SDL_Texture *, const struct SDL_Rect *, void **, int *);
 extern void SDL_UnlockTexture(struct SDL_Texture *);
 extern int SDL_SetTextureColorMod(struct SDL_Texture *, unsigned char, unsigned char, unsigned char);
@@ -62,16 +87,30 @@ extern int SDL_RenderSetViewport(struct SDL_Renderer *, const struct SDL_Rect *)
 extern int SDL_RenderSetClipRect(struct SDL_Renderer *, const struct SDL_Rect *);
 extern int SDL_RenderCopy(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *);
 extern int SDL_RenderCopyEx(struct SDL_Renderer *, struct SDL_Texture *, const struct SDL_Rect *, const struct SDL_Rect *, double, const struct SDL_Point *, int);
+extern int SDL_RenderGeometryRaw(struct SDL_Renderer *, struct SDL_Texture *, const float *, int, const void *, int, const float *, int, int, const void *, int, int);
 extern void SDL_RenderPresent(struct SDL_Renderer *);
+extern void *SDL_GL_CreateContext(struct SDL_Window *);
+extern int SDL_GL_MakeCurrent(struct SDL_Window *, void *);
+extern void SDL_GL_SwapWindow(struct SDL_Window *);
+extern int SDL_PollEvent(union SDL_Event *);
+extern unsigned int SDL_GetMouseState(int *, int *);
+extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern void SDL_QuitSubSystem(unsigned int);
+extern void SDL_Quit(void);
 
+DYLD_INTERPOSE(ks_SDL_QuitSubSystem, SDL_QuitSubSystem)
+DYLD_INTERPOSE(ks_SDL_Quit, SDL_Quit)
 DYLD_INTERPOSE(ks_SDL_CreateWindow, SDL_CreateWindow)
 DYLD_INTERPOSE(ks_SDL_DestroyWindow, SDL_DestroyWindow)
 DYLD_INTERPOSE(ks_SDL_CreateRenderer, SDL_CreateRenderer)
+DYLD_INTERPOSE(ks_SDL_GetRendererInfo, SDL_GetRendererInfo)
 DYLD_INTERPOSE(ks_SDL_DestroyRenderer, SDL_DestroyRenderer)
 DYLD_INTERPOSE(ks_SDL_CreateTexture, SDL_CreateTexture)
 DYLD_INTERPOSE(ks_SDL_CreateTextureFromSurface, SDL_CreateTextureFromSurface)
 DYLD_INTERPOSE(ks_SDL_DestroyTexture, SDL_DestroyTexture)
 DYLD_INTERPOSE(ks_SDL_UpdateTexture, SDL_UpdateTexture)
+DYLD_INTERPOSE(ks_SDL_UpdateYUVTexture, SDL_UpdateYUVTexture)
+DYLD_INTERPOSE(ks_SDL_UpdateNVTexture, SDL_UpdateNVTexture)
 DYLD_INTERPOSE(ks_SDL_LockTexture, SDL_LockTexture)
 DYLD_INTERPOSE(ks_SDL_UnlockTexture, SDL_UnlockTexture)
 DYLD_INTERPOSE(ks_SDL_SetTextureColorMod, SDL_SetTextureColorMod)
@@ -86,6 +125,13 @@ DYLD_INTERPOSE(ks_SDL_RenderSetViewport, SDL_RenderSetViewport)
 DYLD_INTERPOSE(ks_SDL_RenderSetClipRect, SDL_RenderSetClipRect)
 DYLD_INTERPOSE(ks_SDL_RenderCopy, SDL_RenderCopy)
 DYLD_INTERPOSE(ks_SDL_RenderCopyEx, SDL_RenderCopyEx)
+DYLD_INTERPOSE(ks_SDL_RenderGeometryRaw, SDL_RenderGeometryRaw)
 DYLD_INTERPOSE(ks_SDL_RenderPresent, SDL_RenderPresent)
+DYLD_INTERPOSE(ks_SDL_GL_CreateContext, SDL_GL_CreateContext)
+DYLD_INTERPOSE(ks_SDL_GL_MakeCurrent, SDL_GL_MakeCurrent)
+DYLD_INTERPOSE(ks_SDL_GL_SwapWindow, SDL_GL_SwapWindow)
+DYLD_INTERPOSE(ks_SDL_PollEvent, SDL_PollEvent)
+DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
+DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)
 
 #endif

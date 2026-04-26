@@ -30,11 +30,44 @@ pub const DirectTty = struct {
     }
 
     pub fn deinit(self: *DirectTty) void {
+        self.disableInputCapture() catch {};
+        self.drainInput();
+        self.clearGraphics() catch {};
         std.posix.tcsetattr(self.file.handle, .FLUSH, self.original_termios) catch {};
         var writer = self.file.writerStreaming(&.{});
         writer.interface.writeAll("\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
+        writer.interface.writeAll(kittyGraphicsClearSequence()) catch {};
         writer.interface.flush() catch {};
         self.file.close();
+    }
+
+    pub fn enableInputCapture(self: *DirectTty) !void {
+        var writer = self.file.writerStreaming(&.{});
+        try writer.interface.writeAll("\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        try writer.interface.flush();
+    }
+
+    pub fn disableInputCapture(self: *DirectTty) !void {
+        var writer = self.file.writerStreaming(&.{});
+        try writer.interface.writeAll("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l");
+        try writer.interface.flush();
+    }
+
+    pub fn clearGraphics(self: *DirectTty) !void {
+        var writer = self.file.writerStreaming(&.{});
+        try writer.interface.writeAll(kittyGraphicsClearSequence());
+        try writer.interface.flush();
+    }
+
+    fn drainInput(self: *DirectTty) void {
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(self.file.handle, &buf) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => return,
+            };
+            if (n == 0 or n < buf.len) return;
+        }
     }
 
     fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 } {
@@ -46,3 +79,15 @@ pub const DirectTty = struct {
         return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
     }
 };
+
+fn kittyGraphicsClearSequence() []const u8 {
+    // Delete all visible kitty graphics placements and request image data cleanup.
+    // This is intentionally broad teardown cleanup; a future launcher can do a
+    // second reset after abnormal exits, and a future protocol layer can make this
+    // namespace/image-id scoped.
+    return "\x1b_Gq=2,a=d,d=A;\x1b\\";
+}
+
+test "kitty graphics clear sequence frees visible placements" {
+    try std.testing.expectEqualStrings("\x1b_Gq=2,a=d,d=A;\x1b\\", kittyGraphicsClearSequence());
+}

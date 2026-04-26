@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const Logger = struct {
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
     file: ?std.fs.File = null,
     once: std.AutoHashMap(u64, void),
 
@@ -10,12 +11,20 @@ pub const Logger = struct {
     }
 
     pub fn deinit(self: *Logger) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.file) |f| f.close();
         self.once.deinit();
     }
 
     pub fn write(self: *Logger, message: []const u8) void {
-        const file = self.ensureFile() catch return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.writeLocked(message);
+    }
+
+    fn writeLocked(self: *Logger, message: []const u8) void {
+        const file = self.ensureFileLocked() catch return;
         var writer = file.writerStreaming(&.{});
         writer.interface.writeAll(message) catch return;
         writer.interface.writeAll("\n") catch return;
@@ -32,11 +41,13 @@ pub const Logger = struct {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(message);
         const key = hasher.final();
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const gop = self.once.getOrPut(key) catch return;
-        if (!gop.found_existing) self.write(message);
+        if (!gop.found_existing) self.writeLocked(message);
     }
 
-    fn ensureFile(self: *Logger) !*std.fs.File {
+    fn ensureFileLocked(self: *Logger) !*std.fs.File {
         if (self.file == null) {
             var path_buf: [128]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "/tmp/katzensteg-{d}.log", .{std.c.getpid()});
