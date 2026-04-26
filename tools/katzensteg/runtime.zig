@@ -8,6 +8,7 @@ const inspector_mod = @import("inspector.zig");
 const input_mod = @import("input.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
+const window_policy_mod = @import("window_policy.zig");
 const sdl = @import("katzensteg_sdl");
 const Inspector = inspector_mod.Inspector;
 const WhiskersClient = whiskers_client_mod.WhiskersClient;
@@ -37,6 +38,7 @@ var global_runtime: ?Runtime = null;
 const RuntimeConfig = struct {
     composite_mode: CompositeMode = .fullscreen,
     intercept_mode: InterceptMode = .sync_compose,
+    window_policy: window_policy_mod.WindowPresentationPolicy = .mirror,
     present_fps: u32 = 0,
 };
 
@@ -120,6 +122,7 @@ pub const Runtime = struct {
     dump_composites: bool = false,
     debug_composite: bool = false,
     intercept_mode: InterceptMode = .sync_compose,
+    window_policy: window_policy_mod.WindowPresentationPolicy = .mirror,
     terminal_identity: []const u8 = "unknown",
     output_profile_name: []const u8 = "unknown",
     logged_queued_replay_stub: bool = false,
@@ -172,6 +175,7 @@ pub const Runtime = struct {
             .dump_composites = dump_composites,
             .debug_composite = debug_composite,
             .intercept_mode = config.intercept_mode,
+            .window_policy = config.window_policy,
             .queue = std.ArrayList(Command).empty,
             .inspect_resources = std.ArrayList(InspectResource).empty,
             .inspect_resource_records = std.ArrayList(ResourceRecord).empty,
@@ -423,6 +427,23 @@ pub const Runtime = struct {
         if (!self.input_claimed) return false;
         if (event.type != sdl.SDL_WINDOWEVENT) return false;
         return shouldSuppressClaimedWindowEvent(true, event.type, event.window.event);
+    }
+
+    pub fn terminalRenderingEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
+        _ = window;
+        _ = renderer;
+        return routeTerminalRendering(self.window_policy);
+    }
+
+    pub fn realRenderEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
+        _ = window;
+        _ = renderer;
+        return routeRealRendering(self.window_policy);
+    }
+
+    pub fn realWindowEnabled(self: *const Runtime, window: ?*sdl.SDL_Window) bool {
+        _ = window;
+        return self.window_policy.realWindowEnabled();
     }
 
     fn updateInputTarget(self: *Runtime) void {
@@ -754,6 +775,14 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
                 };
             }
         }
+        if (parsed.value.object.get("window_policy")) |value| {
+            if (value == .string) {
+                config.window_policy = parseWindowPolicyValue(value.string, config.window_policy);
+                if (window_policy_mod.parse(value.string) == null) {
+                    logger.writeFmt("katzensteg: unknown window_policy in config: {s}", .{value.string});
+                }
+            }
+        }
         if (parsed.value.object.get("present_fps")) |value| {
             switch (value) {
                 .integer => |n| {
@@ -778,6 +807,14 @@ fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
             config.intercept_mode = parsed;
         } else {
             logger.writeFmt("katzensteg: unknown KATZENSTEG_INTERCEPT_MODE value: {s}", .{mode});
+        }
+    }
+    if (std.c.getenv("KATZENSTEG_WINDOW_POLICY")) |policy_z| {
+        const policy = std.mem.span(policy_z);
+        const before = config.window_policy;
+        config.window_policy = parseWindowPolicyValue(policy, config.window_policy);
+        if (config.window_policy == before and window_policy_mod.parse(policy) == null) {
+            logger.writeFmt("katzensteg: unknown KATZENSTEG_WINDOW_POLICY value: {s}", .{policy});
         }
     }
     if (std.c.getenv("KATZENSTEG_PRESENT_FPS")) |fps_z| {
@@ -806,6 +843,19 @@ fn parseInterceptMode(value: []const u8) ?InterceptMode {
     if (std.mem.eql(u8, value, "sync_compose")) return .sync_compose;
     if (std.mem.eql(u8, value, "queued_replay")) return .queued_replay;
     return null;
+}
+
+fn parseWindowPolicyValue(value: ?[]const u8, fallback: window_policy_mod.WindowPresentationPolicy) window_policy_mod.WindowPresentationPolicy {
+    const raw = value orelse return fallback;
+    return window_policy_mod.parse(raw) orelse fallback;
+}
+
+fn routeTerminalRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
+    return policy.terminalEnabled();
+}
+
+fn routeRealRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
+    return policy.realRenderEnabled();
 }
 
 pub fn shutdownGlobal() callconv(.c) void {
@@ -947,6 +997,22 @@ test "terminal input capture defaults on and can be disabled" {
 test "runtime config defaults to fullscreen composite" {
     const config = RuntimeConfig{};
     try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
+}
+
+test "window policy value parser defaults and falls back" {
+    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.mirror, parseWindowPolicyValue(null, .mirror));
+    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("terminal_only", .mirror));
+    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.real_only, parseWindowPolicyValue("real_only", .mirror));
+    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("bad", .terminal_only));
+}
+
+test "window policy controls terminal and real render routes" {
+    try std.testing.expect(routeTerminalRendering(.mirror));
+    try std.testing.expect(routeRealRendering(.mirror));
+    try std.testing.expect(routeTerminalRendering(.terminal_only));
+    try std.testing.expect(!routeRealRendering(.terminal_only));
+    try std.testing.expect(!routeTerminalRendering(.real_only));
+    try std.testing.expect(routeRealRendering(.real_only));
 }
 
 test "runtime input target includes latest presentation layout" {
