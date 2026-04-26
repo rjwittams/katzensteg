@@ -65,5 +65,30 @@ class TestPhaseFor(unittest.TestCase):
         self.assertEqual(kb.phase_for(120.0), "steady")
 
 
+import io
+import contextlib
+
+
+class TestCli(unittest.TestCase):
+    def _run(self, argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = kb.main(argv)
+        return rc, buf.getvalue()
+
+    def test_once_after_returns_zero_and_prints(self):
+        rc, out = self._run(["--once-after", "5", "--no-color"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.strip())
+
+    def test_no_color_omits_escape_codes(self):
+        _, out = self._run(["--once-after", "5", "--no-color"])
+        self.assertNotIn("\x1b[", out)
+
+    def test_once_after_with_color_emits_escape_codes(self):
+        _, out = self._run(["--once-after", "5"])
+        self.assertIn("\x1b[", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -343,17 +343,39 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+T_INTRO_END = T_STABILIZE_END
+
+
+def _emit_frame(lines: List[str], use_clear: bool) -> None:
+    if use_clear:
+        sys.stdout.write("\x1b[H\x1b[2J")
+    sys.stdout.write("\n".join(lines))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
 def main(argv: List[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
     w = term_width()
+
     if args.once_after is not None:
-        for line in render_at(args.once_after, w, no_color):
-            print(line)
+        _emit_frame(render_at(args.once_after, w, no_color), use_clear=False)
         return 0
-    for line in render_at(0.0, w, no_color):
-        print(line)
-    return 0
+
+    use_clear = sys.stdout.isatty()
+    period = 1.0 / max(args.fps, 1.0)
+    t0 = time.time()
+    try:
+        while True:
+            t = time.time() - t0
+            _emit_frame(render_at(t, w, no_color), use_clear=use_clear)
+            if args.play_once and t >= T_INTRO_END:
+                return 0
+            time.sleep(period)
+    except KeyboardInterrupt:
+        sys.stdout.write(RESET + "\n")
+        return 0
 
 
 if __name__ == "__main__":
