@@ -38,6 +38,7 @@ SPARK = (200, 255, 220)  # bright white-green for the initial scan line
 T_SPARK_END = 0.3
 T_SCAN_END = 0.9
 T_STABILIZE_END = 1.6
+T_INTRO_END = T_STABILIZE_END
 # Boundary blend half-width: each transition crossfades over 2*BLEND seconds.
 BLEND = 0.05
 
@@ -99,47 +100,6 @@ def art_lines() -> List[str]:
     while raw and not raw[-1].strip():
         raw.pop()
     return raw or [""]
-
-
-# --- Phase: steady ---------------------------------------------------------
-
-
-def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
-    lines = art_lines()
-    pulse = 0.5 + 0.5 * math.sin(t_global * 1.6)
-    brightness = 0.65 + 0.35 * pulse
-    out: List[str] = []
-    for yi, line in enumerate(lines):
-        visible = len(line)
-        if no_color:
-            out.append(centre(line, term_w, visible))
-            continue
-        parts: List[str] = []
-        for xi, ch in enumerate(line):
-            if ch == " ":
-                parts.append(" ")
-                continue
-            r, g, b = sample_gradient(float(xi), float(yi), t_global)
-            r = int(r * brightness)
-            g = int(g * brightness)
-            b = int(b * brightness)
-            parts.append(BOLD + rgb_fg(r, g, b) + ch + RESET)
-        out.append(centre("".join(parts), term_w, visible))
-
-    w_letters = max(len(ln) for ln in lines)
-    under_brightness = 0.35 + 0.25 * pulse
-    if no_color:
-        out.append(centre("─" * w_letters, term_w, w_letters))
-    else:
-        under_parts: List[str] = []
-        for xi in range(w_letters):
-            r, g, b = sample_gradient(float(xi), float(len(lines)), t_global * 0.8)
-            r = int(r * under_brightness)
-            g = int(g * under_brightness)
-            b = int(b * under_brightness)
-            under_parts.append(rgb_fg(r, g, b) + "─" + RESET)
-        out.append(centre("".join(under_parts), term_w, w_letters))
-    return out
 
 
 # --- Phase: spark ----------------------------------------------------------
@@ -258,6 +218,47 @@ def render_stabilize(
     return out
 
 
+# --- Phase: steady ---------------------------------------------------------
+
+
+def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
+    lines = art_lines()
+    pulse = 0.5 + 0.5 * math.sin(t_global * 1.6)
+    brightness = 0.65 + 0.35 * pulse
+    out: List[str] = []
+    for yi, line in enumerate(lines):
+        visible = len(line)
+        if no_color:
+            out.append(centre(line, term_w, visible))
+            continue
+        parts: List[str] = []
+        for xi, ch in enumerate(line):
+            if ch == " ":
+                parts.append(" ")
+                continue
+            r, g, b = sample_gradient(float(xi), float(yi), t_global)
+            r = int(r * brightness)
+            g = int(g * brightness)
+            b = int(b * brightness)
+            parts.append(BOLD + rgb_fg(r, g, b) + ch + RESET)
+        out.append(centre("".join(parts), term_w, visible))
+
+    w_letters = max(len(ln) for ln in lines)
+    under_brightness = 0.35 + 0.25 * pulse
+    if no_color:
+        out.append(centre("─" * w_letters, term_w, w_letters))
+    else:
+        under_parts: List[str] = []
+        for xi in range(w_letters):
+            r, g, b = sample_gradient(float(xi), float(len(lines)), t_global * 0.8)
+            r = int(r * under_brightness)
+            g = int(g * under_brightness)
+            b = int(b * under_brightness)
+            under_parts.append(rgb_fg(r, g, b) + "─" + RESET)
+        out.append(centre("".join(under_parts), term_w, w_letters))
+    return out
+
+
 # --- Dispatcher ------------------------------------------------------------
 
 
@@ -341,9 +342,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="disable ANSI colour (also honours NO_COLOR env)",
     )
     return ap.parse_args(argv)
-
-
-T_INTRO_END = T_STABILIZE_END
 
 
 def _emit_frame(lines: List[str], use_clear: bool) -> None:
