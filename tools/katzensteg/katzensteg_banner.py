@@ -24,11 +24,14 @@ from typing import List, Tuple
 
 # --- Constants ---------------------------------------------------------------
 
-KATZENSTEG_ART = r""" __           __                            __
-|  |--.---.-.|  |_.-----.-----.-----.-----.|  |_.-----.-----.
-|    <|  _  ||   _|-- __|  -__|     |__ --||   _|  -__|  _  |
-|__|__|___._||____|_____|_____|__|__|_____||____|_____|___  |
-                                                      |_____|"""
+KATZENSTEG_ART = r""" _         _                     _
+| |       | |                   | |
+| | ____ _| |_ _______ _ __  ___| |_ ___  __ _
+| |/ / _` | __|_  / _ \ '_ \/ __| __/ _ \/ _` |
+|   < (_| | |_ / /  __/ | | \__ \ ||  __/ (_| |
+|_|\_\__,_|\__/___\___|_| |_|___/\__\___|\__, |
+                                          __/ |
+                                         |___/"""
 
 GREEN = (34, 255, 100)
 AMBER = (255, 200, 60)
@@ -143,19 +146,19 @@ def render_scan(
     p = max(0.0, min(1.0, t_phase / duration))
     lines = art_lines()
     h = len(lines)
+    w_letters = max(len(ln) for ln in lines)
     centre_row = (h - 1) / 2.0
     half_extent = p * (centre_row + 0.5)
     out: List[str] = []
     for yi, line in enumerate(lines):
-        visible = len(line)
         d = abs(yi - centre_row)
         if d > half_extent:
-            out.append(" " * visible)
+            out.append(centre("", term_w, w_letters))
             continue
         edge = max(0.0, 1.0 - (d / max(half_extent, 0.001)))
         beam = 0.4 + 0.6 * edge
         if no_color:
-            out.append(centre(line, term_w, visible))
+            out.append(centre(line, term_w, w_letters))
             continue
         parts: List[str] = []
         for xi, ch in enumerate(line):
@@ -166,7 +169,7 @@ def render_scan(
             g = int(GREEN[1] * beam)
             b = int(GREEN[2] * beam)
             parts.append(rgb_fg(r, g, b) + ch + RESET)
-        out.append(centre("".join(parts), term_w, visible))
+        out.append(centre("".join(parts), term_w, w_letters))
     return out
 
 
@@ -185,11 +188,11 @@ def render_stabilize(
     brightness = lerp(0.25, target, p)
     sat = p
     lines = art_lines()
+    w_letters = max(len(ln) for ln in lines)
     out: List[str] = []
     for yi, line in enumerate(lines):
-        visible = len(line)
         if no_color:
-            out.append(centre(line, term_w, visible))
+            out.append(centre(line, term_w, w_letters))
             continue
         parts: List[str] = []
         for xi, ch in enumerate(line):
@@ -201,8 +204,7 @@ def render_stabilize(
             g = int(lerp(GREEN[1], g, sat) * brightness)
             b = int(lerp(GREEN[2], b, sat) * brightness)
             parts.append(BOLD + rgb_fg(r, g, b) + ch + RESET)
-        out.append(centre("".join(parts), term_w, visible))
-    w_letters = max(len(ln) for ln in lines)
+        out.append(centre("".join(parts), term_w, w_letters))
     under_brightness = lerp(0.0, 0.35 + 0.25 * pulse, p)
     if no_color:
         out.append(centre("─" * w_letters, term_w, w_letters))
@@ -223,13 +225,13 @@ def render_stabilize(
 
 def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
     lines = art_lines()
+    w_letters = max(len(ln) for ln in lines)
     pulse = 0.5 + 0.5 * math.sin(t_global * 1.6)
     brightness = 0.65 + 0.35 * pulse
     out: List[str] = []
     for yi, line in enumerate(lines):
-        visible = len(line)
         if no_color:
-            out.append(centre(line, term_w, visible))
+            out.append(centre(line, term_w, w_letters))
             continue
         parts: List[str] = []
         for xi, ch in enumerate(line):
@@ -241,9 +243,8 @@ def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
             g = int(g * brightness)
             b = int(b * brightness)
             parts.append(BOLD + rgb_fg(r, g, b) + ch + RESET)
-        out.append(centre("".join(parts), term_w, visible))
+        out.append(centre("".join(parts), term_w, w_letters))
 
-    w_letters = max(len(ln) for ln in lines)
     under_brightness = 0.35 + 0.25 * pulse
     if no_color:
         out.append(centre("─" * w_letters, term_w, w_letters))
