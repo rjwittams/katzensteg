@@ -142,6 +142,69 @@ def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
     return out
 
 
+# --- Phase: stabilize ------------------------------------------------------
+
+
+def render_stabilize(
+    t_phase: float, t_global: float, term_w: int, no_color: bool
+) -> List[str]:
+    """t_phase ranges 0..(T_STABILIZE_END - T_SCAN_END). Brightness ramps
+    from ~0.25 at t_phase=0 to the steady ~0.65+pulse at t_phase=end."""
+    duration = T_STABILIZE_END - T_SCAN_END
+    p = max(0.0, min(1.0, t_phase / duration))
+    pulse = 0.5 + 0.5 * math.sin(t_global * 1.6)
+    target = 0.65 + 0.35 * pulse
+    brightness = lerp(0.25, target, p)
+    sat = p
+    lines = art_lines()
+    out: List[str] = []
+    for yi, line in enumerate(lines):
+        visible = len(line)
+        if no_color:
+            out.append(centre(line, term_w, visible))
+            continue
+        parts: List[str] = []
+        for xi, ch in enumerate(line):
+            if ch == " ":
+                parts.append(" ")
+                continue
+            r, g, b = sample_gradient(float(xi), float(yi), t_global)
+            r = int(lerp(GREEN[0], r, sat) * brightness)
+            g = int(lerp(GREEN[1], g, sat) * brightness)
+            b = int(lerp(GREEN[2], b, sat) * brightness)
+            parts.append(BOLD + rgb_fg(r, g, b) + ch + RESET)
+        out.append(centre("".join(parts), term_w, visible))
+    w_letters = max(len(ln) for ln in lines)
+    under_brightness = lerp(0.0, 0.35 + 0.25 * pulse, p)
+    if no_color:
+        out.append(centre("─" * w_letters, term_w, w_letters))
+    else:
+        under_parts: List[str] = []
+        for xi in range(w_letters):
+            r, g, b = sample_gradient(float(xi), float(len(lines)), t_global * 0.8)
+            r = int(lerp(GREEN[0], r, sat) * under_brightness)
+            g = int(lerp(GREEN[1], g, sat) * under_brightness)
+            b = int(lerp(GREEN[2], b, sat) * under_brightness)
+            under_parts.append(rgb_fg(r, g, b) + "─" + RESET)
+        out.append(centre("".join(under_parts), term_w, w_letters))
+    return out
+
+
+# --- Dispatcher ------------------------------------------------------------
+
+
+def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
+    """Dispatch to the phase active at t_global. Phase blending arrives
+    in a later task; for now spark/scan fall through to stabilize."""
+    if t_global < T_SPARK_END:
+        return render_stabilize(0.0, t_global, term_w, no_color)
+    if t_global < T_SCAN_END:
+        return render_stabilize(0.0, t_global, term_w, no_color)
+    if t_global < T_STABILIZE_END:
+        return render_stabilize(t_global - T_SCAN_END, t_global, term_w, no_color)
+    return render_steady(t_global, term_w, no_color)
+
+
 # --- Entrypoint --------------------------------------------------------------
 
 
@@ -174,10 +237,10 @@ def main(argv: List[str] | None = None) -> int:
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
     w = term_width()
     if args.once_after is not None:
-        for line in render_steady(args.once_after, w, no_color):
+        for line in render_at(args.once_after, w, no_color):
             print(line)
         return 0
-    for line in render_steady(0.0, w, no_color):
+    for line in render_at(0.0, w, no_color):
         print(line)
     return 0
 
