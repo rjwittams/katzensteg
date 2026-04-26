@@ -51,6 +51,18 @@ const FrameIngestRecord = struct {
     placement_id: u32,
 };
 const FrameBatchRequest = struct { segment_id: []const u8, frames: []const FrameIngestRecord };
+const EventIngestRecord = struct {
+    frame_id: []const u8,
+    ts_ns: i128,
+    kind: []const u8,
+    thread: []const u8,
+    texture_key: u64,
+    image_id: u32,
+    placement_id: u32,
+    bytes_uploaded: u64,
+    reason: ?[]const u8,
+};
+const EventBatchRequest = struct { segment_id: []const u8, events: []const EventIngestRecord };
 const ResourceIngestRecord = struct {
     frame_id: []const u8,
     kind: []const u8,
@@ -140,9 +152,11 @@ pub const WhiskersClient = struct {
         var maybe_start_segment_id: ?[]u8 = null;
         var frame_id: []u8 = undefined;
         var frame_records = std.ArrayList(FrameIngestRecord).empty;
+        var event_records = std.ArrayList(EventIngestRecord).empty;
         var resource_records = std.ArrayList(ResourceIngestRecord).empty;
         defer {
             frame_records.deinit(self.allocator);
+            event_records.deinit(self.allocator);
             resource_records.deinit(self.allocator);
             self.allocator.free(frame_id);
             if (maybe_start_segment_id) |id| self.allocator.free(id);
@@ -194,6 +208,57 @@ pub const WhiskersClient = struct {
             .placement_id = frame.placement_id,
         }) catch return;
 
+        event_records.append(self.allocator, .{
+            .frame_id = frame_id,
+            .ts_ns = frame.ts_ns,
+            .kind = "present",
+            .thread = "producer",
+            .texture_key = 0,
+            .image_id = frame.image_id,
+            .placement_id = frame.placement_id,
+            .bytes_uploaded = frame.bytes_uploaded,
+            .reason = null,
+        }) catch return;
+        if (frame.fallback_reason) |reason| {
+            event_records.append(self.allocator, .{
+                .frame_id = frame_id,
+                .ts_ns = frame.ts_ns,
+                .kind = "fallback",
+                .thread = "producer",
+                .texture_key = frame.fallback_texture_key,
+                .image_id = frame.image_id,
+                .placement_id = frame.placement_id,
+                .bytes_uploaded = 0,
+                .reason = reason,
+            }) catch return;
+        }
+        if (frame.image_id != 0) {
+            event_records.append(self.allocator, .{
+                .frame_id = frame_id,
+                .ts_ns = frame.ts_ns,
+                .kind = "upload",
+                .thread = "producer",
+                .texture_key = 0,
+                .image_id = frame.image_id,
+                .placement_id = 0,
+                .bytes_uploaded = frame.bytes_uploaded,
+                .reason = null,
+            }) catch return;
+        }
+        if (frame.image_id != 0 and frame.placement_id != 0) {
+            event_records.append(self.allocator, .{
+                .frame_id = frame_id,
+                .ts_ns = frame.ts_ns,
+                .kind = "placement",
+                .thread = "producer",
+                .texture_key = 0,
+                .image_id = frame.image_id,
+                .placement_id = frame.placement_id,
+                .bytes_uploaded = 0,
+                .reason = null,
+            }) catch return;
+        }
+
         for (resources) |res| {
             const alias = std.mem.sliceTo(&res.alias, 0);
             resource_records.append(self.allocator, .{
@@ -219,6 +284,11 @@ pub const WhiskersClient = struct {
         postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/frames/batch", FrameBatchRequest{ .segment_id = segment_id, .frames = frame_records.items }) catch |err| {
             self.logger.writeFmt("katzensteg: whiskers frame batch failed: {any}", .{err});
         };
+        if (event_records.items.len > 0) {
+            postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/events/batch", EventBatchRequest{ .segment_id = segment_id, .events = event_records.items }) catch |err| {
+                self.logger.writeFmt("katzensteg: whiskers event batch failed: {any}", .{err});
+            };
+        }
         if (resource_records.items.len > 0) {
             postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/resources/batch", ResourceBatchRequest{ .segment_id = segment_id, .resources = resource_records.items }) catch |err| {
                 self.logger.writeFmt("katzensteg: whiskers resource batch failed: {any}", .{err});
