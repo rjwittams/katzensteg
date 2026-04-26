@@ -54,6 +54,25 @@ fn isTextureFormatFilterDisabled() bool {
     return std.mem.eql(u8, value, "0") or std.ascii.eqlIgnoreCase(value, "false") or std.ascii.eqlIgnoreCase(value, "no") or std.ascii.eqlIgnoreCase(value, "off");
 }
 
+fn parseEnabledEnvValue(value: ?[]const u8) bool {
+    const text = value orelse return true;
+    return !(std.mem.eql(u8, text, "0") or
+        std.ascii.eqlIgnoreCase(text, "false") or
+        std.ascii.eqlIgnoreCase(text, "no") or
+        std.ascii.eqlIgnoreCase(text, "off"));
+}
+
+fn shouldAllowBackgroundGamepadEvents() bool {
+    if (!parseEnabledEnvValue(if (std.c.getenv("KATZENSTEG_INPUT")) |value| std.mem.span(value) else null)) return false;
+    if (!parseEnabledEnvValue(if (std.c.getenv("KATZENSTEG_INPUT_CLAIM")) |value| std.mem.span(value) else null)) return false;
+    return parseEnabledEnvValue(if (std.c.getenv("KATZENSTEG_GAMEPAD_BACKGROUND")) |value| std.mem.span(value) else null);
+}
+
+fn applyBackgroundGamepadHint() void {
+    if (!shouldAllowBackgroundGamepadEvents()) return;
+    _ = sdl.SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+}
+
 fn isKatzenstegTextureFormatSupported(format: sdl.Uint32) bool {
     return switch (format) {
         sdl.SDL_PIXELFORMAT_ABGR8888,
@@ -110,6 +129,16 @@ pub export fn ks_katzensteg_shutdown() callconv(.c) void {
     runtime.shutdownGlobal();
 }
 
+pub export fn ks_SDL_Init(flags: sdl.Uint32) callconv(.c) c_int {
+    applyBackgroundGamepadHint();
+    return sdl.SDL_Init(flags);
+}
+
+pub export fn ks_SDL_InitSubSystem(flags: sdl.Uint32) callconv(.c) c_int {
+    applyBackgroundGamepadHint();
+    return sdl.SDL_InitSubSystem(flags);
+}
+
 pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
     if ((flags & sdl.SDL_INIT_VIDEO) != 0) runtime.shutdownGlobal();
     sdl.SDL_QuitSubSystem(flags);
@@ -130,6 +159,11 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
         .queued_replay => sink.dispatchCommand(rt, .{ .create_window = .{ .window = window, .w = w, .h = h } }),
     }
     return window;
+}
+
+pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.Uint32 {
+    const flags = sdl.SDL_GetWindowFlags(window);
+    return runtime.get().claimedWindowFlags(flags);
 }
 
 pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
@@ -452,7 +486,12 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     const rt = runtime.get();
     rt.pollTerminalInput();
     if (rt.popSdlInputEvent(event)) return 1;
-    return sdl.SDL_PollEvent(event);
+    const out = event orelse return sdl.SDL_PollEvent(event);
+    while (true) {
+        const rc = sdl.SDL_PollEvent(out);
+        if (rc == 0) return 0;
+        if (!rt.shouldSuppressSdlEvent(out)) return rc;
+    }
 }
 
 pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
@@ -538,4 +577,14 @@ test "renderer info texture format filter keeps only capturable formats in rende
     try std.testing.expectEqual(sdl.SDL_PIXELFORMAT_RGB565, info.texture_formats[2]);
     try std.testing.expectEqual(sdl.SDL_PIXELFORMAT_ARGB8888, info.texture_formats[3]);
     try std.testing.expectEqual(@as(sdl.Uint32, 0), info.texture_formats[4]);
+}
+
+test "background gamepad env parser defaults on and accepts common opt-outs" {
+    try std.testing.expect(parseEnabledEnvValue(null));
+    try std.testing.expect(parseEnabledEnvValue("1"));
+    try std.testing.expect(parseEnabledEnvValue("true"));
+    try std.testing.expect(!parseEnabledEnvValue("0"));
+    try std.testing.expect(!parseEnabledEnvValue("false"));
+    try std.testing.expect(!parseEnabledEnvValue("no"));
+    try std.testing.expect(!parseEnabledEnvValue("off"));
 }

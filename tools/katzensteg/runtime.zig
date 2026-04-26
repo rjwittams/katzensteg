@@ -34,7 +34,7 @@ var global_mutex: std.Thread.Mutex = .{};
 var global_runtime: ?Runtime = null;
 
 const RuntimeConfig = struct {
-    composite_mode: CompositeMode = .tiled_strip,
+    composite_mode: CompositeMode = .fullscreen,
     intercept_mode: InterceptMode = .sync_compose,
     present_fps: u32 = 0,
 };
@@ -115,6 +115,7 @@ pub const Runtime = struct {
     debug_protocol_replies: bool = false,
     image_gc: bool = false,
     input_enabled: bool = false,
+    input_claimed: bool = false,
     dump_composites: bool = false,
     debug_composite: bool = false,
     intercept_mode: InterceptMode = .sync_compose,
@@ -153,6 +154,7 @@ pub const Runtime = struct {
         const debug_protocol_replies = std.c.getenv("KATZENSTEG_KITTY_DEBUG_REPLIES") != null;
         const image_gc = std.c.getenv("KATZENSTEG_IMAGE_GC") != null;
         const input_enabled = parseInputEnabledValue(if (std.c.getenv("KATZENSTEG_INPUT")) |value| std.mem.span(value) else null);
+        const input_claimed = input_enabled and parseInputClaimedValue(if (std.c.getenv("KATZENSTEG_INPUT_CLAIM")) |value| std.mem.span(value) else null);
         const dump_composites = std.c.getenv("KATZENSTEG_COMPOSITE_DUMP") != null;
         const debug_composite = std.c.getenv("KATZENSTEG_COMPOSITE_DEBUG") != null;
         var runtime = Runtime{
@@ -164,6 +166,7 @@ pub const Runtime = struct {
             .debug_protocol_replies = debug_protocol_replies,
             .image_gc = image_gc,
             .input_enabled = input_enabled,
+            .input_claimed = input_claimed,
             .dump_composites = dump_composites,
             .debug_composite = debug_composite,
             .intercept_mode = config.intercept_mode,
@@ -403,6 +406,16 @@ pub const Runtime = struct {
         if (!self.input_enabled) return null;
         const parser = &(self.input_parser orelse return null);
         return parser.mouseState();
+    }
+
+    pub fn claimedWindowFlags(self: *const Runtime, flags: u32) u32 {
+        return applyClaimedInputWindowFlags(self.input_claimed, flags);
+    }
+
+    pub fn shouldSuppressSdlEvent(self: *const Runtime, event: *const sdl.SDL_Event) bool {
+        if (!self.input_claimed) return false;
+        if (event.type != sdl.SDL_WINDOWEVENT) return false;
+        return shouldSuppressClaimedWindowEvent(true, event.type, event.window.event);
     }
 
     fn updateInputTarget(self: *Runtime) void {
@@ -875,6 +888,26 @@ fn parseInputEnabledValue(value: ?[]const u8) bool {
     return !std.mem.eql(u8, raw, "0");
 }
 
+fn parseInputClaimedValue(value: ?[]const u8) bool {
+    const raw = value orelse return true;
+    return !std.mem.eql(u8, raw, "0");
+}
+
+fn applyClaimedInputWindowFlags(claimed: bool, flags: u32) u32 {
+    if (!claimed) return flags;
+    return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
+}
+
+fn shouldSuppressClaimedWindowEvent(claimed: bool, event_type: u32, window_event: u8) bool {
+    if (!claimed or event_type != sdl.SDL_WINDOWEVENT) return false;
+    return switch (window_event) {
+        sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+        sdl.SDL_WINDOWEVENT_LEAVE,
+        => true,
+        else => false,
+    };
+}
+
 test "payload buffer pool reuses exact-sized buffers" {
     var pool = PayloadBufferPool{};
     defer pool.deinit(std.testing.allocator);
@@ -897,4 +930,21 @@ test "terminal input capture defaults on and can be disabled" {
     try std.testing.expect(parseInputEnabledValue("1"));
     try std.testing.expect(parseInputEnabledValue("true"));
     try std.testing.expect(!parseInputEnabledValue("0"));
+}
+
+test "runtime config defaults to fullscreen composite" {
+    const config = RuntimeConfig{};
+    try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
+}
+
+test "claimed input keeps SDL window focused locally" {
+    try std.testing.expectEqual(
+        @as(u32, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS),
+        applyClaimedInputWindowFlags(true, 0),
+    );
+    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(false, 0));
+    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
+    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_LEAVE));
+    try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_GAINED));
+    try std.testing.expect(!shouldSuppressClaimedWindowEvent(false, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
 }

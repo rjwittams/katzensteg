@@ -17,6 +17,8 @@ enum {
 typedef struct ProbeState {
     bool running;
     bool focused;
+    bool background_gamepad_hint_requested;
+    bool log_events;
     int window_w;
     int window_h;
     int mouse_x;
@@ -28,6 +30,16 @@ typedef struct ProbeState {
     SDL_Scancode last_scancode;
     SDL_Keymod last_mods;
     char last_text[64];
+    SDL_GameController *controller;
+    SDL_Joystick *joystick;
+    SDL_JoystickID input_instance_id;
+    char input_device_name[96];
+    int controller_count;
+    int joystick_count;
+    int last_axis;
+    int last_axis_value;
+    int last_button;
+    bool last_button_down;
     char summaries[MAX_EVENTS][SUMMARY_LEN];
     int summary_count;
     uint64_t event_count;
@@ -66,8 +78,74 @@ static void push_summary(ProbeState *state, const char *summary)
 
     snprintf(state->summaries[0], SUMMARY_LEN, "%s", summary);
     state->event_count++;
-    fprintf(stderr, "%06llu %s\n", (unsigned long long)state->event_count, summary);
-    fflush(stderr);
+    if (state->log_events) {
+        fprintf(stderr, "%06llu %s\n", (unsigned long long)state->event_count, summary);
+        fflush(stderr);
+    }
+}
+
+static const char *safe_hint(const char *value)
+{
+    return value != NULL ? value : "unset";
+}
+
+static const char *safe_name(const char *value)
+{
+    return value != NULL ? value : "unknown";
+}
+
+static void close_input_device(ProbeState *state)
+{
+    if (state->controller != NULL) {
+        SDL_GameControllerClose(state->controller);
+        state->controller = NULL;
+    }
+    if (state->joystick != NULL) {
+        SDL_JoystickClose(state->joystick);
+        state->joystick = NULL;
+    }
+    state->input_instance_id = -1;
+    state->input_device_name[0] = '\0';
+}
+
+static void refresh_input_device(ProbeState *state)
+{
+    close_input_device(state);
+
+    state->joystick_count = SDL_NumJoysticks();
+    if (state->joystick_count < 0) state->joystick_count = 0;
+    state->controller_count = 0;
+
+    for (int i = 0; i < state->joystick_count; i++) {
+        if (!SDL_IsGameController(i)) continue;
+
+        state->controller_count++;
+        if (state->controller == NULL) {
+            state->controller = SDL_GameControllerOpen(i);
+            if (state->controller != NULL) {
+                SDL_Joystick *joy = SDL_GameControllerGetJoystick(state->controller);
+                state->input_instance_id = joy != NULL ? SDL_JoystickInstanceID(joy) : -1;
+                snprintf(state->input_device_name,
+                         sizeof(state->input_device_name),
+                         "controller:%s",
+                         safe_name(SDL_GameControllerName(state->controller)));
+            }
+        }
+    }
+
+    if (state->controller != NULL) return;
+
+    for (int i = 0; i < state->joystick_count; i++) {
+        state->joystick = SDL_JoystickOpen(i);
+        if (state->joystick != NULL) {
+            state->input_instance_id = SDL_JoystickInstanceID(state->joystick);
+            snprintf(state->input_device_name,
+                     sizeof(state->input_device_name),
+                     "joystick:%s",
+                     safe_name(SDL_JoystickName(state->joystick)));
+            return;
+        }
+    }
 }
 
 static void update_title(SDL_Window *window, const ProbeState *state)
@@ -172,6 +250,74 @@ static void handle_event(SDL_Window *window, ProbeState *state, const SDL_Event 
                  event->wheel.direction,
                  state->wheel_x,
                  state->wheel_y);
+        push_summary(state, summary);
+        break;
+
+    case SDL_CONTROLLERDEVICEADDED:
+    case SDL_CONTROLLERDEVICEREMOVED:
+    case SDL_JOYDEVICEADDED:
+    case SDL_JOYDEVICEREMOVED:
+        refresh_input_device(state);
+        snprintf(summary,
+                 sizeof(summary),
+                 "input_device event=%u controllers=%d joysticks=%d active=%s id=%d",
+                 event->type,
+                 state->controller_count,
+                 state->joystick_count,
+                 state->input_device_name[0] ? state->input_device_name : "none",
+                 (int)state->input_instance_id);
+        push_summary(state, summary);
+        break;
+
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+        state->last_button = event->cbutton.button;
+        state->last_button_down = event->type == SDL_CONTROLLERBUTTONDOWN;
+        snprintf(summary,
+                 sizeof(summary),
+                 "controller_button_%s which=%d button=%u state=%u",
+                 state->last_button_down ? "down" : "up",
+                 (int)event->cbutton.which,
+                 event->cbutton.button,
+                 event->cbutton.state);
+        push_summary(state, summary);
+        break;
+
+    case SDL_CONTROLLERAXISMOTION:
+        state->last_axis = event->caxis.axis;
+        state->last_axis_value = event->caxis.value;
+        snprintf(summary,
+                 sizeof(summary),
+                 "controller_axis which=%d axis=%u value=%d",
+                 (int)event->caxis.which,
+                 event->caxis.axis,
+                 event->caxis.value);
+        push_summary(state, summary);
+        break;
+
+    case SDL_JOYBUTTONDOWN:
+    case SDL_JOYBUTTONUP:
+        state->last_button = event->jbutton.button;
+        state->last_button_down = event->type == SDL_JOYBUTTONDOWN;
+        snprintf(summary,
+                 sizeof(summary),
+                 "joy_button_%s which=%d button=%u state=%u",
+                 state->last_button_down ? "down" : "up",
+                 (int)event->jbutton.which,
+                 event->jbutton.button,
+                 event->jbutton.state);
+        push_summary(state, summary);
+        break;
+
+    case SDL_JOYAXISMOTION:
+        state->last_axis = event->jaxis.axis;
+        state->last_axis_value = event->jaxis.value;
+        snprintf(summary,
+                 sizeof(summary),
+                 "joy_axis which=%d axis=%u value=%d",
+                 (int)event->jaxis.which,
+                 event->jaxis.axis,
+                 event->jaxis.value);
         push_summary(state, summary);
         break;
 
@@ -340,11 +486,6 @@ static void render_probe(SDL_Renderer *renderer, const ProbeState *state, uint32
 
     const int cx = state->mouse_x;
     const int cy = state->mouse_y;
-    SDL_SetRenderDrawColor(renderer, 255, 220, 80, 255);
-    SDL_RenderDrawLine(renderer, cx - 24, cy, cx + 24, cy);
-    SDL_RenderDrawLine(renderer, cx, cy - 24, cx, cy + 24);
-    SDL_Rect cursor = { cx - 5, cy - 5, 10, 10 };
-    SDL_RenderDrawRect(renderer, &cursor);
 
     const int label_x = cx + 14 < state->window_w - 170 ? cx + 14 : cx - 170;
     const int label_y = cy + 14 < state->window_h - 26 ? cy + 14 : cy - 30;
@@ -367,6 +508,21 @@ static void render_probe(SDL_Renderer *renderer, const ProbeState *state, uint32
     draw_textf(renderer, 44, 90, 2, 210, 230, 245, "TEXT \"%s\"  EVENTS %llu",
                state->last_text[0] ? state->last_text : "", (unsigned long long)state->event_count);
 
+    draw_bar(renderer, 12, 124, state->window_w - 24, 76, 21, 25, 34);
+    draw_bar(renderer, 20, 132, 16, 16, state->input_device_name[0] ? 80 : 70, state->input_device_name[0] ? 210 : 70, 150);
+    draw_bar(renderer, 20, 156, 16, 16, state->last_button_down ? 245 : 60, state->last_button_down ? 110 : 70, 80);
+    draw_bar(renderer, 20, 180, 16, 16, state->last_axis_value != 0 ? 90 : 60, state->last_axis_value != 0 ? 180 : 70, 245);
+    draw_textf(renderer, 44, 130, 2, 210, 230, 245, "GAMEPAD HINT %s  DEV %s",
+               safe_hint(SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)),
+               state->input_device_name[0] ? state->input_device_name : "NONE");
+    draw_textf(renderer, 44, 154, 2, 210, 230, 245, "CONTROLLERS %d  JOYSTICKS %d  INSTANCE %d",
+               state->controller_count, state->joystick_count, (int)state->input_instance_id);
+    draw_textf(renderer, 44, 178, 2, 210, 230, 245, "BUTTON %d %s  AXIS %d VALUE %d",
+               state->last_button,
+               state->last_button_down ? "DOWN" : "UP",
+               state->last_axis,
+               state->last_axis_value);
+
     const int event_rows = state->summary_count < 10 ? state->summary_count : 10;
     const int log_top = state->window_h - 26 - event_rows * 20;
     draw_bar(renderer, 12, log_top - 10, state->window_w - 24, event_rows * 20 + 20, 18, 22, 30);
@@ -378,15 +534,39 @@ static void render_probe(SDL_Renderer *renderer, const ProbeState *state, uint32
     const int pulse = (int)((tick / 16) % 120);
     draw_bar(renderer, state->window_w - 150, 20, 100 + pulse / 6, 16, 80, 180, 180);
 
+    SDL_SetRenderDrawColor(renderer, 255, 220, 80, 255);
+    SDL_RenderDrawLine(renderer, cx - 24, cy, cx + 24, cy);
+    SDL_RenderDrawLine(renderer, cx, cy - 24, cx, cy + 24);
+    SDL_Rect cursor = { cx - 5, cy - 5, 10, 10 };
+    SDL_RenderDrawRect(renderer, &cursor);
+
     SDL_RenderPresent(renderer);
 }
 
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    ProbeState state;
+    memset(&state, 0, sizeof(state));
+    state.input_instance_id = -1;
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--background-gamepad") == 0) {
+            state.background_gamepad_hint_requested = true;
+        }
+        else if (strcmp(argv[i], "--log-events") == 0) {
+            state.log_events = true;
+        }
+        else {
+            fprintf(stderr, "usage: %s [--background-gamepad] [--log-events]\n", argv[0]);
+            return 2;
+        }
+    }
+
+    if (state.background_gamepad_hint_requested) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    }
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -416,7 +596,7 @@ int main(int argc, char **argv)
     }
 
     SDL_RendererInfo renderer_info;
-    if (SDL_GetRendererInfo(renderer, &renderer_info) == 0) {
+    if (state.log_events && SDL_GetRendererInfo(renderer, &renderer_info) == 0) {
         fprintf(stderr, "renderer=%s flags=0x%x formats=%u\n",
                 renderer_info.name,
                 renderer_info.flags,
@@ -424,15 +604,21 @@ int main(int argc, char **argv)
     }
 
     SDL_StartTextInput();
-
-    ProbeState state;
-    memset(&state, 0, sizeof(state));
     state.running = true;
     state.focused = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
     SDL_GetWindowSize(window, &state.window_w, &state.window_h);
     state.mouse_buttons = SDL_GetMouseState(&state.mouse_x, &state.mouse_y);
+    refresh_input_device(&state);
 
     push_summary(&state, "started; press Escape or q to quit");
+    if (state.log_events) {
+        fprintf(stderr,
+                "background_gamepad_hint=%s active_device=%s controllers=%d joysticks=%d\n",
+                safe_hint(SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)),
+                state.input_device_name[0] ? state.input_device_name : "none",
+                state.controller_count,
+                state.joystick_count);
+    }
     update_title(window, &state);
 
     while (state.running) {
@@ -447,6 +633,7 @@ int main(int argc, char **argv)
     }
 
     SDL_StopTextInput();
+    close_input_device(&state);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

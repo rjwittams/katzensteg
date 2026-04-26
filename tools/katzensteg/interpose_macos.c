@@ -20,7 +20,10 @@ union SDL_Event;
 
 extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
+extern int ks_SDL_Init(unsigned int);
+extern int ks_SDL_InitSubSystem(unsigned int);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
+extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
 extern void ks_SDL_DestroyWindow(struct SDL_Window *);
 extern struct SDL_Renderer *ks_SDL_CreateRenderer(struct SDL_Window *, int, unsigned int);
 extern int ks_SDL_GetRendererInfo(struct SDL_Renderer *, struct SDL_RendererInfo *);
@@ -95,12 +98,18 @@ extern void SDL_GL_SwapWindow(struct SDL_Window *);
 extern int SDL_PollEvent(union SDL_Event *);
 extern unsigned int SDL_GetMouseState(int *, int *);
 extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern int SDL_Init(unsigned int);
+extern int SDL_InitSubSystem(unsigned int);
 extern void SDL_QuitSubSystem(unsigned int);
 extern void SDL_Quit(void);
+extern unsigned int SDL_GetWindowFlags(struct SDL_Window *);
 
+DYLD_INTERPOSE(ks_SDL_Init, SDL_Init)
+DYLD_INTERPOSE(ks_SDL_InitSubSystem, SDL_InitSubSystem)
 DYLD_INTERPOSE(ks_SDL_QuitSubSystem, SDL_QuitSubSystem)
 DYLD_INTERPOSE(ks_SDL_Quit, SDL_Quit)
 DYLD_INTERPOSE(ks_SDL_CreateWindow, SDL_CreateWindow)
+DYLD_INTERPOSE(ks_SDL_GetWindowFlags, SDL_GetWindowFlags)
 DYLD_INTERPOSE(ks_SDL_DestroyWindow, SDL_DestroyWindow)
 DYLD_INTERPOSE(ks_SDL_CreateRenderer, SDL_CreateRenderer)
 DYLD_INTERPOSE(ks_SDL_GetRendererInfo, SDL_GetRendererInfo)

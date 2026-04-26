@@ -64,6 +64,18 @@ pub const SDL_TextInputEvent = extern struct {
     text: [32]u8,
 };
 
+pub const SDL_WindowEvent = extern struct {
+    type: Uint32,
+    timestamp: Uint32,
+    windowID: Uint32,
+    event: Uint8,
+    padding1: Uint8 = 0,
+    padding2: Uint8 = 0,
+    padding3: Uint8 = 0,
+    data1: Sint32,
+    data2: Sint32,
+};
+
 pub const SDL_MouseMotionEvent = extern struct {
     type: Uint32,
     timestamp: Uint32,
@@ -105,6 +117,7 @@ pub const SDL_MouseWheelEvent = extern struct {
 
 pub const SDL_Event = extern union {
     type: Uint32,
+    window: SDL_WindowEvent,
     key: SDL_KeyboardEvent,
     text: SDL_TextInputEvent,
     motion: SDL_MouseMotionEvent,
@@ -149,11 +162,21 @@ pub const SDL_MOUSEBUTTONDOWN: Uint32 = 0x401;
 pub const SDL_MOUSEBUTTONUP: Uint32 = 0x402;
 pub const SDL_MOUSEWHEEL: Uint32 = 0x403;
 pub const SDL_MOUSEWHEEL_NORMAL: Uint32 = 0;
+pub const SDL_WINDOWEVENT: Uint32 = 0x200;
+pub const SDL_WINDOWEVENT_ENTER: Uint8 = 10;
+pub const SDL_WINDOWEVENT_LEAVE: Uint8 = 11;
+pub const SDL_WINDOWEVENT_FOCUS_GAINED: Uint8 = 12;
+pub const SDL_WINDOWEVENT_FOCUS_LOST: Uint8 = 13;
+pub const SDL_WINDOW_INPUT_FOCUS: Uint32 = 0x00000200;
+pub const SDL_WINDOW_MOUSE_FOCUS: Uint32 = 0x00000400;
 
 pub extern fn SDL_Init(flags: Uint32) c_int;
+pub extern fn SDL_InitSubSystem(flags: Uint32) c_int;
+pub extern fn SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) SDL_bool;
 pub extern fn SDL_QuitSubSystem(flags: Uint32) void;
 pub extern fn SDL_Quit() void;
 pub extern fn SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: Uint32) ?*SDL_Window;
+pub extern fn SDL_GetWindowFlags(window: ?*SDL_Window) Uint32;
 pub extern fn SDL_ShowWindow(window: ?*SDL_Window) void;
 pub extern fn SDL_RaiseWindow(window: ?*SDL_Window) void;
 pub extern fn SDL_DestroyWindow(window: ?*SDL_Window) void;
@@ -199,6 +222,9 @@ pub extern fn SDL_GetTicks() Uint32;
 pub extern fn SDL_GetError() [*:0]const u8;
 
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;
+pub const SDL_INIT_JOYSTICK: Uint32 = 0x00000200;
+pub const SDL_INIT_GAMECONTROLLER: Uint32 = 0x00002000;
+pub const SDL_INIT_EVENTS: Uint32 = 0x00004000;
 pub const SDL_WINDOWPOS_CENTERED_MASK: Uint32 = 0x2FFF0000;
 pub const SDL_WINDOWPOS_CENTERED: c_int = @bitCast(SDL_WINDOWPOS_CENTERED_MASK);
 

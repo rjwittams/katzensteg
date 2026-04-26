@@ -218,7 +218,7 @@ pub const FrameBuilder = struct {
     solid_images: std.AutoHashMap(u32, u32),
     retired_image_ids: std.ArrayList(u32),
     stats: Stats,
-    composite_mode: CompositeMode = .tiled_strip,
+    composite_mode: CompositeMode = .fullscreen,
     dump_composites: bool = false,
     debug_composite: bool = false,
     last_inspect_summary: InspectFrameSummary = .{},
