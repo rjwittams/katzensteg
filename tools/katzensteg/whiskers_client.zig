@@ -189,7 +189,7 @@ pub const WhiskersClient = struct {
         self.last_capture_poll_ns = now;
         const body = try requestForBody(self.allocator, self.socket_path, "GET", "/v0/producers/self", self.bearer_token, "");
         defer self.allocator.free(body);
-        const parsed = try std.json.parseFromSlice(ProducerSelfResponse, self.allocator, body, .{});
+        const parsed = try std.json.parseFromSlice(ProducerSelfResponse, self.allocator, body, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const desired = parsed.value.capture_enabled;
         const current = self.capture_enabled.load(.monotonic);
