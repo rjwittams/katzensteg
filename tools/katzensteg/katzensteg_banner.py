@@ -142,6 +142,45 @@ def render_steady(t_global: float, term_w: int, no_color: bool) -> List[str]:
     return out
 
 
+# --- Phase: vertical scan --------------------------------------------------
+
+
+def render_scan(
+    t_phase: float, t_global: float, term_w: int, no_color: bool
+) -> List[str]:
+    """Reveals letter rows from the vertical centre outward. t_phase
+    ranges 0..(T_SCAN_END - T_SPARK_END)."""
+    duration = T_SCAN_END - T_SPARK_END
+    p = max(0.0, min(1.0, t_phase / duration))
+    lines = art_lines()
+    h = len(lines)
+    centre_row = (h - 1) / 2.0
+    half_extent = p * (centre_row + 0.5)
+    out: List[str] = []
+    for yi, line in enumerate(lines):
+        visible = len(line)
+        d = abs(yi - centre_row)
+        if d > half_extent:
+            out.append(" " * visible)
+            continue
+        edge = max(0.0, 1.0 - (d / max(half_extent, 0.001)))
+        beam = 0.4 + 0.6 * edge
+        if no_color:
+            out.append(centre(line, term_w, visible))
+            continue
+        parts: List[str] = []
+        for xi, ch in enumerate(line):
+            if ch == " ":
+                parts.append(" ")
+                continue
+            r = int(GREEN[0] * beam)
+            g = int(GREEN[1] * beam)
+            b = int(GREEN[2] * beam)
+            parts.append(rgb_fg(r, g, b) + ch + RESET)
+        out.append(centre("".join(parts), term_w, visible))
+    return out
+
+
 # --- Phase: stabilize ------------------------------------------------------
 
 
@@ -199,7 +238,7 @@ def render_at(t_global: float, term_w: int, no_color: bool) -> List[str]:
     if t_global < T_SPARK_END:
         return render_stabilize(0.0, t_global, term_w, no_color)
     if t_global < T_SCAN_END:
-        return render_stabilize(0.0, t_global, term_w, no_color)
+        return render_scan(t_global - T_SPARK_END, t_global, term_w, no_color)
     if t_global < T_STABILIZE_END:
         return render_stabilize(t_global - T_SCAN_END, t_global, term_w, no_color)
     return render_steady(t_global, term_w, no_color)
