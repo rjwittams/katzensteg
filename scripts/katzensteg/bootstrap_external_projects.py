@@ -8,7 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "profiles" / "external-projects.json"
@@ -21,6 +21,26 @@ class PlannedProject:
     commands: list[list[str]]
     build_commands: list[str]
     profiles: list[str]
+
+
+PhaseStatus = Literal["succeeded", "failed", "skipped"]
+
+
+@dataclass
+class CommandPhaseResult:
+    name: str
+    path: Path
+    printed_commands: list[str]
+    status: PhaseStatus
+    error: Exception | None = None
+
+
+@dataclass
+class ProjectExecutionResult:
+    name: str
+    path: Path
+    sync: CommandPhaseResult
+    build: CommandPhaseResult
 
 
 def load_manifest(path: Path) -> dict:
@@ -134,19 +154,102 @@ def sh_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def run_plan(plan: list[PlannedProject], dry_run: bool) -> None:
+def run_sync_commands(plan: list[PlannedProject], dry_run: bool) -> list[CommandPhaseResult]:
+    results: list[CommandPhaseResult] = []
+    for item in plan:
+        printed_commands: list[str] = []
+        error: Exception | None = None
+        for command in item.commands:
+            rendered = shell_quote(command)
+            printed_commands.append(rendered)
+            print(rendered)
+            if dry_run:
+                continue
+            try:
+                subprocess.run(command, check=True)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                error = exc
+                break
+        results.append(
+            CommandPhaseResult(
+                name=item.name,
+                path=item.path,
+                printed_commands=printed_commands,
+                status="failed" if error is not None else "succeeded",
+                error=error,
+            )
+        )
+    return results
+
+
+def run_build_commands(plan: list[PlannedProject], dry_run: bool) -> list[CommandPhaseResult]:
+    results: list[CommandPhaseResult] = []
+    for item in plan:
+        printed_commands: list[str] = []
+        error: Exception | None = None
+        for command in item.build_commands:
+            printed_commands.append(command)
+            print(f"  {command}")
+            if dry_run:
+                continue
+            try:
+                subprocess.run(command, check=True, cwd=item.path, shell=True)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                error = exc
+                break
+        results.append(
+            CommandPhaseResult(
+                name=item.name,
+                path=item.path,
+                printed_commands=printed_commands,
+                status="failed" if error is not None else "succeeded",
+                error=error,
+            )
+        )
+    return results
+
+
+def skipped_phase_result(item: PlannedProject) -> CommandPhaseResult:
+    return CommandPhaseResult(
+        name=item.name,
+        path=item.path,
+        printed_commands=[],
+        status="skipped",
+    )
+
+
+def run_plan(plan: list[PlannedProject], dry_run: bool) -> list[ProjectExecutionResult]:
+    results: list[ProjectExecutionResult] = []
     for item in plan:
         print(f"==> {item.name}: {item.path}")
         if item.profiles:
             print("profiles: " + ", ".join(item.profiles))
-        for command in item.commands:
-            print(shell_quote(command))
-            if not dry_run:
-                subprocess.run(command, check=True)
-        if item.build_commands:
-            print("build notes:")
-            for command in item.build_commands:
-                print(f"  {command}")
+
+        sync_result = run_sync_commands([item], dry_run)[0]
+
+        if sync_result.status != "succeeded":
+            build_result = skipped_phase_result(item)
+        else:
+            if item.build_commands:
+                print("build:")
+            build_result = run_build_commands([item], dry_run)[0]
+
+        results.append(
+            ProjectExecutionResult(
+                name=item.name,
+                path=item.path,
+                sync=sync_result,
+                build=build_result,
+            )
+        )
+    return results
+
+
+def has_failures(results: list[ProjectExecutionResult]) -> bool:
+    return any(
+        result.sync.status == "failed" or result.build.status == "failed"
+        for result in results
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -188,7 +291,9 @@ def main(argv: list[str]) -> int:
     manifest = load_manifest(args.manifest)
     root = args.root if args.root is not None else expand_path(manifest.get("default_root", "$HOME/dev"))
     plan = plan_projects(manifest, root, args.selection, args.include_non_default)
-    run_plan(plan, args.dry_run)
+    results = run_plan(plan, args.dry_run)
+    if has_failures(results):
+        return 1
     return 0
 
 

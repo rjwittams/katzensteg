@@ -3,6 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CalledProcessError
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).with_name("bootstrap_external_projects.py")
@@ -149,6 +151,285 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         selected = bootstrap.select_projects(manifest, names=["chiaki.sdl", "cannonball"])
 
         self.assertEqual(["cannonball", "chiaki-ng"], [project["name"] for project in selected])
+
+    def test_plan_project_selects_build_commands_for_current_platform(self):
+        bootstrap = load_module()
+
+        project = {
+            "name": "demo",
+            "directory": "demo",
+            "primary_remote": "origin",
+            "remotes": {"origin": "https://example.invalid/demo.git"},
+            "checkout": "main",
+            "build": {
+                "linux": ["cmake -S . -B build", "cmake --build build"],
+                "macos": ["xcodebuild -project Demo.xcodeproj"],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(bootstrap, "current_platform", return_value="linux"):
+                planned = bootstrap.plan_project(project, Path(temp_dir))
+
+        self.assertEqual(
+            ["cmake -S . -B build", "cmake --build build"],
+            planned.build_commands,
+        )
+
+    def test_run_build_commands_executes_from_checkout_directory(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[],
+            build_commands=["cmake -S . -B build", "cmake --build build"],
+            profiles=[],
+        )
+
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+            results = bootstrap.run_build_commands([planned], dry_run=False)
+
+        self.assertEqual(2, run_mock.call_count)
+        self.assertEqual([planned.path, planned.path], [call.kwargs["cwd"] for call in run_mock.call_args_list])
+        self.assertEqual(
+            ["cmake -S . -B build", "cmake --build build"],
+            results[0].printed_commands,
+        )
+        self.assertEqual("succeeded", results[0].status)
+
+    def test_run_build_commands_dry_run_prints_without_running(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+            results = bootstrap.run_build_commands([planned], dry_run=True)
+
+        self.assertEqual([], run_mock.call_args_list)
+        self.assertEqual(["cmake -S . -B build"], results[0].printed_commands)
+        self.assertEqual("succeeded", results[0].status)
+
+    def test_run_build_commands_reports_empty_build_list(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[],
+            build_commands=[],
+            profiles=[],
+        )
+
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+            results = bootstrap.run_build_commands([planned], dry_run=False)
+
+        self.assertEqual([], run_mock.call_args_list)
+        self.assertEqual([], results[0].printed_commands)
+        self.assertEqual("succeeded", results[0].status)
+
+    def test_run_build_commands_marks_failures_and_continues(self):
+        bootstrap = load_module()
+
+        failing = bootstrap.PlannedProject(
+            name="failing",
+            path=Path("/tmp/failing-checkout"),
+            commands=[],
+            build_commands=["cmake -S . -B build", "cmake --build build"],
+            profiles=[],
+        )
+        succeeding = bootstrap.PlannedProject(
+            name="succeeding",
+            path=Path("/tmp/succeeding-checkout"),
+            commands=[],
+            build_commands=["make -j4"],
+            profiles=[],
+        )
+
+        with mock.patch.object(
+            bootstrap.subprocess,
+            "run",
+            side_effect=[
+                CalledProcessError(1, "cmake -S . -B build"),
+                None,
+            ],
+        ) as run_mock:
+            results = bootstrap.run_build_commands([failing, succeeding], dry_run=False)
+
+        self.assertEqual(2, run_mock.call_count)
+        self.assertEqual(["cmake -S . -B build", "make -j4"], [call.args[0] for call in run_mock.call_args_list])
+        self.assertEqual("failed", results[0].status)
+        self.assertIsInstance(results[0].error, CalledProcessError)
+        self.assertEqual(["cmake -S . -B build"], results[0].printed_commands)
+        self.assertEqual("succeeded", results[1].status)
+        self.assertEqual(["make -j4"], results[1].printed_commands)
+
+    def test_run_build_commands_contains_runtime_launch_failures(self):
+        bootstrap = load_module()
+
+        failing = bootstrap.PlannedProject(
+            name="failing",
+            path=Path("/tmp/missing-checkout"),
+            commands=[],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+        succeeding = bootstrap.PlannedProject(
+            name="succeeding",
+            path=Path("/tmp/succeeding-checkout"),
+            commands=[],
+            build_commands=["make -j4"],
+            profiles=[],
+        )
+
+        with mock.patch.object(
+            bootstrap.subprocess,
+            "run",
+            side_effect=[
+                FileNotFoundError("missing build tool"),
+                None,
+            ],
+        ) as run_mock:
+            results = bootstrap.run_build_commands([failing, succeeding], dry_run=False)
+
+        self.assertEqual(2, run_mock.call_count)
+        self.assertEqual("failed", results[0].status)
+        self.assertIsInstance(results[0].error, FileNotFoundError)
+        self.assertEqual(["cmake -S . -B build"], results[0].printed_commands)
+        self.assertEqual("succeeded", results[1].status)
+
+    def test_run_sync_commands_contains_runtime_launch_failures(self):
+        bootstrap = load_module()
+
+        failing = bootstrap.PlannedProject(
+            name="failing",
+            path=Path("/tmp/failing-checkout"),
+            commands=[["git", "clone", "https://example.invalid/failing.git"]],
+            build_commands=[],
+            profiles=[],
+        )
+        succeeding = bootstrap.PlannedProject(
+            name="succeeding",
+            path=Path("/tmp/succeeding-checkout"),
+            commands=[["git", "clone", "https://example.invalid/succeeding.git"]],
+            build_commands=[],
+            profiles=[],
+        )
+
+        with mock.patch.object(
+            bootstrap.subprocess,
+            "run",
+            side_effect=[
+                FileNotFoundError("git not found"),
+                None,
+            ],
+        ) as run_mock:
+            results = bootstrap.run_sync_commands([failing, succeeding], dry_run=False)
+
+        self.assertEqual(2, run_mock.call_count)
+        self.assertEqual("failed", results[0].status)
+        self.assertIsInstance(results[0].error, FileNotFoundError)
+        self.assertEqual("succeeded", results[1].status)
+
+    def test_run_plan_skips_build_after_sync_failure(self):
+        bootstrap = load_module()
+
+        failing = bootstrap.PlannedProject(
+            name="failing",
+            path=Path("/tmp/failing-checkout"),
+            commands=[["git", "clone", "https://example.invalid/failing.git"]],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+        succeeding = bootstrap.PlannedProject(
+            name="succeeding",
+            path=Path("/tmp/succeeding-checkout"),
+            commands=[],
+            build_commands=["make -j4"],
+            profiles=[],
+        )
+
+        with mock.patch.object(
+            bootstrap.subprocess,
+            "run",
+            side_effect=[
+                CalledProcessError(1, ["git", "clone", "https://example.invalid/failing.git"]),
+                None,
+            ],
+        ) as run_mock:
+            results = bootstrap.run_plan([failing, succeeding], dry_run=False)
+
+        self.assertEqual(2, run_mock.call_count)
+        self.assertEqual(
+            [["git", "clone", "https://example.invalid/failing.git"], "make -j4"],
+            [call.args[0] for call in run_mock.call_args_list],
+        )
+        self.assertEqual("failed", results[0].sync.status)
+        self.assertEqual([], results[0].build.printed_commands)
+        self.assertEqual("skipped", results[0].build.status)
+        self.assertEqual("succeeded", results[1].build.status)
+
+    def test_main_returns_non_zero_on_sync_failure(self):
+        bootstrap = load_module()
+
+        failed_result = bootstrap.ProjectExecutionResult(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            sync=bootstrap.CommandPhaseResult(
+                name="demo",
+                path=Path("/tmp/demo-checkout"),
+                printed_commands=["git clone demo"],
+                status="failed",
+                error=CalledProcessError(1, ["git", "clone", "demo"]),
+            ),
+            build=bootstrap.CommandPhaseResult(
+                name="demo",
+                path=Path("/tmp/demo-checkout"),
+                printed_commands=[],
+                status="skipped",
+            ),
+        )
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[]), \
+            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH)])
+
+        self.assertEqual(1, exit_code)
+
+    def test_main_returns_non_zero_on_build_failure(self):
+        bootstrap = load_module()
+
+        failed_result = bootstrap.ProjectExecutionResult(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            sync=bootstrap.CommandPhaseResult(
+                name="demo",
+                path=Path("/tmp/demo-checkout"),
+                printed_commands=["git clone demo"],
+                status="succeeded",
+            ),
+            build=bootstrap.CommandPhaseResult(
+                name="demo",
+                path=Path("/tmp/demo-checkout"),
+                printed_commands=["cmake -S . -B build"],
+                status="failed",
+                error=CalledProcessError(1, "cmake -S . -B build"),
+            ),
+        )
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[]), \
+            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH)])
+
+        self.assertEqual(1, exit_code)
 
 
 if __name__ == "__main__":
