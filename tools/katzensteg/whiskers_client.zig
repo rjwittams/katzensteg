@@ -133,14 +133,18 @@ pub const WhiskersClient = struct {
         self.shutdown.store(true, .release);
         self.mutex.lock();
         if (self.control_fd) |fd| {
-            self.control_fd = null;
-            std.posix.close(fd);
+            std.posix.shutdown(fd, .both) catch {};
         }
         self.mutex.unlock();
         if (self.control_thread) |thread| thread.join();
-        self.stopActiveSegmentNow() catch |err| {
-            self.logger.writeFmt("katzensteg: whiskers stopActiveSegmentNow failed during shutdown: {any}", .{err});
-        };
+        self.mutex.lock();
+        const segment_id_owned = self.current_segment_id;
+        self.current_segment_id = null;
+        self.mutex.unlock();
+        if (segment_id_owned) |segment_id| {
+            self.logger.writeFmt("katzensteg: whiskers leaving active segment open during shutdown producer={s}", .{self.producer_id});
+            self.allocator.free(segment_id);
+        }
         self.allocator.free(self.socket_path);
         self.allocator.free(self.producer_id);
         self.allocator.free(self.bearer_token);

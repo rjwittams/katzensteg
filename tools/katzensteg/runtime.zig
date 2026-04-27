@@ -39,6 +39,8 @@ const ts_kitty = termscene.kitty;
 
 var global_mutex: std.Thread.Mutex = .{};
 var global_runtime: ?Runtime = null;
+var global_shutdown_started: bool = false;
+var global_runtime_is_stub: bool = false;
 
 pub const ProducerStatKind = enum {
     generic,
@@ -311,6 +313,31 @@ pub const Runtime = struct {
         if (runtime.dump_composites) runtime.logger.write("katzensteg: composite framebuffer dump enabled");
         if (runtime.debug_composite) runtime.logger.write("katzensteg: composite debug logging enabled");
         return runtime;
+    }
+
+    fn initShutdownStub() Runtime {
+        const allocator = std.heap.c_allocator;
+        return .{
+            .allocator = allocator,
+            .logger = Logger.init(allocator),
+            .frame_builder = FrameBuilder.init(allocator, false, .fullscreen, false, false),
+            .input_enabled = false,
+            .input_claimed = false,
+            .intercept_mode = .sync_compose,
+            .window_policy = .mirror,
+            .real_window_visibility = .show,
+            .terminal_identity = "shutdown",
+            .output_profile_name = "disabled",
+            .active = false,
+            .queue = std.ArrayList(Command).empty,
+            .inspect_resources = std.ArrayList(InspectResource).empty,
+            .inspect_resource_records = std.ArrayList(ResourceRecord).empty,
+            .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
+            .producer_stats = .{},
+            .gl_capture_mode = .disabled,
+            .file_transport_enabled = false,
+            .file_transport_max_bytes = config_mod.default_file_transport_max_bytes,
+        };
     }
 
     fn buildWhiskersHello(self: *Runtime) !whiskers_client_mod.ProducerHello {
@@ -891,7 +918,13 @@ pub fn get() *Runtime {
     global_mutex.lock();
     defer global_mutex.unlock();
     if (global_runtime == null) {
+        if (global_shutdown_started) {
+            global_runtime = Runtime.initShutdownStub();
+            global_runtime_is_stub = true;
+            return &global_runtime.?;
+        }
         global_runtime = Runtime.init();
+        global_runtime_is_stub = false;
         if (global_runtime) |*runtime| {
             if (runtime.inspector) |*inspector| {
                 inspector.logger = &runtime.logger;
@@ -930,9 +963,13 @@ fn routeRealRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
 pub fn shutdownGlobal() callconv(.c) void {
     global_mutex.lock();
     defer global_mutex.unlock();
+    global_shutdown_started = true;
+    if (global_runtime_is_stub) return;
     if (global_runtime) |*runtime| {
+        runtime.active = false;
         runtime.deinit();
-        global_runtime = null;
+        global_runtime = Runtime.initShutdownStub();
+        global_runtime_is_stub = true;
     }
 }
 
