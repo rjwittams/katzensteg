@@ -497,33 +497,6 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
             .image_id = summary.image_id,
             .placement_id = summary.placement_id,
         };
-        if (rt.inspector) |*inspector| {
-            if (inspector.isEnabled()) {
-                inspector.noteFrame(whiskers_frame);
-                rt.inspect_resources.clearRetainingCapacity();
-                rt.frame_builder.appendSnapshotResources(rt.allocator, &rt.inspect_resources) catch return;
-                rt.inspect_resource_records.clearRetainingCapacity();
-                for (rt.inspect_resources.items) |res| {
-                    rt.inspect_resource_records.append(rt.allocator, .{
-                        .kind = switch (res.kind) {
-                            .texture => .texture,
-                            .image => .image,
-                            .placement => .placement,
-                        },
-                        .texture_key = res.texture_key,
-                        .placement_id = res.placement_id,
-                        .alias = inspect_model.makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
-                        .w = res.w,
-                        .h = res.h,
-                        .format = res.format,
-                        .blend_mode = res.blend_mode,
-                        .update_count = res.update_count,
-                        .image_id = res.image_id,
-                    }) catch {};
-                }
-                inspector.noteResources(rt.inspect_resource_records.items);
-            }
-        }
         if (rt.whiskers_client) |*client| {
             rt.inspect_resources.clearRetainingCapacity();
             rt.frame_builder.appendSnapshotResources(rt.allocator, &rt.inspect_resources) catch return;

@@ -6,14 +6,12 @@ const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
 const intercept_sink = @import("intercept_sink.zig");
 const inspect_model = @import("inspect_model.zig");
-const inspector_mod = @import("inspector.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
 const sdl = @import("katzensteg_sdl");
-const Inspector = inspector_mod.Inspector;
 const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
@@ -137,7 +135,6 @@ pub const Runtime = struct {
     queue_head: usize = 0,
     pending_presents: usize = 0,
     worker_thread: ?std.Thread = null,
-    inspector: ?Inspector = null,
     whiskers_client: ?WhiskersClient = null,
     shutdown_worker: bool = false,
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
@@ -201,12 +198,6 @@ pub const Runtime = struct {
             .file_transport_enabled = config.file_transport,
             .file_transport_max_bytes = config.file_transport_max_bytes,
         };
-        if (std.c.getenv("KATZENSTEG_INSPECT_SOCKET")) |path_z| {
-            runtime.inspector = Inspector.init(allocator, &runtime.logger, std.mem.span(path_z)) catch |err| blk: {
-                runtime.logger.writeFmt("katzensteg: inspector init failed: {any}", .{err});
-                break :blk null;
-            };
-        }
         if (std.c.getenv("KATZENSTEG_WHISKERS_SOCKET")) |path_z| {
             var free_producer_hello = true;
             const producer_hello = runtime.buildWhiskersHello() catch |err| blk: {
@@ -279,13 +270,6 @@ pub const Runtime = struct {
         if (runtime.debug_protocol_replies) runtime.logger.write("katzensteg: kitty protocol reply logging enabled (q=0)");
         runtime.logger.writeFmt("katzensteg: composite mode = {s}", .{@tagName(config.composite_mode)});
         runtime.logger.writeFmt("katzensteg: intercept mode = {s}", .{@tagName(config.intercept_mode)});
-        if (runtime.inspector) |*inspector| inspector.configureSession(.{
-            .terminal_identity = runtime.terminal_identity,
-            .composite_mode = @tagName(config.composite_mode),
-            .intercept_mode = @tagName(config.intercept_mode),
-            .output_profile = runtime.output_profile_name,
-            .present_fps = config.present_fps,
-        });
         if (runtime.whiskers_client) |*client| {
             client.updateRuntimeInfo(
                 runtime.terminal_identity,
@@ -378,7 +362,6 @@ pub const Runtime = struct {
         self.queue_mutex.unlock();
         if (self.worker_thread) |thread| thread.join();
         if (self.whiskers_client) |*client| client.deinit();
-        if (self.inspector) |*inspector| inspector.deinit();
         for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);
         self.queue.deinit(self.allocator);
         self.payload_pool.deinit(self.allocator);
@@ -924,10 +907,6 @@ pub fn get() *Runtime {
         global_runtime = Runtime.init();
         global_runtime_is_stub = false;
         if (global_runtime) |*runtime| {
-            if (runtime.inspector) |*inspector| {
-                inspector.logger = &runtime.logger;
-                inspector.start();
-            }
             if (runtime.whiskers_client) |*client| {
                 if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") == null) {
                     client.start();

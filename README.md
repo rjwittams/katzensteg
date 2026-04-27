@@ -26,10 +26,10 @@ This repo currently contains:
 
 Inspector/devtools direction is now split clearly:
 
-- producer-side instrumentation and optional embedded fallback inspector live here in `tools/katzensteg/`
-- the canonical inspector service and web UI now live in the separate `whiskers` repo
+- producer-side instrumentation for Katzensteg lives here in `tools/katzensteg/`
+- the canonical inspector service and web UI live in the separate `whiskers` repo
 
-The embedded inspector in this repo should be treated as fallback/dev-only infrastructure while `whiskers` becomes the primary inspection path.
+This repo no longer carries an embedded inspector runtime path; `whiskers` is the inspection path.
 
 ## Katzensteg first-slice bootstrap
 
@@ -68,8 +68,7 @@ ls /tmp/katzensteg-*.log
 
 For current inspection work:
 
-- prefer `whiskers-service` and `~/dev/whiskers/web/inspector`
+- use `whiskers-service` and `~/dev/whiskers/web/inspector`
 - use `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock` to connect Katzensteg to `whiskers`
-- keep `KATZENSTEG_INSPECT_SOCKET=...` only as an embedded fallback/debug path
 
 The copied browser inspector and Python proxy have been removed from this repo on purpose so there is a single canonical web UI.

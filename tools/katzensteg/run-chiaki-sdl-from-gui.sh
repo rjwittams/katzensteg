@@ -27,9 +27,6 @@ build_katzensteg_env() {
       ;;
   esac
 
-  if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-    env_args+=(KATZENSTEG_INSPECT_SOCKET="$KATZENSTEG_INSPECT_SOCKET")
-  fi
   if [[ -n "${KATZENSTEG_COMPOSITE_DEBUG:-}" ]]; then
     env_args+=(KATZENSTEG_COMPOSITE_DEBUG="$KATZENSTEG_COMPOSITE_DEBUG")
   fi
@@ -77,9 +74,6 @@ if [[ ! -f "$KATZENSTEG_LIB" ]]; then
 fi
 
 rm -f "$OUTPUT_LOG" /tmp/katzensteg-*.log /tmp/katzensteg-composite.ppm
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  rm -f "$KATZENSTEG_INSPECT_SOCKET"
-fi
 
 build_katzensteg_env
 
@@ -93,9 +87,6 @@ echo "  KATZENSTEG_COMPOSITE_MODE=${KATZENSTEG_COMPOSITE_MODE:-fullscreen}"
 echo "  KATZENSTEG_OUTPUT_PROFILE=${KATZENSTEG_OUTPUT_PROFILE:-file_whole}"
 echo "  SDL_RENDER_DRIVER=${SDL_RENDER_DRIVER:-software}"
 echo "  OUTPUT_LOG=$OUTPUT_LOG"
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  echo "  KATZENSTEG_INSPECT_SOCKET=$KATZENSTEG_INSPECT_SOCKET"
-fi
 if [[ -n "${KATZENSTEG_COMPOSITE_DEBUG:-}" ]]; then
   echo "  KATZENSTEG_COMPOSITE_DEBUG=$KATZENSTEG_COMPOSITE_DEBUG"
 fi

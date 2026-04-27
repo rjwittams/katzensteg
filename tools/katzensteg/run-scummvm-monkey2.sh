@@ -6,7 +6,6 @@ SCUMMVM_BIN="${SCUMMVM_BIN:-/opt/homebrew/bin/scummvm}"
 SCUMMVM_GAME_ID="${SCUMMVM_GAME_ID:-monkey2}"
 SCUMMVM_GAME_PATH="${SCUMMVM_GAME_PATH:-$HOME/roms/mi2}"
 KATZENSTEG_LIB="${KATZENSTEG_LIB:-$ROOT/zig-out/lib/libkatzensteg-unlinked.dylib}"
-KATZENSTEG_INSPECT_SOCKET="${KATZENSTEG_INSPECT_SOCKET:-/tmp/katzensteg-inspect.sock}"
 
 if [[ ! -x "$SCUMMVM_BIN" ]]; then
   echo "ScummVM binary not found or not executable: $SCUMMVM_BIN" >&2
@@ -24,7 +23,6 @@ if [[ ! -f "$KATZENSTEG_LIB" ]]; then
   exit 1
 fi
 
-rm -f /tmp/scummvm.out /tmp/katzensteg-*.log /tmp/katzensteg-composite.ppm "$KATZENSTEG_INSPECT_SOCKET"
 
 echo "Running ScummVM + Monkey Island 2 with Katzensteg"
 echo "  SCUMMVM_BIN=$SCUMMVM_BIN"
@@ -36,7 +34,6 @@ echo "  KATZENSTEG_COMPOSITE_MODE=${KATZENSTEG_COMPOSITE_MODE:-fullscreen}"
 echo "  KATZENSTEG_OUTPUT_PROFILE=${KATZENSTEG_OUTPUT_PROFILE:-file_whole}"
 echo "  KATZENSTEG_COMPOSITE_DEBUG=${KATZENSTEG_COMPOSITE_DEBUG:-1}"
 echo "  KATZENSTEG_TRACE_SDL=${KATZENSTEG_TRACE_SDL:-1}"
-echo "  KATZENSTEG_INSPECT_SOCKET=$KATZENSTEG_INSPECT_SOCKET"
 echo "  SDL_RENDER_DRIVER=${SDL_RENDER_DRIVER:-software}"
 echo "  SCUMMVM_GFX_MODE=${SCUMMVM_GFX_MODE:-surfacesdl}"
 echo "  SCUMMVM_RENDERER=${SCUMMVM_RENDERER:-software}"
@@ -56,7 +53,6 @@ exec env \
   KATZENSTEG_COMPOSITE_MODE="${KATZENSTEG_COMPOSITE_MODE:-fullscreen}" \
   KATZENSTEG_OUTPUT_PROFILE="${KATZENSTEG_OUTPUT_PROFILE:-file_whole}" \
   KATZENSTEG_TRACE_SDL="${KATZENSTEG_TRACE_SDL:-1}" \
-  KATZENSTEG_INSPECT_SOCKET="$KATZENSTEG_INSPECT_SOCKET" \
   SDL_RENDER_DRIVER="${SDL_RENDER_DRIVER:-software}" \
   DYLD_INSERT_LIBRARIES="$KATZENSTEG_LIB" \
   "$SCUMMVM_BIN" "${SCUMMVM_ARGS[@]}" \

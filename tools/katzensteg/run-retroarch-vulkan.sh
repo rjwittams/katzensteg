@@ -58,16 +58,12 @@ joypad_driver = "sdl2"
 CFG
 
 rm -f "$OUTPUT_LOG" /tmp/katzensteg-*.log /tmp/katzensteg-composite.ppm
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  rm -f "$KATZENSTEG_INSPECT_SOCKET"
-fi
 
 env_args=(
   -u KATZENSTEG_COMPOSITE_DEBUG
   -u KATZENSTEG_TRACE_SDL
   -u KATZENSTEG_TRACE_VULKAN
   -u KATZENSTEG_STATS
-  -u KATZENSTEG_INSPECT_SOCKET
   KATZENSTEG_INTERCEPT_MODE="${KATZENSTEG_INTERCEPT_MODE:-queued_replay}"
   KATZENSTEG_COMPOSITE_MODE="${KATZENSTEG_COMPOSITE_MODE:-fullscreen}"
   KATZENSTEG_OUTPUT_PROFILE="${KATZENSTEG_OUTPUT_PROFILE:-file_whole}"
@@ -92,9 +88,6 @@ if is_enabled "${KATZENSTEG_TRACE_VULKAN:-}"; then
 fi
 if is_enabled "${KATZENSTEG_STATS:-}"; then
   env_args+=(KATZENSTEG_STATS=1)
-fi
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  env_args+=(KATZENSTEG_INSPECT_SOCKET="$KATZENSTEG_INSPECT_SOCKET")
 fi
 if [[ -n "${KATZENSTEG_REAL_WINDOW:-}" ]]; then
   env_args+=(KATZENSTEG_REAL_WINDOW="$KATZENSTEG_REAL_WINDOW")

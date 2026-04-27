@@ -22,9 +22,6 @@ if [[ ! -f "$KATZENSTEG_LIB" ]]; then
 fi
 
 rm -f "$OUTPUT_LOG" /tmp/katzensteg-*.log /tmp/katzensteg-composite.ppm
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  rm -f "$KATZENSTEG_INSPECT_SOCKET"
-fi
 
 moonlight_args=(
   stream "$MOONLIGHT_HOST" "$MOONLIGHT_APP"
@@ -45,9 +42,6 @@ env_args=(
   VT_FORCE_INDIRECT="${VT_FORCE_INDIRECT:-1}"
   DYLD_INSERT_LIBRARIES="$KATZENSTEG_LIB"
 )
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  env_args+=(KATZENSTEG_INSPECT_SOCKET="$KATZENSTEG_INSPECT_SOCKET")
-fi
 if [[ -n "${KATZENSTEG_COMPOSITE_DEBUG:-}" ]]; then
   env_args+=(KATZENSTEG_COMPOSITE_DEBUG="$KATZENSTEG_COMPOSITE_DEBUG")
 fi
@@ -72,9 +66,6 @@ echo "  SDL_RENDER_DRIVER=${SDL_RENDER_DRIVER:-software}"
 echo "  VT_FORCE_METAL=${VT_FORCE_METAL:-0}"
 echo "  VT_FORCE_INDIRECT=${VT_FORCE_INDIRECT:-1}"
 echo "  OUTPUT_LOG=$OUTPUT_LOG"
-if [[ -n "${KATZENSTEG_INSPECT_SOCKET:-}" ]]; then
-  echo "  KATZENSTEG_INSPECT_SOCKET=$KATZENSTEG_INSPECT_SOCKET"
-fi
 if [[ -n "${KATZENSTEG_COMPOSITE_DEBUG:-}" ]]; then
   echo "  KATZENSTEG_COMPOSITE_DEBUG=$KATZENSTEG_COMPOSITE_DEBUG"
 fi
