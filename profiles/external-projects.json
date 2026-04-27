@@ -19,6 +19,15 @@
       "pkg-config": "pkg-config",
       "qmake6": "qt6-base-dev",
       "sdl2": "libsdl2-dev"
+    },
+    "brew": {
+      "cmake": "cmake",
+      "ffplay": "ffmpeg",
+      "git": "git",
+      "opus": "opus",
+      "pkg-config": "pkgconf",
+      "qmake6": "qt",
+      "sdl2": "sdl2"
     }
   },
   "projects": [

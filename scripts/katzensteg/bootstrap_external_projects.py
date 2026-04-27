@@ -12,6 +12,7 @@ from typing import Iterable, Literal
 
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "profiles" / "external-projects.json"
+OS_RELEASE_PATH = Path("/etc/os-release")
 
 
 @dataclass
@@ -58,6 +59,100 @@ def project_by_name(manifest: dict, name: str) -> dict:
         if project["name"] == name:
             return project
     raise KeyError(name)
+
+
+def parse_os_release(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value.strip().strip("'\"")
+    return values
+
+
+def read_os_release(path: Path = OS_RELEASE_PATH) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def detect_distro_family(os_release_text: str | None = None, platform: str | None = None) -> str:
+    normalized_platform = platform or sys.platform
+    if normalized_platform == "darwin":
+        return "brew"
+    if not normalized_platform.startswith("linux"):
+        return "unknown"
+    if os_release_text is None:
+        os_release_text = read_os_release()
+    if not os_release_text:
+        return "unknown"
+
+    os_release = parse_os_release(os_release_text)
+    identities = {
+        value.lower()
+        for value in (
+            os_release.get("ID", ""),
+            *os_release.get("ID_LIKE", "").split(),
+            os_release.get("NAME", ""),
+        )
+        if value
+    }
+    if "arch" in identities or "archlinux" in identities:
+        return "arch"
+    if {"debian", "ubuntu"} & identities:
+        return "debian"
+    return "unknown"
+
+
+def resolve_package_names(manifest: dict, capabilities: Iterable[str], distro_family: str) -> tuple[list[str], list[str]]:
+    package_hints = manifest.get("package_hints", {})
+    distro_hints = package_hints.get(distro_family)
+    if distro_hints is None:
+        return [], list(capabilities)
+
+    packages: list[str] = []
+    missing: list[str] = []
+    for capability in capabilities:
+        package_name = distro_hints.get(capability)
+        if package_name is None:
+            missing.append(capability)
+            continue
+        packages.append(package_name)
+    return packages, missing
+
+
+def format_install_command(distro_family: str, package_names: Iterable[str]) -> str | None:
+    packages = list(dict.fromkeys(package_names))
+    if not packages:
+        return None
+    if distro_family == "arch":
+        return "sudo pacman -S --needed " + " ".join(packages)
+    if distro_family == "debian":
+        return "sudo apt install " + " ".join(packages)
+    if distro_family == "brew":
+        return "brew install " + " ".join(packages)
+    return None
+
+
+def render_install_hint_lines(manifest: dict, capabilities: Iterable[str], distro_family: str | None = None) -> list[str]:
+    resolved_distro_family = distro_family or detect_distro_family()
+    if resolved_distro_family not in manifest.get("package_hints", {}):
+        return [
+            f"No package hints available for distro family: {resolved_distro_family}",
+            *list(capabilities),
+        ]
+
+    package_names, missing_capabilities = resolve_package_names(manifest, capabilities, resolved_distro_family)
+    command = format_install_command(resolved_distro_family, package_names)
+    lines: list[str] = []
+    if command is not None:
+        lines.append(command)
+    for capability in missing_capabilities:
+        lines.append(f"No package hint for capability: {capability}")
+    return lines
 
 
 def select_projects(manifest: dict, names: Iterable[str] | None = None, include_non_default: bool = False) -> list[dict]:

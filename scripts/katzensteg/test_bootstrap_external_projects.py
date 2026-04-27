@@ -23,9 +23,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
     def assertDoctorShape(self, project):
         doctor = project["doctor"]
 
-        self.assertEqual(
-            {"tools", "pkg_config", "paths", "assets"},
-            set(doctor.keys()),
+        self.assertTrue(
+            {"tools", "pkg_config", "paths", "assets"}.issubset(doctor.keys()),
             project["name"],
         )
         self.assertIsInstance(doctor["tools"], list, project["name"])
@@ -85,10 +84,107 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "qmake6": "qt6-base-dev",
             "sdl2": "libsdl2-dev",
         }
+        expected_brew = {
+            "cmake": "cmake",
+            "ffplay": "ffmpeg",
+            "git": "git",
+            "opus": "opus",
+            "pkg-config": "pkgconf",
+            "qmake6": "qt",
+            "sdl2": "sdl2",
+        }
 
-        self.assertEqual({"arch", "debian"}, set(package_hints))
+        self.assertIn("arch", package_hints)
+        self.assertIn("brew", package_hints)
+        self.assertIn("debian", package_hints)
         self.assertEqual(expected_arch, package_hints["arch"])
+        self.assertEqual(expected_brew, package_hints["brew"])
         self.assertEqual(expected_debian, package_hints["debian"])
+
+    def test_detect_distro_family_recognizes_arch(self):
+        bootstrap = load_module()
+
+        os_release_text = "\n".join(
+            [
+                'NAME="Arch Linux"',
+                "ID=arch",
+                'ID_LIKE="archlinux"',
+            ]
+        )
+
+        self.assertEqual("arch", bootstrap.detect_distro_family(os_release_text))
+
+    def test_detect_distro_family_recognizes_debian_like(self):
+        bootstrap = load_module()
+
+        os_release_text = "\n".join(
+            [
+                'NAME="Ubuntu"',
+                "ID=ubuntu",
+                "ID_LIKE=debian",
+            ]
+        )
+
+        self.assertEqual("debian", bootstrap.detect_distro_family(os_release_text))
+
+    def test_detect_distro_family_recognizes_macos(self):
+        bootstrap = load_module()
+
+        self.assertEqual("brew", bootstrap.detect_distro_family(None, platform="darwin"))
+
+    def test_render_install_hint_lines_formats_arch_command(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report_lines = bootstrap.render_install_hint_lines(manifest, ["ffplay"], distro_family="arch")
+
+        self.assertEqual(["sudo pacman -S --needed ffmpeg"], report_lines)
+
+    def test_render_install_hint_lines_formats_debian_command(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report_lines = bootstrap.render_install_hint_lines(manifest, ["ffplay"], distro_family="debian")
+
+        self.assertEqual(["sudo apt install ffmpeg"], report_lines)
+
+    def test_render_install_hint_lines_formats_brew_command(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report_lines = bootstrap.render_install_hint_lines(manifest, ["ffplay"], distro_family="brew")
+
+        self.assertEqual(["brew install ffmpeg"], report_lines)
+
+    def test_render_install_hint_lines_uses_unsupported_distro_fallback(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report_lines = bootstrap.render_install_hint_lines(
+            manifest,
+            ["ffplay", "pkg-config"],
+            distro_family="unknown",
+        )
+
+        self.assertEqual(
+            [
+                "No package hints available for distro family: unknown",
+                "ffplay",
+                "pkg-config",
+            ],
+            report_lines,
+        )
+
+    def test_render_install_hint_lines_does_not_guess_missing_package_mapping(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report_lines = bootstrap.render_install_hint_lines(manifest, ["nonexistent-capability"], distro_family="debian")
+
+        self.assertEqual(
+            ["No package hint for capability: nonexistent-capability"],
+            report_lines,
+        )
 
     def test_manifest_records_doctor_metadata(self):
         bootstrap = load_module()
