@@ -92,11 +92,18 @@ pub fn build(b: *std.Build) void {
     katzensteg_lib.root_module.omit_frame_pointer = false;
     if (is_macos) katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_lib.linkSystemLibrary("SDL2");
-    katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (is_macos) {
-        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_lib.linkFramework("Accelerate");
         katzensteg_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
+        katzensteg_lib.version_script = b.path("src/katzensteg/katzensteg_linux.map");
+        katzensteg_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_lib);
 
@@ -116,11 +123,18 @@ pub fn build(b: *std.Build) void {
     katzensteg_unlinked_lib.root_module.strip = false;
     katzensteg_unlinked_lib.root_module.omit_frame_pointer = false;
     katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
-    katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (is_macos) {
-        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_unlinked_lib.linkFramework("Accelerate");
         katzensteg_unlinked_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
+        katzensteg_unlinked_lib.version_script = b.path("src/katzensteg/katzensteg_linux.map");
+        katzensteg_unlinked_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_unlinked_lib);
     if (is_macos and builtin.os.tag == .macos) {

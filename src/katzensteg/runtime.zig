@@ -12,6 +12,7 @@ const presentation_layout_mod = @import("presentation_layout.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
 const sdl = @import("katzensteg_sdl");
+const real_sdl = @import("real_sdl.zig");
 const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
@@ -804,7 +805,7 @@ test "SDL mouse events are recognized for ownership handoff" {
 
 fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input_mod.InputEvent) void {
     @memset(&event.padding, 0);
-    const now = sdl.SDL_GetTicks();
+    const now = real_sdl.SDL_GetTicks();
     switch (input_event) {
         .key_down => |key| event.key = .{
             .type = sdl.SDL_KEYDOWN,

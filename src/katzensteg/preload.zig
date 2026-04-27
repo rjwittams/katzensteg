@@ -1,5 +1,7 @@
 const std = @import("std");
 const sdl = @import("katzensteg_sdl");
+const real_gl = @import("real_gl.zig");
+const real_sdl = @import("real_sdl.zig");
 const runtime = @import("runtime.zig");
 const sink = @import("intercept_sink.zig");
 const window_policy = @import("window_policy.zig");
@@ -52,29 +54,6 @@ const GL_COLOR_ATTACHMENT0: c_uint = 0x8CE0;
 const GL_FRAMEBUFFER_COMPLETE: c_uint = 0x8CD5;
 const GL_NO_ERROR: c_uint = 0;
 
-extern fn glReadBuffer(mode: c_uint) void;
-extern fn glPixelStorei(pname: c_uint, param: c_int) void;
-extern fn glGetIntegerv(pname: c_uint, data: *c_int) void;
-extern fn glReadPixels(x: c_int, y: c_int, width: c_int, height: c_int, format: c_uint, typ: c_uint, pixels: ?*anyopaque) void;
-extern fn glGetError() c_uint;
-extern fn glGenBuffers(n: c_int, buffers: *c_uint) void;
-extern fn glDeleteBuffers(n: c_int, buffers: *const c_uint) void;
-extern fn glBindBuffer(target: c_uint, buffer: c_uint) void;
-extern fn glBufferData(target: c_uint, size: isize, data: ?*const anyopaque, usage: c_uint) void;
-extern fn glMapBuffer(target: c_uint, access: c_uint) ?*anyopaque;
-extern fn glUnmapBuffer(target: c_uint) u8;
-extern fn glGenFramebuffers(n: c_int, framebuffers: *c_uint) void;
-extern fn glDeleteFramebuffers(n: c_int, framebuffers: *const c_uint) void;
-extern fn glBindFramebuffer(target: c_uint, framebuffer: c_uint) void;
-extern fn glCheckFramebufferStatus(target: c_uint) c_uint;
-extern fn glFramebufferTexture2D(target: c_uint, attachment: c_uint, textarget: c_uint, texture: c_uint, level: c_int) void;
-extern fn glGenTextures(n: c_int, textures: *c_uint) void;
-extern fn glDeleteTextures(n: c_int, textures: *const c_uint) void;
-extern fn glBindTexture(target: c_uint, texture: c_uint) void;
-extern fn glTexParameteri(target: c_uint, pname: c_uint, param: c_int) void;
-extern fn glTexImage2D(target: c_uint, level: c_int, internalformat: c_int, width: c_int, height: c_int, border: c_int, format: c_uint, typ: c_uint, pixels: ?*const anyopaque) void;
-extern fn glBlitFramebuffer(srcX0: c_int, srcY0: c_int, srcX1: c_int, srcY1: c_int, dstX0: c_int, dstY0: c_int, dstX1: c_int, dstY1: c_int, mask: c_uint, filter: c_uint) void;
-
 const SurfaceTraceView = extern struct {
     flags: u32,
     format: ?*anyopaque,
@@ -92,7 +71,6 @@ const DlInfo = extern struct {
 };
 
 extern fn dladdr(addr: ?*const anyopaque, info: *DlInfo) c_int;
-extern fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
 
 fn traceLimited(rt: *runtime.Runtime, counter: *usize, comptime fmt: []const u8, args: anytype) void {
     if (std.c.getenv("KATZENSTEG_TRACE_SDL") == null) return;
@@ -124,7 +102,7 @@ fn shouldAllowBackgroundGamepadEvents() bool {
 
 fn applyBackgroundGamepadHint() void {
     if (!shouldAllowBackgroundGamepadEvents()) return;
-    _ = sdl.SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+    _ = real_sdl.SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
 }
 
 fn shouldForwardRealRendererCall(policy: window_policy.WindowPresentationPolicy) bool {
@@ -146,10 +124,10 @@ fn selectDlopenPath(requested: ?[*:0]const u8, override: ?[*:0]const u8) ?[*:0]c
 fn applyRealWindowAction(action: window_policy.RealWindowAction, window: ?*sdl.SDL_Window) void {
     switch (action) {
         .none => {},
-        .show => sdl.SDL_ShowWindow(window),
-        .hide => sdl.SDL_HideWindow(window),
-        .minimize => sdl.SDL_MinimizeWindow(window),
-        .restore => sdl.SDL_RestoreWindow(window),
+        .show => real_sdl.SDL_ShowWindow(window),
+        .hide => real_sdl.SDL_HideWindow(window),
+        .minimize => real_sdl.SDL_MinimizeWindow(window),
+        .restore => real_sdl.SDL_RestoreWindow(window),
     }
 }
 
@@ -211,26 +189,26 @@ pub export fn ks_katzensteg_shutdown() callconv(.c) void {
 
 pub export fn ks_SDL_Init(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
-    return sdl.SDL_Init(flags);
+    return real_sdl.SDL_Init(flags);
 }
 
 pub export fn ks_SDL_InitSubSystem(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
-    return sdl.SDL_InitSubSystem(flags);
+    return real_sdl.SDL_InitSubSystem(flags);
 }
 
 pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
     if ((flags & sdl.SDL_INIT_VIDEO) != 0) runtime.shutdownGlobal();
-    sdl.SDL_QuitSubSystem(flags);
+    real_sdl.SDL_QuitSubSystem(flags);
 }
 
 pub export fn ks_SDL_Quit() callconv(.c) void {
     runtime.shutdownGlobal();
-    sdl.SDL_Quit();
+    real_sdl.SDL_Quit();
 }
 
 pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Window {
-    const window = sdl.SDL_CreateWindow(title, x, y, w, h, flags);
+    const window = real_sdl.SDL_CreateWindow(title, x, y, w, h, flags);
     const rt = runtime.get();
     rt.noteInputWindowSize(w, h);
     traceLimited(rt, &trace_create_window, "katzensteg-trace: SDL_CreateWindow window={x} size={d}x{d} flags=0x{x}", .{ if (window) |p| @intFromPtr(p) else 0, w, h, flags });
@@ -243,7 +221,7 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
 }
 
 pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.Uint32 {
-    const flags = sdl.SDL_GetWindowFlags(window);
+    const flags = real_sdl.SDL_GetWindowFlags(window);
     return runtime.get().claimedWindowFlags(flags);
 }
 
@@ -256,7 +234,7 @@ pub export fn ks_SDL_HideWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     const action = rt.realWindowCreateAction(window);
     if (action == .none) {
-        sdl.SDL_HideWindow(window);
+        real_sdl.SDL_HideWindow(window);
     } else {
         applyRealWindowAction(action, window);
     }
@@ -266,7 +244,7 @@ pub export fn ks_SDL_MinimizeWindow(window: ?*sdl.SDL_Window) callconv(.c) void 
     const rt = runtime.get();
     const action = rt.realWindowCreateAction(window);
     if (action == .none) {
-        sdl.SDL_MinimizeWindow(window);
+        real_sdl.SDL_MinimizeWindow(window);
     } else {
         applyRealWindowAction(action, window);
     }
@@ -281,18 +259,18 @@ pub export fn ks_SDL_RaiseWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     const action = rt.realWindowShowAction(window);
     if (action == .show) {
-        sdl.SDL_RaiseWindow(window);
+        real_sdl.SDL_RaiseWindow(window);
     } else {
         applyRealWindowAction(action, window);
     }
 }
 
 pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
-    sdl.SDL_DestroyWindow(window);
+    real_sdl.SDL_DestroyWindow(window);
 }
 
 pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Renderer {
-    const renderer = sdl.SDL_CreateRenderer(window, index, flags);
+    const renderer = real_sdl.SDL_CreateRenderer(window, index, flags);
     const rt = runtime.get();
     traceLimited(rt, &trace_create_renderer, "katzensteg-trace: SDL_CreateRenderer window={x} renderer={x} index={d} flags=0x{x}", .{ if (window) |p| @intFromPtr(p) else 0, if (renderer) |p| @intFromPtr(p) else 0, index, flags });
     switch (rt.intercept_mode) {
@@ -303,7 +281,7 @@ pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flag
 }
 
 pub export fn ks_SDL_GetRendererInfo(renderer: ?*sdl.SDL_Renderer, info: ?*sdl.SDL_RendererInfo) callconv(.c) c_int {
-    const rc = sdl.SDL_GetRendererInfo(renderer, info);
+    const rc = real_sdl.SDL_GetRendererInfo(renderer, info);
     if (rc == 0) {
         if (info) |renderer_info| {
             const before = renderer_info.num_texture_formats;
@@ -323,11 +301,11 @@ pub export fn ks_SDL_DestroyRenderer(renderer: ?*sdl.SDL_Renderer) callconv(.c) 
         .sync_compose => sink.onDestroyRenderer(rt, renderer),
         .queued_replay => sink.dispatchCommand(rt, .{ .destroy_renderer = .{ .renderer = renderer } }),
     }
-    sdl.SDL_DestroyRenderer(renderer);
+    real_sdl.SDL_DestroyRenderer(renderer);
 }
 
 pub export fn ks_SDL_CreateTexture(renderer: ?*sdl.SDL_Renderer, format: sdl.Uint32, access: c_int, w: c_int, h: c_int) callconv(.c) ?*sdl.SDL_Texture {
-    const texture = sdl.SDL_CreateTexture(renderer, format, access, w, h);
+    const texture = real_sdl.SDL_CreateTexture(renderer, format, access, w, h);
     const rt = runtime.get();
     traceLimited(rt, &trace_create_texture, "katzensteg-trace: SDL_CreateTexture renderer={x} texture={x} format={d} access={d} size={d}x{d}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, format, access, w, h });
     switch (rt.intercept_mode) {
@@ -338,7 +316,7 @@ pub export fn ks_SDL_CreateTexture(renderer: ?*sdl.SDL_Renderer, format: sdl.Uin
 }
 
 pub export fn ks_SDL_CreateTextureFromSurface(renderer: ?*sdl.SDL_Renderer, surface: ?*sdl.SDL_Surface) callconv(.c) ?*sdl.SDL_Texture {
-    const texture = sdl.SDL_CreateTextureFromSurface(renderer, surface);
+    const texture = real_sdl.SDL_CreateTextureFromSurface(renderer, surface);
     const rt = runtime.get();
     if (texture) |tex| {
         switch (rt.intercept_mode) {
@@ -358,11 +336,11 @@ pub export fn ks_SDL_DestroyTexture(texture: ?*sdl.SDL_Texture) callconv(.c) voi
         .sync_compose => sink.onDestroyTexture(rt, texture),
         .queued_replay => sink.dispatchCommand(rt, .{ .destroy_texture = .{ .texture = texture } }),
     }
-    sdl.SDL_DestroyTexture(texture);
+    real_sdl.SDL_DestroyTexture(texture);
 }
 
 pub export fn ks_SDL_UpdateTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: c_int) callconv(.c) c_int {
-    const rc = sdl.SDL_UpdateTexture(texture, rect, pixels, pitch);
+    const rc = real_sdl.SDL_UpdateTexture(texture, rect, pixels, pitch);
     const rt = runtime.get();
     traceLimited(rt, &trace_update_texture, "katzensteg-trace: SDL_UpdateTexture texture={x} rc={d} rect={s} pitch={d} pixels={x}", .{ if (texture) |p| @intFromPtr(p) else 0, rc, if (rect == null) "null" else "partial", pitch, if (pixels) |p| @intFromPtr(p) else 0 });
     if (rc == 0) switch (rt.intercept_mode) {
@@ -373,7 +351,7 @@ pub export fn ks_SDL_UpdateTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl
 }
 
 pub export fn ks_SDL_UpdateYUVTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const sdl.Uint8, ypitch: c_int, uplane: ?[*]const sdl.Uint8, upitch: c_int, vplane: ?[*]const sdl.Uint8, vpitch: c_int) callconv(.c) c_int {
-    const rc = sdl.SDL_UpdateYUVTexture(texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+    const rc = real_sdl.SDL_UpdateYUVTexture(texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
     const rt = runtime.get();
     traceLimited(rt, &trace_update_yuv_texture, "katzensteg-trace: SDL_UpdateYUVTexture texture={x} rc={d} rect={s} ypitch={d} upitch={d} vpitch={d}", .{ if (texture) |p| @intFromPtr(p) else 0, rc, if (rect == null) "null" else "partial", ypitch, upitch, vpitch });
     if (rc == 0) switch (rt.intercept_mode) {
@@ -384,7 +362,7 @@ pub export fn ks_SDL_UpdateYUVTexture(texture: ?*sdl.SDL_Texture, rect: ?*const 
 }
 
 pub export fn ks_SDL_UpdateNVTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const sdl.Uint8, ypitch: c_int, uvplane: ?[*]const sdl.Uint8, uvpitch: c_int) callconv(.c) c_int {
-    const rc = sdl.SDL_UpdateNVTexture(texture, rect, yplane, ypitch, uvplane, uvpitch);
+    const rc = real_sdl.SDL_UpdateNVTexture(texture, rect, yplane, ypitch, uvplane, uvpitch);
     const rt = runtime.get();
     traceLimited(rt, &trace_update_nv_texture, "katzensteg-trace: SDL_UpdateNVTexture texture={x} rc={d} rect={s} ypitch={d} uvpitch={d}", .{ if (texture) |p| @intFromPtr(p) else 0, rc, if (rect == null) "null" else "partial", ypitch, uvpitch });
     if (rc == 0) switch (rt.intercept_mode) {
@@ -395,7 +373,7 @@ pub export fn ks_SDL_UpdateNVTexture(texture: ?*sdl.SDL_Texture, rect: ?*const s
 }
 
 pub export fn ks_SDL_LockTexture(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: *?*anyopaque, pitch: *c_int) callconv(.c) c_int {
-    const rc = sdl.SDL_LockTexture(texture, rect, pixels, pitch);
+    const rc = real_sdl.SDL_LockTexture(texture, rect, pixels, pitch);
     const rt = runtime.get();
     traceLimited(rt, &trace_lock_texture, "katzensteg-trace: SDL_LockTexture texture={x} rc={d} rect={s} pitch={d} pixels={x}", .{ if (texture) |p| @intFromPtr(p) else 0, rc, if (rect == null) "null" else "partial", if (rc == 0) pitch.* else 0, if (rc == 0) if (pixels.*) |p| @intFromPtr(p) else 0 else 0 });
     if (rc == 0) {
@@ -414,11 +392,11 @@ pub export fn ks_SDL_UnlockTexture(texture: ?*sdl.SDL_Texture) callconv(.c) void
         .sync_compose => sink.onUnlockTexture(rt, texture),
         .queued_replay => sink.enqueueQueuedUnlockTexture(rt, texture),
     }
-    sdl.SDL_UnlockTexture(texture);
+    real_sdl.SDL_UnlockTexture(texture);
 }
 
 pub export fn ks_SDL_SetTextureColorMod(texture: ?*sdl.SDL_Texture, r: sdl.Uint8, g: sdl.Uint8, b: sdl.Uint8) callconv(.c) c_int {
-    const rc = sdl.SDL_SetTextureColorMod(texture, r, g, b);
+    const rc = real_sdl.SDL_SetTextureColorMod(texture, r, g, b);
     const rt = runtime.get();
     if (rc == 0) switch (rt.intercept_mode) {
         .sync_compose => sink.onSetTextureColorMod(rt, texture, r, g, b),
@@ -428,7 +406,7 @@ pub export fn ks_SDL_SetTextureColorMod(texture: ?*sdl.SDL_Texture, r: sdl.Uint8
 }
 
 pub export fn ks_SDL_SetTextureAlphaMod(texture: ?*sdl.SDL_Texture, a: sdl.Uint8) callconv(.c) c_int {
-    const rc = sdl.SDL_SetTextureAlphaMod(texture, a);
+    const rc = real_sdl.SDL_SetTextureAlphaMod(texture, a);
     const rt = runtime.get();
     if (rc == 0) switch (rt.intercept_mode) {
         .sync_compose => sink.onSetTextureAlphaMod(rt, texture, a),
@@ -438,7 +416,7 @@ pub export fn ks_SDL_SetTextureAlphaMod(texture: ?*sdl.SDL_Texture, a: sdl.Uint8
 }
 
 pub export fn ks_SDL_SetTextureBlendMode(texture: ?*sdl.SDL_Texture, blendMode: c_int) callconv(.c) c_int {
-    const rc = sdl.SDL_SetTextureBlendMode(texture, blendMode);
+    const rc = real_sdl.SDL_SetTextureBlendMode(texture, blendMode);
     if (rc == 0) {
         const rt = runtime.get();
         switch (rt.intercept_mode) {
@@ -450,7 +428,7 @@ pub export fn ks_SDL_SetTextureBlendMode(texture: ?*sdl.SDL_Texture, blendMode: 
 }
 
 pub export fn ks_SDL_SetRenderDrawColor(renderer: ?*sdl.SDL_Renderer, r: sdl.Uint8, g: sdl.Uint8, b: sdl.Uint8, a: sdl.Uint8) callconv(.c) c_int {
-    const rc = sdl.SDL_SetRenderDrawColor(renderer, r, g, b, a);
+    const rc = real_sdl.SDL_SetRenderDrawColor(renderer, r, g, b, a);
     if (rc == 0) {
         const rt = runtime.get();
         switch (rt.intercept_mode) {
@@ -463,7 +441,7 @@ pub export fn ks_SDL_SetRenderDrawColor(renderer: ?*sdl.SDL_Renderer, r: sdl.Uin
 
 pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderClear(renderer) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderClear(renderer) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_clear, "katzensteg-trace: SDL_RenderClear renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
         if (rt.terminalRenderingEnabled(null, renderer)) {
@@ -478,7 +456,7 @@ pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_in
 
 pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, srcrect: ?*const sdl.SDL_Rect, dstrect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderCopy(renderer, texture, srcrect, dstrect) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderCopy(renderer, texture, srcrect, dstrect) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_copy, "katzensteg-trace: SDL_RenderCopy renderer={x} texture={x} src={s} dst={s}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, if (srcrect == null) "null" else "set", if (dstrect == null) "null" else "set" });
         if (rt.terminalRenderingEnabled(null, renderer)) {
@@ -493,7 +471,7 @@ pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL
 
 pub export fn ks_SDL_RenderCopyEx(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, srcrect: ?*const sdl.SDL_Rect, dstrect: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderCopyEx(renderer, texture, srcrect, dstrect, angle, center, flip) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderCopyEx(renderer, texture, srcrect, dstrect, angle, center, flip) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_copy_ex, "katzensteg-trace: SDL_RenderCopyEx renderer={x} texture={x} src={s} dst={s} angle={d:.2} flip={d}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, if (srcrect == null) "null" else "set", if (dstrect == null) "null" else "set", angle, flip });
         if (rt.terminalRenderingEnabled(null, renderer)) {
@@ -508,7 +486,7 @@ pub export fn ks_SDL_RenderCopyEx(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.S
 
 pub export fn ks_SDL_RenderGeometryRaw(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, color: ?[*]const sdl.SDL_Color, color_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderGeometryRaw(renderer, texture, xy, xy_stride, color, color_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderGeometryRaw(renderer, texture, xy, xy_stride, color, color_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_geometry_raw, "katzensteg-trace: SDL_RenderGeometryRaw renderer={x} texture={x} vertices={d} indices={d} size_indices={d}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, num_vertices, num_indices, size_indices });
         if (rt.terminalRenderingEnabled(null, renderer)) {
@@ -523,7 +501,7 @@ pub export fn ks_SDL_RenderGeometryRaw(renderer: ?*sdl.SDL_Renderer, texture: ?*
 
 pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderFillRect(renderer, rect) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderFillRect(renderer, rect) else 0;
     if (rc == 0) {
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
@@ -537,7 +515,7 @@ pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const 
 
 pub export fn ks_SDL_RenderDrawPoint(renderer: ?*sdl.SDL_Renderer, x: c_int, y: c_int) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderDrawPoint(renderer, x, y) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderDrawPoint(renderer, x, y) else 0;
     if (rc == 0) {
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
@@ -551,7 +529,7 @@ pub export fn ks_SDL_RenderDrawPoint(renderer: ?*sdl.SDL_Renderer, x: c_int, y: 
 
 pub export fn ks_SDL_RenderDrawLine(renderer: ?*sdl.SDL_Renderer, x1: c_int, y1: c_int, x2: c_int, y2: c_int) callconv(.c) c_int {
     const rt = runtime.get();
-    const rc = if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderDrawLine(renderer, x1, y1, x2, y2) else 0;
+    const rc = if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderDrawLine(renderer, x1, y1, x2, y2) else 0;
     if (rc == 0) {
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
@@ -564,7 +542,7 @@ pub export fn ks_SDL_RenderDrawLine(renderer: ?*sdl.SDL_Renderer, x1: c_int, y1:
 }
 
 pub export fn ks_SDL_RenderSetViewport(renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
-    const rc = sdl.SDL_RenderSetViewport(renderer, rect);
+    const rc = real_sdl.SDL_RenderSetViewport(renderer, rect);
     if (rc == 0) {
         const rt = runtime.get();
         switch (rt.intercept_mode) {
@@ -576,7 +554,7 @@ pub export fn ks_SDL_RenderSetViewport(renderer: ?*sdl.SDL_Renderer, rect: ?*con
 }
 
 pub export fn ks_SDL_RenderSetClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
-    const rc = sdl.SDL_RenderSetClipRect(renderer, rect);
+    const rc = real_sdl.SDL_RenderSetClipRect(renderer, rect);
     if (rc == 0) {
         const rt = runtime.get();
         switch (rt.intercept_mode) {
@@ -596,18 +574,18 @@ pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) vo
             .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = renderer } }),
         }
     }
-    if (rt.realRenderEnabled(null, renderer)) sdl.SDL_RenderPresent(renderer);
+    if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderPresent(renderer);
 }
 
 pub export fn ks_SDL_GL_CreateContext(window: ?*sdl.SDL_Window) callconv(.c) sdl.SDL_GLContext {
-    const context = sdl.SDL_GL_CreateContext(window);
+    const context = real_sdl.SDL_GL_CreateContext(window);
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_create_context, "katzensteg-trace: SDL_GL_CreateContext window={x} context={x}", .{ if (window) |p| @intFromPtr(p) else 0, if (context) |p| @intFromPtr(p) else 0 });
     return context;
 }
 
 pub export fn ks_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_GLContext) callconv(.c) c_int {
-    const rc = sdl.SDL_GL_MakeCurrent(window, context);
+    const rc = real_sdl.SDL_GL_MakeCurrent(window, context);
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_make_current, "katzensteg-trace: SDL_GL_MakeCurrent window={x} context={x} rc={d}", .{ if (window) |p| @intFromPtr(p) else 0, if (context) |p| @intFromPtr(p) else 0, rc });
     return rc;
@@ -616,28 +594,31 @@ pub export fn ks_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_G
 pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_swap_window, "katzensteg-trace: SDL_GL_SwapWindow window={x}", .{if (window) |p| @intFromPtr(p) else 0});
-    switch (rt.glCaptureMode()) {
+    const capture_mode = rt.glCaptureMode();
+    if (capture_mode != .disabled and !real_gl.available()) {
+        rt.logger.writeOnce("katzensteg: GL capture disabled because OpenGL symbols are unavailable");
+    } else switch (capture_mode) {
         .disabled => {},
         .sync => captureGlFramebufferSync(rt, window),
         .pbo => captureGlFramebufferPbo(rt, window),
     }
-    sdl.SDL_GL_SwapWindow(window);
+    real_sdl.SDL_GL_SwapWindow(window);
 }
 
 pub export fn ks_SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) callconv(.c) c_int {
     const selected = selectVulkanLoaderPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
-    return sdl.SDL_Vulkan_LoadLibrary(selected);
+    return real_sdl.SDL_Vulkan_LoadLibrary(selected);
 }
 
 pub export fn ks_dlopen(path: ?[*:0]const u8, mode: c_int) callconv(.c) ?*anyopaque {
     const selected = selectDlopenPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
-    return dlopen(selected, mode);
+    return real_sdl.realDlopen(selected, mode);
 }
 
 fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct { w: c_int, h: c_int, len: usize } {
     var w: c_int = 0;
     var h: c_int = 0;
-    sdl.SDL_GL_GetDrawableSize(window, &w, &h);
+    real_sdl.SDL_GL_GetDrawableSize(window, &w, &h);
     if (w <= 0 or h <= 0) return null;
     if (!rt.shouldCaptureExternalFrame(window)) return null;
     return .{ .w = w, .h = h, .len = @as(usize, @intCast(w)) * @as(usize, @intCast(h)) * 4 };
@@ -651,18 +632,18 @@ fn captureGlFramebufferSync(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void
     var old_read_buffer: c_int = 0;
     var old_pack_alignment: c_int = 4;
     var old_pack_buffer: c_int = 0;
-    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
-    glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
-    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
-    defer glReadBuffer(@intCast(old_read_buffer));
-    defer glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
-    defer glBindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
+    real_gl.GetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    real_gl.GetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+    real_gl.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
+    defer real_gl.ReadBuffer(@intCast(old_read_buffer));
+    defer real_gl.PixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+    defer real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
 
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadBuffer(GL_BACK);
-    glReadPixels(0, 0, size.w, size.h, GL_RGBA, GL_UNSIGNED_BYTE, buffers.raw.ptr);
-    const err = glGetError();
+    real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    real_gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
+    real_gl.ReadBuffer(GL_BACK);
+    real_gl.ReadPixels(0, 0, size.w, size.h, GL_RGBA, GL_UNSIGNED_BYTE, buffers.raw.ptr);
+    const err = real_gl.GetError();
     if (err != GL_NO_ERROR) {
         trace_gl_capture_error += 1;
         if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
@@ -690,23 +671,23 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
     var old_framebuffer: c_int = 0;
     var old_read_framebuffer: c_int = 0;
     var old_draw_framebuffer: c_int = 0;
-    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
-    glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
-    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_framebuffer);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw_framebuffer);
-    defer glReadBuffer(@intCast(old_read_buffer));
-    defer glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
-    defer glBindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
-    defer glBindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
-    defer glBindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_read_framebuffer));
-    defer glBindFramebuffer(GL_DRAW_FRAMEBUFFER, @intCast(old_draw_framebuffer));
+    real_gl.GetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    real_gl.GetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+    real_gl.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
+    real_gl.GetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
+    real_gl.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_framebuffer);
+    real_gl.GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw_framebuffer);
+    defer real_gl.ReadBuffer(@intCast(old_read_buffer));
+    defer real_gl.PixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+    defer real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, @intCast(old_pack_buffer));
+    defer real_gl.BindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
+    defer real_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_read_framebuffer));
+    defer real_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, @intCast(old_draw_framebuffer));
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_framebuffer));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
-    glBlitFramebuffer(0, 0, size.w, size.h, 0, 0, target.w, target.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    const blit_err = glGetError();
+    real_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, @intCast(old_framebuffer));
+    real_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
+    real_gl.BlitFramebuffer(0, 0, size.w, size.h, 0, 0, target.w, target.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    const blit_err = real_gl.GetError();
     if (blit_err != GL_NO_ERROR) {
         trace_gl_capture_error += 1;
         if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
@@ -715,14 +696,14 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
         return;
     }
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
+    real_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, rt.gl_capture_downscale.fbo);
     const read_index = state.index;
     const map_index = (state.index + 1) % state.ids.len;
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[read_index]);
-    glReadPixels(0, 0, target.w, target.h, GL_RGBA, GL_UNSIGNED_BYTE, null);
-    const read_err = glGetError();
+    real_gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
+    real_gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
+    real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[read_index]);
+    real_gl.ReadPixels(0, 0, target.w, target.h, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    const read_err = real_gl.GetError();
     if (read_err != GL_NO_ERROR) {
         trace_gl_capture_error += 1;
         if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
@@ -732,17 +713,17 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
     }
 
     if (state.primed) {
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[map_index]);
-        if (glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY)) |mapped| {
+        real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[map_index]);
+        if (real_gl.MapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY)) |mapped| {
             const mapped_bytes = @as([*]const u8, @ptrCast(mapped))[0..target_len];
             gl_capture.flipRgbaRows(buffers.rgba, mapped_bytes, target.w, target.h);
-            if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) == 0) {
+            if (real_gl.UnmapBuffer(GL_PIXEL_PACK_BUFFER) == 0) {
                 rt.logger.write("katzensteg: GL PBO unmap reported data invalid");
             } else {
                 publishGlFramebuffer(rt, target.w, target.h, buffers.rgba);
             }
         } else {
-            const map_err = glGetError();
+            const map_err = real_gl.GetError();
             trace_gl_capture_error += 1;
             if (trace_gl_capture_error <= 12 or (trace_gl_capture_error % 300) == 0) {
                 rt.logger.writeFmt("katzensteg: GL PBO map failed err=0x{x} size={d}", .{ map_err, target_len });
@@ -788,12 +769,12 @@ fn ensureGlDownscaleTarget(rt: *runtime.Runtime, w: i32, h: i32) bool {
     const state = &rt.gl_capture_downscale;
     if (state.fbo != 0 and state.texture != 0 and state.w == w and state.h == h) return true;
 
-    if (state.fbo != 0) glDeleteFramebuffers(1, &state.fbo);
-    if (state.texture != 0) glDeleteTextures(1, &state.texture);
+    if (state.fbo != 0) real_gl.DeleteFramebuffers(1, &state.fbo);
+    if (state.texture != 0) real_gl.DeleteTextures(1, &state.texture);
     state.reset();
 
-    glGenFramebuffers(1, &state.fbo);
-    glGenTextures(1, &state.texture);
+    real_gl.GenFramebuffers(1, &state.fbo);
+    real_gl.GenTextures(1, &state.texture);
     if (state.fbo == 0 or state.texture == 0) {
         rt.logger.write("katzensteg: GL FBO downscale allocation returned id 0");
         state.reset();
@@ -802,23 +783,23 @@ fn ensureGlDownscaleTarget(rt: *runtime.Runtime, w: i32, h: i32) bool {
 
     var old_texture: c_int = 0;
     var old_framebuffer: c_int = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
-    glGetIntegerv(0x8069, &old_texture);
-    defer glBindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
-    defer glBindTexture(GL_TEXTURE_2D, @intCast(old_texture));
+    real_gl.GetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
+    real_gl.GetIntegerv(0x8069, &old_texture);
+    defer real_gl.BindFramebuffer(GL_FRAMEBUFFER, @intCast(old_framebuffer));
+    defer real_gl.BindTexture(GL_TEXTURE_2D, @intCast(old_texture));
 
-    glBindTexture(GL_TEXTURE_2D, state.texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, @intCast(GL_LINEAR));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, @intCast(GL_LINEAR));
-    glTexImage2D(GL_TEXTURE_2D, 0, @intCast(GL_RGBA), w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
-    glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.texture, 0);
-    const status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    const err = glGetError();
+    real_gl.BindTexture(GL_TEXTURE_2D, state.texture);
+    real_gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, @intCast(GL_LINEAR));
+    real_gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, @intCast(GL_LINEAR));
+    real_gl.TexImage2D(GL_TEXTURE_2D, 0, @intCast(GL_RGBA), w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    real_gl.BindFramebuffer(GL_FRAMEBUFFER, state.fbo);
+    real_gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.texture, 0);
+    const status = real_gl.CheckFramebufferStatus(GL_FRAMEBUFFER);
+    const err = real_gl.GetError();
     if (status != GL_FRAMEBUFFER_COMPLETE or err != GL_NO_ERROR) {
         rt.logger.writeFmt("katzensteg: GL FBO downscale setup failed status=0x{x} err=0x{x} size={d}x{d}", .{ status, err, w, h });
-        glDeleteFramebuffers(1, &state.fbo);
-        glDeleteTextures(1, &state.texture);
+        real_gl.DeleteFramebuffers(1, &state.fbo);
+        real_gl.DeleteTextures(1, &state.texture);
         state.reset();
         return false;
     }
@@ -834,11 +815,11 @@ fn ensureGlPboState(rt: *runtime.Runtime, len: usize) bool {
     if (state.len == len and state.ids[0] != 0 and state.ids[1] != 0) return true;
 
     if (state.ids[0] != 0 or state.ids[1] != 0) {
-        glDeleteBuffers(2, &state.ids[0]);
+        real_gl.DeleteBuffers(2, &state.ids[0]);
         state.reset();
     }
 
-    glGenBuffers(2, &state.ids[0]);
+    real_gl.GenBuffers(2, &state.ids[0]);
     var i: usize = 0;
     while (i < state.ids.len) : (i += 1) {
         if (state.ids[i] == 0) {
@@ -846,14 +827,14 @@ fn ensureGlPboState(rt: *runtime.Runtime, len: usize) bool {
             state.reset();
             return false;
         }
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[i]);
-        glBufferData(GL_PIXEL_PACK_BUFFER, @intCast(len), null, GL_STREAM_READ);
+        real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[i]);
+        real_gl.BufferData(GL_PIXEL_PACK_BUFFER, @intCast(len), null, GL_STREAM_READ);
     }
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    const err = glGetError();
+    real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    const err = real_gl.GetError();
     if (err != GL_NO_ERROR) {
         rt.logger.writeFmt("katzensteg: GL PBO setup failed err=0x{x} len={d}", .{ err, len });
-        glDeleteBuffers(2, &state.ids[0]);
+        real_gl.DeleteBuffers(2, &state.ids[0]);
         state.reset();
         return false;
     }
@@ -869,9 +850,9 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
     } else if (rt.popSdlInputEvent(event)) return 1;
-    const out = event orelse return sdl.SDL_PollEvent(event);
+    const out = event orelse return real_sdl.SDL_PollEvent(event);
     while (true) {
-        const rc = sdl.SDL_PollEvent(out);
+        const rc = real_sdl.SDL_PollEvent(out);
         if (rc == 0) return 0;
         if (!rt.shouldSuppressSdlEvent(out)) {
             rt.noteRealSdlEvent(out);
@@ -885,10 +866,10 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     rt.pollTerminalInput();
 
     if (action != sdl.SDL_GETEVENT or numevents <= 0) {
-        return sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+        return real_sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
     }
 
-    const out = events orelse return sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+    const out = events orelse return real_sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
     var emitted: c_int = 0;
     while (emitted < numevents) : (emitted += 1) {
         const idx: usize = @intCast(emitted);
@@ -897,14 +878,14 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
 
     if (emitted == numevents) return emitted;
     const rest_ptr = out + @as(usize, @intCast(emitted));
-    const real_rc = sdl.SDL_PeepEvents(rest_ptr, numevents - emitted, action, minType, maxType);
+    const real_rc = real_sdl.SDL_PeepEvents(rest_ptr, numevents - emitted, action, minType, maxType);
     if (real_rc < 0) return if (emitted > 0) emitted else real_rc;
     return emitted + real_rc;
 }
 
 pub export fn ks_SDL_GetKeyboardState(numkeys: ?*c_int) callconv(.c) ?[*]const sdl.Uint8 {
     var real_count: c_int = 0;
-    const real_state = sdl.SDL_GetKeyboardState(&real_count);
+    const real_state = real_sdl.SDL_GetKeyboardState(&real_count);
     const rt = runtime.get();
     rt.pollTerminalInput();
     return rt.mergedKeyboardState(real_state, real_count, numkeys);
@@ -915,14 +896,14 @@ pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
-        return sdl.SDL_GetMouseState(x, y);
+        return real_sdl.SDL_GetMouseState(x, y);
     }
     if (rt.terminalMouseState()) |state| {
         if (x) |out_x| out_x.* = state.x;
         if (y) |out_y| out_y.* = state.y;
         return state.buttons;
     }
-    const buttons = sdl.SDL_GetMouseState(x, y);
+    const buttons = real_sdl.SDL_GetMouseState(x, y);
     if (buttons != 0) rt.claimRealWindowMouse();
     return buttons;
 }
@@ -932,14 +913,14 @@ pub export fn ks_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) 
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
-        return sdl.SDL_GetRelativeMouseState(x, y);
+        return real_sdl.SDL_GetRelativeMouseState(x, y);
     }
     if (rt.terminalRelativeMouseState()) |state| {
         if (x) |out_x| out_x.* = state.xrel;
         if (y) |out_y| out_y.* = state.yrel;
         return state.buttons;
     }
-    const buttons = sdl.SDL_GetRelativeMouseState(x, y);
+    const buttons = real_sdl.SDL_GetRelativeMouseState(x, y);
     const xrel = if (x) |out_x| out_x.* else 0;
     const yrel = if (y) |out_y| out_y.* else 0;
     if (buttons != 0 or xrel != 0 or yrel != 0) rt.claimRealWindowMouse();
@@ -947,12 +928,12 @@ pub export fn ks_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) 
 }
 
 fn realMouseFocused() bool {
-    return sdl.SDL_GetMouseFocus() != null;
+    return real_sdl.SDL_GetMouseFocus() != null;
 }
 
 pub export fn ks_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*sdl.SDL_Rect) callconv(.c) c_int {
     const return_addr = @returnAddress();
-    const rc = sdl.SDL_UpperBlit(src, srcrect, dst, dstrect);
+    const rc = real_sdl.SDL_UpperBlit(src, srcrect, dst, dstrect);
     const rt = runtime.get();
     if (std.c.getenv("KATZENSTEG_TRACE_SDL") != null) {
         trace_upper_blit += 1;
@@ -979,7 +960,7 @@ pub export fn ks_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_
                     ds.pitch,
                     ds.pixels,
                     if (dstrect == null) "null" else "set",
-                    std.mem.span(sdl.SDL_GetError()),
+                    std.mem.span(real_sdl.SDL_GetError()),
                 },
             );
         }
