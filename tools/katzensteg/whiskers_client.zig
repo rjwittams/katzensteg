@@ -84,7 +84,12 @@ const ResourceIngestRecord = struct {
     image_id: u32,
 };
 const ResourceBatchRequest = struct { segment_id: []const u8, resources: []const ResourceIngestRecord };
-const control_socket_timeout_ms: i64 = 250;
+
+const ParseProgress = enum {
+    progress,
+    need_more,
+    done,
+};
 
 pub const WhiskersClient = struct {
     allocator: std.mem.Allocator,
@@ -97,6 +102,8 @@ pub const WhiskersClient = struct {
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     control_thread: ?std.Thread = null,
     control_fd: ?std.posix.fd_t = null,
+    wake_read_fd: std.posix.fd_t = -1,
+    wake_write_fd: std.posix.fd_t = -1,
     mutex: std.Thread.Mutex = .{},
     current_segment_id: ?[]u8 = null,
     next_segment_seq: u64 = 1,
@@ -111,6 +118,12 @@ pub const WhiskersClient = struct {
         const parsed = try std.json.parseFromSlice(ProducerHelloResponse, allocator, response_body, .{});
         defer parsed.deinit();
 
+        const wake = try createWakeSocketPair();
+        errdefer {
+            std.posix.close(wake[0]);
+            std.posix.close(wake[1]);
+        }
+
         return .{
             .allocator = allocator,
             .logger = logger,
@@ -119,6 +132,8 @@ pub const WhiskersClient = struct {
             .bearer_token = try allocator.dupe(u8, parsed.value.bearer_token),
             .display_name = try allocator.dupe(u8, parsed.value.display_name),
             .capture_enabled = std.atomic.Value(bool).init(parsed.value.capture_enabled),
+            .wake_read_fd = wake[0],
+            .wake_write_fd = wake[1],
         };
     }
 
@@ -132,6 +147,9 @@ pub const WhiskersClient = struct {
 
     pub fn deinit(self: *WhiskersClient) void {
         self.shutdown.store(true, .release);
+        if (self.wake_write_fd >= 0) {
+            _ = std.posix.write(self.wake_write_fd, &[1]u8{1}) catch {};
+        }
         self.mutex.lock();
         if (self.control_fd) |fd| {
             std.posix.shutdown(fd, .both) catch {};
@@ -145,6 +163,14 @@ pub const WhiskersClient = struct {
         if (segment_id_owned) |segment_id| {
             self.logger.writeFmt("katzensteg: whiskers leaving active segment open during shutdown producer={s}", .{self.producer_id});
             self.allocator.free(segment_id);
+        }
+        if (self.wake_read_fd >= 0) {
+            std.posix.close(self.wake_read_fd);
+            self.wake_read_fd = -1;
+        }
+        if (self.wake_write_fd >= 0) {
+            std.posix.close(self.wake_write_fd);
+            self.wake_write_fd = -1;
         }
         self.allocator.free(self.socket_path);
         self.allocator.free(self.producer_id);
@@ -376,7 +402,7 @@ pub const WhiskersClient = struct {
             self.controlLoopOnce() catch |err| {
                 if (self.shutdown.load(.acquire)) break;
                 switch (err) {
-                    error.WouldBlock, error.ConnectionTimedOut => continue,
+                    error.EndOfStream, error.ConnectionResetByPeer, error.BrokenPipe => continue,
                     else => {
                         self.logger.writeFmt("katzensteg: whiskers control loop error: {any}", .{err});
                         std.Thread.sleep(250 * std.time.ns_per_ms);
@@ -388,7 +414,6 @@ pub const WhiskersClient = struct {
 
     fn controlLoopOnce(self: *WhiskersClient) !void {
         var stream = try std.net.connectUnixSocket(self.socket_path);
-        try setControlSocketTimeout(stream.handle, control_socket_timeout_ms);
         defer {
             self.mutex.lock();
             if (self.control_fd != null and self.control_fd.? == stream.handle) self.control_fd = null;
@@ -407,47 +432,114 @@ pub const WhiskersClient = struct {
         );
         _ = try stream.write(req_buf.items);
 
-        var read_buf: [4096]u8 = undefined;
-        var reader = stream.reader(&read_buf);
-        const header_bytes = try readUntilHeaderEnd(self.allocator, &reader);
-        defer self.allocator.free(header_bytes);
-        const status = parseStatusCode(header_bytes) orelse return error.BadHttpResponse;
-        if (status != 200) return error.BadHttpStatus;
-
+        var recv_buf = std.ArrayList(u8).empty;
+        defer recv_buf.deinit(self.allocator);
         var line_buf = std.ArrayList(u8).empty;
         defer line_buf.deinit(self.allocator);
+        var parse_offset: usize = 0;
+        var headers_done = false;
+        var chunk_remaining: ?usize = null;
+        var expect_chunk_trailer = false;
+
         while (!self.shutdown.load(.acquire)) {
-            const chunk_header = try reader.interface().takeDelimiterExclusive('\n');
-            const chunk_header_trimmed = std.mem.trim(u8, chunk_header, "\r ");
-            if (chunk_header_trimmed.len == 0) continue;
-            const chunk_size = std.fmt.parseInt(usize, chunk_header_trimmed, 16) catch return error.BadChunkHeader;
-            if (chunk_size == 0) break;
-            var remaining = chunk_size;
-            while (remaining > 0) : (remaining -= 1) {
-                const byte = try reader.interface().takeByte();
-                if (byte == '\n') {
-                    const trimmed = std.mem.trimRight(u8, line_buf.items, "\r");
-                    if (trimmed.len != 0 and std.mem.startsWith(u8, trimmed, "event:")) {
-                        const event_name = std.mem.trim(u8, trimmed[6..], " ");
-                        self.applyControlEvent(event_name);
-                    }
-                    line_buf.clearRetainingCapacity();
-                } else {
-                    line_buf.append(self.allocator, byte) catch return error.OutOfMemory;
+            while (true) {
+                switch (try self.processControlBytes(&recv_buf, &line_buf, &parse_offset, &headers_done, &chunk_remaining, &expect_chunk_trailer)) {
+                    .progress => continue,
+                    .done => return,
+                    .need_more => break,
                 }
             }
-            _ = try reader.interface().takeByte(); // \r
-            _ = try reader.interface().takeByte(); // \n
+
+            var poll_fds = [_]std.posix.pollfd{
+                .{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = self.wake_read_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+            _ = try std.posix.poll(&poll_fds, -1);
+            if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
+                self.drainWakeFd();
+                return;
+            }
+            if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+                return error.EndOfStream;
+            }
+            if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
+
+            var buf: [4096]u8 = undefined;
+            const n = try std.posix.read(stream.handle, &buf);
+            if (n == 0) return error.EndOfStream;
+            try recv_buf.appendSlice(self.allocator, buf[0..n]);
         }
+    }
+
+    fn drainWakeFd(self: *WhiskersClient) void {
+        var buf: [64]u8 = undefined;
+        _ = std.posix.read(self.wake_read_fd, &buf) catch {};
+    }
+
+    fn processControlBytes(
+        self: *WhiskersClient,
+        recv_buf: *std.ArrayList(u8),
+        line_buf: *std.ArrayList(u8),
+        parse_offset: *usize,
+        headers_done: *bool,
+        chunk_remaining: *?usize,
+        expect_chunk_trailer: *bool,
+    ) !ParseProgress {
+        if (!headers_done.*) {
+            const pending = recv_buf.items[parse_offset.*..];
+            const rel_end = std.mem.indexOf(u8, pending, "\r\n\r\n") orelse return .need_more;
+            const header = pending[0..rel_end];
+            const status = parseStatusCode(header) orelse return error.BadHttpResponse;
+            if (status != 200) return error.BadHttpStatus;
+            parse_offset.* += rel_end + 4;
+            headers_done.* = true;
+            try maybeCompactBuffer(recv_buf, self.allocator, parse_offset);
+            return .progress;
+        }
+
+        if (expect_chunk_trailer.*) {
+            const pending = recv_buf.items[parse_offset.*..];
+            if (pending.len < 2) return .need_more;
+            parse_offset.* += 2;
+            expect_chunk_trailer.* = false;
+            chunk_remaining.* = null;
+            try maybeCompactBuffer(recv_buf, self.allocator, parse_offset);
+            return .progress;
+        }
+
+        if (chunk_remaining.* == null) {
+            const pending = recv_buf.items[parse_offset.*..];
+            const rel_nl = findNewline(pending) orelse return .need_more;
+            const chunk_header = std.mem.trim(u8, pending[0..rel_nl], "\r ");
+            parse_offset.* += rel_nl + 1;
+            if (chunk_header.len == 0) {
+                try maybeCompactBuffer(recv_buf, self.allocator, parse_offset);
+                return .progress;
+            }
+            const size = std.fmt.parseInt(usize, chunk_header, 16) catch return error.BadChunkHeader;
+            if (size == 0) return .done;
+            chunk_remaining.* = size;
+            try maybeCompactBuffer(recv_buf, self.allocator, parse_offset);
+            return .progress;
+        }
+
+        const remaining = chunk_remaining.*.?;
+        const pending = recv_buf.items[parse_offset.*..];
+        if (pending.len == 0) return .need_more;
+        const take = @min(remaining, pending.len);
+        try processSseData(line_buf, self.allocator, pending[0..take], self);
+        parse_offset.* += take;
+        chunk_remaining.* = remaining - take;
+        if (chunk_remaining.*.? == 0) expect_chunk_trailer.* = true;
+        try maybeCompactBuffer(recv_buf, self.allocator, parse_offset);
+        return .progress;
     }
 };
 
-fn setControlSocketTimeout(fd: std.posix.fd_t, timeout_ms: i64) !void {
-    var tv = std.posix.timeval{
-        .sec = @intCast(@divTrunc(timeout_ms, 1000)),
-        .usec = @intCast(@mod(timeout_ms, 1000) * 1000),
-    };
-    try std.posix.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, std.mem.asBytes(&tv));
+fn createWakeSocketPair() ![2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+    return fds;
 }
 
 fn postJsonIgnoreBody(allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) !void {
@@ -495,14 +587,31 @@ fn parseStatusCode(header: []const u8) ?u16 {
     return std.fmt.parseInt(u16, code_text, 10) catch null;
 }
 
-fn readUntilHeaderEnd(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(allocator);
-    while (true) {
-        const byte = try reader.interface().takeByte();
-        try buf.append(allocator, byte);
-        if (std.mem.endsWith(u8, buf.items, "\r\n\r\n")) break;
-        if (buf.items.len > 64 * 1024) return error.HeadersTooLarge;
+fn maybeCompactBuffer(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, parse_offset: *usize) !void {
+    if (parse_offset.* == 0) return;
+    if (parse_offset.* < 4096 and parse_offset.* < buf.items.len / 2) return;
+    const remaining = buf.items[parse_offset.*..];
+    std.mem.copyForwards(u8, buf.items[0..remaining.len], remaining);
+    buf.items.len = remaining.len;
+    parse_offset.* = 0;
+    _ = allocator;
+}
+
+fn processSseData(line_buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, client: *WhiskersClient) !void {
+    for (data) |byte| {
+        if (byte == '\n') {
+            const trimmed = std.mem.trimRight(u8, line_buf.items, "\r");
+            if (trimmed.len != 0 and std.mem.startsWith(u8, trimmed, "event:")) {
+                const event_name = std.mem.trim(u8, trimmed[6..], " ");
+                client.applyControlEvent(event_name);
+            }
+            line_buf.clearRetainingCapacity();
+        } else {
+            try line_buf.append(allocator, byte);
+        }
     }
-    return buf.toOwnedSlice(allocator);
+}
+
+fn findNewline(bytes: []const u8) ?usize {
+    return std.mem.indexOfScalar(u8, bytes, '\n');
 }
