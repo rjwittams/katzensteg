@@ -603,7 +603,7 @@ fn expandProfileSeedFiles(allocator: std.mem.Allocator, seed_files: []const prof
         try out.append(allocator, .{
             .path = try expandLauncherString(allocator, entry.path, expansion),
             .source = if (entry.source) |source| try expandLauncherString(allocator, source, expansion) else null,
-            .content = if (entry.content) |content| try allocator.dupe(u8, content) else null,
+            .content = if (entry.content) |content| try expandLauncherString(allocator, content, expansion) else null,
         });
     }
     return out.toOwnedSlice(allocator);
@@ -1152,6 +1152,26 @@ test "launcher resolves and seeds missing files without overwriting existing fil
     const preserved = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
     defer std.testing.allocator.free(preserved);
     try std.testing.expectEqualStrings("keep\n", preserved);
+}
+
+test "launcher expands seed file content placeholders" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "gamescope",
+        .target = "/bin/echo",
+        .seed_files = &.{
+            .{
+                .path = "/tmp/katzensteg-launcher-seed-content-test.json",
+                .content = "{\"library_path\":\"$HOME/dev/gamescope/layer.so\",\"repo\":\"{repo}\"}\n",
+            },
+        },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer plan.deinit();
+
+    try std.testing.expectEqualStrings("{\"library_path\":\"/Users/test/dev/gamescope/layer.so\",\"repo\":\"/repo\"}\n", plan.seed_files[0].content.?);
 }
 
 test "launcher refuses broken profiles before resolving launch plan" {

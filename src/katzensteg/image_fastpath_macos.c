@@ -162,6 +162,17 @@ int ks_fast_bgra_to_rgba(uint8_t *dst_rgba,
     return vImagePermuteChannels_ARGB8888(&src, &dst, bgra_to_rgba, kvImageNoFlags) == kvImageNoError;
 }
 
+int ks_fast_a2b10g10r10_to_rgba(uint8_t *dst_rgba,
+                                int width,
+                                int height,
+                                const uint8_t *src_a2b10g10r10) {
+    (void)dst_rgba;
+    (void)width;
+    (void)height;
+    (void)src_a2b10g10r10;
+    return 0;
+}
+
 int ks_fast_scale_rgba(uint8_t *dst_rgba,
                        int dst_width,
                        int dst_height,

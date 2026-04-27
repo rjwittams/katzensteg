@@ -90,3 +90,4 @@ A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older 
 - Keep producer-side instrumentation here; new inspector UI work goes in `whiskers`.
 - Linux: keep `build.zig`'s LLVM-codegen setting unless you have revalidated the `.sframe`/linker behavior on the target distro.
 - Preload code must not write to stdout/stderr (file logging only).
+- Vulkan capture should pass the original external framebuffer format through to the preload/present layer (`ExternalFramebufferFormat`) instead of normalizing in `vulkan_layer.c`. Format conversion belongs in the present path so queued stale frames can be dropped before conversion and future format-specific fast paths have one owner.

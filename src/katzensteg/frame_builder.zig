@@ -34,6 +34,7 @@ const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos 
 pub const ExternalFramebufferFormat = enum(u32) {
     rgba8 = 0,
     bgra8 = 1,
+    a2b10g10r10_unorm_pack32 = 2,
 };
 
 fn convertExternalFramebufferToRgba(dst: []u8, src: []const u8, width: i32, height: i32, format: ExternalFramebufferFormat) bool {
@@ -52,18 +53,45 @@ fn convertExternalFramebufferToRgba(dst: []u8, src: []const u8, width: i32, heig
                 dst[i + 3] = src[i + 3];
             }
         },
+        .a2b10g10r10_unorm_pack32 => {
+            if (tryFastA2B10G10R10ToRgba(dst, src[0..expected_len], width, height)) return true;
+            var i: usize = 0;
+            while (i < expected_len) : (i += 4) {
+                const packed_pixel = std.mem.readInt(u32, src[i..][0..4], .little);
+                dst[i + 0] = unorm10ToU8(packed_pixel & 0x3ff);
+                dst[i + 1] = unorm10ToU8((packed_pixel >> 10) & 0x3ff);
+                dst[i + 2] = unorm10ToU8((packed_pixel >> 20) & 0x3ff);
+                dst[i + 3] = unorm2ToU8((packed_pixel >> 30) & 0x3);
+            }
+        },
     }
     return true;
+}
+
+fn unorm10ToU8(value: u32) u8 {
+    return @intCast((value * 255 + 511) / 1023);
+}
+
+fn unorm2ToU8(value: u32) u8 {
+    return @intCast((value * 255 + 1) / 3);
 }
 
 extern fn ks_fast_i420_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uplane: [*]const u8, upitch: c_int, vplane: [*]const u8, vpitch: c_int) callconv(.c) c_int;
 extern fn ks_fast_nv12_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uvplane: [*]const u8, uvpitch: c_int) callconv(.c) c_int;
 extern fn ks_fast_bgra_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, src_bgra: [*]const u8) callconv(.c) c_int;
+extern fn ks_fast_a2b10g10r10_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, src_a2b10g10r10: [*]const u8) callconv(.c) c_int;
 extern fn ks_fast_scale_rgba(dst_rgba: [*]u8, dst_width: c_int, dst_height: c_int, src_rgba: [*]const u8, src_width: c_int, src_height: c_int) callconv(.c) c_int;
 
 fn tryFastBgraToRgba(dst: []u8, src: []const u8, width: i32, height: i32) bool {
     if (comptime native_fastpaths_enabled) {
         return ks_fast_bgra_to_rgba(dst.ptr, @intCast(width), @intCast(height), src.ptr) != 0;
+    }
+    return false;
+}
+
+fn tryFastA2B10G10R10ToRgba(dst: []u8, src: []const u8, width: i32, height: i32) bool {
+    if (comptime native_fastpaths_enabled) {
+        return ks_fast_a2b10g10r10_to_rgba(dst.ptr, @intCast(width), @intCast(height), src.ptr) != 0;
     }
     return false;
 }
@@ -3470,6 +3498,20 @@ test "external framebuffer conversion swaps bgra input to rgba" {
 
     try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 2, 1, .bgra8));
     try std.testing.expectEqualSlices(u8, &expected, &dst);
+}
+
+test "external framebuffer conversion expands a2b10g10r10 to rgba" {
+    var src: [8]u8 = undefined;
+    var dst: [src.len]u8 = undefined;
+
+    std.mem.writeInt(u32, src[0..4], (3 << 30) | (1023 << 20) | (512 << 10) | 0, .little);
+    std.mem.writeInt(u32, src[4..8], (0 << 30) | (0 << 20) | (1023 << 10) | 1023, .little);
+
+    try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 2, 1, .a2b10g10r10_unorm_pack32));
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0, 128, 255, 255,
+        255, 255, 0, 0,
+    }, &dst);
 }
 
 test "external framebuffer conversion rejects dimension length mismatch" {
