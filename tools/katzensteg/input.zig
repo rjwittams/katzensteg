@@ -3,6 +3,7 @@ const sdl = @import("katzensteg_sdl");
 const presentation_layout = @import("presentation_layout.zig");
 
 const max_pending_bytes = 256;
+const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
 
 pub const Target = struct {
     cols: i32 = 80,
@@ -122,6 +123,8 @@ pub const TerminalInputParser = struct {
     last_mouse_y: i32 = 0,
     mouse_buttons: u32 = 0,
     mouse_activity: bool = false,
+    keyboard_state: [sdl.SDL_NUM_SCANCODES]u8 = [_]u8{0} ** sdl.SDL_NUM_SCANCODES,
+    keyboard_deadline_ns: [sdl.SDL_NUM_SCANCODES]i128 = [_]i128{0} ** sdl.SDL_NUM_SCANCODES,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{
@@ -171,9 +174,23 @@ pub const TerminalInputParser = struct {
         return active;
     }
 
+    pub fn copyKeyboardState(self: *TerminalInputParser, out: []u8, now_ns: i128) void {
+        self.expireKeyboardState(now_ns);
+        const n = @min(out.len, self.keyboard_state.len);
+        @memcpy(out[0..n], self.keyboard_state[0..n]);
+    }
+
     pub fn pop(self: *TerminalInputParser) ?InputEvent {
         if (self.queue.items.len == 0) return null;
         return self.queue.orderedRemove(0);
+    }
+
+    pub fn popSdlRange(self: *TerminalInputParser, min_type: u32, max_type: u32) ?InputEvent {
+        for (self.queue.items, 0..) |event, idx| {
+            const event_type = inputEventSdlType(event);
+            if (event_type >= min_type and event_type <= max_type) return self.queue.orderedRemove(idx);
+        }
+        return null;
     }
 
     pub fn flushStandaloneEscape(self: *TerminalInputParser) !void {
@@ -324,14 +341,30 @@ pub const TerminalInputParser = struct {
     }
 
     fn emitTextAndKey(self: *TerminalInputParser, bytes: []const u8, key: KeyEvent) !void {
+        self.holdKeyForPolling(key);
         try self.queue.append(self.allocator, .{ .key_down = key });
         try self.queue.append(self.allocator, .{ .text = TextEvent.init(bytes) });
         try self.queue.append(self.allocator, .{ .key_up = key });
     }
 
     fn emitKey(self: *TerminalInputParser, key: KeyEvent) !void {
+        self.holdKeyForPolling(key);
         try self.queue.append(self.allocator, .{ .key_down = key });
         try self.queue.append(self.allocator, .{ .key_up = key });
+    }
+
+    fn holdKeyForPolling(self: *TerminalInputParser, key: KeyEvent) void {
+        if (key.scancode < 0) return;
+        const idx: usize = @intCast(key.scancode);
+        if (idx >= self.keyboard_state.len) return;
+        self.keyboard_state[idx] = 1;
+        self.keyboard_deadline_ns[idx] = std.time.nanoTimestamp() + keyboard_poll_hold_ns;
+    }
+
+    fn expireKeyboardState(self: *TerminalInputParser, now_ns: i128) void {
+        for (&self.keyboard_state, self.keyboard_deadline_ns) |*state, deadline| {
+            if (state.* != 0 and deadline <= now_ns) state.* = 0;
+        }
     }
 
     fn mapCellX(self: *const TerminalInputParser, cell_x: i32) i32 {
@@ -396,6 +429,17 @@ fn asciiKey(byte: u8) KeyEvent {
     };
 }
 
+fn inputEventSdlType(event: InputEvent) u32 {
+    return switch (event) {
+        .key_down => sdl.SDL_KEYDOWN,
+        .key_up => sdl.SDL_KEYUP,
+        .text => sdl.SDL_TEXTINPUT,
+        .mouse_motion => sdl.SDL_MOUSEMOTION,
+        .mouse_button => |button| if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
+        .mouse_wheel => sdl.SDL_MOUSEWHEEL,
+    };
+}
+
 test "terminal input parser emits printable key text and key transitions" {
     var parser = TerminalInputParser.init(std.testing.allocator);
     defer parser.deinit();
@@ -406,6 +450,31 @@ test "terminal input parser emits printable key text and key transitions" {
     try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.pop().?);
     try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
     try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.pop().?);
+}
+
+test "terminal input parser can pop events by SDL type range" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    try parser.feed("a");
+
+    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl.SDL_KEYDOWN, sdl.SDL_KEYUP).?);
+    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl.SDL_KEYDOWN, sdl.SDL_KEYUP).?);
+    try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
+}
+
+test "terminal input parser exposes recent keys through polling state" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    try parser.feed("a");
+
+    var state = [_]u8{0} ** sdl.SDL_NUM_SCANCODES;
+    parser.copyKeyboardState(&state, std.time.nanoTimestamp());
+    try std.testing.expectEqual(@as(u8, 1), state[4]);
+
+    parser.copyKeyboardState(&state, std.time.nanoTimestamp() + keyboard_poll_hold_ns + 1);
+    try std.testing.expectEqual(@as(u8, 0), state[4]);
 }
 
 test "terminal input parser emits arrow key transitions" {

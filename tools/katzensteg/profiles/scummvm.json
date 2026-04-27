@@ -1,0 +1,30 @@
+{
+  "profiles": {
+    "app.scummvm": {
+      "hidden": true,
+      "target": "/opt/homebrew/bin/scummvm",
+      "env": {
+        "SDL_RENDER_DRIVER": "software",
+        "KATZENSTEG_COMPOSITE_DEBUG": "1",
+        "KATZENSTEG_TRACE_SDL": "1",
+        "KATZENSTEG_INSPECT_SOCKET": "/tmp/katzensteg-inspect.sock"
+      }
+    },
+    "scummvm.monkey2": {
+      "extends": [
+        "app.scummvm",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--no-fullscreen",
+        "--gfx-mode=surfacesdl",
+        "--renderer=software",
+        "--path=$HOME/roms/mi2",
+        "monkey2"
+      ],
+      "stdout": "/tmp/scummvm.out",
+      "stderr": "stdout"
+    }
+  }
+}

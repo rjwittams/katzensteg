@@ -206,7 +206,7 @@ zig build -freference-trace
 ./zig-out/bin/katzensteg --help
 ```
 
-Expected output should include `launch <profile>`.
+Expected output should include `katzensteg [options] <target>`.
 
 - [ ] **Step 2: Add launcher executable to `build.zig`**
 
@@ -217,10 +217,10 @@ Build name: `katzensteg`.
 Support:
 
 - `katzensteg --help`
-- `katzensteg launch <profile>`
+- `katzensteg [options] <target>`
 - useful error for unknown commands
 
-The launch command can fail with "profile loading not implemented" in this task.
+A non-profile target can remain unsupported in this task, but the CLI shape should be direct target syntax.
 
 - [ ] **Step 4: Verify**
 
@@ -229,10 +229,10 @@ Run:
 ```sh
 zig build -freference-trace
 ./zig-out/bin/katzensteg --help
-./zig-out/bin/katzensteg launch retroarch.sonic
+./zig-out/bin/katzensteg retroarch.sonic
 ```
 
-Expected: build passes; help prints; launch returns a controlled not-implemented error.
+Expected: build passes; help prints; unknown targets return a controlled resolution error.
 
 - [ ] **Step 5: Commit**
 
@@ -270,7 +270,7 @@ Keep the first syntax small. Do not implement every script quirk yet.
 
 - [ ] **Step 4: Connect launcher to profile loader**
 
-`katzensteg launch <profile>` should search repo-local profiles first and print the resolved profile without spawning.
+`katzensteg [options] <target>` should search repo-local profiles first and print the resolved profile without spawning.
 
 - [ ] **Step 5: Verify**
 
@@ -279,7 +279,7 @@ Run:
 ```sh
 zig test tools/katzensteg/launcher_profiles.zig
 zig build -freference-trace
-./zig-out/bin/katzensteg launch example --dry-run
+./zig-out/bin/katzensteg example --dry-run
 ```
 
 Expected: tests pass; dry-run prints resolved launch/runtime config.
@@ -360,7 +360,7 @@ Run:
 
 ```sh
 zig build -freference-trace
-./zig-out/bin/katzensteg launch example.env-test
+./zig-out/bin/katzensteg example.env-test
 ```
 
 Expected: child receives generated `KATZENSTEG_CONFIG` and configured env.
@@ -419,7 +419,7 @@ Preserve current user-edited behavior in `run-retroarch-sonic.sh`, including `RE
 
 - [ ] **Step 2: Convert script to a shim**
 
-The script should call `zig-out/bin/katzensteg launch retroarch.sonic` or build first if that matches current script style.
+The script should call `zig-out/bin/katzensteg retroarch.sonic` or build first if that matches current script style.
 
 - [ ] **Step 3: Verify**
 
@@ -527,7 +527,7 @@ Run:
 
 ```sh
 ./zig-out/bin/katzensteg --help
-./zig-out/bin/katzensteg launch --help
+./zig-out/bin/katzensteg --help
 ```
 
 Expected: docs and help agree.
@@ -589,7 +589,7 @@ zig build -freference-trace
 - [ ] Smoke-test non-SDL launcher profile:
 
 ```sh
-./zig-out/bin/katzensteg launch example.env-test
+./zig-out/bin/katzensteg example.env-test
 ```
 
 - [ ] Smoke-test representative app profiles:

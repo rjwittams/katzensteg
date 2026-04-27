@@ -1,0 +1,70 @@
+{
+  "profiles": {
+    "runtime.fullscreen_file": {
+      "hidden": true,
+      "runtime": {
+        "window_policy": "terminal_only",
+        "input": true,
+        "input_claim": true,
+        "output_profile": "file_whole"
+      },
+      "env": {
+        "KATZENSTEG_INTERCEPT_MODE": "queued_replay",
+        "KATZENSTEG_COMPOSITE_MODE": "fullscreen",
+        "KATZENSTEG_OUTPUT_PROFILE": "file_whole"
+      }
+    },
+    "capture.gl_pbo": {
+      "hidden": true,
+      "env": {
+        "KATZENSTEG_GL_CAPTURE": "pbo"
+      }
+    },
+    "adapter.sdl2_preload": {
+      "hidden": true,
+      "env": {
+        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib"
+      }
+    },
+    "app.retroarch": {
+      "hidden": true,
+      "target": "$HOME/dev/RetroArch/retroarch",
+      "env": {
+        "RETROARCH_COCOA_BOOTSTRAP_WINDOW": "0"
+      }
+    },
+    "retroarch.sonic": {
+      "extends": [
+        "app.retroarch",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "-L",
+        "$HOME/Library/Application Support/RetroArch/cores/genesis_plus_gx_libretro.dylib",
+        "-c",
+        "/tmp/retroarch-sdl2.cfg",
+        "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
+      ],
+      "stdout": "/tmp/retro-sonic.out",
+      "stderr": "stdout"
+    },
+    "retroarch.melonds.sm64ds": {
+      "extends": [
+        "app.retroarch",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "capture.gl_pbo"
+      ],
+      "args": [
+        "-L",
+        "$HOME/Library/Application Support/RetroArch/cores/melonds_libretro.dylib",
+        "-c",
+        "/tmp/retroarch-sdl2.cfg",
+        "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
+      ],
+      "stdout": "/tmp/retro-sm64ds-melonds.out",
+      "stderr": "stdout"
+    }
+  }
+}

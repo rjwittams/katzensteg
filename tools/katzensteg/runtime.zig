@@ -1,5 +1,6 @@
 const std = @import("std");
 const termscene = @import("termscene");
+const config_mod = @import("config.zig");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
@@ -16,10 +17,11 @@ const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspector_mod.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
-const CompositeMode = frame_builder_mod.CompositeMode;
-const InterceptMode = intercept_sink.InterceptMode;
+const CompositeMode = config_mod.CompositeMode;
+const InterceptMode = config_mod.InterceptMode;
 const Command = intercept_sink.Command;
 const PixelSize = frame_builder_mod.PixelSize;
+const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
 const queue_compact_threshold = 4096;
 const payload_pool_max_buffers = 64;
@@ -36,14 +38,6 @@ const ts_kitty = termscene.kitty;
 
 var global_mutex: std.Thread.Mutex = .{};
 var global_runtime: ?Runtime = null;
-
-const RuntimeConfig = struct {
-    composite_mode: CompositeMode = .fullscreen,
-    intercept_mode: InterceptMode = .sync_compose,
-    window_policy: window_policy_mod.WindowPresentationPolicy = .mirror,
-    real_window_visibility: window_policy_mod.RealWindowVisibility = .show,
-    present_fps: u32 = 0,
-};
 
 pub const ProducerStatKind = enum {
     generic,
@@ -149,6 +143,7 @@ pub const Runtime = struct {
     mouse_ownership: input_mod.MouseOwnership = .{},
     input_window_w: i32 = 640,
     input_window_h: i32 = 480,
+    keyboard_state: [sdl.SDL_NUM_SCANCODES]u8 = [_]u8{0} ** sdl.SDL_NUM_SCANCODES,
     presentation_layout: presentation_layout_mod.PresentationLayout = .{},
     present_interval_ns: i128 = 0,
     adaptive_present_target_ns: i128 = std.time.ns_per_s / 60,
@@ -158,19 +153,22 @@ pub const Runtime = struct {
     gl_capture_buffers: gl_capture_mod.Buffers = .{},
     gl_capture_pbo: gl_capture_mod.PboState = .{},
     gl_capture_downscale: gl_capture_mod.DownscaleState = .{},
+    forced_output_profile: ?config_mod.OutputProfile = null,
+    file_transport_enabled: bool = true,
+    file_transport_max_bytes: u64 = config_mod.default_file_transport_max_bytes,
 
     fn init() Runtime {
         const allocator = std.heap.c_allocator;
         var logger = Logger.init(allocator);
-        const config = loadConfig(allocator, &logger);
+        const config = config_mod.loadRuntimeConfig(allocator, &logger);
         const bg_only = std.c.getenv("KATZENSTEG_BG_ONLY") != null;
-        const stats = std.c.getenv("KATZENSTEG_STATS") != null;
-        const debug_protocol_replies = std.c.getenv("KATZENSTEG_KITTY_DEBUG_REPLIES") != null;
-        const image_gc = std.c.getenv("KATZENSTEG_IMAGE_GC") != null;
-        const input_enabled = parseInputEnabledValue(if (std.c.getenv("KATZENSTEG_INPUT")) |value| std.mem.span(value) else null);
-        const input_claimed = input_enabled and parseInputClaimedValue(if (std.c.getenv("KATZENSTEG_INPUT_CLAIM")) |value| std.mem.span(value) else null);
-        const dump_composites = std.c.getenv("KATZENSTEG_COMPOSITE_DUMP") != null;
-        const debug_composite = std.c.getenv("KATZENSTEG_COMPOSITE_DEBUG") != null;
+        const stats = config.stats;
+        const debug_protocol_replies = config.debug_protocol_replies;
+        const image_gc = config.image_gc;
+        const input_enabled = config.input_enabled;
+        const input_claimed = input_enabled and config.input_claimed;
+        const dump_composites = config.dump_composites;
+        const debug_composite = config.debug_composite;
         var runtime = Runtime{
             .allocator = allocator,
             .logger = logger,
@@ -194,6 +192,9 @@ pub const Runtime = struct {
             .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
             .present_interval_ns = if (config.present_fps > 0) @divTrunc(std.time.ns_per_s, config.present_fps) else 0,
             .producer_stats = .{ .enabled = stats, .last_report_ns = std.time.nanoTimestamp() },
+            .forced_output_profile = config.output_profile,
+            .file_transport_enabled = config.file_transport,
+            .file_transport_max_bytes = config.file_transport_max_bytes,
         };
         if (std.c.getenv("KATZENSTEG_INSPECT_SOCKET")) |path_z| {
             runtime.inspector = Inspector.init(allocator, &runtime.logger, std.mem.span(path_z)) catch |err| blk: {
@@ -426,6 +427,16 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn popSdlInputEventInRange(self: *Runtime, event: ?*sdl.SDL_Event, min_type: u32, max_type: u32) bool {
+        if (!self.input_enabled) return false;
+        var parser = &(self.input_parser orelse return false);
+        const input_event = parser.popSdlRange(min_type, max_type) orelse return false;
+        if (inputEventIsMouse(input_event)) self.mouse_ownership.claimTerminal();
+        const out = event orelse return true;
+        fillSdlEvent(out, input_event);
+        return true;
+    }
+
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
         if (!self.mouse_ownership.terminalOwns()) return null;
@@ -446,6 +457,21 @@ pub const Runtime = struct {
 
     pub fn claimRealWindowMouse(self: *Runtime) void {
         self.mouse_ownership.claimRealWindow();
+    }
+
+    pub fn mergedKeyboardState(self: *Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
+        if (!self.input_enabled) return real_state;
+        var parser = &(self.input_parser orelse return real_state);
+        @memset(&self.keyboard_state, 0);
+        if (real_state) |keys| {
+            const n: usize = @min(self.keyboard_state.len, @as(usize, @intCast(@max(0, real_count))));
+            @memcpy(self.keyboard_state[0..n], keys[0..n]);
+        }
+        var terminal_state = [_]u8{0} ** sdl.SDL_NUM_SCANCODES;
+        parser.copyKeyboardState(&terminal_state, std.time.nanoTimestamp());
+        for (&self.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
+        if (numkeys) |out| out.* = @intCast(self.keyboard_state.len);
+        return &self.keyboard_state;
     }
 
     pub fn claimedWindowFlags(self: *const Runtime, flags: u32) u32 {
@@ -499,10 +525,10 @@ pub const Runtime = struct {
         return self.shouldPresent();
     }
 
-    pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, rgba: []const u8) void {
+    pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
         const start_ns = std.time.nanoTimestamp();
-        self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, rgba, self.debug_protocol_replies, self.image_gc);
+        self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.debug_protocol_replies, self.image_gc);
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
@@ -641,7 +667,7 @@ pub const Runtime = struct {
                 if (c.uvplane) |buf| self.payload_pool.release(self.allocator, buf);
             },
             .external_framebuffer_present => |*c| {
-                if (c.rgba) |buf| self.payload_pool.release(self.allocator, buf);
+                if (c.pixels) |buf| self.payload_pool.release(self.allocator, buf);
             },
             else => {},
         }
@@ -739,7 +765,7 @@ fn eventIsMouse(event: sdl.SDL_Event) bool {
 }
 
 test "external framebuffer present is a frame-local present command" {
-    const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .rgba = null } };
+    const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
     try std.testing.expect(isFrameLocalCommand(cmd));
     try std.testing.expect(isPresentCommand(cmd));
 }
@@ -868,101 +894,6 @@ pub fn get() *Runtime {
     return &global_runtime.?;
 }
 
-fn loadConfig(allocator: std.mem.Allocator, logger: *Logger) RuntimeConfig {
-    var config = RuntimeConfig{};
-    if (std.c.getenv("KATZENSTEG_CONFIG")) |path_z| {
-        const path = std.mem.span(path_z);
-        const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| {
-            logger.writeFmt("katzensteg: failed to read config {s}: {any}", .{ path, err });
-            return config;
-        };
-        defer allocator.free(bytes);
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| {
-            logger.writeFmt("katzensteg: failed to parse config {s}: {any}", .{ path, err });
-            return config;
-        };
-        defer parsed.deinit();
-        if (parsed.value.object.get("composite_mode")) |value| {
-            if (value == .string) {
-                config.composite_mode = parseCompositeMode(value.string) orelse blk: {
-                    logger.writeFmt("katzensteg: unknown composite_mode in config: {s}", .{value.string});
-                    break :blk config.composite_mode;
-                };
-            }
-        }
-        if (parsed.value.object.get("intercept_mode")) |value| {
-            if (value == .string) {
-                config.intercept_mode = parseInterceptMode(value.string) orelse blk: {
-                    logger.writeFmt("katzensteg: unknown intercept_mode in config: {s}", .{value.string});
-                    break :blk config.intercept_mode;
-                };
-            }
-        }
-        if (parsed.value.object.get("window_policy")) |value| {
-            if (value == .string) {
-                config.window_policy = parseWindowPolicyValue(value.string, config.window_policy);
-                if (window_policy_mod.parse(value.string) == null) {
-                    logger.writeFmt("katzensteg: unknown window_policy in config: {s}", .{value.string});
-                }
-            }
-        }
-        if (parsed.value.object.get("real_window")) |value| {
-            if (value == .string) {
-                config.real_window_visibility = parseRealWindowVisibilityValue(value.string, config.real_window_visibility);
-                if (window_policy_mod.parseRealWindowVisibility(value.string) == null) {
-                    logger.writeFmt("katzensteg: unknown real_window in config: {s}", .{value.string});
-                }
-            }
-        }
-        if (parsed.value.object.get("present_fps")) |value| {
-            switch (value) {
-                .integer => |n| {
-                    if (n > 0) config.present_fps = @intCast(n);
-                },
-                else => {},
-            }
-        }
-        logger.writeFmt("katzensteg: loaded config from {s}", .{path});
-    }
-    if (std.c.getenv("KATZENSTEG_COMPOSITE_MODE")) |mode_z| {
-        const mode = std.mem.span(mode_z);
-        if (parseCompositeMode(mode)) |parsed| {
-            config.composite_mode = parsed;
-        } else {
-            logger.writeFmt("katzensteg: unknown KATZENSTEG_COMPOSITE_MODE value: {s}", .{mode});
-        }
-    }
-    if (std.c.getenv("KATZENSTEG_INTERCEPT_MODE")) |mode_z| {
-        const mode = std.mem.span(mode_z);
-        if (parseInterceptMode(mode)) |parsed| {
-            config.intercept_mode = parsed;
-        } else {
-            logger.writeFmt("katzensteg: unknown KATZENSTEG_INTERCEPT_MODE value: {s}", .{mode});
-        }
-    }
-    if (std.c.getenv("KATZENSTEG_WINDOW_POLICY")) |policy_z| {
-        const policy = std.mem.span(policy_z);
-        const before = config.window_policy;
-        config.window_policy = parseWindowPolicyValue(policy, config.window_policy);
-        if (config.window_policy == before and window_policy_mod.parse(policy) == null) {
-            logger.writeFmt("katzensteg: unknown KATZENSTEG_WINDOW_POLICY value: {s}", .{policy});
-        }
-    }
-    if (std.c.getenv("KATZENSTEG_REAL_WINDOW")) |visibility_z| {
-        const visibility = std.mem.span(visibility_z);
-        const before = config.real_window_visibility;
-        config.real_window_visibility = parseRealWindowVisibilityValue(visibility, config.real_window_visibility);
-        if (config.real_window_visibility == before and window_policy_mod.parseRealWindowVisibility(visibility) == null) {
-            logger.writeFmt("katzensteg: unknown KATZENSTEG_REAL_WINDOW value: {s}", .{visibility});
-        }
-    }
-    if (std.c.getenv("KATZENSTEG_PRESENT_FPS")) |fps_z| {
-        const fps = std.fmt.parseInt(u32, std.mem.span(fps_z), 10) catch 0;
-        config.present_fps = fps;
-    }
-    return config;
-}
-
 fn avgMicros(bucket: ProducerBucket) f64 {
     if (bucket.calls == 0) return 0;
     return @as(f64, @floatFromInt(bucket.total_ns)) / @as(f64, @floatFromInt(bucket.calls)) / 1000.0;
@@ -970,28 +901,6 @@ fn avgMicros(bucket: ProducerBucket) f64 {
 
 fn maxMicros(bucket: ProducerBucket) f64 {
     return @as(f64, @floatFromInt(bucket.max_ns)) / 1000.0;
-}
-
-fn parseCompositeMode(value: []const u8) ?CompositeMode {
-    if (std.mem.eql(u8, value, "fullscreen")) return .fullscreen;
-    if (std.mem.eql(u8, value, "tiled_strip")) return .tiled_strip;
-    return null;
-}
-
-fn parseInterceptMode(value: []const u8) ?InterceptMode {
-    if (std.mem.eql(u8, value, "sync_compose")) return .sync_compose;
-    if (std.mem.eql(u8, value, "queued_replay")) return .queued_replay;
-    return null;
-}
-
-fn parseWindowPolicyValue(value: ?[]const u8, fallback: window_policy_mod.WindowPresentationPolicy) window_policy_mod.WindowPresentationPolicy {
-    const raw = value orelse return fallback;
-    return window_policy_mod.parse(raw) orelse fallback;
-}
-
-fn parseRealWindowVisibilityValue(value: ?[]const u8, fallback: window_policy_mod.RealWindowVisibility) window_policy_mod.RealWindowVisibility {
-    const raw = value orelse return fallback;
-    return window_policy_mod.parseRealWindowVisibility(raw) orelse fallback;
 }
 
 fn routeTerminalRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
@@ -1013,15 +922,10 @@ pub fn shutdownGlobal() callconv(.c) void {
 
 fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kitty.Options {
     const tty = runtime.tty.?.file;
-    const forced_profile = parseForcedOutputProfile();
-    const file_transport_env = std.c.getenv("KATZENSTEG_FILE_TRANSPORT");
-    const file_transport_disabled = if (file_transport_env) |value|
-        std.mem.eql(u8, std.mem.span(value), "0")
-    else
-        false;
-    if (file_transport_disabled) return .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
+    const forced_profile = mapOutputProfile(runtime.forced_output_profile);
+    if (!runtime.file_transport_enabled) return .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
 
-    const high_water = parseHighWaterBytes();
+    const high_water = runtime.file_transport_max_bytes;
     const upload_path = try makeUploadPath(allocator);
     errdefer allocator.free(upload_path);
 
@@ -1074,29 +978,12 @@ fn makeUploadPath(allocator: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{s}/tty-graphics-protocol-katzensteg-{d}.rgba", .{ tmpdir, std.c.getpid() });
 }
 
-fn parseHighWaterBytes() u64 {
-    const default_bytes: u64 = 10 * 1024 * 1024;
-    const env_value = std.c.getenv("KATZENSTEG_FILE_TRANSPORT_MAX_BYTES") orelse return default_bytes;
-    return std.fmt.parseInt(u64, std.mem.span(env_value), 10) catch default_bytes;
-}
-
-fn parseForcedOutputProfile() ?ts_kitty.OutputProfile {
-    const env_value = std.c.getenv("KATZENSTEG_OUTPUT_PROFILE") orelse return null;
-    const value = std.mem.span(env_value);
-    if (std.mem.eql(u8, value, "direct_apc")) return .direct_apc;
-    if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
-    if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
-    return null;
-}
-
-fn parseInputEnabledValue(value: ?[]const u8) bool {
-    const raw = value orelse return true;
-    return !std.mem.eql(u8, raw, "0");
-}
-
-fn parseInputClaimedValue(value: ?[]const u8) bool {
-    const raw = value orelse return true;
-    return !std.mem.eql(u8, raw, "0");
+fn mapOutputProfile(profile: ?config_mod.OutputProfile) ?ts_kitty.OutputProfile {
+    return switch (profile orelse return null) {
+        .direct_apc => .direct_apc,
+        .file_whole => .file_whole,
+        .file_offset_ring => .file_offset_ring,
+    };
 }
 
 fn applyClaimedInputWindowFlags(claimed: bool, flags: u32) u32 {
@@ -1129,33 +1016,6 @@ test "payload buffer pool reuses exact-sized buffers" {
     const third = try pool.acquire(std.testing.allocator, 16);
     try std.testing.expect(third.ptr != first_ptr);
     pool.release(std.testing.allocator, third);
-}
-
-test "terminal input capture defaults on and can be disabled" {
-    try std.testing.expect(parseInputEnabledValue(null));
-    try std.testing.expect(parseInputEnabledValue("1"));
-    try std.testing.expect(parseInputEnabledValue("true"));
-    try std.testing.expect(!parseInputEnabledValue("0"));
-}
-
-test "runtime config defaults to fullscreen composite" {
-    const config = RuntimeConfig{};
-    try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
-    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.show, config.real_window_visibility);
-}
-
-test "window policy value parser defaults and falls back" {
-    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.mirror, parseWindowPolicyValue(null, .mirror));
-    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("terminal_only", .mirror));
-    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.real_only, parseWindowPolicyValue("real_only", .mirror));
-    try std.testing.expectEqual(window_policy_mod.WindowPresentationPolicy.terminal_only, parseWindowPolicyValue("bad", .terminal_only));
-}
-
-test "real window visibility value parser defaults and falls back" {
-    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.show, parseRealWindowVisibilityValue(null, .show));
-    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.hide, parseRealWindowVisibilityValue("hide", .show));
-    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.minimize, parseRealWindowVisibilityValue("minimize", .show));
-    try std.testing.expectEqual(window_policy_mod.RealWindowVisibility.hide, parseRealWindowVisibilityValue("bad", .hide));
 }
 
 test "window policy controls terminal and real render routes" {

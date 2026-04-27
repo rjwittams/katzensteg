@@ -4,6 +4,8 @@ const runtime = @import("runtime.zig");
 const sink = @import("intercept_sink.zig");
 const window_policy = @import("window_policy.zig");
 const gl_capture = @import("gl_capture.zig");
+const frame_builder_mod = @import("frame_builder.zig");
+const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
 var trace_create_window: usize = 0;
 var trace_create_renderer: usize = 0;
@@ -90,6 +92,7 @@ const DlInfo = extern struct {
 };
 
 extern fn dladdr(addr: ?*const anyopaque, info: *DlInfo) c_int;
+extern fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
 
 fn traceLimited(rt: *runtime.Runtime, counter: *usize, comptime fmt: []const u8, args: anytype) void {
     if (std.c.getenv("KATZENSTEG_TRACE_SDL") == null) return;
@@ -130,6 +133,18 @@ fn shouldForwardRealRendererCall(policy: window_policy.WindowPresentationPolicy)
 
 fn glCaptureMode() gl_capture.CaptureMode {
     return gl_capture.modeFromEnv(if (std.c.getenv("KATZENSTEG_GL_CAPTURE")) |value| std.mem.span(value) else null);
+}
+
+fn selectVulkanLoaderPath(requested: ?[*:0]const u8, override: ?[*:0]const u8) ?[*:0]const u8 {
+    if (requested != null) return requested;
+    return override;
+}
+
+fn selectDlopenPath(requested: ?[*:0]const u8, override: ?[*:0]const u8) ?[*:0]const u8 {
+    const path = requested orelse return null;
+    const loader = override orelse return requested;
+    if (std.mem.eql(u8, std.mem.span(path), "libvulkan.dylib")) return loader;
+    return requested;
 }
 
 fn applyRealWindowAction(action: window_policy.RealWindowAction, window: ?*sdl.SDL_Window) void {
@@ -613,6 +628,16 @@ pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     sdl.SDL_GL_SwapWindow(window);
 }
 
+pub export fn ks_SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) callconv(.c) c_int {
+    const selected = selectVulkanLoaderPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
+    return sdl.SDL_Vulkan_LoadLibrary(selected);
+}
+
+pub export fn ks_dlopen(path: ?[*:0]const u8, mode: c_int) callconv(.c) ?*anyopaque {
+    const selected = selectDlopenPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
+    return dlopen(selected, mode);
+}
+
 fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct { w: c_int, h: c_int, len: usize } {
     var w: c_int = 0;
     var h: c_int = 0;
@@ -734,10 +759,33 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
 }
 
 fn publishGlFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, rgba: []const u8) void {
+    publishExternalFramebuffer(rt, width, height, .rgba8, rgba);
+}
+
+fn publishExternalFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
     switch (rt.intercept_mode) {
-        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, rgba),
-        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, rgba),
+        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, pixels),
+        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, pixels),
     }
+}
+
+pub export fn ks_katzensteg_present_external_rgba(width: c_int, height: c_int, pixels: ?[*]const u8, len: usize) callconv(.c) void {
+    ks_katzensteg_present_external_framebuffer(width, height, @intFromEnum(ExternalFramebufferFormat.rgba8), pixels, len);
+}
+
+pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c_int, format_value: c_int, pixels: ?[*]const u8, len: usize) callconv(.c) void {
+    if (width <= 0 or height <= 0) return;
+    const data = pixels orelse return;
+    const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+    if (len < byte_len) return;
+    const format: ExternalFramebufferFormat = switch (format_value) {
+        @intFromEnum(ExternalFramebufferFormat.rgba8) => .rgba8,
+        @intFromEnum(ExternalFramebufferFormat.bgra8) => .bgra8,
+        else => return,
+    };
+    const rt = runtime.get();
+    if (!rt.shouldCaptureExternalFrame(null)) return;
+    publishExternalFramebuffer(rt, width, height, format, data[0..byte_len]);
 }
 
 fn ensureGlDownscaleTarget(rt: *runtime.Runtime, w: i32, h: i32) bool {
@@ -834,6 +882,36 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
             return rc;
         }
     }
+}
+
+pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, action: c_int, minType: sdl.Uint32, maxType: sdl.Uint32) callconv(.c) c_int {
+    const rt = runtime.get();
+    rt.pollTerminalInput();
+
+    if (action != sdl.SDL_GETEVENT or numevents <= 0) {
+        return sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+    }
+
+    const out = events orelse return sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+    var emitted: c_int = 0;
+    while (emitted < numevents) : (emitted += 1) {
+        const idx: usize = @intCast(emitted);
+        if (!rt.popSdlInputEventInRange(&out[idx], minType, maxType)) break;
+    }
+
+    if (emitted == numevents) return emitted;
+    const rest_ptr = out + @as(usize, @intCast(emitted));
+    const real_rc = sdl.SDL_PeepEvents(rest_ptr, numevents - emitted, action, minType, maxType);
+    if (real_rc < 0) return if (emitted > 0) emitted else real_rc;
+    return emitted + real_rc;
+}
+
+pub export fn ks_SDL_GetKeyboardState(numkeys: ?*c_int) callconv(.c) ?[*]const sdl.Uint8 {
+    var real_count: c_int = 0;
+    const real_state = sdl.SDL_GetKeyboardState(&real_count);
+    const rt = runtime.get();
+    rt.pollTerminalInput();
+    return rt.mergedKeyboardState(real_state, real_count, numkeys);
 }
 
 pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
@@ -964,4 +1042,25 @@ test "window policy controls forwarding real renderer calls" {
     try std.testing.expect(shouldForwardRealRendererCall(.mirror));
     try std.testing.expect(!shouldForwardRealRendererCall(.terminal_only));
     try std.testing.expect(shouldForwardRealRendererCall(.real_only));
+}
+
+test "Vulkan loader override only replaces SDL default lookup" {
+    const explicit = "/tmp/custom-vulkan.dylib";
+    const override = "/opt/homebrew/lib/libvulkan.1.dylib";
+
+    try std.testing.expectEqualStrings(override, std.mem.span(selectVulkanLoaderPath(null, override.ptr).?));
+    try std.testing.expectEqualStrings(explicit, std.mem.span(selectVulkanLoaderPath(explicit.ptr, override.ptr).?));
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), selectVulkanLoaderPath(null, null));
+}
+
+test "Vulkan loader override replaces RetroArch bare dlopen lookup only" {
+    const override = "/opt/homebrew/lib/libvulkan.1.dylib";
+    const bare = "libvulkan.dylib";
+    const versioned = "libvulkan.1.dylib";
+    const unrelated = "libSDL2.dylib";
+
+    try std.testing.expectEqualStrings(override, std.mem.span(selectDlopenPath(bare.ptr, override.ptr).?));
+    try std.testing.expectEqualStrings(versioned, std.mem.span(selectDlopenPath(versioned.ptr, override.ptr).?));
+    try std.testing.expectEqualStrings(unrelated, std.mem.span(selectDlopenPath(unrelated.ptr, override.ptr).?));
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), selectDlopenPath(null, override.ptr));
 }

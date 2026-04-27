@@ -1,0 +1,37 @@
+{
+  "profiles": {
+    "app.moonlight": {
+      "hidden": true,
+      "target": "$HOME/dev/moonlight-qt/app/Moonlight.app/Contents/MacOS/Moonlight",
+      "env": {
+        "SDL_RENDER_DRIVER": "software",
+        "VT_FORCE_METAL": "0",
+        "VT_FORCE_INDIRECT": "1"
+      }
+    },
+    "moonlight.steam_big_picture": {
+      "extends": [
+        "app.moonlight",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "stream",
+        "feta",
+        "Steam Big Picture",
+        "--display-mode",
+        "windowed",
+        "--absolute-mouse",
+        "--capture-system-keys",
+        "never",
+        "--video-decoder",
+        "hardware",
+        "--video-codec",
+        "HEVC",
+        "--no-hdr"
+      ],
+      "stdout": "/tmp/moonlight-katzensteg.out",
+      "stderr": "stdout"
+    }
+  }
+}

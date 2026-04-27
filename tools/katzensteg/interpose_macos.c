@@ -58,11 +58,15 @@ extern void ks_SDL_RenderPresent(struct SDL_Renderer *);
 extern void *ks_SDL_GL_CreateContext(struct SDL_Window *);
 extern int ks_SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
+extern int ks_SDL_Vulkan_LoadLibrary(const char *);
 extern int ks_SDL_PollEvent(union SDL_Event *);
+extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
+extern const unsigned char *ks_SDL_GetKeyboardState(int *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
 extern void ks_katzensteg_shutdown(void);
+extern void *ks_dlopen(const char *, int);
 
 static void katzensteg_module_destructor(void) {
     ks_katzensteg_shutdown();
@@ -106,7 +110,10 @@ extern void SDL_RenderPresent(struct SDL_Renderer *);
 extern void *SDL_GL_CreateContext(struct SDL_Window *);
 extern int SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void SDL_GL_SwapWindow(struct SDL_Window *);
+extern int SDL_Vulkan_LoadLibrary(const char *);
 extern int SDL_PollEvent(union SDL_Event *);
+extern int SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
+extern const unsigned char *SDL_GetKeyboardState(int *);
 extern unsigned int SDL_GetMouseState(int *, int *);
 extern unsigned int SDL_GetRelativeMouseState(int *, int *);
 extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
@@ -115,6 +122,7 @@ extern int SDL_InitSubSystem(unsigned int);
 extern void SDL_QuitSubSystem(unsigned int);
 extern void SDL_Quit(void);
 extern unsigned int SDL_GetWindowFlags(struct SDL_Window *);
+extern void *dlopen(const char *, int);
 
 DYLD_INTERPOSE(ks_SDL_Init, SDL_Init)
 DYLD_INTERPOSE(ks_SDL_InitSubSystem, SDL_InitSubSystem)
@@ -156,9 +164,13 @@ DYLD_INTERPOSE(ks_SDL_RenderPresent, SDL_RenderPresent)
 DYLD_INTERPOSE(ks_SDL_GL_CreateContext, SDL_GL_CreateContext)
 DYLD_INTERPOSE(ks_SDL_GL_MakeCurrent, SDL_GL_MakeCurrent)
 DYLD_INTERPOSE(ks_SDL_GL_SwapWindow, SDL_GL_SwapWindow)
+DYLD_INTERPOSE(ks_SDL_Vulkan_LoadLibrary, SDL_Vulkan_LoadLibrary)
 DYLD_INTERPOSE(ks_SDL_PollEvent, SDL_PollEvent)
+DYLD_INTERPOSE(ks_SDL_PeepEvents, SDL_PeepEvents)
+DYLD_INTERPOSE(ks_SDL_GetKeyboardState, SDL_GetKeyboardState)
 DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
 DYLD_INTERPOSE(ks_SDL_GetRelativeMouseState, SDL_GetRelativeMouseState)
 DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)
+DYLD_INTERPOSE(ks_dlopen, dlopen)
 
 #endif

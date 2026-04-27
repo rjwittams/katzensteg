@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const config_mod = @import("config.zig");
 const sdl = @import("katzensteg_sdl");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
@@ -26,9 +27,51 @@ const composite_tile_rows: i32 = 4;
 const composite_strip_max_w: i32 = 4096;
 const primitive_composite_threshold: usize = 128;
 const external_framebuffer_renderer_key: usize = 0x6b73_676c;
+const fullscreen_retained_placement_count: usize = 2;
+
+pub const ExternalFramebufferFormat = enum(u32) {
+    rgba8 = 0,
+    bgra8 = 1,
+};
+
+fn convertExternalFramebufferToRgba(dst: []u8, src: []const u8, width: i32, height: i32, format: ExternalFramebufferFormat) bool {
+    if (width <= 0 or height <= 0) return false;
+    const expected_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+    if (dst.len != expected_len or src.len < expected_len) return false;
+    switch (format) {
+        .rgba8 => @memcpy(dst, src[0..expected_len]),
+        .bgra8 => {
+            if (tryFastBgraToRgba(dst, src[0..expected_len], width, height)) return true;
+            var i: usize = 0;
+            while (i < expected_len) : (i += 4) {
+                dst[i + 0] = src[i + 2];
+                dst[i + 1] = src[i + 1];
+                dst[i + 2] = src[i + 0];
+                dst[i + 3] = src[i + 3];
+            }
+        },
+    }
+    return true;
+}
 
 extern fn ks_fast_i420_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uplane: [*]const u8, upitch: c_int, vplane: [*]const u8, vpitch: c_int) callconv(.c) c_int;
 extern fn ks_fast_nv12_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, yplane: [*]const u8, ypitch: c_int, uvplane: [*]const u8, uvpitch: c_int) callconv(.c) c_int;
+extern fn ks_fast_bgra_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, src_bgra: [*]const u8) callconv(.c) c_int;
+extern fn ks_fast_scale_rgba(dst_rgba: [*]u8, dst_width: c_int, dst_height: c_int, src_rgba: [*]const u8, src_width: c_int, src_height: c_int) callconv(.c) c_int;
+
+fn tryFastBgraToRgba(dst: []u8, src: []const u8, width: i32, height: i32) bool {
+    if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+        return ks_fast_bgra_to_rgba(dst.ptr, @intCast(width), @intCast(height), src.ptr) != 0;
+    }
+    return false;
+}
+
+fn tryFastScaleRgba(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32) bool {
+    if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+        return ks_fast_scale_rgba(dst.ptr, @intCast(dst_w), @intCast(dst_h), src.ptr, @intCast(src_w), @intCast(src_h)) != 0;
+    }
+    return false;
+}
 
 const CompositeStripEntry = struct {
     tile_index: usize,
@@ -38,6 +81,11 @@ const CompositeStripEntry = struct {
 const CompositeTileState = struct {
     src_rect: sdl.SDL_Rect,
     dest_rect: ts_types.CellRect,
+    image_id: u32 = 0,
+    placement_id: u32 = 0,
+};
+
+const CompositePlacement = struct {
     image_id: u32 = 0,
     placement_id: u32 = 0,
 };
@@ -69,6 +117,8 @@ const RendererState = struct {
     composite_mode_active: bool = false,
     composite_image_id: u32 = 0,
     composite_placement_id: u32 = 0,
+    retained_fullscreen_placements: [fullscreen_retained_placement_count]CompositePlacement = [_]CompositePlacement{.{}} ** fullscreen_retained_placement_count,
+    retained_fullscreen_placement_count: usize = 0,
     composite_rgba: ?[]u8 = null,
     composite_last_presented: ?[]u8 = null,
     composite_tiles: std.ArrayList(CompositeTileState),
@@ -97,6 +147,24 @@ const RendererState = struct {
         self.copies.deinit(allocator);
         self.fills.deinit(allocator);
         self.lines.deinit(allocator);
+    }
+
+    fn rememberFullscreenPlacement(self: *RendererState, old: CompositePlacement) ?CompositePlacement {
+        if (old.image_id == 0 or old.placement_id == 0) return null;
+        if (fullscreen_retained_placement_count == 0) return old;
+        if (self.retained_fullscreen_placement_count < fullscreen_retained_placement_count) {
+            self.retained_fullscreen_placements[self.retained_fullscreen_placement_count] = old;
+            self.retained_fullscreen_placement_count += 1;
+            return null;
+        }
+        const evicted = self.retained_fullscreen_placements[0];
+        std.mem.copyForwards(
+            CompositePlacement,
+            self.retained_fullscreen_placements[0 .. fullscreen_retained_placement_count - 1],
+            self.retained_fullscreen_placements[1..fullscreen_retained_placement_count],
+        );
+        self.retained_fullscreen_placements[fullscreen_retained_placement_count - 1] = old;
+        return evicted;
     }
 };
 
@@ -160,10 +228,7 @@ const LineOp = struct {
     color: [4]u8,
 };
 
-pub const CompositeMode = enum {
-    fullscreen,
-    tiled_strip,
-};
+pub const CompositeMode = config_mod.CompositeMode;
 
 pub const PixelSize = struct {
     w: i32,
@@ -291,13 +356,13 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, rgba: []const u8, debug_protocol_replies: bool, image_gc: bool) void {
+    pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, debug_protocol_replies: bool, image_gc: bool) void {
         if (width <= 0 or height <= 0) return;
-        const expected_len: usize = @intCast(width * height * 4);
-        if (rgba.len < expected_len) return;
+        const expected_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+        if (pixels.len < expected_len) return;
 
         const result = self.renderers.getOrPut(external_framebuffer_renderer_key) catch |err| {
-            logger.writeFmt("katzensteg: GL framebuffer state allocation failed: {any}", .{err});
+            logger.writeFmt("katzensteg: external framebuffer state allocation failed: {any}", .{err});
             return;
         };
         if (!result.found_existing) {
@@ -325,10 +390,10 @@ pub const FrameBuilder = struct {
                 return;
             };
         }
-        @memcpy(state.composite_rgba.?, rgba[0..expected_len]);
+        if (!convertExternalFramebufferToRgba(state.composite_rgba.?[0..expected_len], pixels[0..expected_len], width, height, format)) return;
         state.composite_mode_active = true;
 
-        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: GL framebuffer present failed: {any}", .{err});
+        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: external framebuffer present failed: {any}", .{err});
 
         var job = PresentJob{ .framebuffer = .{
             .width = width,
@@ -1132,8 +1197,7 @@ pub const FrameBuilder = struct {
             @memset(state.composite_last_presented.?, 0);
         }
 
-        const old_image_id = state.composite_image_id;
-        const old_placement_id = state.composite_placement_id;
+        const old_placement = CompositePlacement{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id };
         state.composite_image_id = self.allocImageId();
         state.composite_placement_id = self.next_composite_placement_id;
         self.next_composite_placement_id +%= 1;
@@ -1146,7 +1210,7 @@ pub const FrameBuilder = struct {
         const upload_buf = if (upload_size.w == state.window_w and upload_size.h == state.window_h)
             buf
         else blk: {
-            const scratch = try scaleRgbaNearest(self.allocator, buf, state.window_w, state.window_h, upload_size.w, upload_size.h);
+            const scratch = try scaleRgba(self.allocator, buf, state.window_w, state.window_h, upload_size.w, upload_size.h);
             scaled_buf = scratch;
             break :blk scratch;
         };
@@ -1163,12 +1227,7 @@ pub const FrameBuilder = struct {
             .src_h = upload_size.h,
             .z = 100,
         });
-        if (old_image_id != 0 and old_placement_id != 0) {
-            kitty_protocol.writeDeleteExactPlacement(tty.file.deprecatedWriter(), .{ .image_id = old_image_id, .placement_id = old_placement_id }) catch |err| {
-                logger.writeFmt("katzensteg: composite fullscreen delete failed: {any}", .{err});
-            };
-            self.retireImageId(old_image_id);
-        }
+        if (state.rememberFullscreenPlacement(old_placement)) |evicted| self.deleteCompositePlacement(logger, tty, evicted);
         @memcpy(state.composite_last_presented.?, buf);
         if (self.stats.enabled) {
             self.stats.texture_uploads += 1;
@@ -1178,11 +1237,9 @@ pub const FrameBuilder = struct {
 
     fn deleteCompositeFullscreenDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
         if (state.composite_image_id != 0 and state.composite_placement_id != 0) {
-            kitty_protocol.writeDeleteExactPlacement(tty.file.deprecatedWriter(), .{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id }) catch |err| {
-                logger.writeFmt("katzensteg: composite fullscreen delete failed: {any}", .{err});
-            };
-            self.retireImageId(state.composite_image_id);
+            self.deleteCompositePlacement(logger, tty, .{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id });
         }
+        self.deleteRetainedFullscreenPlacements(logger, tty, state);
         state.composite_image_id = 0;
         state.composite_placement_id = 0;
         if (state.composite_last_presented) |last| @memset(last, 0);
@@ -1656,6 +1713,23 @@ pub const FrameBuilder = struct {
         if (!compositeTileImageIsReferenced(state, image_id)) self.retireImageId(image_id);
     }
 
+    fn deleteCompositePlacement(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, placement: CompositePlacement) void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        kitty_protocol.writeDeleteExactPlacement(tty.file.deprecatedWriter(), .{ .image_id = placement.image_id, .placement_id = placement.placement_id }) catch |err| {
+            logger.writeFmt("katzensteg: composite fullscreen delete failed: {any}", .{err});
+        };
+        self.retireImageId(placement.image_id);
+    }
+
+    fn deleteRetainedFullscreenPlacements(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
+        var i: usize = 0;
+        while (i < state.retained_fullscreen_placement_count) : (i += 1) {
+            self.deleteCompositePlacement(logger, tty, state.retained_fullscreen_placements[i]);
+            state.retained_fullscreen_placements[i] = .{};
+        }
+        state.retained_fullscreen_placement_count = 0;
+    }
+
     fn deleteRetiredImages(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend) void {
         if (self.retired_image_ids.items.len == 0) return;
         for (self.retired_image_ids.items) |image_id| {
@@ -2070,9 +2144,22 @@ pub const FrameBuilder = struct {
         pixels: usize,
     };
 
+    fn scaleRgba(allocator: std.mem.Allocator, src: []const u8, src_w: i32, src_h: i32, dst_w: i32, dst_h: i32) ![]u8 {
+        const dst_len: usize = @intCast(dst_w * dst_h * 4);
+        const dst = try allocator.alloc(u8, dst_len);
+        if (tryFastScaleRgba(dst, dst_w, dst_h, src, src_w, src_h)) return dst;
+        scaleRgbaNearestInto(dst, src, src_w, src_h, dst_w, dst_h);
+        return dst;
+    }
+
     fn scaleRgbaNearest(allocator: std.mem.Allocator, src: []const u8, src_w: i32, src_h: i32, dst_w: i32, dst_h: i32) ![]u8 {
         const dst_len: usize = @intCast(dst_w * dst_h * 4);
         const dst = try allocator.alloc(u8, dst_len);
+        scaleRgbaNearestInto(dst, src, src_w, src_h, dst_w, dst_h);
+        return dst;
+    }
+
+    fn scaleRgbaNearestInto(dst: []u8, src: []const u8, src_w: i32, src_h: i32, dst_w: i32, dst_h: i32) void {
         const src_w_usize: usize = @intCast(src_w);
         const dst_w_usize: usize = @intCast(dst_w);
         var y: i32 = 0;
@@ -2086,7 +2173,6 @@ pub const FrameBuilder = struct {
                 @memcpy(dst[dst_index .. dst_index + 4], src[src_index .. src_index + 4]);
             }
         }
-        return dst;
     }
 
     fn compositeCopy(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
@@ -3048,6 +3134,20 @@ test "composite tile strip images retire only after all placements stop referenc
     try std.testing.expectEqual(@as(u32, 77), builder.retired_image_ids.items[0]);
 }
 
+test "fullscreen composite retains a bounded placement fallback window" {
+    var state = RendererState.init(std.testing.allocator, 64, 64);
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?CompositePlacement, null), state.rememberFullscreenPlacement(.{ .image_id = 10, .placement_id = 1 }));
+    try std.testing.expectEqual(@as(?CompositePlacement, null), state.rememberFullscreenPlacement(.{ .image_id = 11, .placement_id = 2 }));
+    try std.testing.expectEqual(@as(usize, 2), state.retained_fullscreen_placement_count);
+
+    const evicted = state.rememberFullscreenPlacement(.{ .image_id = 12, .placement_id = 3 });
+    try std.testing.expectEqual(CompositePlacement{ .image_id = 10, .placement_id = 1 }, evicted.?);
+    try std.testing.expectEqual(CompositePlacement{ .image_id = 11, .placement_id = 2 }, state.retained_fullscreen_placements[0]);
+    try std.testing.expectEqual(CompositePlacement{ .image_id = 12, .placement_id = 3 }, state.retained_fullscreen_placements[1]);
+}
+
 test "present decision debug logging is change-driven" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, true);
     defer builder.deinit();
@@ -3290,6 +3390,30 @@ test "YUV converters preserve output for padded odd-sized neutral chroma frames"
 
     try std.testing.expectEqualSlices(u8, &expected, yuv_record.base_rgba.?);
     try std.testing.expectEqualSlices(u8, &expected, nv_record.base_rgba.?);
+}
+
+test "external framebuffer conversion preserves rgba input" {
+    const src = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var dst: [src.len]u8 = undefined;
+
+    try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 2, 1, .rgba8));
+    try std.testing.expectEqualSlices(u8, &src, &dst);
+}
+
+test "external framebuffer conversion swaps bgra input to rgba" {
+    const src = [_]u8{ 3, 2, 1, 4, 7, 6, 5, 8 };
+    const expected = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var dst: [src.len]u8 = undefined;
+
+    try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 2, 1, .bgra8));
+    try std.testing.expectEqualSlices(u8, &expected, &dst);
+}
+
+test "external framebuffer conversion rejects dimension length mismatch" {
+    const src = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var dst: [src.len]u8 = undefined;
+
+    try std.testing.expect(!convertExternalFramebufferToRgba(&dst, &src, 1, 1, .rgba8));
 }
 
 test "axis-aligned render geometry raw maps textured quad to copy rect" {

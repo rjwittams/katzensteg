@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "app.input_probe": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-input-probe",
+      "args": [
+        "--log-events"
+      ],
+      "stdout": "/tmp/katzensteg-input-probe.out",
+      "stderr": "stdout"
+    },
+    "probe.input": {
+      "extends": [
+        "app.input_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ]
+    }
+  }
+}
