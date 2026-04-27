@@ -1,5 +1,7 @@
 # Katzensteg External Project Inventory
 
+Date: 2026-04-27
+
 This tracks local app forks used to test end-to-end SDL, OpenGL, Vulkan, and streaming paths. Branch names should describe the app-side change, not Katzensteg itself.
 
 ## Branch Naming
@@ -8,129 +10,187 @@ Use names like:
 
 - `macos-sdl2-video-output`
 - `macos-sdl2-build-fixes`
-- `macos-sdl-renderer-hwdecode`
-- `sdl-output-probe`
+- `macos-sdl-renderer-output`
+- `macos-sdl-client-build`
 - `macos-vulkan-sdl-output`
 
 Avoid names that only say the branch is for Katzensteg. The useful question is what the fork changes in the target project.
+
+## Fork Remote Status
+
+Forks now exist under `rjwittams` and each local checkout has a separate `rjwittams` remote. Upstream remains `origin`.
+
+| Project | Upstream `origin` | Fork remote |
+| --- | --- | --- |
+| RetroArch | `https://github.com/libretro/RetroArch.git` | `https://github.com/rjwittams/RetroArch.git` |
+| Moonlight Qt | `https://github.com/moonlight-stream/moonlight-qt.git` | `https://github.com/rjwittams/moonlight-qt.git` |
+| ScummVM | `https://github.com/scummvm/scummvm.git` | `https://github.com/rjwittams/scummvm.git` |
+| Cannonball | `https://github.com/djyt/cannonball.git` | `https://github.com/rjwittams/cannonball.git` |
+| Chiaki NG | `https://github.com/streetpea/chiaki-ng.git` | `https://github.com/rjwittams/chiaki-ng.git` |
+| ANESE | `https://github.com/daniel5151/ANESE.git` | `https://github.com/rjwittams/ANESE.git` |
 
 ## Projects
 
 ### RetroArch
 
 - Local checkout: `/Users/robert/dev/RetroArch`
-- Upstream remote: `https://github.com/libretro/RetroArch.git`
-- Proposed fork remote: `https://github.com/rjwittams/RetroArch.git`
 - Current local branch: `robert/macos-sdl2-video-pr-cleanup`
-- Suggested branch names:
-  - `macos-sdl2-video-output`
-  - `macos-vulkan-sdl-output`
-  - `macos-gl-sdl-output`
+- Pushed fork branch: `rjwittams/macos-sdl2-video-output`
+- Local state: dirty; the pushed branch contains the two committed macOS/SDL2 commits, but the currently tested tree also has uncommitted GL/Vulkan/windowing work.
+- Uncommitted source changes:
+  - `Makefile.common`
+  - `gfx/common/vulkan_common.c`
+  - `gfx/common/vulkan_common.h`
+  - `gfx/drivers/sdl2_gfx.c`
+  - `gfx/drivers/vulkan.c`
+  - `gfx/drivers_context/sdl_gl_ctx.c`
+  - `gfx/video_driver.c`
+  - `gfx/video_driver.h`
+  - `ui/drivers/cocoa/cocoa_common.m`
+  - `ui/drivers/ui_cocoa.m`
+- Untracked local artifacts:
+  - `RetroArch.app/`
+  - crash logs
+  - Metal shader build products
+  - `gfx/drivers_context/sdl_vk_ctx.c`
 - Local change shape:
   - macOS build and bundle work
-  - SDL2 video path changes
-  - GL/Vulkan context and video-driver changes
+  - SDL2 video and input path changes
+  - OpenGL/Vulkan context-driver changes
   - Cocoa bootstrap/window behavior changes
-- Repo-local launch coverage:
-  - `retroarch.sonic`
-  - `retroarch.melonds.sm64ds`
-  - legacy scripts for Sonic, bsnes/SMW, melonDS, and Vulkan/Flycast
-- Notes:
-  - Treat generated `RetroArch.app`, crash logs, shader build products, and bundled resources as local artifacts unless deliberately packaging a release.
+- Launcher profile coverage:
+  - `sonic`
+  - `sm64ds`
+  - `smw`
+  - `jsr`
+- Next cleanup:
+  - Split uncommitted work into at least SDL2 software, SDL GL, SDL Vulkan, and Cocoa/windowing commits.
+  - Decide whether `gfx/drivers_context/sdl_vk_ctx.c` is source or a local experiment before committing.
+  - Keep generated app bundles, crash logs, and shader products out of source branches.
 
 ### Moonlight Qt
 
 - Local checkout: `/Users/robert/dev/moonlight-qt`
-- Upstream remote: `https://github.com/moonlight-stream/moonlight-qt.git`
-- Proposed fork remote: `https://github.com/rjwittams/moonlight-qt.git`
-- Current local branch: `master`
-- Suggested branch names:
-  - `macos-sdl-renderer-hwdecode`
-  - `macos-sdl-renderer-output`
+- Current local branch: `macos-sdl-renderer-output`
+- Pushed fork branch: none yet; current changes are uncommitted.
+- Local state: dirty; source changes are confined to the SDL ffmpeg renderer plus generated qmake/build artifacts.
+- Uncommitted source changes:
+  - `app/streaming/video/ffmpeg-renderers/sdlvid.cpp`
+  - `app/streaming/video/ffmpeg-renderers/sdlvid.h`
+- Untracked local artifacts:
+  - qmake cache/stash and generated Makefiles
+  - `app/Moonlight.app/`
+  - `app/release/`
+  - built third-party static libraries and release dirs
 - Local change shape:
-  - SDL video renderer changes
+  - SDL video renderer output path
   - hardware decode / format-handling experiments
-  - local Qt build artifacts
-- Repo-local launch coverage:
-  - `moonlight.steam_big_picture`
-  - legacy Steam Big Picture script
-- Notes:
-  - Do not carry generated qmake files, `app/release`, bundled app output, or built third-party libraries into source branches.
+- Launcher profile coverage:
+  - `moonlight.steam`
+- Known Katzensteg limitations:
+  - terminal streaming works, but terminal mouse input does not yet appear to hit Moonlight's input path
+  - mixed-Retina setups can intermittently produce a renderer-output/window-size mismatch that shows the top-left quarter of the stream
+- Next cleanup:
+  - Commit only the `sdlvid.*` source changes on `macos-sdl-renderer-output`.
+  - Keep generated qmake files, app bundles, release output, and built third-party libraries untracked.
 
 ### ScummVM
 
 - Local checkout: `/Users/robert/dev/scummvm`
-- Upstream remote: `https://github.com/scummvm/scummvm.git`
-- Proposed fork remote: `https://github.com/rjwittams/scummvm.git`
 - Current local branch: `master`
-- Suggested branch name:
-  - `sdl2-surface-renderer-macos`
+- Pushed fork branch: none needed yet; local checkout is clean and currently tracks upstream.
+- Local state: clean.
 - Local change shape:
-  - currently clean in the local checkout
-  - used mainly to validate SDL surface/software output behavior
-- Repo-local launch coverage:
-  - `scummvm.monkey2`
-  - legacy Monkey Island 2 script
+  - no app-side patch currently required
+  - used to validate SDL surface/software output behavior
+- Launcher profile coverage:
+  - `mi2`
+- Next cleanup:
+  - Leave as upstream unless a ScummVM-specific SDL fix becomes necessary.
 
 ### Cannonball
 
 - Local checkout: `/Users/robert/dev/cannonball`
-- Upstream remote: `https://github.com/djyt/cannonball.git`
-- Proposed fork remote: `https://github.com/rjwittams/cannonball.git`
-- Current local branch: `master`
-- Suggested branch name:
-  - `macos-sdl2-build-fixes`
+- Current local branch: `macos-sdl2-build-fixes`
+- Pushed fork branch: none yet; current changes are uncommitted.
+- Local state: dirty.
+- Uncommitted source changes:
+  - `cmake/CMakeLists.txt`
+  - `src/main/stdint.hpp`
+- Untracked local files:
+  - `config.xml`
+  - `run-cannonball-ks.sh`
 - Local change shape:
   - CMake adjustments
   - stdint portability/build fixes
-  - local config and launcher script
-- Repo-local launch coverage:
-  - no launcher profile yet
+  - local launcher/config files
+- Launcher profile coverage:
+  - no Katzensteg launcher profile yet
   - local script exists in the Cannonball checkout
+- Next cleanup:
+  - Commit source build fixes separately from local config/script files.
+  - Add a Katzensteg launcher profile if Cannonball remains a useful smoke target.
 
 ### Chiaki NG
 
 - Local checkout: `/Users/robert/dev/chiaki-ng`
-- Upstream remote: `https://github.com/streetpea/chiaki-ng.git`
-- Proposed fork remote: `https://github.com/rjwittams/chiaki-ng.git`
-- Current local branch: `main`
-- Suggested branch names:
-  - `macos-sdl-client-build`
-  - `macos-sdl-output-option`
+- Current local branch: `macos-sdl-client-build`
+- Pushed fork branch: none yet; current changes are uncommitted.
+- Local state: dirty.
+- Uncommitted source changes:
+  - `CMakeLists.txt`
+  - `test/CMakeLists.txt`
+  - modified `third-party/cpp-steam-tools` submodule state
+- Untracked local files:
+  - `.codex-tmp/`
+  - `scripts/run-chiaki-sdl-from-gui.py`
+  - `sdl/`
+  - `test/macos_no_cpp_steam_tools_dylib.cmake`
 - Local change shape:
   - CMake changes
   - SDL client/proxy work
   - Steam tools test/build changes
-- Repo-local launch coverage:
-  - legacy `run-chiaki-sdl-from-gui.sh`
-- Notes:
-  - `.codex-tmp` and CMake build trees are local artifacts.
+- Launcher profile coverage:
+  - `chiaki.sdl`
+  - `chiaki.sdl.child`
+- Next cleanup:
+  - Separate build-system changes from the SDL client/proxy code.
+  - Decide whether the Python wrapper script should live in the fork or be replaced by a launcher feature.
+  - Record exact submodule commit/state before pushing a branch.
 
 ### ANESE
 
 - Local checkout: `/Users/robert/dev/ANESE`
-- Upstream remote: `https://github.com/daniel5151/ANESE.git`
-- Proposed fork remote: `https://github.com/rjwittams/ANESE.git`
 - Current local branch: `master`
-- Suggested branch name:
-  - `sdl-output-probe`
+- Pushed fork branch: none needed yet; local checkout is clean and currently tracks upstream.
+- Local state: clean.
 - Local change shape:
-  - currently clean in the local checkout
-  - used as a small emulator target through a legacy script
-- Repo-local launch coverage:
-  - legacy `run-anese.sh`
+  - no app-side patch currently required
+  - used as a small SDL emulator target
+- Launcher profile coverage:
+  - `anese.test`
+  - `smb3`
+- Next cleanup:
+  - Leave as upstream unless an ANESE-specific SDL/output fix becomes necessary.
 
 ### FFplay
 
 - Local checkout: Homebrew/system install, not a forked local project.
-- Repo-local launch coverage:
-  - legacy `run-ffplay-testsrc.sh`
+- Launcher profile coverage:
+  - `ffplay.testsrc`
 - Notes:
   - Keep this as a runtime smoke target rather than a source fork unless FFmpeg-specific changes become necessary.
 
-## Next Steps
+## Current Branch Cleanup State
 
-- Add `rjwittams` fork remotes once the fork URLs are confirmed.
-- Split local dirty changes into focused branches using the suggested names above.
-- Add launcher profiles for useful script-only targets: bsnes/SMW, Vulkan/Flycast, Cannonball, Chiaki, ANESE, and ffplay testsrc.
-- Generate a bootstrap script after branch names and checkout locations settle.
+- Done:
+  - created `rjwittams` fork remotes for RetroArch, Moonlight Qt, ScummVM, Cannonball, Chiaki NG, and ANESE
+  - pushed RetroArch committed app-side work to `rjwittams/macos-sdl2-video-output`
+  - moved Moonlight dirty work from `master` to `macos-sdl-renderer-output`
+  - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
+  - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
+- Still needed:
+  - split and commit dirty work in RetroArch, Moonlight Qt, Cannonball, and Chiaki NG
+  - push those branch commits to the `rjwittams` forks
+  - decide whether Cannonball needs a first-class launcher profile
+  - add bootstrap metadata after source branches settle
