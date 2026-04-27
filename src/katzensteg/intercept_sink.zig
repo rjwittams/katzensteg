@@ -1,6 +1,7 @@
 const std = @import("std");
 const config_mod = @import("config.zig");
 const sdl = @import("katzensteg_sdl");
+const real_sdl = @import("real_sdl.zig");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
 const inspect_model = @import("inspect_model.zig");
@@ -109,7 +110,7 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
                     var access: c_int = 0;
                     var w: c_int = 0;
                     var h: c_int = 0;
-                    if (sdl.SDL_QueryTexture(c.texture, &format, &access, &w, &h) != 0) break :blk2 0;
+                    if (real_sdl.SDL_QueryTexture(c.texture, &format, &access, &w, &h) != 0) break :blk2 0;
                     break :blk2 @as(usize, @intCast(c.pitch * h));
                 };
                 if (byte_len > 0) {
@@ -211,7 +212,7 @@ pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture
             var access: c_int = 0;
             var w: c_int = 0;
             var h: c_int = 0;
-            if (sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) break :blk 0;
+            if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) break :blk 0;
             break :blk @as(usize, @intCast(pitch * h));
         };
         if (byte_len > 0) {
@@ -283,7 +284,7 @@ fn textureUpdateDimensions(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rec
     var access: c_int = 0;
     var w: c_int = 0;
     var h: c_int = 0;
-    if (sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) return null;
+    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) return null;
     return .{ .w = w, .h = h };
 }
 
@@ -320,18 +321,18 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
     var access: c_int = 0;
     var w: c_int = 0;
     var h: c_int = 0;
-    if (sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) {
+    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) {
         rt.logger.write("katzensteg: SDL_QueryTexture failed in enqueueCreateTextureFromSurface; using fallback metadata");
         format = sdl.SDL_PIXELFORMAT_ABGR8888;
     }
     rt.enqueueCommand(.{ .create_texture = .{ .texture = texture, .format = format, .w = w, .h = h } });
 
     if (surface == null) return;
-    const converted = sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
         rt.logger.write("katzensteg: SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface");
         return;
     };
-    defer sdl.SDL_FreeSurface(converted);
+    defer real_sdl.SDL_FreeSurface(converted);
     const surf: *SurfaceView = @ptrCast(@alignCast(converted));
     const byte_len: usize = @intCast(surf.pitch * surf.h);
     const copied = rt.acquirePayloadBuffer(byte_len) catch {
@@ -367,7 +368,7 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
         var access: c_int = 0;
         var w: c_int = 0;
         var h: c_int = 0;
-        if (sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) break :blk 0;
+        if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) break :blk 0;
         break :blk @as(usize, @intCast(capture.pitch * h));
     };
     if (byte_len == 0) {
@@ -433,7 +434,7 @@ pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Re
     var access: c_int = 0;
     var w: c_int = 0;
     var h: c_int = 0;
-    if (sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) return;
+    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) return;
     const copy = frame_builder_mod.FrameBuilder.geometryRawAsCopy(xy, @intCast(xy_stride), uv, @intCast(uv_stride), @intCast(num_vertices), indices, @intCast(num_indices), @intCast(size_indices), w, h) orelse {
         rt.logger.writeOnce("katzensteg: unsupported SDL_RenderGeometryRaw shape; skipping geometry");
         return;

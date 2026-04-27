@@ -24,7 +24,6 @@
       },
       "env": {
         "KATZENSTEG_VULKAN_CAPTURE": "1",
-        "KATZENSTEG_VULKAN_LOADER": "/opt/homebrew/lib/libvulkan.1.dylib",
         "VK_LAYER_PATH": "{repo}/profiles",
         "VK_INSTANCE_LAYERS": "VK_LAYER_KATZENSTEG_capture"
       }
@@ -59,7 +58,8 @@
     "adapter.sdl2_preload": {
       "hidden": true,
       "env": {
-        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib"
+        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib",
+        "LD_PRELOAD": "{repo}/zig-out/lib/libkatzensteg-unlinked.so"
       }
     },
     "retroarch": {
@@ -84,7 +84,7 @@
       ],
       "args": [
         "-L",
-        "$HOME/Library/Application Support/RetroArch/cores/genesis_plus_gx_libretro.dylib",
+        "genesis_plus_gx_libretro",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
@@ -100,7 +100,7 @@
       ],
       "args": [
         "-L",
-        "$HOME/Library/Application Support/RetroArch/cores/melonds_libretro.dylib",
+        "melonds_libretro",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
@@ -115,7 +115,7 @@
       ],
       "args": [
         "-L",
-        "$HOME/Library/Application Support/RetroArch/cores/bsnes_libretro.dylib",
+        "bsnes_libretro",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/smw.smc"
@@ -123,7 +123,7 @@
     },
     "jsr": {
       "extends": [
-        "retroarch.app",
+        "retroarch",
         "adapter.sdl2_preload",
         "runtime.fullscreen_file",
         "config.retroarch_vulkan",
@@ -131,7 +131,7 @@
       ],
       "args": [
         "-L",
-        "$HOME/Library/Application Support/RetroArch/cores/flycast_libretro.dylib",
+        "flycast_libretro",
         "-c",
         "/tmp/retroarch-sdl2-vulkan.cfg",
         "$HOME/roms/JGR/Jet Grind Radio (USA).cue"

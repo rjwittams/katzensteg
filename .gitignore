@@ -1,7 +1,10 @@
 .zig-cache/
 .zig-global-cache/
+.zig-global-cache-system/
 zig-out/
 .codex-tmp/
+/.codex
+/.codex/
 
 __pycache__/
 *.pyc
@@ -11,3 +14,9 @@ test-results/
 
 *crash*.txt
 *-crash*.txt
+
+/basic-sdl-demo
+/katzensteg-vulkan-probe
+/ks-min
+/feta-linux-handoff.md
+/katzensteg-linux-build.patch

@@ -62,7 +62,7 @@
       ],
       "args": [
         "-cfgfile",
-        "$HOME/dev/cannonball/config.xml"
+        "$HOME/dev/cannonball/build/config.xml"
       ]
     },
     "app.chiaki_gui_wrapper": {
