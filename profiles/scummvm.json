@@ -2,7 +2,7 @@
   "profiles": {
     "app.scummvm": {
       "hidden": true,
-      "target": "/opt/homebrew/bin/scummvm",
+      "target": "$HOME/dev/scummvm/scummvm",
       "env": {
         "SDL_RENDER_DRIVER": "software",
         "KATZENSTEG_COMPOSITE_DEBUG": "1",

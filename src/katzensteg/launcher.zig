@@ -244,7 +244,9 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
-        std.debug.print("katzensteg dry-run\ncommand={s}\nargs={d}\n", .{ target, extra_args.len });
+        const line = try dryRunCommandLineForDisplay(allocator, target, extra_args);
+        defer allocator.free(line);
+        std.debug.print("katzensteg dry-run\ncommandline={s}\n", .{line});
         return;
     };
     if (profileLaunchProblem(profile)) |problem| {
@@ -266,10 +268,9 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
             outputSpecLabel(plan.stderr),
         },
     );
-    std.debug.print("argv:\n", .{});
-    for (plan.argv, 0..) |arg, index| {
-        std.debug.print("  [{d}] {s}\n", .{ index, arg });
-    }
+    const line = try commandLineForDisplay(allocator, plan.argv);
+    defer allocator.free(line);
+    std.debug.print("commandline={s}\n", .{line});
     std.debug.print("env:\n", .{});
     if (plan.env.len == 0) {
         std.debug.print("  <none>\n", .{});
@@ -346,7 +347,11 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     child.stdout_behavior = stdioForStdout(plan.stdout);
     child.stderr_behavior = stdioForStderr(plan.stdout, plan.stderr);
 
-    const term = try spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr);
+    const term = spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
+        resetTerminalBestEffort();
+        printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
+        return spawnFailureExitCode(err);
+    };
     resetTerminalBestEffort();
     const exit_code = childExitCode(term);
     if (exit_code != 0) {
@@ -384,7 +389,11 @@ fn runCommand(allocator: std.mem.Allocator, target: []const u8, extra_args: []co
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
 
-    const term = try child.spawnAndWait();
+    const term = child.spawnAndWait() catch |err| {
+        resetTerminalBestEffort();
+        printSpawnFailure(allocator, "command", argv, err);
+        return spawnFailureExitCode(err);
+    };
     resetTerminalBestEffort();
     return childExitCode(term);
 }
@@ -442,6 +451,44 @@ fn childExitCode(term: std.process.Child.Term) u8 {
         },
         else => 1,
     };
+}
+
+fn spawnFailureExitCode(err: anyerror) u8 {
+    return switch (err) {
+        error.FileNotFound => 127,
+        error.AccessDenied, error.PermissionDenied => 126,
+        else => 1,
+    };
+}
+
+fn printSpawnFailure(allocator: std.mem.Allocator, label: []const u8, argv: []const []const u8, err: anyerror) void {
+    std.debug.print("katzensteg: failed to launch {s}: {s}\n", .{ label, @errorName(err) });
+    const commandline = commandLineForDisplay(allocator, argv) catch null;
+    if (commandline) |line| {
+        defer allocator.free(line);
+        std.debug.print("  commandline={s}\n", .{line});
+    }
+    if (argv.len > 0) {
+        const reason = spawnFailureReasonForDisplay(allocator, argv[0], err) catch null;
+        if (reason) |text| {
+            defer allocator.free(text);
+            std.debug.print("  {s}\n", .{text});
+        }
+    }
+}
+
+fn spawnFailureReasonForDisplay(allocator: std.mem.Allocator, executable: []const u8, err: anyerror) ![]const u8 {
+    if (err == error.FileNotFound) {
+        if (usesPathLookup(executable)) {
+            return std.fmt.allocPrint(allocator, "executable not found on PATH: {s}", .{executable});
+        }
+        return std.fmt.allocPrint(allocator, "executable not found: {s}", .{executable});
+    }
+    return std.fmt.allocPrint(allocator, "spawn failed before the target process started", .{});
+}
+
+fn usesPathLookup(executable: []const u8) bool {
+    return std.mem.indexOfScalar(u8, executable, '/') == null;
 }
 
 fn loadProfileCatalog(allocator: std.mem.Allocator) !profiles_mod.ProfileCatalog {
@@ -731,6 +778,14 @@ fn commandLineForDisplay(allocator: std.mem.Allocator, argv: []const []const u8)
     return out.toOwnedSlice(allocator);
 }
 
+fn dryRunCommandLineForDisplay(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) ![]const u8 {
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, target);
+    try argv.appendSlice(allocator, extra_args);
+    return commandLineForDisplay(allocator, argv.items);
+}
+
 fn appendShellQuotedArg(allocator: std.mem.Allocator, out: *std.ArrayList(u8), arg: []const u8) !void {
     if (arg.len > 0 and shellArgCanBeBare(arg)) {
         try out.appendSlice(allocator, arg);
@@ -973,6 +1028,27 @@ test "launcher formats executed command line for failure output" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("/bin/echo plain 'two words' 'it'\\''s' ''", line);
+}
+
+test "launcher formats direct dry-run command line with extra args" {
+    const line = try dryRunCommandLineForDisplay(std.testing.allocator, "retroarch", &.{ "--fullscreen", "two words" });
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("retroarch --fullscreen 'two words'", line);
+}
+
+test "launcher describes missing absolute executable paths" {
+    const reason = try spawnFailureReasonForDisplay(std.testing.allocator, "/missing/scummvm", error.FileNotFound);
+    defer std.testing.allocator.free(reason);
+
+    try std.testing.expectEqualStrings("executable not found: /missing/scummvm", reason);
+}
+
+test "launcher describes missing path lookup commands" {
+    const reason = try spawnFailureReasonForDisplay(std.testing.allocator, "scummvm", error.FileNotFound);
+    defer std.testing.allocator.free(reason);
+
+    try std.testing.expectEqualStrings("executable not found on PATH: scummvm", reason);
 }
 
 test "launcher detects proxy executable basename" {
