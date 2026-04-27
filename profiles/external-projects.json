@@ -1,6 +1,26 @@
 {
   "schema_version": 1,
   "default_root": "$HOME/dev",
+  "package_hints": {
+    "arch": {
+      "cmake": "cmake",
+      "ffplay": "ffmpeg",
+      "git": "git",
+      "opus": "opus",
+      "pkg-config": "pkgconf",
+      "qmake6": "qt6-base",
+      "sdl2": "sdl2"
+    },
+    "debian": {
+      "cmake": "cmake",
+      "ffplay": "ffmpeg",
+      "git": "git",
+      "opus": "libopus-dev",
+      "pkg-config": "pkg-config",
+      "qmake6": "qt6-base-dev",
+      "sdl2": "libsdl2-dev"
+    }
+  },
   "projects": [
     {
       "name": "retroarch",
@@ -26,6 +46,34 @@
         "linux": [
           "./configure --enable-sdl2",
           "make -j$(nproc)"
+        ]
+      },
+      "doctor": {
+        "tools": [
+          "make"
+        ],
+        "pkg_config": [
+          "sdl2"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "retroarch"
+          }
+        ],
+        "assets": [
+          {
+            "path": "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
+          },
+          {
+            "path": "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
+          },
+          {
+            "path": "$HOME/snes/smw.smc"
+          },
+          {
+            "path": "$HOME/roms/JGR/Jet Grind Radio (USA).cue"
+          }
         ]
       },
       "notes": [
@@ -57,6 +105,21 @@
           "make -j$(nproc)"
         ]
       },
+      "doctor": {
+        "tools": [
+          "qmake6"
+        ],
+        "pkg_config": [
+          "sdl2"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "app/release"
+          }
+        ],
+        "assets": []
+      },
       "notes": [
         "Pushed branch contains the SDL renderer RGB fallback used by Katzensteg.",
         "Known Katzensteg gaps: terminal mouse path and macOS mixed-Retina output-size mismatch."
@@ -85,6 +148,25 @@
           "make -j$(nproc)"
         ]
       },
+      "doctor": {
+        "tools": [
+          "make"
+        ],
+        "pkg_config": [
+          "sdl2"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "scummvm"
+          }
+        ],
+        "assets": [
+          {
+            "path": "$HOME/roms/mi2"
+          }
+        ]
+      },
       "notes": [
         "No app-side Katzensteg patch is currently required."
       ]
@@ -111,6 +193,25 @@
           "cmake -S . -B build",
           "cmake --build build"
         ]
+      },
+      "doctor": {
+        "tools": [
+          "cmake"
+        ],
+        "pkg_config": [
+          "sdl2"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "build/cannonball"
+          },
+          {
+            "kind": "config",
+            "path": "config.xml"
+          }
+        ],
+        "assets": []
       },
       "notes": [
         "Pushed branch contains macOS CMake and static-assert portability fixes.",
@@ -148,6 +249,23 @@
           "ctest --test-dir .codex-tmp/build-sdl-prototype -R chiaki-sdl --output-on-failure"
         ]
       },
+      "doctor": {
+        "tools": [
+          "uv",
+          "cmake"
+        ],
+        "pkg_config": [
+          "sdl2",
+          "opus"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": ".codex-tmp/build-sdl-prototype"
+          }
+        ],
+        "assets": []
+      },
       "notes": [
         "Prototype branch is intentionally not a final Chiaki UI design.",
         "The SDL client should eventually grow GUI-equivalent launch/config behavior and remove the Python wrapper."
@@ -175,6 +293,19 @@
           "cmake --build build"
         ]
       },
+      "doctor": {
+        "tools": [
+          "cmake"
+        ],
+        "pkg_config": [],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "build"
+          }
+        ],
+        "assets": []
+      },
       "notes": [
         "Tracked as a Chiaki submodule branch; not cloned by default as a top-level checkout."
       ]
@@ -201,6 +332,25 @@
         "linux": [
           "cmake -S . -B build",
           "cmake --build build"
+        ]
+      },
+      "doctor": {
+        "tools": [
+          "cmake"
+        ],
+        "pkg_config": [
+          "sdl2"
+        ],
+        "paths": [
+          {
+            "kind": "output",
+            "path": "build/anese"
+          }
+        ],
+        "assets": [
+          {
+            "path": "$HOME/roms/smb3.nes"
+          }
         ]
       },
       "notes": [
