@@ -136,6 +136,22 @@
         "/tmp/retroarch-sdl2-vulkan.cfg",
         "$HOME/roms/JGR/Jet Grind Radio (USA).cue"
       ]
+    },
+    "spyro": {
+      "extends": [
+        "retroarch",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "config.retroarch_vulkan",
+        "capture.vulkan"
+      ],
+      "args": [
+        "-L",
+        "mednafen_psx_hw_libretro",
+        "-c",
+        "/tmp/retroarch-sdl2-vulkan.cfg",
+        "$HOME/roms/Spyro the Dragon (USA)/Spyro the Dragon (USA).cue"
+      ]
     }
   }
 }
