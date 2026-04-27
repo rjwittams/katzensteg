@@ -113,8 +113,8 @@ Record:
 
 ### Tasks
 
-- [ ] Create `docs/katzensteg/external-projects.md`.
-- [ ] Add one section per external project.
+- [x] Create `docs/katzensteg/external-projects.md`.
+- [x] Add one section per external project.
 - [ ] For each project, create or confirm a `rjwittams` GitHub fork.
 - [ ] Push local branches to those forks with names describing the app-side change, not Katzensteg itself. Most branches should be named around macOS build fixes or end-to-end SDL output support.
 - [ ] Update launcher profiles to use stable checkout conventions where practical.
