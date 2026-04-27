@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -42,6 +43,16 @@ class ProjectExecutionResult:
     path: Path
     sync: CommandPhaseResult
     build: CommandPhaseResult
+
+
+@dataclass
+class DoctorReport:
+    missing_tools: list[str]
+    missing_packages: list[str]
+    missing_outputs: list[str]
+    missing_configs: list[str]
+    missing_assets: list[str]
+    summary: str
 
 
 def load_manifest(path: Path) -> dict:
@@ -179,6 +190,114 @@ def select_projects(manifest: dict, names: Iterable[str] | None = None, include_
 
 def expand_path(path: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(path)))
+
+
+def doctor_project_root(root: Path, project: dict) -> Path:
+    return root / project["directory"]
+
+
+def doctor_path(project_root: Path, path_value: str) -> Path:
+    candidate = expand_path(path_value)
+    if candidate.is_absolute():
+        return candidate
+    return project_root / candidate
+
+
+PkgConfigStatus = Literal["present", "missing_module", "missing_tool"]
+
+
+def run_pkg_config_exists(module_name: str) -> PkgConfigStatus:
+    try:
+        result = subprocess.run(
+            ["pkg-config", "--exists", module_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return "missing_tool"
+    if result.returncode == 0:
+        return "present"
+    return "missing_module"
+
+
+def format_doctor_summary(report: DoctorReport) -> str:
+    categories = [
+        ("missing tools", report.missing_tools),
+        ("missing pkg-config modules", report.missing_packages),
+        ("missing outputs", report.missing_outputs),
+        ("missing configs", report.missing_configs),
+        ("missing assets", report.missing_assets),
+    ]
+    parts = [f"{label}: {len(items)}" for label, items in categories if items]
+    if not parts:
+        return "doctor ok"
+    return ", ".join(parts)
+
+
+def run_doctor(
+    manifest: dict,
+    root: Path,
+    names: Iterable[str] | None = None,
+    include_non_default: bool = False,
+) -> DoctorReport:
+    missing_tools: list[str] = []
+    missing_packages: list[str] = []
+    missing_outputs: list[str] = []
+    missing_configs: list[str] = []
+    missing_assets: list[str] = []
+
+    for project in select_projects(manifest, names, include_non_default):
+        doctor = project.get("doctor", {})
+        project_root = doctor_project_root(root, project)
+
+        for tool_name in doctor.get("tools", []):
+            if shutil.which(tool_name) is None:
+                missing_tools.append(tool_name)
+
+        pkg_config_available = True
+        for module_name in doctor.get("pkg_config", []):
+            if not pkg_config_available:
+                continue
+            status = run_pkg_config_exists(module_name)
+            if status == "present":
+                continue
+            if status == "missing_tool":
+                missing_tools.append("pkg-config")
+                pkg_config_available = False
+                continue
+            if status == "missing_module":
+                missing_packages.append(module_name)
+
+        for path_entry in doctor.get("paths", []):
+            path_kind = path_entry["kind"]
+            if path_kind not in {"output", "config"}:
+                raise ValueError(
+                    f"unknown doctor path kind {path_kind!r} for project {project['name']}"
+                )
+            resolved_path = doctor_path(project_root, path_entry["path"])
+            if resolved_path.exists():
+                continue
+            if path_kind == "output":
+                missing_outputs.append(str(resolved_path))
+            elif path_kind == "config":
+                missing_configs.append(str(resolved_path))
+
+        for asset_entry in doctor.get("assets", []):
+            resolved_path = doctor_path(project_root, asset_entry["path"])
+            if not resolved_path.exists():
+                missing_assets.append(str(resolved_path))
+
+    report = DoctorReport(
+        missing_tools=list(dict.fromkeys(missing_tools)),
+        missing_packages=list(dict.fromkeys(missing_packages)),
+        missing_outputs=list(dict.fromkeys(missing_outputs)),
+        missing_configs=list(dict.fromkeys(missing_configs)),
+        missing_assets=list(dict.fromkeys(missing_assets)),
+        summary="",
+    )
+    report.summary = format_doctor_summary(report)
+    return report
 
 
 def clone_command(project: dict, target: Path) -> list[str]:

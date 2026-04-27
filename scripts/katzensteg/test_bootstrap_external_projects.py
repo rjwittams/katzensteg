@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -399,6 +400,267 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         self.assertIsInstance(results[0].error, FileNotFoundError)
         self.assertEqual(["cmake -S . -B build"], results[0].printed_commands)
         self.assertEqual("succeeded", results[1].status)
+
+    def test_run_doctor_classifies_missing_tools_packages_and_paths(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "cannonball",
+                    "directory": "cannonball",
+                    "doctor": {
+                        "tools": ["missing-tool"],
+                        "pkg_config": ["missing-module"],
+                        "paths": [
+                            {"kind": "output", "path": "build/cannonball"},
+                            {"kind": "config", "path": "config.xml"},
+                        ],
+                        "assets": [
+                            {"path": "$HOME/roms/game.bin"},
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            project_root = root / "cannonball"
+            project_root.mkdir(parents=True)
+            expected_config = str(project_root / "config.xml")
+            expected_output = str(project_root / "build" / "cannonball")
+            expected_asset = str(Path(temp_dir) / "roms" / "game.bin")
+
+            with mock.patch.dict(os.environ, {"HOME": temp_dir}, clear=False), \
+                mock.patch.object(bootstrap.shutil, "which", return_value=None) as which_mock, \
+                mock.patch.object(
+                    bootstrap.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=1),
+                ) as run_mock:
+                report = bootstrap.run_doctor(manifest, root, names=["cannonball"])
+
+        self.assertEqual(["missing-tool"], report.missing_tools)
+        self.assertEqual(["missing-module"], report.missing_packages)
+        self.assertEqual([expected_output], report.missing_outputs)
+        self.assertEqual([expected_config], report.missing_configs)
+        self.assertEqual([expected_asset], report.missing_assets)
+        self.assertIn("missing tools", report.summary)
+        self.assertIn("missing pkg-config modules", report.summary)
+        self.assertIn("missing outputs", report.summary)
+        self.assertIn("missing configs", report.summary)
+        self.assertIn("missing assets", report.summary)
+        which_mock.assert_called_once_with("missing-tool")
+        run_mock.assert_called_once_with(
+            ["pkg-config", "--exists", "missing-module"],
+            check=False,
+            stdout=bootstrap.subprocess.DEVNULL,
+            stderr=bootstrap.subprocess.DEVNULL,
+        )
+
+    def test_run_doctor_summary_is_ok_when_nothing_is_missing(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "ready-project",
+                    "directory": "ready-project",
+                    "doctor": {
+                        "tools": ["present-tool"],
+                        "pkg_config": ["present-module"],
+                        "paths": [
+                            {"kind": "output", "path": "build/output.bin"},
+                            {"kind": "config", "path": "config.xml"},
+                        ],
+                        "assets": [
+                            {"path": "$HOME/assets/ready.bin"},
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            project_root = root / "ready-project"
+            (project_root / "build").mkdir(parents=True)
+            project_root.mkdir(parents=True, exist_ok=True)
+            (project_root / "build" / "output.bin").write_text("ok", encoding="utf-8")
+            (project_root / "config.xml").write_text("<config />", encoding="utf-8")
+            asset_path = Path(temp_dir) / "assets" / "ready.bin"
+            asset_path.parent.mkdir(parents=True)
+            asset_path.write_text("asset", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"HOME": temp_dir}, clear=False), \
+                mock.patch.object(bootstrap.shutil, "which", return_value="/usr/bin/present-tool"), \
+                mock.patch.object(
+                    bootstrap.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0),
+                ):
+                report = bootstrap.run_doctor(manifest, root, names=["ready-project"])
+
+        self.assertEqual([], report.missing_tools)
+        self.assertEqual([], report.missing_packages)
+        self.assertEqual([], report.missing_outputs)
+        self.assertEqual([], report.missing_configs)
+        self.assertEqual([], report.missing_assets)
+        self.assertEqual("doctor ok", report.summary)
+
+    def test_run_doctor_treats_pkg_config_launch_failure_as_missing_tool(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "pkg-config-project",
+                    "directory": "pkg-config-project",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": ["sdl2", "opus"],
+                        "paths": [],
+                        "assets": [],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            (root / "pkg-config-project").mkdir(parents=True)
+
+            with mock.patch.object(
+                bootstrap.subprocess,
+                "run",
+                side_effect=FileNotFoundError("pkg-config not found"),
+            ) as run_mock:
+                report = bootstrap.run_doctor(manifest, root, names=["pkg-config-project"])
+
+        self.assertEqual(["pkg-config"], report.missing_tools)
+        self.assertEqual([], report.missing_packages)
+        self.assertIn("missing tools", report.summary)
+        self.assertNotIn("missing pkg-config modules", report.summary)
+        self.assertEqual(1, run_mock.call_count)
+
+    def test_run_doctor_rejects_unknown_path_kind(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "broken-project",
+                    "directory": "broken-project",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": [],
+                        "paths": [
+                            {"kind": "typo", "path": "somewhere"},
+                        ],
+                        "assets": [],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+
+            with self.assertRaisesRegex(ValueError, "unknown doctor path kind.*typo.*broken-project"):
+                bootstrap.run_doctor(manifest, root, names=["broken-project"])
+
+    def test_run_doctor_rejects_unknown_path_kind_even_when_path_exists(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "broken-project",
+                    "directory": "broken-project",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": [],
+                        "paths": [
+                            {"kind": "typo", "path": "existing-file"},
+                        ],
+                        "assets": [],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            project_root = root / "broken-project"
+            project_root.mkdir(parents=True)
+            (project_root / "existing-file").write_text("present", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unknown doctor path kind.*typo.*broken-project"):
+                bootstrap.run_doctor(manifest, root, names=["broken-project"])
+
+    def test_run_doctor_continues_across_multiple_projects(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "first-project",
+                    "directory": "first-project",
+                    "doctor": {
+                        "tools": ["missing-tool"],
+                        "pkg_config": [],
+                        "paths": [],
+                        "assets": [],
+                    },
+                },
+                {
+                    "name": "second-project",
+                    "directory": "second-project",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": ["missing-module"],
+                        "paths": [
+                            {"kind": "config", "path": "config.xml"},
+                        ],
+                        "assets": [
+                            {"path": "$HOME/assets/missing.bin"},
+                        ],
+                    },
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            (root / "first-project").mkdir(parents=True)
+            (root / "second-project").mkdir(parents=True)
+            expected_config = str(root / "second-project" / "config.xml")
+            expected_asset = str(Path(temp_dir) / "assets" / "missing.bin")
+
+            with mock.patch.dict(os.environ, {"HOME": temp_dir}, clear=False), \
+                mock.patch.object(bootstrap.shutil, "which", return_value=None), \
+                mock.patch.object(
+                    bootstrap.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=1),
+                ):
+                report = bootstrap.run_doctor(manifest, root, names=["first-project", "second-project"])
+
+        self.assertEqual(["missing-tool"], report.missing_tools)
+        self.assertEqual(["missing-module"], report.missing_packages)
+        self.assertEqual([expected_config], report.missing_configs)
+        self.assertEqual([expected_asset], report.missing_assets)
+        self.assertIn("missing tools", report.summary)
+        self.assertIn("missing pkg-config modules", report.summary)
+        self.assertIn("missing configs", report.summary)
+        self.assertIn("missing assets", report.summary)
 
     def test_run_sync_commands_contains_runtime_launch_failures(self):
         bootstrap = load_module()
