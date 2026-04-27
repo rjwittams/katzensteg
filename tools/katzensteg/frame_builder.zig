@@ -869,18 +869,19 @@ pub const FrameBuilder = struct {
                 .z = -100,
             });
         }
+        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         if (!bg_only) {
             for (state.fills.items) |fill| {
                 try solids_list.append(self.allocator, .{
                     .color = fill.color,
-                    .dest_rect = mapRectToCells(fill.rect, state.window_w, state.window_h, tty.cols, tty.rows),
+                    .dest_rect = mapRectToCellsInRegion(fill.rect, state.window_w, state.window_h, sdl_region),
                     .z = 0,
                 });
             }
             for (state.lines.items) |line| {
                 try solids_list.append(self.allocator, .{
                     .color = line.color,
-                    .dest_rect = mapLineToCells(line, state.window_w, state.window_h, tty.cols, tty.rows),
+                    .dest_rect = mapLineToCellsInRegion(line, state.window_w, state.window_h, sdl_region),
                     .z = 1,
                 });
             }
@@ -901,7 +902,7 @@ pub const FrameBuilder = struct {
                 try sprites_list.append(self.allocator, .{
                     .asset_id = texture.asset_id,
                     .source_rect = copy.src,
-                    .dest_rect = mapRectToCells(copy.dst, state.window_w, state.window_h, tty.cols, tty.rows),
+                    .dest_rect = mapRectToCellsInRegion(copy.dst, state.window_w, state.window_h, sdl_region),
                     .z = @intCast(100 + i),
                 });
             }
@@ -1015,7 +1016,6 @@ pub const FrameBuilder = struct {
     pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer) presentation_layout.PresentationLayout {
         var layout = presentation_layout.PresentationLayout{};
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return layout;
-        if (!state.composite_mode_active) return layout;
         switch (self.composite_mode) {
             .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
         }
@@ -2657,12 +2657,28 @@ pub const FrameBuilder = struct {
         return .{ .col = col, .row = row, .w = w, .h = h };
     }
 
+    fn mapRectToCellsInRegion(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+        const col = region.col + @divTrunc(dst.x * region.w, @max(window_w, 1));
+        const row = region.row + @divTrunc(dst.y * region.h, @max(window_h, 1));
+        const w = @max(1, @divTrunc(dst.w * region.w, @max(window_w, 1)));
+        const h = @max(1, @divTrunc(dst.h * region.h, @max(window_h, 1)));
+        return .{ .col = col, .row = row, .w = w, .h = h };
+    }
+
     fn mapLineToCells(line: LineOp, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const min_x = @min(line.x1, line.x2);
         const min_y = @min(line.y1, line.y2);
         const max_x = @max(line.x1, line.x2);
         const max_y = @max(line.y1, line.y2);
         return mapRectToCells(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, tty_cols, tty_rows);
+    }
+
+    fn mapLineToCellsInRegion(line: LineOp, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+        const min_x = @min(line.x1, line.x2);
+        const min_y = @min(line.y1, line.y2);
+        const max_x = @max(line.x1, line.x2);
+        const max_y = @max(line.y1, line.y2);
+        return mapRectToCellsInRegion(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, region);
     }
 
     fn applyViewportRect(rect: sdl.SDL_Rect, viewport: sdl.SDL_Rect) sdl.SDL_Rect {
@@ -3004,6 +3020,51 @@ test "fullscreen composite presentation region matches placed image rect" {
         .h = dest.h,
     }, region.tty_rect);
     try std.testing.expectEqual(presentation_layout.SdlRect{ .x = 0, .y = 0, .w = 320, .h = 240 }, region.sdl_rect);
+}
+
+test "fullscreen sprite path preserves source aspect in terminal cells" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const renderer_key: usize = 1;
+    const texture_key: usize = 2;
+    try builder.renderers.put(renderer_key, RendererState.init(std.testing.allocator, 640, 480));
+
+    const pixels = try std.testing.allocator.alloc(u8, 640 * 480 * 4);
+    @memset(pixels, 255);
+    try builder.textures.put(texture_key, .{
+        .w = 640,
+        .h = 480,
+        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .image_id = 0,
+        .base_rgba = pixels,
+        .base_opaque = true,
+    });
+
+    const state = builder.renderers.getPtr(renderer_key).?;
+    try state.copies.append(std.testing.allocator, .{
+        .texture_key = texture_key,
+        .src = .{ .x = 0, .y = 0, .w = 640, .h = 480 },
+        .dst = .{ .x = 0, .y = 0, .w = 640, .h = 480 },
+        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+        .base_opaque = true,
+    });
+
+    var job = try builder.buildPresentJob(&logger, &tty, @ptrFromInt(renderer_key), false);
+    defer job.deinit(std.testing.allocator);
+
+    const scene_job = job.scene;
+    try std.testing.expectEqual(@as(usize, 1), scene_job.sprites.len);
+    try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.sprites[0].dest_rect);
 }
 
 test "fullscreen composite upload size falls back to source without terminal pixels" {
