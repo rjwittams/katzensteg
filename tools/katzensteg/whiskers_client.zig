@@ -84,6 +84,7 @@ const ResourceIngestRecord = struct {
     image_id: u32,
 };
 const ResourceBatchRequest = struct { segment_id: []const u8, resources: []const ResourceIngestRecord };
+const control_socket_timeout_ms: i64 = 250;
 
 pub const WhiskersClient = struct {
     allocator: std.mem.Allocator,
@@ -374,14 +375,20 @@ pub const WhiskersClient = struct {
         while (!self.shutdown.load(.acquire)) {
             self.controlLoopOnce() catch |err| {
                 if (self.shutdown.load(.acquire)) break;
-                self.logger.writeFmt("katzensteg: whiskers control loop error: {any}", .{err});
-                std.Thread.sleep(250 * std.time.ns_per_ms);
+                switch (err) {
+                    error.WouldBlock, error.ConnectionTimedOut => continue,
+                    else => {
+                        self.logger.writeFmt("katzensteg: whiskers control loop error: {any}", .{err});
+                        std.Thread.sleep(250 * std.time.ns_per_ms);
+                    },
+                }
             };
         }
     }
 
     fn controlLoopOnce(self: *WhiskersClient) !void {
         var stream = try std.net.connectUnixSocket(self.socket_path);
+        try setControlSocketTimeout(stream.handle, control_socket_timeout_ms);
         defer {
             self.mutex.lock();
             if (self.control_fd != null and self.control_fd.? == stream.handle) self.control_fd = null;
@@ -434,6 +441,14 @@ pub const WhiskersClient = struct {
         }
     }
 };
+
+fn setControlSocketTimeout(fd: std.posix.fd_t, timeout_ms: i64) !void {
+    var tv = std.posix.timeval{
+        .sec = @intCast(@divTrunc(timeout_ms, 1000)),
+        .usec = @intCast(@mod(timeout_ms, 1000) * 1000),
+    };
+    try std.posix.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, std.mem.asBytes(&tv));
+}
 
 fn postJsonIgnoreBody(allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) !void {
     const body = try postJsonForBody(allocator, socket_path, bearer_token, path, payload);
