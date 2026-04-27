@@ -108,6 +108,13 @@ class EnvScrubTests(unittest.TestCase):
         self.assertIsNone(self.c_getenv("KATZENSTEG_TRACE_VULKAN"))
         self.assertEqual("VK_LAYER_OTHER:VK_LAYER_LAST", self.c_getenv("VK_INSTANCE_LAYERS"))
 
+    def test_z_vulkan_layer_preserves_a2b10g10r10_format_for_present_layer(self):
+        vulkan_lib = ctypes.CDLL(str(self.vulkan_lib_path))
+        vulkan_lib.ks_vulkan_test_external_format_for_vk.argtypes = [ctypes.c_int]
+        vulkan_lib.ks_vulkan_test_external_format_for_vk.restype = ctypes.c_int
+
+        self.assertEqual(2, vulkan_lib.ks_vulkan_test_external_format_for_vk(64))
+
     def test_preload_constructor_removes_only_katzensteg_from_ld_preload(self):
         if platform.system() != "Linux":
             self.skipTest("Linux preload env scrub test")

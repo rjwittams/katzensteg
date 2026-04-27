@@ -10,6 +10,11 @@ const frame_builder_mod = @import("frame_builder.zig");
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
 var trace_create_window: usize = 0;
+var trace_show_window: usize = 0;
+var trace_hide_window: usize = 0;
+var trace_minimize_window: usize = 0;
+var trace_restore_window: usize = 0;
+var trace_raise_window: usize = 0;
 var trace_create_renderer: usize = 0;
 var trace_get_renderer_info: usize = 0;
 var trace_create_texture: usize = 0;
@@ -227,12 +232,15 @@ pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.U
 
 pub export fn ks_SDL_ShowWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
-    applyRealWindowAction(rt.realWindowShowAction(window), window);
+    const action = rt.realWindowShowAction(window);
+    traceLimited(rt, &trace_show_window, "katzensteg-trace: SDL_ShowWindow window={x} action={s}", .{ if (window) |p| @intFromPtr(p) else 0, @tagName(action) });
+    applyRealWindowAction(action, window);
 }
 
 pub export fn ks_SDL_HideWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     const action = rt.realWindowCreateAction(window);
+    traceLimited(rt, &trace_hide_window, "katzensteg-trace: SDL_HideWindow window={x} action={s}", .{ if (window) |p| @intFromPtr(p) else 0, @tagName(action) });
     if (action == .none) {
         real_sdl.SDL_HideWindow(window);
     } else {
@@ -243,6 +251,7 @@ pub export fn ks_SDL_HideWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
 pub export fn ks_SDL_MinimizeWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     const action = rt.realWindowCreateAction(window);
+    traceLimited(rt, &trace_minimize_window, "katzensteg-trace: SDL_MinimizeWindow window={x} action={s}", .{ if (window) |p| @intFromPtr(p) else 0, @tagName(action) });
     if (action == .none) {
         real_sdl.SDL_MinimizeWindow(window);
     } else {
@@ -252,12 +261,15 @@ pub export fn ks_SDL_MinimizeWindow(window: ?*sdl.SDL_Window) callconv(.c) void 
 
 pub export fn ks_SDL_RestoreWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
-    applyRealWindowAction(rt.realWindowRestoreAction(window), window);
+    const action = rt.realWindowRestoreAction(window);
+    traceLimited(rt, &trace_restore_window, "katzensteg-trace: SDL_RestoreWindow window={x} action={s}", .{ if (window) |p| @intFromPtr(p) else 0, @tagName(action) });
+    applyRealWindowAction(action, window);
 }
 
 pub export fn ks_SDL_RaiseWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     const action = rt.realWindowShowAction(window);
+    traceLimited(rt, &trace_raise_window, "katzensteg-trace: SDL_RaiseWindow window={x} action={s}", .{ if (window) |p| @intFromPtr(p) else 0, @tagName(action) });
     if (action == .show) {
         real_sdl.SDL_RaiseWindow(window);
     } else {
@@ -758,6 +770,7 @@ pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c
     const format: ExternalFramebufferFormat = switch (format_value) {
         @intFromEnum(ExternalFramebufferFormat.rgba8) => .rgba8,
         @intFromEnum(ExternalFramebufferFormat.bgra8) => .bgra8,
+        @intFromEnum(ExternalFramebufferFormat.a2b10g10r10_unorm_pack32) => .a2b10g10r10_unorm_pack32,
         else => return,
     };
     const rt = runtime.get();

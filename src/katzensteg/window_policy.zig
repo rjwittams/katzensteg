@@ -40,7 +40,7 @@ pub const RealWindowVisibility = enum {
 
     pub fn createAction(self: RealWindowVisibility) RealWindowAction {
         return switch (self) {
-            .show => .none,
+            .show => .show,
             .hide => .hide,
             .minimize => .minimize,
         };
@@ -105,7 +105,7 @@ test "real window visibility parses requested SDL action" {
     try std.testing.expectEqual(RealWindowVisibility.hide, parseRealWindowVisibility("hide").?);
     try std.testing.expectEqual(RealWindowVisibility.minimize, parseRealWindowVisibility("minimize").?);
     try std.testing.expect(parseRealWindowVisibility("nonsense") == null);
-    try std.testing.expectEqual(RealWindowAction.none, RealWindowVisibility.show.createAction());
+    try std.testing.expectEqual(RealWindowAction.show, RealWindowVisibility.show.createAction());
     try std.testing.expectEqual(RealWindowAction.hide, RealWindowVisibility.hide.createAction());
     try std.testing.expectEqual(RealWindowAction.minimize, RealWindowVisibility.minimize.createAction());
     try std.testing.expectEqual(RealWindowAction.hide, RealWindowVisibility.hide.showAction());
