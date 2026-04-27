@@ -63,7 +63,7 @@ Those two Moonlight issues are tracked as post-Linux investigations in the check
 By default, the launcher looks for profiles in:
 
 ```text
-{repo}/tools/katzensteg/profiles
+{repo}/profiles
 ```
 
 `{repo}` is resolved from the current working directory when run from the repo, or from `zig-out/bin/katzensteg` when run elsewhere.
@@ -72,7 +72,7 @@ Overrides:
 
 ```sh
 KATZENSTEG_PROFILE_DIR=/path/to/profiles ./zig-out/bin/katzensteg
-KATZENSTEG_REPO=/path/to/ttytris ./zig-out/bin/katzensteg sonic
+KATZENSTEG_REPO=/path/to/katzensteg ./zig-out/bin/katzensteg sonic
 ```
 
 ## Logs

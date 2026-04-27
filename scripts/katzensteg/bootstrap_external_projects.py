@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_MANIFEST = Path(__file__).with_name("external-projects.json")
+DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "profiles" / "external-projects.json"
 
 
 @dataclass

@@ -19,7 +19,7 @@
       "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe",
       "env": {
         "KATZENSTEG_VULKAN_CAPTURE": "1",
-        "VK_LAYER_PATH": "{repo}/tools/katzensteg",
+        "VK_LAYER_PATH": "{repo}/profiles",
         "VK_INSTANCE_LAYERS": "VK_LAYER_KATZENSTEG_capture"
       }
     },

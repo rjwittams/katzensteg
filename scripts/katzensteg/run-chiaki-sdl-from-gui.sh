@@ -49,7 +49,7 @@ if [[ "${KATZENSTEG_CHIAKI_SDL_PROXY:-}" == "1" ]]; then
   fi
   if [[ ! -f "$KATZENSTEG_LIB" ]]; then
     echo "Katzensteg dylib not found: $KATZENSTEG_LIB" >&2
-    echo "Build ttytris first: zig build" >&2
+    echo "Build Katzensteg first: zig build" >&2
     exit 1
   fi
 
@@ -69,7 +69,7 @@ if [[ ! -x "$CHIAKI_SDL_BIN" ]]; then
 fi
 if [[ ! -f "$KATZENSTEG_LIB" ]]; then
   echo "Katzensteg dylib not found: $KATZENSTEG_LIB" >&2
-  echo "Build ttytris first: zig build" >&2
+  echo "Build Katzensteg first: zig build" >&2
   exit 1
 fi
 

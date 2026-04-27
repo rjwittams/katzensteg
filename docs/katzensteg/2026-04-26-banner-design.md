@@ -7,10 +7,10 @@ launcher. The banner sets an 80s-CRT mood (green/amber on black) and reads
 "katzensteg" in a thin outline letterform similar to the visual reference
 sketch.
 
-The Python file at `tools/katzensteg/katzensteg_banner.py` is a **prototype**:
+The Python file at `scripts/katzensteg/katzensteg_banner.py` is a **prototype**:
 its job is to let us iterate on look-and-feel quickly. Once the visual is
 right, the same animation gets ported to Zig and integrated into
-`tools/katzensteg/launcher.zig`.
+`src/katzensteg/launcher.zig`.
 
 ## Scope
 

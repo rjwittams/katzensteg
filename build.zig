@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const katzensteg_sdl_mod = b.createModule(.{
-        .root_source_file = b.path("tools/katzensteg/sdl2.zig"),
+        .root_source_file = b.path("src/katzensteg/sdl2.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "ttytris",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("games/ttytris/main.zig"),
+            .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/katzensteg/preload.zig"),
+            .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -84,9 +84,9 @@ pub fn build(b: *std.Build) void {
     katzensteg_lib.root_module.omit_frame_pointer = false;
     katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_lib.linkSystemLibrary("SDL2");
-    katzensteg_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/interpose_macos.c") });
+    katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (target.result.os.tag == .macos) {
-        katzensteg_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/yuv_convert_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
         katzensteg_lib.linkFramework("Accelerate");
         katzensteg_lib.linkFramework("OpenGL");
     }
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg-unlinked",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/katzensteg/preload.zig"),
+            .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -107,9 +107,9 @@ pub fn build(b: *std.Build) void {
     katzensteg_unlinked_lib.root_module.strip = false;
     katzensteg_unlinked_lib.root_module.omit_frame_pointer = false;
     katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
-    katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/interpose_macos.c") });
+    katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (target.result.os.tag == .macos) {
-        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("tools/katzensteg/yuv_convert_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
         katzensteg_unlinked_lib.linkFramework("Accelerate");
         katzensteg_unlinked_lib.linkFramework("OpenGL");
     }
@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/katzensteg/test/basic_sdl_demo.zig"),
+            .root_source_file = b.path("examples/probes/basic_sdl_demo.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -152,7 +152,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_input_probe.addCSourceFile(.{ .file = b.path("tools/katzensteg/test/input_probe.c") });
+    katzensteg_input_probe.addCSourceFile(.{ .file = b.path("examples/probes/input_probe.c") });
     katzensteg_input_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
     katzensteg_input_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_input_probe.linkSystemLibrary("SDL2");
@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_gl_probe.addCSourceFile(.{ .file = b.path("tools/katzensteg/test/gl_probe.c") });
+    katzensteg_gl_probe.addCSourceFile(.{ .file = b.path("examples/probes/gl_probe.c") });
     katzensteg_gl_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
     katzensteg_gl_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_gl_probe.linkSystemLibrary("SDL2");
@@ -186,7 +186,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("tools/katzensteg/vulkan_layer.c") });
+    katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer.c") });
     katzensteg_vulkan_layer.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
     b.installArtifact(katzensteg_vulkan_layer);
 
@@ -198,7 +198,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("tools/katzensteg/test/vulkan_probe.c") });
+    katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("examples/probes/vulkan_probe.c") });
     katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
     katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
     katzensteg_vulkan_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -209,7 +209,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_launcher = b.addExecutable(.{
         .name = "katzensteg",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/katzensteg/launcher.zig"),
+            .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -218,7 +218,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/katzensteg/launcher.zig"),
+            .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
     const debug_exe = b.addExecutable(.{
         .name = "ttytris-debug",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("games/ttytris/main.zig"),
+            .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
             .optimize = .Debug,
         }),

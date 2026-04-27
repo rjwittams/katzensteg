@@ -808,7 +808,7 @@ test "profile parser keeps loading documents after a malformed document" {
 }
 
 test "bundled profiles include smb3 ANESE launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "tools/katzensteg/profiles");
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("smb3").?;
@@ -817,7 +817,7 @@ test "bundled profiles include smb3 ANESE launch target" {
 }
 
 test "bundled profiles include Cannonball launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "tools/katzensteg/profiles");
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("cannonball").?;

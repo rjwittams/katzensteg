@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).with_name("bootstrap_external_projects.py")
-MANIFEST_PATH = Path(__file__).with_name("external-projects.json")
+MANIFEST_PATH = Path(__file__).resolve().parents[2] / "profiles" / "external-projects.json"
 
 
 def load_module():

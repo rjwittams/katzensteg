@@ -180,7 +180,7 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 ## Current Branch Cleanup State
 
 Linux-port preparation is tracked in `docs/katzensteg/linux-port-readiness.md`.
-Bootstrap metadata lives in `tools/katzensteg/external-projects.json` and can be applied with `tools/katzensteg/bootstrap_external_projects.py`.
+Bootstrap metadata lives in `profiles/external-projects.json` and can be applied with `scripts/katzensteg/bootstrap_external_projects.py`.
 
 - Done:
   - created `rjwittams` fork remotes for RetroArch, Moonlight Qt, ScummVM, Cannonball, Chiaki NG, and ANESE

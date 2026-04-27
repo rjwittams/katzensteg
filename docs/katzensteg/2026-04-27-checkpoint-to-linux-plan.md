@@ -74,8 +74,8 @@ Goal: make `katzensteg <profile>` the normal path for repeated local testing wit
 
 ### Verification
 
-- [x] `zig test tools/katzensteg/launcher.zig`
-- [x] `zig test tools/katzensteg/launcher_profiles.zig`
+- [x] `zig test src/katzensteg/launcher.zig`
+- [x] `zig test src/katzensteg/launcher_profiles.zig`
 - [x] `zig build -freference-trace`
 - [x] `./zig-out/bin/katzensteg retroarch.sonic --dry-run`
 - [x] `./zig-out/bin/katzensteg probe.input --dry-run`
@@ -177,10 +177,10 @@ Keep this separate from launcher cleanup. Moving files before the launcher bound
 
 - [ ] Decide final repo name, likely `katzensteg`.
 - [ ] Create or rename GitHub repo under `rjwittams`.
-- [ ] Move Katzensteg source out of `tools/katzensteg` once the build is stable.
-- [ ] Move ttytris into examples or demos.
+- [x] Move Katzensteg source out of `tools/katzensteg` once the build is stable.
+- [x] Move ttytris into examples or demos.
 - [ ] Update build targets, scripts, profile paths, docs, and CI/dev commands.
-- [ ] Keep compatibility shims only where they save real friction.
+- [x] Skip compatibility shims for the old tree.
 
 ### Verification
 

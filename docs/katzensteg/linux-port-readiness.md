@@ -20,9 +20,9 @@ This is the practical checkpoint before trying Katzensteg on a Linux machine. Th
    Current helper:
 
    ```sh
-   tools/katzensteg/bootstrap_external_projects.py --dry-run
-   tools/katzensteg/bootstrap_external_projects.py --root ~/dev
-   tools/katzensteg/bootstrap_external_projects.py --root ~/dev retroarch chiaki.sdl
+   scripts/katzensteg/bootstrap_external_projects.py --dry-run
+   scripts/katzensteg/bootstrap_external_projects.py --root ~/dev
+   scripts/katzensteg/bootstrap_external_projects.py --root ~/dev retroarch chiaki.sdl
    ```
 
    On a new machine, clone the Katzensteg repo first, then run the helper from that checkout. The helper intentionally prints build commands as notes rather than trying to become a cross-platform package manager.

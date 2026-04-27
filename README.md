@@ -5,8 +5,10 @@ A Zig terminal graphics/runtime repo centered on `termscene` and `Katzensteg`.
 This repo currently contains:
 
 - `src/termscene/` — reusable engine core and kitty backend
-- `tools/katzensteg/` — the main active SDL preload/runtime bridge work
-- `games/ttytris/` — in-repo demo/stress game built on termscene
+- `src/katzensteg/` — the main active SDL preload/runtime bridge work
+- `profiles/` — Katzensteg launcher profiles and support manifests
+- `scripts/katzensteg/` — helper scripts for local app smoke tests and setup
+- `examples/ttytris/` — in-repo demo/stress game built on termscene
 - `examples/termscene-demo/` — focused termscene feature demo
 - `docs/katzensteg/` — Katzensteg design notes, plans, and roadmap
 
@@ -26,7 +28,7 @@ This repo currently contains:
 
 Inspector/devtools direction is now split clearly:
 
-- producer-side instrumentation for Katzensteg lives here in `tools/katzensteg/`
+- producer-side instrumentation for Katzensteg lives here in `src/katzensteg/`
 - the canonical inspector service and web UI live in the separate `whiskers` repo
 
 This repo no longer carries an embedded inspector runtime path; `whiskers` is the inspection path.

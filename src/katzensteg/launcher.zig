@@ -458,7 +458,7 @@ fn resolveProfileDir(allocator: std.mem.Allocator) ![]const u8 {
 
     const repo = try resolveRepoRoot(allocator);
     defer allocator.free(repo);
-    return std.fs.path.join(allocator, &.{ repo, "tools", "katzensteg", "profiles" });
+    return std.fs.path.join(allocator, &.{ repo, "profiles" });
 }
 
 fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {
@@ -472,7 +472,7 @@ fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn cwdLooksLikeRepo() !bool {
-    var dir = std.fs.cwd().openDir("tools/katzensteg/profiles", .{}) catch |err| switch (err) {
+    var dir = std.fs.cwd().openDir("profiles", .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => return err,
     };

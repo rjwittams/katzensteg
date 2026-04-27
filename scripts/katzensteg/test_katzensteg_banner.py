@@ -75,12 +75,14 @@ class TestPhaseFor(unittest.TestCase):
 
 import io
 import contextlib
+import os
+from unittest import mock
 
 
 class TestCli(unittest.TestCase):
     def _run(self, argv):
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(buf):
             rc = kb.main(argv)
         return rc, buf.getvalue()
 
