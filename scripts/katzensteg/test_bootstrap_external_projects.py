@@ -33,11 +33,19 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         self.assertIsInstance(doctor["paths"], list, project["name"])
         self.assertIsInstance(doctor["assets"], list, project["name"])
 
-        for tool_name in doctor["tools"]:
-            self.assertIsInstance(tool_name, str, project["name"])
+        for tool_entry in doctor["tools"]:
+            if isinstance(tool_entry, str):
+                continue
+            self.assertIsInstance(tool_entry, dict, project["name"])
+            self.assertIn("name", tool_entry, project["name"])
+            self.assertIsInstance(tool_entry["name"], str, project["name"])
 
-        for module_name in doctor["pkg_config"]:
-            self.assertIsInstance(module_name, str, project["name"])
+        for module_entry in doctor["pkg_config"]:
+            if isinstance(module_entry, str):
+                continue
+            self.assertIsInstance(module_entry, dict, project["name"])
+            self.assertIn("name", module_entry, project["name"])
+            self.assertIsInstance(module_entry["name"], str, project["name"])
 
         for path_entry in doctor["paths"]:
             self.assertIsInstance(path_entry, dict, project["name"])
@@ -48,8 +56,13 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
 
         for asset_entry in doctor["assets"]:
             self.assertIsInstance(asset_entry, dict, project["name"])
-            self.assertIn("path", asset_entry, project["name"])
-            self.assertIsInstance(asset_entry["path"], str, project["name"])
+            self.assertTrue("path" in asset_entry or "any_of" in asset_entry, project["name"])
+            if "path" in asset_entry:
+                self.assertIsInstance(asset_entry["path"], str, project["name"])
+            if "any_of" in asset_entry:
+                self.assertIsInstance(asset_entry["any_of"], list, project["name"])
+                for path_value in asset_entry["any_of"]:
+                    self.assertIsInstance(path_value, str, project["name"])
 
     def test_manifest_records_retroarch_pushed_branch(self):
         bootstrap = load_module()
@@ -71,19 +84,30 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "cmake": "cmake",
             "ffplay": "ffmpeg",
             "git": "git",
+            "gl": "mesa",
+            "make": "make",
             "opus": "opus",
             "pkg-config": "pkgconf",
             "qmake6": "qt6-base",
             "sdl2": "sdl2",
+            "SDL2_ttf": "sdl2_ttf",
+            "uv": "uv",
+            "vulkan": "vulkan-headers vulkan-icd-loader",
+            "zig": "zig",
         }
         expected_debian = {
             "cmake": "cmake",
             "ffplay": "ffmpeg",
             "git": "git",
+            "gl": "libgl-dev",
+            "make": "make",
             "opus": "libopus-dev",
             "pkg-config": "pkg-config",
             "qmake6": "qt6-base-dev",
             "sdl2": "libsdl2-dev",
+            "SDL2_ttf": "libsdl2-ttf-dev",
+            "vulkan": "libvulkan-dev",
+            "zig": "zig",
         }
         expected_brew = {
             "cmake": "cmake",
@@ -93,6 +117,9 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "pkg-config": "pkgconf",
             "qmake6": "qt",
             "sdl2": "sdl2",
+            "SDL2_ttf": "sdl2_ttf",
+            "uv": "uv",
+            "zig": "zig",
         }
 
         self.assertIn("arch", package_hints)
@@ -191,13 +218,25 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         bootstrap = load_module()
 
         manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        repo_doctor = manifest["doctor"]
+        retroarch = bootstrap.project_by_name(manifest, "retroarch")
         moonlight = bootstrap.project_by_name(manifest, "moonlight-qt")
         chiaki = bootstrap.project_by_name(manifest, "chiaki-ng")
         cannonball = bootstrap.project_by_name(manifest, "cannonball")
         scummvm = bootstrap.project_by_name(manifest, "scummvm")
 
+        self.assertEqual(["zig", "pkg-config"], repo_doctor["tools"])
+        self.assertIn("sdl2", repo_doctor["pkg_config"])
+        self.assertIn({"name": "gl", "platforms": ["linux"]}, repo_doctor["pkg_config"])
+        self.assertTrue(
+            any(
+                asset.get("label", "").startswith("RetroArch bsnes core")
+                for asset in retroarch["doctor"]["assets"]
+            )
+        )
         self.assertEqual(["qmake6"], moonlight["doctor"]["tools"])
         self.assertIn("sdl2", moonlight["doctor"]["pkg_config"])
+        self.assertIn("SDL2_ttf", moonlight["doctor"]["pkg_config"])
         self.assertIn(
             {"kind": "output", "path": "app/release"},
             moonlight["doctor"]["paths"],
@@ -211,9 +250,10 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         )
 
         self.assertIn(
-            {"kind": "config", "path": "config.xml"},
+            {"kind": "config", "path": "build/config.xml"},
             cannonball["doctor"]["paths"],
         )
+        self.assertIn({"path": "roms/epr-10381b.132"}, cannonball["doctor"]["assets"])
         self.assertIn({"path": "$HOME/roms/mi2"}, scummvm["doctor"]["assets"])
 
     def test_manifest_records_doctor_shape_for_every_project(self):
@@ -464,6 +504,119 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             stdout=bootstrap.subprocess.DEVNULL,
             stderr=bootstrap.subprocess.DEVNULL,
         )
+
+    def test_run_doctor_checks_repo_doctor_and_platform_filtered_entries(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "doctor": {
+                "tools": ["repo-tool"],
+                "pkg_config": [
+                    {"name": "linux-module", "platforms": ["linux"]},
+                    {"name": "macos-module", "platforms": ["macos"]},
+                ],
+                "paths": [],
+                "assets": [],
+            },
+            "projects": [
+                {
+                    "name": "retroarch",
+                    "directory": "retroarch",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": [],
+                        "paths": [],
+                        "assets": [
+                            {
+                                "label": "linux core",
+                                "platforms": ["linux"],
+                                "any_of": ["missing-core.so", "present-core.so"],
+                            },
+                            {
+                                "label": "macos core",
+                                "platforms": ["macos"],
+                                "path": "missing-core.dylib",
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            project_root = root / "retroarch"
+            project_root.mkdir(parents=True)
+            (project_root / "present-core.so").write_text("core", encoding="utf-8")
+
+            with mock.patch.object(bootstrap, "current_platform", return_value="linux"), \
+                mock.patch.object(bootstrap.shutil, "which", return_value=None), \
+                mock.patch.object(
+                    bootstrap.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=1),
+                ) as run_mock:
+                report = bootstrap.run_doctor(manifest, root, names=["retroarch"])
+
+        self.assertEqual(["repo-tool"], report.missing_tools)
+        self.assertEqual(["linux-module"], report.missing_packages)
+        self.assertEqual([], report.missing_assets)
+        run_mock.assert_called_once()
+        self.assertEqual("linux-module", run_mock.call_args.args[0][2])
+
+    def test_run_doctor_reports_missing_any_of_asset_by_label(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "retroarch",
+                    "directory": "retroarch",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": [],
+                        "paths": [],
+                        "assets": [
+                            {
+                                "label": "RetroArch bsnes core",
+                                "any_of": ["missing-a.so", "missing-b.so"],
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            (root / "retroarch").mkdir(parents=True)
+            report = bootstrap.run_doctor(manifest, root, names=["retroarch"])
+
+        self.assertEqual(["RetroArch bsnes core"], report.missing_assets)
+
+    def test_format_doctor_detail_lines_includes_missing_items_and_install_hints(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        report = bootstrap.DoctorReport(
+            missing_tools=["zig"],
+            missing_packages=["sdl2"],
+            missing_outputs=[],
+            missing_configs=["/tmp/config.xml"],
+            missing_assets=["RetroArch bsnes core"],
+            summary="missing tools: 1",
+        )
+
+        lines = bootstrap.format_doctor_detail_lines(report, manifest, distro_family="arch")
+
+        self.assertIn("Doctor details:", lines)
+        self.assertIn("    zig", lines)
+        self.assertIn("    sdl2", lines)
+        self.assertIn("    /tmp/config.xml", lines)
+        self.assertIn("    RetroArch bsnes core", lines)
+        self.assertIn("    sudo pacman -S --needed zig sdl2", lines)
 
     def test_run_doctor_summary_is_ok_when_nothing_is_missing(self):
         bootstrap = load_module()

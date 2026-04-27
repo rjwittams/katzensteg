@@ -6,19 +6,30 @@
       "cmake": "cmake",
       "ffplay": "ffmpeg",
       "git": "git",
+      "gl": "mesa",
+      "make": "make",
       "opus": "opus",
       "pkg-config": "pkgconf",
       "qmake6": "qt6-base",
-      "sdl2": "sdl2"
+      "sdl2": "sdl2",
+      "SDL2_ttf": "sdl2_ttf",
+      "uv": "uv",
+      "vulkan": "vulkan-headers vulkan-icd-loader",
+      "zig": "zig"
     },
     "debian": {
       "cmake": "cmake",
       "ffplay": "ffmpeg",
       "git": "git",
+      "gl": "libgl-dev",
+      "make": "make",
       "opus": "libopus-dev",
       "pkg-config": "pkg-config",
       "qmake6": "qt6-base-dev",
-      "sdl2": "libsdl2-dev"
+      "sdl2": "libsdl2-dev",
+      "SDL2_ttf": "libsdl2-ttf-dev",
+      "vulkan": "libvulkan-dev",
+      "zig": "zig"
     },
     "brew": {
       "cmake": "cmake",
@@ -27,8 +38,34 @@
       "opus": "opus",
       "pkg-config": "pkgconf",
       "qmake6": "qt",
-      "sdl2": "sdl2"
+      "sdl2": "sdl2",
+      "SDL2_ttf": "sdl2_ttf",
+      "uv": "uv",
+      "zig": "zig"
     }
+  },
+  "doctor": {
+    "tools": [
+      "zig",
+      "pkg-config"
+    ],
+    "pkg_config": [
+      "sdl2",
+      {
+        "name": "gl",
+        "platforms": [
+          "linux"
+        ]
+      },
+      {
+        "name": "vulkan",
+        "platforms": [
+          "linux"
+        ]
+      }
+    ],
+    "paths": [],
+    "assets": []
   },
   "projects": [
     {
@@ -71,6 +108,78 @@
           }
         ],
         "assets": [
+          {
+            "label": "RetroArch Genesis Plus GX core",
+            "platforms": [
+              "macos"
+            ],
+            "path": "$HOME/Library/Application Support/RetroArch/cores/genesis_plus_gx_libretro.dylib"
+          },
+          {
+            "label": "RetroArch melonDS core",
+            "platforms": [
+              "macos"
+            ],
+            "path": "$HOME/Library/Application Support/RetroArch/cores/melonds_libretro.dylib"
+          },
+          {
+            "label": "RetroArch bsnes core",
+            "platforms": [
+              "macos"
+            ],
+            "path": "$HOME/Library/Application Support/RetroArch/cores/bsnes_libretro.dylib"
+          },
+          {
+            "label": "RetroArch Flycast core",
+            "platforms": [
+              "macos"
+            ],
+            "path": "$HOME/Library/Application Support/RetroArch/cores/flycast_libretro.dylib"
+          },
+          {
+            "label": "RetroArch Genesis Plus GX core; download 'Sega - MS/GG/MD/CD (Genesis Plus GX)' from Online Updater > Core Downloader, or configure RetroArch to use Arch package libretro-genesis-plus-gx",
+            "platforms": [
+              "linux"
+            ],
+            "any_of": [
+              "$HOME/.config/retroarch/cores/genesis_plus_gx_libretro.so",
+              "$HOME/.local/share/libretro/cores/genesis_plus_gx_libretro.so",
+              "/usr/lib/libretro/genesis_plus_gx_libretro.so"
+            ]
+          },
+          {
+            "label": "RetroArch melonDS core; download 'Nintendo - DS (melonDS)' from Online Updater > Core Downloader, or configure RetroArch to use Arch package libretro-melonds",
+            "platforms": [
+              "linux"
+            ],
+            "any_of": [
+              "$HOME/.config/retroarch/cores/melonds_libretro.so",
+              "$HOME/.local/share/libretro/cores/melonds_libretro.so",
+              "/usr/lib/libretro/melonds_libretro.so"
+            ]
+          },
+          {
+            "label": "RetroArch bsnes core; download 'Nintendo - SNES / SFC (bsnes)' from Online Updater > Core Downloader, or configure RetroArch to use Arch package libretro-bsnes",
+            "platforms": [
+              "linux"
+            ],
+            "any_of": [
+              "$HOME/.config/retroarch/cores/bsnes_libretro.so",
+              "$HOME/.local/share/libretro/cores/bsnes_libretro.so",
+              "/usr/lib/libretro/bsnes_libretro.so"
+            ]
+          },
+          {
+            "label": "RetroArch Flycast core; download 'Sega - Dreamcast/Naomi (Flycast)' from Online Updater > Core Downloader, or configure RetroArch to use Arch package libretro-flycast",
+            "platforms": [
+              "linux"
+            ],
+            "any_of": [
+              "$HOME/.config/retroarch/cores/flycast_libretro.so",
+              "$HOME/.local/share/libretro/cores/flycast_libretro.so",
+              "/usr/lib/libretro/flycast_libretro.so"
+            ]
+          },
           {
             "path": "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
           },
@@ -119,7 +228,8 @@
           "qmake6"
         ],
         "pkg_config": [
-          "sdl2"
+          "sdl2",
+          "SDL2_ttf"
         ],
         "paths": [
           {
@@ -195,11 +305,11 @@
       ],
       "build": {
         "macos": [
-          "cmake -S . -B build",
+          "cmake -S cmake -B build",
           "cmake --build build"
         ],
         "linux": [
-          "cmake -S . -B build",
+          "cmake -S cmake -B build -DTARGET=linux.cmake",
           "cmake --build build"
         ]
       },
@@ -217,14 +327,108 @@
           },
           {
             "kind": "config",
-            "path": "config.xml"
+            "path": "build/config.xml"
           }
         ],
-        "assets": []
+        "assets": [
+          {
+            "path": "roms/epr-10380b.133"
+          },
+          {
+            "path": "roms/epr-10382b.118"
+          },
+          {
+            "path": "roms/epr-10381b.132"
+          },
+          {
+            "path": "roms/epr-10383b.117"
+          },
+          {
+            "path": "roms/epr-10327a.76"
+          },
+          {
+            "path": "roms/epr-10329a.58"
+          },
+          {
+            "path": "roms/epr-10328a.75"
+          },
+          {
+            "path": "roms/epr-10330a.57"
+          },
+          {
+            "path": "roms/opr-10268.99"
+          },
+          {
+            "path": "roms/opr-10232.102"
+          },
+          {
+            "path": "roms/opr-10267.100"
+          },
+          {
+            "path": "roms/opr-10231.103"
+          },
+          {
+            "path": "roms/opr-10266.101"
+          },
+          {
+            "path": "roms/opr-10230.104"
+          },
+          {
+            "path": "roms/opr-10185.11"
+          },
+          {
+            "path": "roms/opr-10186.47"
+          },
+          {
+            "path": "roms/mpr-10371.9"
+          },
+          {
+            "path": "roms/mpr-10373.10"
+          },
+          {
+            "path": "roms/mpr-10375.11"
+          },
+          {
+            "path": "roms/mpr-10377.12"
+          },
+          {
+            "path": "roms/mpr-10372.13"
+          },
+          {
+            "path": "roms/mpr-10374.14"
+          },
+          {
+            "path": "roms/mpr-10376.15"
+          },
+          {
+            "path": "roms/mpr-10378.16"
+          },
+          {
+            "path": "roms/epr-10187.88"
+          },
+          {
+            "path": "roms/opr-10193.66"
+          },
+          {
+            "path": "roms/opr-10192.67"
+          },
+          {
+            "path": "roms/opr-10191.68"
+          },
+          {
+            "path": "roms/opr-10190.69"
+          },
+          {
+            "path": "roms/opr-10189.70"
+          },
+          {
+            "path": "roms/opr-10188.71"
+          }
+        ]
       },
       "notes": [
         "Pushed branch contains macOS CMake and static-assert portability fixes.",
-        "The launcher currently expects a local config.xml."
+        "The launcher uses the config.xml generated into the CMake build directory."
       ]
     },
     {
@@ -335,11 +539,11 @@
       ],
       "build": {
         "macos": [
-          "cmake -S . -B build",
+          "cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
           "cmake --build build"
         ],
         "linux": [
-          "cmake -S . -B build",
+          "cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
           "cmake --build build"
         ]
       },

@@ -61,6 +61,13 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - `sm64ds`
   - `smw`
   - `jsr`
+- Linux core requirements:
+  - `genesis_plus_gx_libretro.so` for Sonic
+  - `melonds_libretro.so` for SM64DS
+  - `bsnes_libretro.so` for SMW
+  - `flycast_libretro.so` for JSR
+  - Source-built RetroArch defaults to a user cores directory such as `~/.config/retroarch/cores`; use RetroArch's Online Updater > Core Downloader entries printed by the bootstrap doctor.
+  - Distro packages such as Arch's `libretro-genesis-plus-gx libretro-melonds libretro-bsnes libretro-flycast` are a fallback, but the RetroArch config or `LIBRETRO_DIRECTORY` must point at the system core directory.
 - Next cleanup:
   - Keep generated app bundles, crash logs, and shader products out of source branches.
   - Re-test launcher profiles from a clean checkout when bootstrap metadata exists.
@@ -112,7 +119,6 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 - Pushed source commit:
   - `776d0e7 build: fix macOS CMake and static asserts`
 - Untracked local files:
-  - `config.xml`
   - `run-cannonball-ks.sh`
 - Local change shape:
   - CMake adjustments
@@ -121,7 +127,9 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 - Launcher profile coverage:
   - `cannonball`
 - Next cleanup:
-  - Decide whether `config.xml` should remain local-only or become a seeded launcher config.
+  - Build from the `cmake/` source directory; Linux uses `-DTARGET=linux.cmake`.
+  - Launcher config now comes from the generated `build/config.xml`.
+  - Required OutRun Revision B ROMs are checked under `roms/` by the bootstrap doctor.
 
 ### Chiaki NG
 
@@ -192,8 +200,9 @@ Bootstrap metadata lives in `profiles/external-projects.json` and can be applied
   - pushed Chiaki NG SDL client prototype to `rjwittams/macos-sdl-client-build`
   - added a first-class `cannonball` Katzensteg launcher profile
   - added bootstrap metadata and a clone/update helper for external checkouts
+  - added bootstrap doctor checks for Katzensteg build dependencies, external project outputs, local assets, Cannonball ROMs/config, and RetroArch cores
   - moved Moonlight dirty work from `master` to `macos-sdl-renderer-output`
   - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
   - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
 - Still needed:
-  - add a doctor/check command for local tools, profile paths, terminal support, and missing ROM/config assets
+  - add deeper terminal capability checks beyond local tools, profile paths, and missing assets

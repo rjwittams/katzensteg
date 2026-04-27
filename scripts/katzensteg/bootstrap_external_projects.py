@@ -203,6 +203,43 @@ def doctor_path(project_root: Path, path_value: str) -> Path:
     return project_root / candidate
 
 
+def doctor_entry_applies(entry: str | dict, platform: str | None = None) -> bool:
+    if not isinstance(entry, dict):
+        return True
+    platforms = entry.get("platforms")
+    if platforms is None:
+        return True
+    return (platform or current_platform()) in platforms
+
+
+def doctor_entry_name(entry: str | dict) -> str:
+    if isinstance(entry, str):
+        return entry
+    return entry["name"]
+
+
+def iter_doctor_names(entries: Iterable[str | dict], platform: str | None = None) -> Iterable[str]:
+    for entry in entries:
+        if doctor_entry_applies(entry, platform):
+            yield doctor_entry_name(entry)
+
+
+def resolve_asset_paths(project_root: Path, asset_entry: dict) -> list[Path]:
+    if "path" in asset_entry:
+        return [doctor_path(project_root, asset_entry["path"])]
+    if "any_of" in asset_entry:
+        return [doctor_path(project_root, path_value) for path_value in asset_entry["any_of"]]
+    raise ValueError(f"doctor asset entry must contain path or any_of: {asset_entry!r}")
+
+
+def missing_asset_label(asset_entry: dict, resolved_paths: list[Path]) -> str:
+    if label := asset_entry.get("label"):
+        return str(label)
+    if len(resolved_paths) == 1:
+        return str(resolved_paths[0])
+    return "one of: " + ", ".join(str(path) for path in resolved_paths)
+
+
 PkgConfigStatus = Literal["present", "missing_module", "missing_tool"]
 
 
@@ -247,16 +284,20 @@ def run_doctor(
     missing_configs: list[str] = []
     missing_assets: list[str] = []
 
+    doctor_sections: list[tuple[dict, Path, str]] = []
+    if repo_doctor := manifest.get("doctor"):
+        doctor_sections.append((repo_doctor, DEFAULT_MANIFEST.parents[1], "katzensteg"))
     for project in select_projects(manifest, names, include_non_default):
         doctor = project.get("doctor", {})
-        project_root = doctor_project_root(root, project)
+        doctor_sections.append((doctor, doctor_project_root(root, project), project["name"]))
 
-        for tool_name in doctor.get("tools", []):
+    for doctor, project_root, section_name in doctor_sections:
+        for tool_name in iter_doctor_names(doctor.get("tools", [])):
             if shutil.which(tool_name) is None:
                 missing_tools.append(tool_name)
 
         pkg_config_available = True
-        for module_name in doctor.get("pkg_config", []):
+        for module_name in iter_doctor_names(doctor.get("pkg_config", [])):
             if not pkg_config_available:
                 continue
             status = run_pkg_config_exists(module_name)
@@ -270,10 +311,12 @@ def run_doctor(
                 missing_packages.append(module_name)
 
         for path_entry in doctor.get("paths", []):
+            if not doctor_entry_applies(path_entry):
+                continue
             path_kind = path_entry["kind"]
             if path_kind not in {"output", "config"}:
                 raise ValueError(
-                    f"unknown doctor path kind {path_kind!r} for project {project['name']}"
+                    f"unknown doctor path kind {path_kind!r} for project {section_name}"
                 )
             resolved_path = doctor_path(project_root, path_entry["path"])
             if resolved_path.exists():
@@ -284,9 +327,11 @@ def run_doctor(
                 missing_configs.append(str(resolved_path))
 
         for asset_entry in doctor.get("assets", []):
-            resolved_path = doctor_path(project_root, asset_entry["path"])
-            if not resolved_path.exists():
-                missing_assets.append(str(resolved_path))
+            if not doctor_entry_applies(asset_entry):
+                continue
+            resolved_paths = resolve_asset_paths(project_root, asset_entry)
+            if not any(path.exists() for path in resolved_paths):
+                missing_assets.append(missing_asset_label(asset_entry, resolved_paths))
 
     report = DoctorReport(
         missing_tools=list(dict.fromkeys(missing_tools)),
@@ -298,6 +343,46 @@ def run_doctor(
     )
     report.summary = format_doctor_summary(report)
     return report
+
+
+def format_doctor_detail_lines(
+    report: DoctorReport,
+    manifest: dict,
+    distro_family: str | None = None,
+) -> list[str]:
+    if not doctor_has_failures(report):
+        return []
+
+    lines: list[str] = ["Doctor details:"]
+    if report.missing_tools:
+        lines.append("  missing tools:")
+        lines.extend(f"    {item}" for item in report.missing_tools)
+    if report.missing_packages:
+        lines.append("  missing pkg-config modules:")
+        lines.extend(f"    {item}" for item in report.missing_packages)
+    if report.missing_outputs:
+        lines.append("  missing outputs:")
+        lines.extend(f"    {item}" for item in report.missing_outputs)
+    if report.missing_configs:
+        lines.append("  missing configs:")
+        lines.extend(f"    {item}" for item in report.missing_configs)
+    if report.missing_assets:
+        lines.append("  missing assets:")
+        lines.extend(f"    {item}" for item in report.missing_assets)
+
+    install_capabilities = [*report.missing_tools, *report.missing_packages]
+    if install_capabilities:
+        lines.append("  install hints:")
+        lines.extend(
+            f"    {line}"
+            for line in render_install_hint_lines(manifest, install_capabilities, distro_family)
+        )
+    return lines
+
+
+def print_doctor_details(report: DoctorReport, manifest: dict) -> None:
+    for line in format_doctor_detail_lines(report, manifest):
+        print(line)
 
 
 def clone_command(project: dict, target: Path) -> list[str]:
@@ -582,6 +667,7 @@ def main(argv: list[str]) -> int:
     else:
         results = run_plan(plan, args.dry_run)
     doctor_report = run_doctor(manifest, root, args.selection, args.include_non_default)
+    print_doctor_details(doctor_report, manifest)
     print_final_summary(results, doctor_report)
     if has_failures(results) or doctor_has_failures(doctor_report):
         return 1
