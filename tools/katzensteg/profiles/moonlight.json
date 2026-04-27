@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "app.moonlight": {
+    "moonlight": {
       "hidden": true,
       "target": "$HOME/dev/moonlight-qt/app/Moonlight.app/Contents/MacOS/Moonlight",
       "env": {
@@ -9,9 +9,9 @@
         "VT_FORCE_INDIRECT": "1"
       }
     },
-    "moonlight.steam_big_picture": {
+    "moonlight.steam": {
       "extends": [
-        "app.moonlight",
+        "moonlight",
         "adapter.sdl2_preload",
         "runtime.fullscreen_file"
       ],

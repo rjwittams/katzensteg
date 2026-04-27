@@ -6,6 +6,12 @@ pub const EnvVar = struct {
     value: []const u8,
 };
 
+pub const SeedFile = struct {
+    path: []const u8,
+    source: ?[]const u8 = null,
+    content: ?[]const u8 = null,
+};
+
 pub const RuntimeFieldSet = struct {
     composite_mode: bool = false,
     intercept_mode: bool = false,
@@ -30,8 +36,10 @@ pub const LaunchProfile = struct {
     stdout: ?[]const u8 = null,
     stderr: ?[]const u8 = null,
     env: []const EnvVar = &.{},
+    seed_files: []const SeedFile = &.{},
     runtime: config.RuntimeConfig = .{},
     runtime_fields: RuntimeFieldSet = .{},
+    error_summary: ?[]const u8 = null,
 
     fn deinit(self: *LaunchProfile) void {
         self.allocator.free(self.name);
@@ -48,6 +56,17 @@ pub const LaunchProfile = struct {
             self.allocator.free(entry.value);
         }
         self.allocator.free(self.env);
+        for (self.seed_files) |entry| {
+            self.allocator.free(entry.path);
+            if (entry.source) |source| self.allocator.free(source);
+            if (entry.content) |content| self.allocator.free(content);
+        }
+        self.allocator.free(self.seed_files);
+        if (self.error_summary) |summary| self.allocator.free(summary);
+    }
+
+    pub fn isBroken(self: *const LaunchProfile) bool {
+        return self.error_summary != null;
     }
 };
 
@@ -68,18 +87,10 @@ pub const ProfileCatalog = struct {
             profiles.deinit(allocator);
         }
 
-        for (documents) |bytes| {
-            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
-            defer parsed.deinit();
-            const profiles_value = parsed.value.object.get("profiles") orelse return error.MissingProfiles;
-            if (profiles_value != .object) return error.InvalidProfiles;
-
-            var it = profiles_value.object.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.* != .object) return error.InvalidProfile;
-                if (findProfileIndex(profiles.items, entry.key_ptr.*) != null) return error.DuplicateProfile;
-                try profiles.append(allocator, try parseProfile(allocator, entry.key_ptr.*, entry.value_ptr.*));
-            }
+        for (documents, 0..) |bytes, index| {
+            const document_name = try std.fmt.allocPrint(allocator, "document[{d}]", .{index});
+            defer allocator.free(document_name);
+            try parseDocumentInto(allocator, &profiles, bytes, document_name);
         }
         try resolveInheritance(allocator, profiles.items);
 
@@ -93,20 +104,27 @@ pub const ProfileCatalog = struct {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
 
-        var docs = std.ArrayList([]const u8).empty;
-        defer {
-            for (docs.items) |doc| allocator.free(doc);
-            docs.deinit(allocator);
+        var profiles = std.ArrayList(LaunchProfile).empty;
+        errdefer {
+            for (profiles.items) |*profile| profile.deinit();
+            profiles.deinit(allocator);
         }
 
         var it = dir.iterate();
         while (try it.next()) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-            try docs.append(allocator, try dir.readFileAlloc(allocator, entry.name, 1024 * 1024));
+            const bytes = try dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
+            defer allocator.free(bytes);
+            try parseDocumentInto(allocator, &profiles, bytes, entry.name);
         }
 
-        return parseDocuments(allocator, docs.items);
+        try resolveInheritance(allocator, profiles.items);
+
+        return .{
+            .allocator = allocator,
+            .profiles = try profiles.toOwnedSlice(allocator),
+        };
     }
 
     pub fn deinit(self: *ProfileCatalog) void {
@@ -121,6 +139,56 @@ pub const ProfileCatalog = struct {
         return null;
     }
 };
+
+fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(LaunchProfile), bytes: []const u8, document_name: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "document parse failed: {s}", .{@errorName(err)}));
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "document root is not an object", .{}));
+        return;
+    }
+    const profiles_value = parsed.value.object.get("profiles") orelse {
+        try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "missing profiles object", .{}));
+        return;
+    };
+    if (profiles_value != .object) {
+        try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "profiles is not an object", .{}));
+        return;
+    }
+
+    var it = profiles_value.object.iterator();
+    while (it.next()) |entry| {
+        if (findProfileIndex(profiles.items, entry.key_ptr.*) != null) {
+            try profiles.append(allocator, try makeBrokenProfile(allocator, entry.key_ptr.*, "duplicate profile name", .{}));
+            continue;
+        }
+        if (entry.value_ptr.* != .object) {
+            try profiles.append(allocator, try makeBrokenProfile(allocator, entry.key_ptr.*, "profile body is not an object", .{}));
+            continue;
+        }
+        const profile = parseProfile(allocator, entry.key_ptr.*, entry.value_ptr.*) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            try profiles.append(allocator, try makeBrokenProfile(allocator, entry.key_ptr.*, "profile parse failed: {s}", .{@errorName(err)}));
+            continue;
+        };
+        try profiles.append(allocator, profile);
+    }
+}
+
+fn makeBrokenProfile(allocator: std.mem.Allocator, name: []const u8, comptime fmt: []const u8, args: anytype) !LaunchProfile {
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
+    return .{
+        .allocator = allocator,
+        .name = owned_name,
+        .error_summary = try std.fmt.allocPrint(allocator, fmt, args),
+    };
+}
 
 fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.Value) !LaunchProfile {
     const object = value.object;
@@ -144,6 +212,7 @@ fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.
     if (object.get("stdout")) |stdout_value| profile.stdout = try dupeOptionalString(allocator, stdout_value, error.InvalidStdout);
     if (object.get("stderr")) |stderr_value| profile.stderr = try dupeOptionalString(allocator, stderr_value, error.InvalidStderr);
     if (object.get("env")) |env_value| profile.env = try parseEnvMap(allocator, env_value);
+    if (object.get("seed_files")) |seed_files_value| profile.seed_files = try parseSeedFiles(allocator, seed_files_value);
     if (object.get("runtime")) |runtime_value| {
         const parsed_runtime = try parseRuntimeObject(runtime_value);
         profile.runtime = parsed_runtime.config;
@@ -190,6 +259,44 @@ fn parseEnvMap(allocator: std.mem.Allocator, value: std.json.Value) ![]const Env
         });
     }
     return env.toOwnedSlice(allocator);
+}
+
+fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value) ![]const SeedFile {
+    if (value != .array) return error.InvalidSeedFiles;
+    var seed_files = std.ArrayList(SeedFile).empty;
+    errdefer {
+        for (seed_files.items) |entry| {
+            allocator.free(entry.path);
+            if (entry.source) |source| allocator.free(source);
+            if (entry.content) |content| allocator.free(content);
+        }
+        seed_files.deinit(allocator);
+    }
+
+    for (value.array.items) |item| {
+        if (item != .object) return error.InvalidSeedFiles;
+        const path_value = item.object.get("path") orelse return error.InvalidSeedFiles;
+        if (path_value != .string) return error.InvalidSeedFiles;
+        var seed_file = SeedFile{
+            .path = try allocator.dupe(u8, path_value.string),
+        };
+        errdefer {
+            allocator.free(seed_file.path);
+            if (seed_file.source) |source| allocator.free(source);
+            if (seed_file.content) |content| allocator.free(content);
+        }
+        if (item.object.get("source")) |source_value| {
+            if (source_value != .string) return error.InvalidSeedFiles;
+            seed_file.source = try allocator.dupe(u8, source_value.string);
+        }
+        if (item.object.get("content")) |content_value| {
+            if (content_value != .string) return error.InvalidSeedFiles;
+            seed_file.content = try allocator.dupe(u8, content_value.string);
+        }
+        if ((seed_file.source == null) == (seed_file.content == null)) return error.InvalidSeedFiles;
+        try seed_files.append(allocator, seed_file);
+    }
+    return seed_files.toOwnedSlice(allocator);
 }
 
 const ParsedRuntime = struct {
@@ -281,17 +388,39 @@ fn resolveInheritance(allocator: std.mem.Allocator, profiles: []LaunchProfile) !
 
 fn resolveProfileAt(allocator: std.mem.Allocator, profiles: []LaunchProfile, idx: usize, resolved: []bool, resolving: []bool) !void {
     if (resolved[idx]) return;
-    if (resolving[idx]) return error.ProfileInheritanceCycle;
+    if (profiles[idx].isBroken()) {
+        resolved[idx] = true;
+        return;
+    }
+    if (resolving[idx]) {
+        try setProfileError(allocator, &profiles[idx], "profile inheritance cycle", .{});
+        resolved[idx] = true;
+        return;
+    }
     resolving[idx] = true;
     defer resolving[idx] = false;
 
     const parent_names = profiles[idx].extends;
     for (parent_names) |parent_name| {
-        const parent_idx = findProfileIndex(profiles, parent_name) orelse return error.UnknownParentProfile;
+        const parent_idx = findProfileIndex(profiles, parent_name) orelse {
+            try setProfileError(allocator, &profiles[idx], "unknown parent profile: {s}", .{parent_name});
+            resolved[idx] = true;
+            return;
+        };
         try resolveProfileAt(allocator, profiles, parent_idx, resolved, resolving);
+        if (profiles[parent_idx].error_summary) |summary| {
+            try setProfileError(allocator, &profiles[idx], "parent profile is broken: {s}: {s}", .{ parent_name, summary });
+            resolved[idx] = true;
+            return;
+        }
         try inheritFrom(allocator, &profiles[idx], &profiles[parent_idx]);
     }
     resolved[idx] = true;
+}
+
+fn setProfileError(allocator: std.mem.Allocator, profile: *LaunchProfile, comptime fmt: []const u8, args: anytype) !void {
+    if (profile.error_summary != null) return;
+    profile.error_summary = try std.fmt.allocPrint(allocator, fmt, args);
 }
 
 fn inheritFrom(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *const LaunchProfile) !void {
@@ -301,6 +430,7 @@ fn inheritFrom(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *con
     if (child.stdout == null and parent.stdout != null) child.stdout = try allocator.dupe(u8, parent.stdout.?);
     if (child.stderr == null and parent.stderr != null) child.stderr = try allocator.dupe(u8, parent.stderr.?);
     try inheritEnv(allocator, child, parent);
+    try inheritSeedFiles(allocator, child, parent);
     inheritRuntime(child, parent);
 }
 
@@ -342,6 +472,53 @@ fn inheritEnv(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *cons
     }
     allocator.free(child.env);
     child.env = try env.toOwnedSlice(allocator);
+}
+
+fn inheritSeedFiles(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *const LaunchProfile) !void {
+    var seed_files = std.ArrayList(SeedFile).empty;
+    errdefer {
+        for (seed_files.items) |entry| {
+            allocator.free(entry.path);
+            if (entry.source) |source| allocator.free(source);
+            if (entry.content) |content| allocator.free(content);
+        }
+        seed_files.deinit(allocator);
+    }
+    for (parent.seed_files) |entry| {
+        if (seedFileContains(child.seed_files, entry.path)) continue;
+        try seed_files.append(allocator, try dupeSeedFile(allocator, entry));
+    }
+    for (child.seed_files) |entry| {
+        try seed_files.append(allocator, try dupeSeedFile(allocator, entry));
+    }
+    for (child.seed_files) |entry| {
+        allocator.free(entry.path);
+        if (entry.source) |source| allocator.free(source);
+        if (entry.content) |content| allocator.free(content);
+    }
+    allocator.free(child.seed_files);
+    child.seed_files = try seed_files.toOwnedSlice(allocator);
+}
+
+fn dupeSeedFile(allocator: std.mem.Allocator, entry: SeedFile) !SeedFile {
+    var out = SeedFile{
+        .path = try allocator.dupe(u8, entry.path),
+    };
+    errdefer {
+        allocator.free(out.path);
+        if (out.source) |source| allocator.free(source);
+        if (out.content) |content| allocator.free(content);
+    }
+    if (entry.source) |source| out.source = try allocator.dupe(u8, source);
+    if (entry.content) |content| out.content = try allocator.dupe(u8, content);
+    return out;
+}
+
+fn seedFileContains(seed_files: []const SeedFile, path: []const u8) bool {
+    for (seed_files) |entry| {
+        if (std.mem.eql(u8, entry.path, path)) return true;
+    }
+    return false;
 }
 
 fn envContains(env: []const EnvVar, name: []const u8) bool {
@@ -414,6 +591,12 @@ test "profile parser reads launch and runtime fields" {
         \\      "env": {
         \\        "KATZENSTEG_INPUT": "1"
         \\      },
+        \\      "seed_files": [
+        \\        {
+        \\          "path": "/tmp/example.cfg",
+        \\          "content": "video_driver = \"sdl2\"\n"
+        \\        }
+        \\      ],
         \\      "runtime": {
         \\        "composite_mode": "fullscreen",
         \\        "intercept_mode": "queued_replay",
@@ -442,6 +625,8 @@ test "profile parser reads launch and runtime fields" {
     try std.testing.expectEqualStrings("stdout", profile.stderr.?);
     try std.testing.expectEqualStrings("KATZENSTEG_INPUT", profile.env[0].name);
     try std.testing.expectEqualStrings("1", profile.env[0].value);
+    try std.testing.expectEqualStrings("/tmp/example.cfg", profile.seed_files[0].path);
+    try std.testing.expectEqualStrings("video_driver = \"sdl2\"\n", profile.seed_files[0].content.?);
     try std.testing.expect(!profile.hidden);
     try std.testing.expectEqual(config.RuntimeConfig{
         .intercept_mode = .queued_replay,
@@ -484,6 +669,12 @@ test "profile inheritance fills missing fields and preserves child overrides" {
         \\        "KEEP": "base",
         \\        "OVERRIDE": "base"
         \\      },
+        \\      "seed_files": [
+        \\        {
+        \\          "path": "/tmp/retroarch-sdl2.cfg",
+        \\          "content": "video_driver = \"sdl2\"\n"
+        \\        }
+        \\      ],
         \\      "runtime": {
         \\        "intercept_mode": "queued_replay",
         \\        "window_policy": "terminal_only",
@@ -519,6 +710,7 @@ test "profile inheritance fills missing fields and preserves child overrides" {
     try std.testing.expectEqualStrings("base", profile.env[0].value);
     try std.testing.expectEqualStrings("OVERRIDE", profile.env[1].name);
     try std.testing.expectEqualStrings("child", profile.env[1].value);
+    try std.testing.expectEqualStrings("/tmp/retroarch-sdl2.cfg", profile.seed_files[0].path);
 }
 
 test "profile inheritance resolves across multiple profile documents" {
@@ -552,4 +744,74 @@ test "profile inheritance resolves across multiple profile documents" {
     try std.testing.expectEqualStrings("/bin/echo", profile.target);
     try std.testing.expectEqualStrings("hello", profile.args[0]);
     try std.testing.expectEqual(config.RuntimeConfig{ .window_policy = .terminal_only }, config.RuntimeConfig{ .window_policy = profile.runtime.window_policy });
+}
+
+test "profile parser keeps broken profile entries after parse failures" {
+    const json =
+        \\{
+        \\  "profiles": {
+        \\    "good": {
+        \\      "target": "/bin/echo"
+        \\    },
+        \\    "bad": {
+        \\      "target": 123
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var catalog = try ProfileCatalog.parse(std.testing.allocator, json);
+    defer catalog.deinit();
+
+    try std.testing.expectEqualStrings("/bin/echo", catalog.find("good").?.target);
+    const bad = catalog.find("bad").?;
+    try std.testing.expect(bad.isBroken());
+    try std.testing.expect(bad.error_summary != null);
+}
+
+test "profile parser marks profiles with missing parents as broken" {
+    const json =
+        \\{
+        \\  "profiles": {
+        \\    "child": {
+        \\      "extends": ["missing.parent"]
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var catalog = try ProfileCatalog.parse(std.testing.allocator, json);
+    defer catalog.deinit();
+
+    const child = catalog.find("child").?;
+    try std.testing.expect(child.isBroken());
+    try std.testing.expect(std.mem.indexOf(u8, child.error_summary.?, "missing.parent") != null);
+}
+
+test "profile parser keeps loading documents after a malformed document" {
+    const malformed_json = "{";
+    const good_json =
+        \\{
+        \\  "profiles": {
+        \\    "good": {
+        \\      "target": "/bin/echo"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var catalog = try ProfileCatalog.parseDocuments(std.testing.allocator, &.{ malformed_json, good_json });
+    defer catalog.deinit();
+
+    try std.testing.expect(catalog.find("document[0]").?.isBroken());
+    try std.testing.expectEqualStrings("/bin/echo", catalog.find("good").?.target);
+}
+
+test "bundled profiles include smb3 ANESE launch target" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "tools/katzensteg/profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("smb3").?;
+    try std.testing.expectEqualStrings("$HOME/dev/ANESE/build/anese", profile.target);
+    try std.testing.expectEqualStrings("$HOME/roms/smb3.nes", profile.args[0]);
 }

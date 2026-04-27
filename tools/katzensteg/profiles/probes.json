@@ -13,6 +13,25 @@
         "adapter.sdl2_preload",
         "runtime.fullscreen_file"
       ]
+    },
+    "app.vulkan_probe": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe",
+      "env": {
+        "KATZENSTEG_VULKAN_CAPTURE": "1",
+        "VK_LAYER_PATH": "{repo}/tools/katzensteg",
+        "VK_INSTANCE_LAYERS": "VK_LAYER_KATZENSTEG_capture"
+      }
+    },
+    "probe.vulkan": {
+      "extends": [
+        "app.vulkan_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "runtime": {
+        "vulkan_capture": true
+      }
     }
   }
 }

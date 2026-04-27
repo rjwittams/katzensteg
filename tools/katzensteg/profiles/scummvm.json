@@ -10,7 +10,7 @@
         "KATZENSTEG_INSPECT_SOCKET": "/tmp/katzensteg-inspect.sock"
       }
     },
-    "scummvm.monkey2": {
+    "mi2": {
       "extends": [
         "app.scummvm",
         "adapter.sdl2_preload",

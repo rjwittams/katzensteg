@@ -53,9 +53,10 @@ const ResolvedLaunchPlan = struct {
     stdout: OutputSpec,
     stderr: OutputSpec,
     env: []profiles_mod.EnvVar,
+    seed_files: []profiles_mod.SeedFile,
     runtime: @import("config.zig").RuntimeConfig,
 
-    fn fromProfile(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !ResolvedLaunchPlan {
+    fn fromProfile(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
         var plan = ResolvedLaunchPlan{
             .allocator = allocator,
             .profile_name = try allocator.dupe(u8, profile.name),
@@ -65,15 +66,17 @@ const ResolvedLaunchPlan = struct {
             .stdout = .inherit,
             .stderr = .inherit,
             .env = &.{},
+            .seed_files = &.{},
             .runtime = resolvedRuntimeConfig(profile),
         };
         errdefer plan.deinit();
 
-        plan.argv = try buildChildArgv(allocator, profile, expansion);
+        plan.argv = try buildChildArgv(allocator, profile, expansion, extra_args);
         if (profile.cwd) |raw| plan.cwd = try expandLauncherString(allocator, raw, expansion);
         plan.stdout = try resolveProfileStdout(allocator, profile, expansion);
         plan.stderr = try resolveProfileStderr(allocator, profile, expansion);
         plan.env = try expandProfileEnv(allocator, profile.env, expansion);
+        plan.seed_files = try expandProfileSeedFiles(allocator, profile.seed_files, expansion);
         return plan;
     }
 
@@ -89,6 +92,12 @@ const ResolvedLaunchPlan = struct {
             self.allocator.free(entry.value);
         }
         self.allocator.free(self.env);
+        for (self.seed_files) |entry| {
+            self.allocator.free(entry.path);
+            if (entry.source) |source| self.allocator.free(source);
+            if (entry.content) |content| self.allocator.free(content);
+        }
+        self.allocator.free(self.seed_files);
     }
 };
 
@@ -117,13 +126,18 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (args.len > 0 and isProxyExecutablePath(args[0])) {
+        const exit_code = try runProxy(allocator, args[1..]);
+        std.process.exit(exit_code);
+    }
+
     switch (parseCommand(args)) {
         .help => try std.fs.File.stdout().writeAll(usageText()),
         .menu => try showProfiles(allocator),
         .run => {
             const target_idx = targetArgIndex(args) orelse unreachable;
             const target = args[target_idx];
-            if (hasArg(args[1..], "--dry-run")) {
+            if (launcherDryRun(args)) {
                 try dryRunTarget(allocator, target, args[target_idx + 1 ..]);
                 return;
             }
@@ -154,8 +168,13 @@ fn usageText() []const u8 {
         \\Environment:
         \\  KATZENSTEG_PROFILE_DIR  Override the profile directory.
         \\  KATZENSTEG_REPO         Override {repo}/$ROOT expansion.
+        \\  KATZENSTEG_PROXY_PROFILE  Child profile used by katzensteg-proxy.
         \\
     ;
+}
+
+fn isProxyExecutablePath(path: []const u8) bool {
+    return std.mem.eql(u8, std.fs.path.basename(path), "katzensteg-proxy");
 }
 
 fn parseCommand(args: []const []const u8) Command {
@@ -163,6 +182,14 @@ fn parseCommand(args: []const []const u8) Command {
     if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
+}
+
+fn launcherDryRun(args: []const []const u8) bool {
+    const target_idx = targetArgIndex(args) orelse args.len;
+    for (args[1..target_idx]) |arg| {
+        if (std.mem.eql(u8, arg, "--dry-run")) return true;
+    }
+    return false;
 }
 
 fn targetArg(args: []const []const u8) ?[]const u8 {
@@ -201,6 +228,10 @@ fn showProfiles(allocator: std.mem.Allocator) !void {
     var writer = stdout.writerStreaming(&.{});
     try writer.interface.writeAll("katzensteg profiles:\n");
     for (catalog.profiles) |profile| {
+        if (profile.error_summary) |summary| {
+            try writer.interface.print("  {s} [broken: {s}]\n", .{ profile.name, summary });
+            continue;
+        }
         if (profile.hidden) continue;
         if (profile.target.len == 0) continue;
         try writer.interface.print("  {s}\n", .{profile.name});
@@ -216,14 +247,14 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
         std.debug.print("katzensteg dry-run\ncommand={s}\nargs={d}\n", .{ target, extra_args.len });
         return;
     };
-    if (profile.target.len == 0) {
-        std.debug.print("katzensteg: profile is a fragment, not a launch target: {s}\n", .{target});
+    if (profileLaunchProblem(profile)) |problem| {
+        printProfileLaunchProblem(target, problem);
         std.process.exit(66);
     }
 
     var expansion = try ExpansionContext.init(allocator);
     defer expansion.deinit(allocator);
-    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion);
+    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
     std.debug.print(
@@ -245,6 +276,18 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     } else {
         for (plan.env) |entry| {
             std.debug.print("  {s}={s}\n", .{ entry.name, entry.value });
+        }
+    }
+    std.debug.print("seed_files:\n", .{});
+    if (plan.seed_files.len == 0) {
+        std.debug.print("  <none>\n", .{});
+    } else {
+        for (plan.seed_files) |entry| {
+            if (entry.source) |source| {
+                std.debug.print("  {s} <- {s}\n", .{ entry.path, source });
+            } else {
+                std.debug.print("  {s} <- inline content\n", .{entry.path});
+            }
         }
     }
     std.debug.print(
@@ -271,14 +314,14 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     const profile = catalog.find(target) orelse {
         return runCommand(allocator, target, extra_args);
     };
-    if (profile.target.len == 0) {
-        std.debug.print("katzensteg: profile is a fragment, not a launch target: {s}\n", .{target});
+    if (profileLaunchProblem(profile)) |problem| {
+        printProfileLaunchProblem(target, problem);
         return 66;
     }
 
     var expansion = try ExpansionContext.init(allocator);
     defer expansion.deinit(allocator);
-    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion);
+    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
     const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
@@ -294,6 +337,7 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     std.debug.print("  target: {s}\n", .{plan.target});
     std.debug.print("  runtime config: {s}\n", .{runtime_config_path});
     std.debug.print("  output: {s}\n", .{outputSpecLabel(plan.stdout)});
+    try ensureSeedFiles(allocator, plan.seed_files);
 
     var child = std.process.Child.init(plan.argv, allocator);
     child.env_map = &env_map;
@@ -304,7 +348,30 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
 
     const term = try spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr);
     resetTerminalBestEffort();
-    return childExitCode(term);
+    const exit_code = childExitCode(term);
+    if (exit_code != 0) {
+        reportExecutedCommand(allocator, plan.argv);
+        reportOutputTail(allocator, plan.stdout, plan.stderr);
+    }
+    return exit_code;
+}
+
+const ProfileLaunchProblem = union(enum) {
+    broken: []const u8,
+    fragment,
+};
+
+fn profileLaunchProblem(profile: *const profiles_mod.LaunchProfile) ?ProfileLaunchProblem {
+    if (profile.error_summary) |summary| return .{ .broken = summary };
+    if (profile.target.len == 0) return .fragment;
+    return null;
+}
+
+fn printProfileLaunchProblem(name: []const u8, problem: ProfileLaunchProblem) void {
+    switch (problem) {
+        .broken => |summary| std.debug.print("katzensteg: profile is broken: {s}: {s}\n", .{ name, summary }),
+        .fragment => std.debug.print("katzensteg: profile is a fragment, not a launch target: {s}\n", .{name}),
+    }
 }
 
 fn runCommand(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) !u8 {
@@ -320,6 +387,50 @@ fn runCommand(allocator: std.mem.Allocator, target: []const u8, extra_args: []co
     const term = try child.spawnAndWait();
     resetTerminalBestEffort();
     return childExitCode(term);
+}
+
+fn runProxy(allocator: std.mem.Allocator, extra_args: []const []const u8) !u8 {
+    const profile_name = std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROXY_PROFILE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            std.debug.print("katzensteg-proxy: missing KATZENSTEG_PROXY_PROFILE\n", .{});
+            return 64;
+        },
+        else => return err,
+    };
+    defer allocator.free(profile_name);
+
+    var catalog = try loadProfileCatalog(allocator);
+    defer catalog.deinit();
+
+    const profile = catalog.find(profile_name) orelse {
+        std.debug.print("katzensteg-proxy: child profile not found: {s}\n", .{profile_name});
+        return 66;
+    };
+    if (profileLaunchProblem(profile)) |problem| {
+        printProfileLaunchProblem(profile_name, problem);
+        return 66;
+    }
+
+    var expansion = try ExpansionContext.init(allocator);
+    defer expansion.deinit(allocator);
+    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
+    defer plan.deinit();
+
+    const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
+    defer {
+        std.fs.deleteFileAbsolute(runtime_config_path) catch {};
+        allocator.free(runtime_config_path);
+    }
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    for (plan.env) |entry| try env_map.put(entry.name, entry.value);
+    try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
+    try ensureSeedFiles(allocator, plan.seed_files);
+
+    const err = std.process.execve(allocator, plan.argv, &env_map);
+    std.debug.print("katzensteg-proxy: exec failed for {s}: {s}\n", .{ plan.target, @errorName(err) });
+    return 127;
 }
 
 fn childExitCode(term: std.process.Child.Term) u8 {
@@ -382,7 +493,7 @@ fn repoRootFromExecutablePath(allocator: std.mem.Allocator, exe_path: []const u8
     return allocator.dupe(u8, repo);
 }
 
-fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) ![][]const u8 {
+fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) ![][]const u8 {
     var argv = std.ArrayList([]const u8).empty;
     errdefer {
         for (argv.items) |arg| allocator.free(arg);
@@ -390,6 +501,7 @@ fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles_mod.Lau
     }
     try argv.append(allocator, try expandLauncherString(allocator, profile.target, expansion));
     for (profile.args) |arg| try argv.append(allocator, try expandLauncherString(allocator, arg, expansion));
+    for (extra_args) |arg| try argv.append(allocator, try allocator.dupe(u8, arg));
     return argv.toOwnedSlice(allocator);
 }
 
@@ -417,6 +529,26 @@ fn expandProfileEnv(allocator: std.mem.Allocator, env: []const profiles_mod.EnvV
         try out.append(allocator, .{
             .name = try allocator.dupe(u8, entry.name),
             .value = try expandLauncherString(allocator, entry.value, expansion),
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn expandProfileSeedFiles(allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile, expansion: ExpansionContext) ![]profiles_mod.SeedFile {
+    var out = std.ArrayList(profiles_mod.SeedFile).empty;
+    errdefer {
+        for (out.items) |entry| {
+            allocator.free(entry.path);
+            if (entry.source) |source| allocator.free(source);
+            if (entry.content) |content| allocator.free(content);
+        }
+        out.deinit(allocator);
+    }
+    for (seed_files) |entry| {
+        try out.append(allocator, .{
+            .path = try expandLauncherString(allocator, entry.path, expansion),
+            .source = if (entry.source) |source| try expandLauncherString(allocator, source, expansion) else null,
+            .content = if (entry.content) |content| try allocator.dupe(u8, content) else null,
         });
     }
     return out.toOwnedSlice(allocator);
@@ -529,6 +661,140 @@ fn openStderrSink(stdout_spec: OutputSpec, stderr_spec: OutputSpec, stdout_sink:
 fn createOutputFile(path: []const u8) !std.fs.File {
     if (std.fs.path.isAbsolute(path)) return std.fs.createFileAbsolute(path, .{ .truncate = true, .read = false });
     return std.fs.cwd().createFile(path, .{ .truncate = true, .read = false });
+}
+
+fn ensureSeedFiles(allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile) !void {
+    for (seed_files) |entry| {
+        if (try fileExists(entry.path)) continue;
+        const bytes = if (entry.content) |content|
+            content
+        else blk: {
+            const source = entry.source orelse return error.InvalidSeedFile;
+            break :blk try readWholeFile(allocator, source);
+        };
+        defer if (entry.content == null) allocator.free(bytes);
+        const file = try createOutputFile(entry.path);
+        defer file.close();
+        try file.writeAll(bytes);
+    }
+}
+
+fn fileExists(path: []const u8) !bool {
+    const file = if (std.fs.path.isAbsolute(path))
+        std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        }
+    else
+        std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+    file.close();
+    return true;
+}
+
+fn readWholeFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+        defer file.close();
+        return file.readToEndAlloc(allocator, 1024 * 1024);
+    }
+    return std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+}
+
+fn reportOutputTail(allocator: std.mem.Allocator, stdout_spec: OutputSpec, stderr_spec: OutputSpec) void {
+    switch (stdout_spec) {
+        .file => |path| reportFileTail(allocator, path),
+        else => {},
+    }
+    switch (stderr_spec) {
+        .file => |path| reportFileTail(allocator, path),
+        .stdout => {},
+        else => {},
+    }
+}
+
+fn reportExecutedCommand(allocator: std.mem.Allocator, argv: []const []const u8) void {
+    const line = commandLineForDisplay(allocator, argv) catch return;
+    defer allocator.free(line);
+    std.debug.print("katzensteg: command: {s}\n", .{line});
+}
+
+fn commandLineForDisplay(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    for (argv, 0..) |arg, index| {
+        if (index != 0) try out.append(allocator, ' ');
+        try appendShellQuotedArg(allocator, &out, arg);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendShellQuotedArg(allocator: std.mem.Allocator, out: *std.ArrayList(u8), arg: []const u8) !void {
+    if (arg.len > 0 and shellArgCanBeBare(arg)) {
+        try out.appendSlice(allocator, arg);
+        return;
+    }
+
+    try out.append(allocator, '\'');
+    for (arg) |c| {
+        if (c == '\'') {
+            try out.appendSlice(allocator, "'\\''");
+        } else {
+            try out.append(allocator, c);
+        }
+    }
+    try out.append(allocator, '\'');
+}
+
+fn shellArgCanBeBare(arg: []const u8) bool {
+    for (arg) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '@' or c == '%' or c == '+' or c == '=' or c == ':' or c == ',' or c == '.' or c == '/' or c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn reportFileTail(allocator: std.mem.Allocator, path: []const u8) void {
+    const bytes = readTailFile(allocator, path) catch return;
+    defer allocator.free(bytes);
+    const tail = lastLines(allocator, bytes, 20) catch return;
+    defer allocator.free(tail);
+    if (tail.len == 0) return;
+    std.debug.print("katzensteg: last output from {s}:\n{s}", .{ path, tail });
+    if (tail[tail.len - 1] != '\n') std.debug.print("\n", .{});
+}
+
+fn readTailFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const max_tail_bytes: u64 = 64 * 1024;
+    const file = if (std.fs.path.isAbsolute(path))
+        try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+    else
+        try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    defer file.close();
+
+    const size = try file.getEndPos();
+    const start = if (size > max_tail_bytes) size - max_tail_bytes else 0;
+    try file.seekTo(start);
+    return file.readToEndAlloc(allocator, @intCast(max_tail_bytes));
+}
+
+fn lastLines(allocator: std.mem.Allocator, bytes: []const u8, line_count: usize) ![]const u8 {
+    if (line_count == 0 or bytes.len == 0) return allocator.dupe(u8, "");
+    var lines_seen: usize = 0;
+    var i = bytes.len;
+    while (i > 0) {
+        i -= 1;
+        if (bytes[i] == '\n' and i + 1 < bytes.len) {
+            lines_seen += 1;
+            if (lines_seen == line_count) {
+                return allocator.dupe(u8, bytes[i + 1 ..]);
+            }
+        }
+    }
+    return allocator.dupe(u8, bytes);
 }
 
 fn stdioForStdout(spec: OutputSpec) std.process.Child.StdIo {
@@ -670,12 +936,49 @@ test "launcher builds child argv from profile target and args" {
         .target = "{repo}/bin/echo",
         .args = &.{ "$HOME/hello", "world" },
     };
-    const argv = try buildChildArgv(std.testing.allocator, &profile, expansion);
+    const argv = try buildChildArgv(std.testing.allocator, &profile, expansion, &.{});
     defer freeChildArgv(std.testing.allocator, argv);
 
     try std.testing.expectEqualStrings("/repo/bin/echo", argv[0]);
     try std.testing.expectEqualStrings("/Users/test/hello", argv[1]);
     try std.testing.expectEqualStrings("world", argv[2]);
+}
+
+test "launcher appends extra profile arguments after configured args" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "chiaki.sdl",
+        .target = "$HOME/dev/chiaki-ng/build-sdl/sdl/chiaki-sdl",
+        .args = &.{"--profile-default"},
+    };
+    const argv = try buildChildArgv(std.testing.allocator, &profile, expansion, &.{ "--host", "192.168.1.100" });
+    defer freeChildArgv(std.testing.allocator, argv);
+
+    try std.testing.expectEqualStrings("/Users/test/dev/chiaki-ng/build-sdl/sdl/chiaki-sdl", argv[0]);
+    try std.testing.expectEqualStrings("--profile-default", argv[1]);
+    try std.testing.expectEqualStrings("--host", argv[2]);
+    try std.testing.expectEqualStrings("192.168.1.100", argv[3]);
+}
+
+test "launcher output tail keeps the last requested lines" {
+    const tail = try lastLines(std.testing.allocator, "one\ntwo\nthree\nfour\n", 2);
+    defer std.testing.allocator.free(tail);
+
+    try std.testing.expectEqualStrings("three\nfour\n", tail);
+}
+
+test "launcher formats executed command line for failure output" {
+    const line = try commandLineForDisplay(std.testing.allocator, &.{ "/bin/echo", "plain", "two words", "it's", "" });
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("/bin/echo plain 'two words' 'it'\\''s' ''", line);
+}
+
+test "launcher detects proxy executable basename" {
+    try std.testing.expect(isProxyExecutablePath("/repo/zig-out/bin/katzensteg-proxy"));
+    try std.testing.expect(isProxyExecutablePath("katzensteg-proxy"));
+    try std.testing.expect(!isProxyExecutablePath("/repo/zig-out/bin/katzensteg"));
 }
 
 test "launcher resolves profile into launch plan with default log and runtime policy" {
@@ -687,7 +990,7 @@ test "launcher resolves profile into launch plan with default log and runtime po
         .args = &.{ "-L", "$HOME/core.dylib" },
     };
 
-    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion);
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
     defer plan.deinit();
 
     try std.testing.expectEqualStrings("retroarch.sonic", plan.profile_name);
@@ -714,13 +1017,67 @@ test "launcher resolved plan expands profile env and preserves explicit output" 
         },
     };
 
-    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion);
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
     defer plan.deinit();
 
     try std.testing.expectEqualStrings("/repo/probe.out", plan.stdout.file);
     try std.testing.expectEqual(OutputSpec.ignore, plan.stderr);
     try std.testing.expectEqualStrings("DYLD_INSERT_LIBRARIES", plan.env[0].name);
     try std.testing.expectEqualStrings("/repo/zig-out/lib/libkatzensteg-unlinked.dylib", plan.env[0].value);
+}
+
+test "launcher resolves and seeds missing files without overwriting existing files" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "retroarch",
+        .target = "/bin/echo",
+        .seed_files = &.{
+            .{ .path = "/tmp/katzensteg-launcher-seed-test.cfg", .content = "video_driver = \"sdl2\"\n" },
+        },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer plan.deinit();
+    try std.testing.expectEqualStrings("/tmp/katzensteg-launcher-seed-test.cfg", plan.seed_files[0].path);
+
+    std.fs.deleteFileAbsolute(plan.seed_files[0].path) catch {};
+    defer std.fs.deleteFileAbsolute(plan.seed_files[0].path) catch {};
+
+    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
+    const seeded = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    defer std.testing.allocator.free(seeded);
+    try std.testing.expectEqualStrings("video_driver = \"sdl2\"\n", seeded);
+
+    {
+        const file = try std.fs.createFileAbsolute(plan.seed_files[0].path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("keep\n");
+    }
+    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
+    const preserved = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    defer std.testing.allocator.free(preserved);
+    try std.testing.expectEqualStrings("keep\n", preserved);
+}
+
+test "launcher refuses broken profiles before resolving launch plan" {
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "moonlight.steam",
+        .error_summary = "unknown parent profile: app.moonlight",
+    };
+
+    const problem = profileLaunchProblem(&profile).?;
+    try std.testing.expectEqualStrings("unknown parent profile: app.moonlight", problem.broken);
+}
+
+test "launcher still treats valid fragments as non-launch targets" {
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "runtime.fullscreen_file",
+    };
+
+    try std.testing.expectEqual(ProfileLaunchProblem.fragment, profileLaunchProblem(&profile).?);
 }
 
 test "launcher builds child argv from direct command target and remaining args" {
@@ -793,4 +1150,9 @@ test "launcher target parser skips options and supports option terminator" {
     try std.testing.expectEqualStrings("--odd-command-name", targetArg(&.{ "katzensteg", "--", "--odd-command-name" }).?);
     try std.testing.expectEqual(@as(usize, 2), targetArgIndex(&.{ "katzensteg", "--dry-run", "example", "extra" }).?);
     try std.testing.expect(targetArg(&.{ "katzensteg", "--dry-run" }) == null);
+}
+
+test "launcher dry-run option is only consumed before target" {
+    try std.testing.expect(launcherDryRun(&.{ "katzensteg", "--dry-run", "example" }));
+    try std.testing.expect(!launcherDryRun(&.{ "katzensteg", "example", "--dry-run" }));
 }

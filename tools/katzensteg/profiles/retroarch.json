@@ -17,24 +17,70 @@
         "gl_capture": "pbo"
       }
     },
+    "capture.vulkan": {
+      "hidden": true,
+      "runtime": {
+        "vulkan_capture": true
+      },
+      "env": {
+        "KATZENSTEG_VULKAN_CAPTURE": "1",
+        "KATZENSTEG_VULKAN_LOADER": "/opt/homebrew/lib/libvulkan.1.dylib",
+        "VK_LAYER_PATH": "{repo}/tools/katzensteg",
+        "VK_INSTANCE_LAYERS": "VK_LAYER_KATZENSTEG_capture"
+      }
+    },
+    "config.retroarch_sdl2": {
+      "hidden": true,
+      "seed_files": [
+        {
+          "path": "/tmp/retroarch-sdl2.cfg",
+          "content": "video_driver = \"sdl2\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\n"
+        }
+      ]
+    },
+    "config.retroarch_input": {
+      "hidden": true,
+      "seed_files": [
+        {
+          "path": "/tmp/retroarch-input.cfg",
+          "content": "input_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\n"
+        }
+      ]
+    },
+    "config.retroarch_vulkan": {
+      "hidden": true,
+      "seed_files": [
+        {
+          "path": "/tmp/retroarch-sdl2-vulkan.cfg",
+          "content": "video_driver = \"vulkan\"\nvideo_context_driver = \"sdl_vk\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\nlog_verbosity = \"true\"\n"
+        }
+      ]
+    },
     "adapter.sdl2_preload": {
       "hidden": true,
       "env": {
         "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib"
       }
     },
-    "app.retroarch": {
-      "hidden": true,
+    "retroarch": {
       "target": "$HOME/dev/RetroArch/retroarch",
       "env": {
         "RETROARCH_COCOA_BOOTSTRAP_WINDOW": "0"
       }
     },
-    "retroarch.sonic": {
+    "retroarch.app": {
+      "hidden": true,
+      "target": "$HOME/dev/RetroArch/RetroArch.app/Contents/MacOS/RetroArch",
+      "env": {
+        "RETROARCH_COCOA_BOOTSTRAP_WINDOW": "0"
+      }
+    },
+    "sonic": {
       "extends": [
-        "app.retroarch",
+        "retroarch",
         "adapter.sdl2_preload",
-        "runtime.fullscreen_file"
+        "runtime.fullscreen_file",
+        "config.retroarch_sdl2"
       ],
       "args": [
         "-L",
@@ -44,11 +90,12 @@
         "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
       ]
     },
-    "retroarch.melonds.sm64ds": {
+    "sm64ds": {
       "extends": [
-        "app.retroarch",
+        "retroarch",
         "adapter.sdl2_preload",
         "runtime.fullscreen_file",
+        "config.retroarch_sdl2",
         "capture.gl_pbo"
       ],
       "args": [
@@ -57,6 +104,37 @@
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
+      ]
+    },
+    "smw": {
+      "extends": [
+        "retroarch",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "config.retroarch_sdl2"
+      ],
+      "args": [
+        "-L",
+        "$HOME/Library/Application Support/RetroArch/cores/bsnes_libretro.dylib",
+        "-c",
+        "/tmp/retroarch-sdl2.cfg",
+        "$HOME/snes/smw.smc"
+      ]
+    },
+    "jsr": {
+      "extends": [
+        "retroarch.app",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "config.retroarch_vulkan",
+        "capture.vulkan"
+      ],
+      "args": [
+        "-L",
+        "$HOME/Library/Application Support/RetroArch/cores/flycast_libretro.dylib",
+        "-c",
+        "/tmp/retroarch-sdl2-vulkan.cfg",
+        "$HOME/roms/JGR/Jet Grind Radio (USA).cue"
       ]
     }
   }

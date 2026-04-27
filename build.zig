@@ -215,6 +215,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(katzensteg_launcher);
+    const katzensteg_proxy = b.addExecutable(.{
+        .name = "katzensteg-proxy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/katzensteg/launcher.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(katzensteg_proxy);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);

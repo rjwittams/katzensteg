@@ -1,0 +1,78 @@
+{
+  "profiles": {
+    "app.ffplay": {
+      "hidden": true,
+      "target": "ffplay",
+      "env": {
+        "SDL_RENDER_DRIVER": "software"
+      }
+    },
+    "ffplay.testsrc": {
+      "extends": [
+        "app.ffplay",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=640x360:rate=60"
+      ]
+    },
+    "app.anese": {
+      "hidden": true,
+      "target": "$HOME/dev/ANESE/build/anese",
+      "env": {
+        "KATZENSTEG_STATS": "1"
+      }
+    },
+    "anese.test": {
+      "extends": [
+        "app.anese",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "$HOME/dev/ANESE/roms/tests/cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
+      ]
+    },
+    "smb3": {
+      "extends": [
+        "app.anese",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "$HOME/roms/smb3.nes"
+      ]
+    },
+    "app.chiaki_gui_wrapper": {
+      "hidden": true,
+      "target": "$HOME/dev/chiaki-ng/scripts/run-chiaki-sdl-from-gui.py",
+      "env": {
+        "KATZENSTEG_PROXY_PROFILE": "chiaki.sdl.child"
+      },
+      "args": [
+        "--sdl-binary",
+        "{repo}/zig-out/bin/katzensteg-proxy"
+      ]
+    },
+    "chiaki.sdl": {
+      "extends": [
+        "app.chiaki_gui_wrapper"
+      ]
+    },
+    "chiaki.sdl.child": {
+      "hidden": true,
+      "target": "$HOME/dev/chiaki-ng/build-sdl/sdl/chiaki-sdl",
+      "extends": [
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "env": {
+        "SDL_RENDER_DRIVER": "software"
+      }
+    }
+  }
+}
