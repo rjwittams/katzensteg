@@ -23,6 +23,31 @@
         "VK_INSTANCE_LAYERS": "VK_LAYER_KATZENSTEG_capture"
       }
     },
+    "app.gamescope": {
+      "hidden": true,
+      "target": "$HOME/dev/gamescope/build-sdl/src/gamescope",
+      "args": [
+        "--backend",
+        "sdl",
+        "-W",
+        "640",
+        "-H",
+        "360",
+        "-w",
+        "640",
+        "-h",
+        "360",
+        "--",
+        "vkcube",
+        "--c",
+        "120"
+      ],
+      "env": {
+        "PATH": "$HOME/dev/gamescope/build-sdl/src:$PATH",
+        "KATZENSTEG_TRACE_VULKAN": "1",
+        "KATZENSTEG_TRACE_SDL": "1"
+      }
+    },
     "probe.vulkan": {
       "extends": [
         "app.vulkan_probe",
@@ -32,6 +57,14 @@
       "runtime": {
         "vulkan_capture": true
       }
+    },
+    "probe.gamescope": {
+      "extends": [
+        "app.gamescope",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "capture.vulkan"
+      ]
     }
   }
 }

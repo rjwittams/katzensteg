@@ -825,3 +825,35 @@ test "bundled profiles include Cannonball launch target" {
     try std.testing.expectEqualStrings("-cfgfile", profile.args[0]);
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/config.xml", profile.args[1]);
 }
+
+test "bundled profiles include gamescope SDL Vulkan probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.gamescope").?;
+    try std.testing.expectEqualStrings("$HOME/dev/gamescope/build-sdl/src/gamescope", profile.target);
+    try std.testing.expectEqualStrings("--backend", profile.args[0]);
+    try std.testing.expectEqualStrings("sdl", profile.args[1]);
+    try std.testing.expectEqualStrings("--", profile.args[10]);
+    try std.testing.expectEqualStrings("vkcube", profile.args[11]);
+    try std.testing.expectEqualStrings("--c", profile.args[12]);
+    try std.testing.expectEqualStrings("120", profile.args[13]);
+    try std.testing.expect(profile.runtime.vulkan_capture);
+    try std.testing.expect(profile.runtime.input_enabled);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try expectEnvValue(profile, "PATH", "$HOME/dev/gamescope/build-sdl/src:$PATH");
+    try expectEnvValue(profile, "LD_PRELOAD", "{repo}/zig-out/lib/libkatzensteg-unlinked.so");
+    try expectEnvValue(profile, "VK_INSTANCE_LAYERS", "VK_LAYER_KATZENSTEG_capture");
+    try expectEnvValue(profile, "KATZENSTEG_TRACE_VULKAN", "1");
+    try expectEnvValue(profile, "KATZENSTEG_TRACE_SDL", "1");
+}
+
+fn expectEnvValue(profile: *const LaunchProfile, name: []const u8, value: []const u8) !void {
+    for (profile.env) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) {
+            try std.testing.expectEqualStrings(value, entry.value);
+            return;
+        }
+    }
+    return error.EnvVarNotFound;
+}
