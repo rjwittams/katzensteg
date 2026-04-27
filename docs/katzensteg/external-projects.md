@@ -36,24 +36,21 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 
 - Local checkout: `/Users/robert/dev/RetroArch`
 - Current local branch: `robert/macos-sdl2-video-pr-cleanup`
-- Pushed fork branch: `rjwittams/macos-sdl2-video-output`
-- Local state: dirty; the pushed branch contains the two committed macOS/SDL2 commits, but the currently tested tree also has uncommitted GL/Vulkan/windowing work.
-- Uncommitted source changes:
-  - `Makefile.common`
-  - `gfx/common/vulkan_common.c`
-  - `gfx/common/vulkan_common.h`
-  - `gfx/drivers/sdl2_gfx.c`
-  - `gfx/drivers/vulkan.c`
-  - `gfx/drivers_context/sdl_gl_ctx.c`
-  - `gfx/video_driver.c`
-  - `gfx/video_driver.h`
-  - `ui/drivers/cocoa/cocoa_common.m`
-  - `ui/drivers/ui_cocoa.m`
+- Pushed fork branches:
+  - `rjwittams/macos-sdl2-video-output`
+  - `rjwittams/macos-sdl2-window-contexts`
+- Local state: source clean; dirty only due to generated local app/crash/shader artifacts.
+- Pushed source commits:
+  - `fa50e7ede8 macOS: allow SDL2 video and input drivers`
+  - `a2288506a7 build: link QuartzCore on macOS`
+  - `bf65b03bf9 macos: allow suppressing Cocoa bootstrap window`
+  - `dbaa28eae4 video: remember window owner across driver switches`
+  - `212d08c630 video: prefer SDL GL context for SDL-owned windows`
+  - `0a5f8ab0eb video: add SDL Vulkan context driver`
 - Untracked local artifacts:
   - `RetroArch.app/`
   - crash logs
   - Metal shader build products
-  - `gfx/drivers_context/sdl_vk_ctx.c`
 - Local change shape:
   - macOS build and bundle work
   - SDL2 video and input path changes
@@ -65,10 +62,8 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - `smw`
   - `jsr`
 - Next cleanup:
-  - Split uncommitted work into at least SDL2 software, SDL GL, SDL Vulkan, and Cocoa/windowing commits.
-  - Decide whether `gfx/drivers_context/sdl_vk_ctx.c` is source or a local experiment before committing.
   - Keep generated app bundles, crash logs, and shader products out of source branches.
-  - Use `docs/katzensteg/retroarch-agent-handoff.md` as the handoff prompt for splitting this work.
+  - Re-test launcher profiles from a clean checkout when bootstrap metadata exists.
 
 ### Moonlight Qt
 
@@ -184,9 +179,12 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 
 ## Current Branch Cleanup State
 
+Linux-port preparation is tracked in `docs/katzensteg/linux-port-readiness.md`.
+
 - Done:
   - created `rjwittams` fork remotes for RetroArch, Moonlight Qt, ScummVM, Cannonball, Chiaki NG, and ANESE
   - pushed RetroArch committed app-side work to `rjwittams/macos-sdl2-video-output`
+  - pushed RetroArch SDL window/context work to `rjwittams/macos-sdl2-window-contexts`
   - pushed Moonlight SDL renderer work to `rjwittams/macos-sdl-renderer-output`
   - pushed Cannonball macOS build fixes to `rjwittams/macos-sdl2-build-fixes`
   - pushed cpp-steam-tools macOS static-library fix to `rjwittams/macos-static-library`
@@ -196,5 +194,4 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
   - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
 - Still needed:
-  - split and commit dirty work in RetroArch
   - add bootstrap metadata after source branches settle
