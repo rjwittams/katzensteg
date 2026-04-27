@@ -248,6 +248,13 @@ Goal: replace macOS Instruments habits with a Linux profiling workflow that is g
 - [ ] Capture one profile of an emulator workload.
 - [ ] Confirm symbols resolve for Katzensteg build outputs.
 
+## Post-Linux Investigations
+
+These are real issues, but they should not block the Linux port unless they turn out to reproduce there.
+
+- Moonlight HiDPI/output-size mismatch: Moonlight uses `SDL_GetRendererOutputSize` and sets the renderer viewport to that output size. On mixed-Retina macOS setups this sometimes appears to choose a 2x backing size even when the visible window is on a non-Retina display, and Katzensteg then shows the top-left quarter of the stream in the terminal. Treat this as a missing explicit transform in the presentation model: texture/frame pixels -> renderer output pixels -> SDL logical window coordinates -> Katzensteg presentation rect -> terminal cells. Add trace coverage for `SDL_GetWindowSize`, `SDL_GetRendererOutputSize`, viewport changes, and texture sizes before changing behavior.
+- Moonlight mouse path: terminal mouse injection works in the SDL input probe, ScummVM, and RetroArch mouse tests, but Moonlight does not appear to consume the same path. Investigate whether it uses relative mouse mode, raw/input-grab state, warp APIs, controller-like mouse emulation, or a different SDL event/state query pattern. Keep the first pass diagnostic rather than app-specific.
+
 ## Immediate Next Step
 
 Start with Phase 1. The launcher is the current bottleneck for repeatability, and it also defines the shape that external-project inventory and Linux bootstrap will rely on.
