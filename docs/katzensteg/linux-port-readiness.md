@@ -17,6 +17,16 @@ This is the practical checkpoint before trying Katzensteg on a Linux machine. Th
    - Add a machine-readable manifest of external checkouts, remotes, branches, and basic build commands.
    - Include profile names that exercise each checkout, so a new machine can move from clone to smoke test without hunting through shell history.
 
+   Current helper:
+
+   ```sh
+   tools/katzensteg/bootstrap_external_projects.py --dry-run
+   tools/katzensteg/bootstrap_external_projects.py --root ~/dev
+   tools/katzensteg/bootstrap_external_projects.py --root ~/dev retroarch chiaki.sdl
+   ```
+
+   On a new machine, clone the Katzensteg repo first, then run the helper from that checkout. The helper intentionally prints build commands as notes rather than trying to become a cross-platform package manager.
+
 2. **Launcher portability pass**
    - Teach profiles about platform-specific preload variables: `DYLD_INSERT_LIBRARIES` on macOS, `LD_PRELOAD` on Linux.
    - Make shared-library names and libretro core suffixes platform-aware: `.dylib` vs `.so`.
@@ -27,16 +37,22 @@ This is the practical checkpoint before trying Katzensteg on a Linux machine. Th
    - Verify basic SDL probe and `ffplay.testsrc` before trying larger app forks.
    - Then test RetroArch software SDL, RetroArch GL, RetroArch Vulkan, Cannonball, ScummVM, ANESE, Moonlight, and Chiaki in that order.
 
-4. **Terminal capability checks**
+4. **Linux accelerated image paths**
+   - Do not re-investigate from scalar-only baselines where macOS already proved the shape.
+   - Add Linux equivalents for the macOS vImage-backed scale/convert paths, with the same scalar fallback behavior.
+   - Prioritize fullscreen scaling and pixel-format conversion paths that already show up hot on macOS profiles.
+   - Treat library choice as an implementation detail: likely candidates include SIMD code paths, pixman/libswscale, or platform-specific helpers, but the public Katzensteg path should stay the same.
+
+5. **Terminal capability checks**
    - Re-check kitty graphics transport behavior on Linux terminals: kitty, Ghostty if available, foot/WezTerm if convenient.
    - Confirm file transport, direct APC fallback, keyboard protocol, mouse tracking, alt-screen teardown, and image clear behavior.
 
-5. **Profiling setup**
+6. **Profiling setup**
    - Use Linux `perf` as the baseline profiler.
    - Install/debug symbols for Katzensteg and app forks, and build Katzensteg with enough symbol information for useful call stacks.
    - Consider `hotspot`, `perfetto`, or `samply` as nicer frontends once raw `perf record/report` is producing credible data.
 
-6. **Known deferred gaps**
+7. **Known deferred gaps**
    - Moonlight terminal mouse path is still not understood.
    - Moonlight mixed-Retina output-size mismatch is macOS-specific but should be recorded as a presentation-layout issue, not treated as Linux blocking.
    - Runtime menu/chrome and richer profile UI can wait until the Linux smoke matrix is real.

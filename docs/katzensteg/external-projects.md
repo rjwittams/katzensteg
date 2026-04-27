@@ -180,6 +180,7 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 ## Current Branch Cleanup State
 
 Linux-port preparation is tracked in `docs/katzensteg/linux-port-readiness.md`.
+Bootstrap metadata lives in `tools/katzensteg/external-projects.json` and can be applied with `tools/katzensteg/bootstrap_external_projects.py`.
 
 - Done:
   - created `rjwittams` fork remotes for RetroArch, Moonlight Qt, ScummVM, Cannonball, Chiaki NG, and ANESE
@@ -190,8 +191,9 @@ Linux-port preparation is tracked in `docs/katzensteg/linux-port-readiness.md`.
   - pushed cpp-steam-tools macOS static-library fix to `rjwittams/macos-static-library`
   - pushed Chiaki NG SDL client prototype to `rjwittams/macos-sdl-client-build`
   - added a first-class `cannonball` Katzensteg launcher profile
+  - added bootstrap metadata and a clone/update helper for external checkouts
   - moved Moonlight dirty work from `master` to `macos-sdl-renderer-output`
   - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
   - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
 - Still needed:
-  - add bootstrap metadata after source branches settle
+  - add a doctor/check command for local tools, profile paths, terminal support, and missing ROM/config assets

@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "default_root": "$HOME/dev",
+  "projects": [
+    {
+      "name": "retroarch",
+      "display_name": "RetroArch",
+      "directory": "RetroArch",
+      "primary_remote": "rjwittams",
+      "checkout": "macos-sdl2-window-contexts",
+      "remotes": {
+        "origin": "https://github.com/libretro/RetroArch.git",
+        "rjwittams": "https://github.com/rjwittams/RetroArch.git"
+      },
+      "profiles": [
+        "sonic",
+        "sm64ds",
+        "smw",
+        "jsr"
+      ],
+      "build": {
+        "macos": [
+          "./configure --enable-sdl2 --disable-metal",
+          "make -j$(sysctl -n hw.ncpu)"
+        ],
+        "linux": [
+          "./configure --enable-sdl2",
+          "make -j$(nproc)"
+        ]
+      },
+      "notes": [
+        "Pushed branch includes macOS SDL2 video/input enablement, Cocoa bootstrap suppression, SDL-owned GL windows, and SDL Vulkan context work.",
+        "Linux should still validate which pieces are portable before treating this branch as upstreamable there."
+      ]
+    },
+    {
+      "name": "moonlight-qt",
+      "display_name": "Moonlight Qt",
+      "directory": "moonlight-qt",
+      "primary_remote": "rjwittams",
+      "checkout": "macos-sdl-renderer-output",
+      "recursive": true,
+      "remotes": {
+        "origin": "https://github.com/moonlight-stream/moonlight-qt.git",
+        "rjwittams": "https://github.com/rjwittams/moonlight-qt.git"
+      },
+      "profiles": [
+        "moonlight.steam"
+      ],
+      "build": {
+        "macos": [
+          "qmake6 moonlight-qt.pro",
+          "make -j$(sysctl -n hw.ncpu)"
+        ],
+        "linux": [
+          "qmake6 moonlight-qt.pro",
+          "make -j$(nproc)"
+        ]
+      },
+      "notes": [
+        "Pushed branch contains the SDL renderer RGB fallback used by Katzensteg.",
+        "Known Katzensteg gaps: terminal mouse path and macOS mixed-Retina output-size mismatch."
+      ]
+    },
+    {
+      "name": "scummvm",
+      "display_name": "ScummVM",
+      "directory": "scummvm",
+      "primary_remote": "origin",
+      "checkout": "master",
+      "remotes": {
+        "origin": "https://github.com/scummvm/scummvm.git",
+        "rjwittams": "https://github.com/rjwittams/scummvm.git"
+      },
+      "profiles": [
+        "mi2"
+      ],
+      "build": {
+        "macos": [
+          "./configure",
+          "make -j$(sysctl -n hw.ncpu)"
+        ],
+        "linux": [
+          "./configure",
+          "make -j$(nproc)"
+        ]
+      },
+      "notes": [
+        "No app-side Katzensteg patch is currently required."
+      ]
+    },
+    {
+      "name": "cannonball",
+      "display_name": "Cannonball",
+      "directory": "cannonball",
+      "primary_remote": "rjwittams",
+      "checkout": "macos-sdl2-build-fixes",
+      "remotes": {
+        "origin": "https://github.com/djyt/cannonball.git",
+        "rjwittams": "https://github.com/rjwittams/cannonball.git"
+      },
+      "profiles": [
+        "cannonball"
+      ],
+      "build": {
+        "macos": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ],
+        "linux": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ]
+      },
+      "notes": [
+        "Pushed branch contains macOS CMake and static-assert portability fixes.",
+        "The launcher currently expects a local config.xml."
+      ]
+    },
+    {
+      "name": "chiaki-ng",
+      "display_name": "Chiaki NG",
+      "directory": "chiaki-ng",
+      "primary_remote": "rjwittams",
+      "checkout": "macos-sdl-client-build",
+      "recursive": true,
+      "remotes": {
+        "origin": "https://github.com/streetpea/chiaki-ng.git",
+        "rjwittams": "https://github.com/rjwittams/chiaki-ng.git"
+      },
+      "profiles": [
+        "chiaki.sdl",
+        "chiaki.sdl.child"
+      ],
+      "build": {
+        "macos": [
+          "uv venv .codex-tmp/py --python 3.12",
+          "uv pip install --python .codex-tmp/py/bin/python protobuf",
+          "cmake -S . -B .codex-tmp/build-sdl-prototype -DCHIAKI_ENABLE_GUI=OFF -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_SDL2_STREAMER=ON -DCHIAKI_ENABLE_TESTS=ON -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF -DCHIAKI_ENABLE_RUDP=OFF -DCHIAKI_LIB_JSONC_EXTERNAL_PROJECT=ON -DCHIAKI_LIB_MINIUPNPC_EXTERNAL_PROJECT=ON -DPYTHON_EXECUTABLE=$PWD/.codex-tmp/py/bin/python -DPython_EXECUTABLE=$PWD/.codex-tmp/py/bin/python",
+          "cmake --build .codex-tmp/build-sdl-prototype --target chiaki-sdl chiaki-sdl-options-test",
+          "ctest --test-dir .codex-tmp/build-sdl-prototype -R chiaki-sdl --output-on-failure"
+        ],
+        "linux": [
+          "uv venv .codex-tmp/py --python 3.12",
+          "uv pip install --python .codex-tmp/py/bin/python protobuf",
+          "cmake -S . -B .codex-tmp/build-sdl-prototype -DCHIAKI_ENABLE_GUI=OFF -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_SDL2_STREAMER=ON -DCHIAKI_ENABLE_TESTS=ON -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF -DCHIAKI_ENABLE_RUDP=OFF -DCHIAKI_LIB_JSONC_EXTERNAL_PROJECT=ON -DCHIAKI_LIB_MINIUPNPC_EXTERNAL_PROJECT=ON -DPYTHON_EXECUTABLE=$PWD/.codex-tmp/py/bin/python -DPython_EXECUTABLE=$PWD/.codex-tmp/py/bin/python",
+          "cmake --build .codex-tmp/build-sdl-prototype --target chiaki-sdl chiaki-sdl-options-test",
+          "ctest --test-dir .codex-tmp/build-sdl-prototype -R chiaki-sdl --output-on-failure"
+        ]
+      },
+      "notes": [
+        "Prototype branch is intentionally not a final Chiaki UI design.",
+        "The SDL client should eventually grow GUI-equivalent launch/config behavior and remove the Python wrapper."
+      ]
+    },
+    {
+      "name": "cpp-steam-tools",
+      "display_name": "cpp-steam-tools",
+      "directory": "cpp-steam-tools",
+      "primary_remote": "rjwittams",
+      "checkout": "macos-static-library",
+      "default": false,
+      "remotes": {
+        "origin": "https://github.com/streetpea/cpp-steam-tools.git",
+        "rjwittams": "https://github.com/rjwittams/cpp-steam-tools.git"
+      },
+      "profiles": [],
+      "build": {
+        "macos": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ],
+        "linux": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ]
+      },
+      "notes": [
+        "Tracked as a Chiaki submodule branch; not cloned by default as a top-level checkout."
+      ]
+    },
+    {
+      "name": "anese",
+      "display_name": "ANESE",
+      "directory": "ANESE",
+      "primary_remote": "origin",
+      "checkout": "master",
+      "remotes": {
+        "origin": "https://github.com/daniel5151/ANESE.git",
+        "rjwittams": "https://github.com/rjwittams/ANESE.git"
+      },
+      "profiles": [
+        "anese.test",
+        "smb3"
+      ],
+      "build": {
+        "macos": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ],
+        "linux": [
+          "cmake -S . -B build",
+          "cmake --build build"
+        ]
+      },
+      "notes": [
+        "No app-side Katzensteg patch is currently required."
+      ]
+    }
+  ]
+}
