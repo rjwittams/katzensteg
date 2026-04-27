@@ -116,6 +116,10 @@ static DeviceRecord g_devices[KS_MAX_DEVICES];
 static QueueRecord g_queues[KS_MAX_QUEUES];
 static SwapchainRecord g_swapchains[KS_MAX_SWAPCHAINS];
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
+static bool g_capture_enabled;
+static bool g_trace_enabled;
+
+extern void ks_scrub_colon_env_entry(const char *name, const char *entry);
 
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetInstanceProcAddr(VkInstance instance, const char *name);
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetDeviceProcAddr(VkDevice device, const char *name);
@@ -140,13 +144,28 @@ static bool env_enabled(const char *name)
 
 static bool capture_enabled(void)
 {
-    return env_enabled("KATZENSTEG_VULKAN_CAPTURE");
+    return g_capture_enabled;
 }
 
 static bool trace_enabled(void)
 {
-    return env_enabled("KATZENSTEG_TRACE_VULKAN");
+    return g_trace_enabled;
 }
+
+__attribute__((constructor))
+static void katzensteg_vulkan_layer_constructor(void)
+{
+    g_capture_enabled = env_enabled("KATZENSTEG_VULKAN_CAPTURE");
+    g_trace_enabled = env_enabled("KATZENSTEG_TRACE_VULKAN");
+    ks_scrub_colon_env_entry("VK_INSTANCE_LAYERS", KS_LAYER_NAME);
+    unsetenv("KATZENSTEG_VULKAN_CAPTURE");
+    unsetenv("KATZENSTEG_TRACE_VULKAN");
+}
+
+#if defined(KS_VULKAN_LAYER_TESTING)
+int ks_vulkan_test_capture_enabled(void) { return capture_enabled(); }
+int ks_vulkan_test_trace_enabled(void) { return trace_enabled(); }
+#endif
 
 static void tracef(const char *fmt, ...)
 {
