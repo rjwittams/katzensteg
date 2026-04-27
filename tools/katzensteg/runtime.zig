@@ -231,8 +231,6 @@ pub const Runtime = struct {
                 if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") != null) {
                     client.capture_enabled.store(true, .release);
                     runtime.logger.write("katzensteg: whiskers force capture enabled");
-                } else {
-                    client.start();
                 }
                 runtime.logger.writeFmt("katzensteg: whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
             }
@@ -929,6 +927,11 @@ pub fn get() *Runtime {
             if (runtime.inspector) |*inspector| {
                 inspector.logger = &runtime.logger;
                 inspector.start();
+            }
+            if (runtime.whiskers_client) |*client| {
+                if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") == null) {
+                    client.start();
+                }
             }
             if (runtime.intercept_mode == .queued_replay) {
                 if (std.Thread.spawn(.{}, workerMain, .{runtime})) |thread| {

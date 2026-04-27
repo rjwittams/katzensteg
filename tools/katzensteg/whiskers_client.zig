@@ -454,6 +454,7 @@ pub const WhiskersClient = struct {
                 .{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
                 .{ .fd = self.wake_read_fd, .events = std.posix.POLL.IN, .revents = 0 },
             };
+            if (self.shutdown.load(.acquire)) return;
             _ = try std.posix.poll(&poll_fds, -1);
             if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
                 self.drainWakeFd();
