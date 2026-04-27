@@ -44,6 +44,54 @@ const OutputSpec = union(enum) {
     }
 };
 
+const ResolvedLaunchPlan = struct {
+    allocator: std.mem.Allocator,
+    profile_name: []const u8,
+    target: []const u8,
+    argv: [][]const u8,
+    cwd: ?[]const u8,
+    stdout: OutputSpec,
+    stderr: OutputSpec,
+    env: []profiles_mod.EnvVar,
+    runtime: @import("config.zig").RuntimeConfig,
+
+    fn fromProfile(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !ResolvedLaunchPlan {
+        var plan = ResolvedLaunchPlan{
+            .allocator = allocator,
+            .profile_name = try allocator.dupe(u8, profile.name),
+            .target = try expandLauncherString(allocator, profile.target, expansion),
+            .argv = &.{},
+            .cwd = null,
+            .stdout = .inherit,
+            .stderr = .inherit,
+            .env = &.{},
+            .runtime = resolvedRuntimeConfig(profile),
+        };
+        errdefer plan.deinit();
+
+        plan.argv = try buildChildArgv(allocator, profile, expansion);
+        if (profile.cwd) |raw| plan.cwd = try expandLauncherString(allocator, raw, expansion);
+        plan.stdout = try resolveProfileStdout(allocator, profile, expansion);
+        plan.stderr = try resolveProfileStderr(allocator, profile, expansion);
+        plan.env = try expandProfileEnv(allocator, profile.env, expansion);
+        return plan;
+    }
+
+    fn deinit(self: *ResolvedLaunchPlan) void {
+        self.allocator.free(self.profile_name);
+        self.allocator.free(self.target);
+        freeChildArgv(self.allocator, self.argv);
+        if (self.cwd) |cwd| self.allocator.free(cwd);
+        self.stdout.deinit(self.allocator);
+        self.stderr.deinit(self.allocator);
+        for (self.env) |entry| {
+            self.allocator.free(entry.name);
+            self.allocator.free(entry.value);
+        }
+        self.allocator.free(self.env);
+    }
+};
+
 const FileSink = struct {
     file: std.fs.File,
     mutex: std.Thread.Mutex = .{},
@@ -175,23 +223,43 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
 
     var expansion = try ExpansionContext.init(allocator);
     defer expansion.deinit(allocator);
-    const expanded_target = try expandLauncherString(allocator, profile.target, expansion);
-    defer allocator.free(expanded_target);
-    const stdout_spec = try resolveOutputSpec(allocator, profile.stdout, expansion);
-    defer stdout_spec.deinit(allocator);
-    const stderr_spec = try resolveOutputSpec(allocator, profile.stderr, expansion);
-    defer stderr_spec.deinit(allocator);
+    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion);
+    defer plan.deinit();
 
     std.debug.print(
-        "katzensteg dry-run\nprofile={s}\ntarget={s}\nargs={d}\nenv={d}\nstdout={s}\nstderr={s}\nwindow_policy={s}\n",
+        "katzensteg dry-run\nprofile={s}\ntarget={s}\nstdout={s}\nstderr={s}\n",
         .{
-            profile.name,
-            expanded_target,
-            profile.args.len,
-            profile.env.len,
-            outputSpecLabel(stdout_spec),
-            outputSpecLabel(stderr_spec),
-            @tagName(profile.runtime.window_policy),
+            plan.profile_name,
+            plan.target,
+            outputSpecLabel(plan.stdout),
+            outputSpecLabel(plan.stderr),
+        },
+    );
+    std.debug.print("argv:\n", .{});
+    for (plan.argv, 0..) |arg, index| {
+        std.debug.print("  [{d}] {s}\n", .{ index, arg });
+    }
+    std.debug.print("env:\n", .{});
+    if (plan.env.len == 0) {
+        std.debug.print("  <none>\n", .{});
+    } else {
+        for (plan.env) |entry| {
+            std.debug.print("  {s}={s}\n", .{ entry.name, entry.value });
+        }
+    }
+    std.debug.print(
+        "runtime:\n  intercept_mode={s}\n  composite_mode={s}\n  window_policy={s}\n  real_window={s}\n  present_fps={d}\n  input={}\n  input_claim={}\n  output_profile={s}\n  gl_capture={s}\n  vulkan_capture={}\n",
+        .{
+            @tagName(plan.runtime.intercept_mode),
+            @tagName(plan.runtime.composite_mode),
+            @tagName(plan.runtime.window_policy),
+            @tagName(plan.runtime.real_window_visibility),
+            plan.runtime.present_fps,
+            plan.runtime.input_enabled,
+            plan.runtime.input_claimed,
+            if (plan.runtime.output_profile) |output_profile| @tagName(output_profile) else "auto",
+            @tagName(plan.runtime.gl_capture),
+            plan.runtime.vulkan_capture,
         },
     );
 }
@@ -210,41 +278,31 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
 
     var expansion = try ExpansionContext.init(allocator);
     defer expansion.deinit(allocator);
+    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion);
+    defer plan.deinit();
 
-    const runtime_config_path = try writeRuntimeConfig(allocator, profile);
+    const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
     defer allocator.free(runtime_config_path);
     defer std.fs.deleteFileAbsolute(runtime_config_path) catch {};
 
     var env_map = try std.process.getEnvMap(allocator);
     defer env_map.deinit();
-    for (profile.env) |entry| {
-        const value = try expandLauncherString(allocator, entry.value, expansion);
-        defer allocator.free(value);
-        try env_map.put(entry.name, value);
-    }
+    for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
 
-    const argv = try buildChildArgv(allocator, profile, expansion);
-    defer freeChildArgv(allocator, argv);
-    const cwd = if (profile.cwd) |raw| try expandLauncherString(allocator, raw, expansion) else null;
-    defer if (cwd) |value| allocator.free(value);
-    const stdout_spec = try resolveOutputSpec(allocator, profile.stdout, expansion);
-    defer stdout_spec.deinit(allocator);
-    const stderr_spec = try resolveOutputSpec(allocator, profile.stderr, expansion);
-    defer stderr_spec.deinit(allocator);
-
-    std.debug.print("katzensteg: launching {s}\n", .{profile.name});
-    std.debug.print("  target: {s}\n", .{profile.target});
+    std.debug.print("katzensteg: launching {s}\n", .{plan.profile_name});
+    std.debug.print("  target: {s}\n", .{plan.target});
     std.debug.print("  runtime config: {s}\n", .{runtime_config_path});
+    std.debug.print("  output: {s}\n", .{outputSpecLabel(plan.stdout)});
 
-    var child = std.process.Child.init(argv, allocator);
+    var child = std.process.Child.init(plan.argv, allocator);
     child.env_map = &env_map;
-    child.cwd = cwd;
+    child.cwd = plan.cwd;
     child.stdin_behavior = .Inherit;
-    child.stdout_behavior = stdioForStdout(stdout_spec);
-    child.stderr_behavior = stdioForStderr(stdout_spec, stderr_spec);
+    child.stdout_behavior = stdioForStdout(plan.stdout);
+    child.stderr_behavior = stdioForStderr(plan.stdout, plan.stderr);
 
-    const term = try spawnAndWaitWithOutput(allocator, &child, stdout_spec, stderr_spec);
+    const term = try spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr);
     resetTerminalBestEffort();
     return childExitCode(term);
 }
@@ -344,6 +402,70 @@ fn buildCommandArgv(allocator: std.mem.Allocator, target: []const u8, extra_args
     try argv.append(allocator, try allocator.dupe(u8, target));
     for (extra_args) |arg| try argv.append(allocator, try allocator.dupe(u8, arg));
     return argv.toOwnedSlice(allocator);
+}
+
+fn expandProfileEnv(allocator: std.mem.Allocator, env: []const profiles_mod.EnvVar, expansion: ExpansionContext) ![]profiles_mod.EnvVar {
+    var out = std.ArrayList(profiles_mod.EnvVar).empty;
+    errdefer {
+        for (out.items) |entry| {
+            allocator.free(entry.name);
+            allocator.free(entry.value);
+        }
+        out.deinit(allocator);
+    }
+    for (env) |entry| {
+        try out.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .value = try expandLauncherString(allocator, entry.value, expansion),
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn defaultRuntimeConfig() @import("config.zig").RuntimeConfig {
+    return .{
+        .intercept_mode = .queued_replay,
+        .window_policy = .terminal_only,
+        .input_enabled = true,
+        .input_claimed = true,
+        .output_profile = .file_whole,
+    };
+}
+
+fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) @import("config.zig").RuntimeConfig {
+    var runtime = defaultRuntimeConfig();
+    const fields = profile.runtime_fields;
+    if (fields.composite_mode) runtime.composite_mode = profile.runtime.composite_mode;
+    if (fields.intercept_mode) runtime.intercept_mode = profile.runtime.intercept_mode;
+    if (fields.window_policy) runtime.window_policy = profile.runtime.window_policy;
+    if (fields.real_window) runtime.real_window_visibility = profile.runtime.real_window_visibility;
+    if (fields.present_fps) runtime.present_fps = profile.runtime.present_fps;
+    if (fields.input) runtime.input_enabled = profile.runtime.input_enabled;
+    if (fields.input_claim) runtime.input_claimed = profile.runtime.input_claimed;
+    if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
+    if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
+    if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;
+    return runtime;
+}
+
+fn resolveProfileStdout(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
+    if (profile.stdout) |value| return resolveOutputSpec(allocator, value, expansion);
+    const log_name = try sanitizedProfileName(allocator, profile.name);
+    defer allocator.free(log_name);
+    return .{ .file = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-{s}.out", .{log_name}) };
+}
+
+fn resolveProfileStderr(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
+    if (profile.stderr) |value| return resolveOutputSpec(allocator, value, expansion);
+    return .stdout;
+}
+
+fn sanitizedProfileName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const out = try allocator.alloc(u8, name.len);
+    for (name, 0..) |c, i| {
+        out[i] = if (std.ascii.isAlphanumeric(c)) c else '-';
+    }
+    return out;
 }
 
 fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec) !std.process.Child.Term {
@@ -494,30 +616,36 @@ fn freeChildArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
     allocator.free(argv);
 }
 
-fn writeRuntimeConfig(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile) ![]const u8 {
+fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: @import("config.zig").RuntimeConfig) ![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-runtime-{d}.json", .{std.time.nanoTimestamp()});
     errdefer allocator.free(path);
     const file = try std.fs.createFileAbsolute(path, .{ .truncate = true, .read = true });
     defer file.close();
     var writer = file.writerStreaming(&.{});
-    try writer.interface.print(
-        "{{\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"output_profile\":",
-        .{
-            @tagName(profile.runtime.window_policy),
-            @tagName(profile.runtime.real_window_visibility),
-            profile.runtime.present_fps,
-            profile.runtime.input_enabled,
-            profile.runtime.input_claimed,
-        },
-    );
-    if (profile.runtime.output_profile) |output_profile| {
-        try writer.interface.print("\"{s}\"", .{@tagName(output_profile)});
-    } else {
-        try writer.interface.writeAll("null");
-    }
-    try writer.interface.writeAll("}\n");
+    try writeRuntimeConfigJson(&writer.interface, runtime);
     try writer.interface.flush();
     return path;
+}
+
+fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: @import("config.zig").RuntimeConfig) !void {
+    try writer.print(
+        "{{\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"output_profile\":",
+        .{
+            @tagName(runtime.composite_mode),
+            @tagName(runtime.intercept_mode),
+            @tagName(runtime.window_policy),
+            @tagName(runtime.real_window_visibility),
+            runtime.present_fps,
+            runtime.input_enabled,
+            runtime.input_claimed,
+        },
+    );
+    if (runtime.output_profile) |output_profile| {
+        try writer.print("\"{s}\"", .{@tagName(output_profile)});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.print(",\"gl_capture\":\"{s}\",\"vulkan_capture\":{}}}\n", .{ @tagName(runtime.gl_capture), runtime.vulkan_capture });
 }
 
 fn resetTerminalBestEffort() void {
@@ -548,6 +676,51 @@ test "launcher builds child argv from profile target and args" {
     try std.testing.expectEqualStrings("/repo/bin/echo", argv[0]);
     try std.testing.expectEqualStrings("/Users/test/hello", argv[1]);
     try std.testing.expectEqualStrings("world", argv[2]);
+}
+
+test "launcher resolves profile into launch plan with default log and runtime policy" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "retroarch.sonic",
+        .target = "$HOME/dev/RetroArch/retroarch",
+        .args = &.{ "-L", "$HOME/core.dylib" },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion);
+    defer plan.deinit();
+
+    try std.testing.expectEqualStrings("retroarch.sonic", plan.profile_name);
+    try std.testing.expectEqualStrings("/Users/test/dev/RetroArch/retroarch", plan.target);
+    try std.testing.expectEqualStrings("/Users/test/core.dylib", plan.argv[2]);
+    try std.testing.expectEqualStrings("/tmp/katzensteg-retroarch-sonic.out", plan.stdout.file);
+    try std.testing.expectEqual(OutputSpec.stdout, plan.stderr);
+    try std.testing.expectEqual(@as(usize, 0), plan.env.len);
+    try std.testing.expectEqual(.queued_replay, plan.runtime.intercept_mode);
+    try std.testing.expectEqual(.terminal_only, plan.runtime.window_policy);
+    try std.testing.expectEqual(.file_whole, plan.runtime.output_profile.?);
+}
+
+test "launcher resolved plan expands profile env and preserves explicit output" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "probe.input",
+        .target = "{repo}/zig-out/bin/probe",
+        .stdout = "{repo}/probe.out",
+        .stderr = "ignore",
+        .env = &.{
+            .{ .name = "DYLD_INSERT_LIBRARIES", .value = "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib" },
+        },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion);
+    defer plan.deinit();
+
+    try std.testing.expectEqualStrings("/repo/probe.out", plan.stdout.file);
+    try std.testing.expectEqual(OutputSpec.ignore, plan.stderr);
+    try std.testing.expectEqualStrings("DYLD_INSERT_LIBRARIES", plan.env[0].name);
+    try std.testing.expectEqualStrings("/repo/zig-out/lib/libkatzensteg-unlinked.dylib", plan.env[0].value);
 }
 
 test "launcher builds child argv from direct command target and remaining args" {

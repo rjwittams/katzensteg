@@ -131,10 +131,6 @@ fn shouldForwardRealRendererCall(policy: window_policy.WindowPresentationPolicy)
     return policy.realRenderEnabled();
 }
 
-fn glCaptureMode() gl_capture.CaptureMode {
-    return gl_capture.modeFromEnv(if (std.c.getenv("KATZENSTEG_GL_CAPTURE")) |value| std.mem.span(value) else null);
-}
-
 fn selectVulkanLoaderPath(requested: ?[*:0]const u8, override: ?[*:0]const u8) ?[*:0]const u8 {
     if (requested != null) return requested;
     return override;
@@ -620,7 +616,7 @@ pub export fn ks_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_G
 pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_swap_window, "katzensteg-trace: SDL_GL_SwapWindow window={x}", .{if (window) |p| @intFromPtr(p) else 0});
-    switch (glCaptureMode()) {
+    switch (rt.glCaptureMode()) {
         .disabled => {},
         .sync => captureGlFramebufferSync(rt, window),
         .pbo => captureGlFramebufferPbo(rt, window),

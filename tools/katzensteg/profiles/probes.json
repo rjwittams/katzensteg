@@ -5,9 +5,7 @@
       "target": "{repo}/zig-out/bin/katzensteg-input-probe",
       "args": [
         "--log-events"
-      ],
-      "stdout": "/tmp/katzensteg-input-probe.out",
-      "stderr": "stdout"
+      ]
     },
     "probe.input": {
       "extends": [

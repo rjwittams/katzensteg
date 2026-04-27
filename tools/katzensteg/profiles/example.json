@@ -3,6 +3,8 @@
     "runtime.terminal_only": {
       "hidden": true,
       "runtime": {
+        "composite_mode": "fullscreen",
+        "intercept_mode": "queued_replay",
         "window_policy": "terminal_only",
         "input": true,
         "input_claim": true,
@@ -11,9 +13,7 @@
     },
     "app.env": {
       "hidden": true,
-      "target": "/usr/bin/env",
-      "stdout": "/tmp/katzensteg-example.out",
-      "stderr": "stdout"
+      "target": "/usr/bin/env"
     },
     "example": {
       "extends": [

@@ -3,21 +3,18 @@
     "runtime.fullscreen_file": {
       "hidden": true,
       "runtime": {
+        "composite_mode": "fullscreen",
+        "intercept_mode": "queued_replay",
         "window_policy": "terminal_only",
         "input": true,
         "input_claim": true,
         "output_profile": "file_whole"
-      },
-      "env": {
-        "KATZENSTEG_INTERCEPT_MODE": "queued_replay",
-        "KATZENSTEG_COMPOSITE_MODE": "fullscreen",
-        "KATZENSTEG_OUTPUT_PROFILE": "file_whole"
       }
     },
     "capture.gl_pbo": {
       "hidden": true,
-      "env": {
-        "KATZENSTEG_GL_CAPTURE": "pbo"
+      "runtime": {
+        "gl_capture": "pbo"
       }
     },
     "adapter.sdl2_preload": {
@@ -45,9 +42,7 @@
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
-      ],
-      "stdout": "/tmp/retro-sonic.out",
-      "stderr": "stdout"
+      ]
     },
     "retroarch.melonds.sm64ds": {
       "extends": [
@@ -62,9 +57,7 @@
         "-c",
         "/tmp/retroarch-sdl2.cfg",
         "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
-      ],
-      "stdout": "/tmp/retro-sm64ds-melonds.out",
-      "stderr": "stdout"
+      ]
     }
   }
 }

@@ -154,6 +154,7 @@ pub const Runtime = struct {
     gl_capture_buffers: gl_capture_mod.Buffers = .{},
     gl_capture_pbo: gl_capture_mod.PboState = .{},
     gl_capture_downscale: gl_capture_mod.DownscaleState = .{},
+    gl_capture_mode: gl_capture_mod.CaptureMode = .disabled,
     forced_output_profile: ?config_mod.OutputProfile = null,
     file_transport_enabled: bool = true,
     file_transport_max_bytes: u64 = config_mod.default_file_transport_max_bytes,
@@ -193,6 +194,7 @@ pub const Runtime = struct {
             .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
             .present_interval_ns = if (config.present_fps > 0) @divTrunc(std.time.ns_per_s, config.present_fps) else 0,
             .producer_stats = .{ .enabled = stats, .last_report_ns = std.time.nanoTimestamp() },
+            .gl_capture_mode = mapGlCaptureMode(config.gl_capture),
             .forced_output_profile = config.output_profile,
             .file_transport_enabled = config.file_transport,
             .file_transport_max_bytes = config.file_transport_max_bytes,
@@ -546,6 +548,10 @@ pub const Runtime = struct {
             return null;
         };
         return &self.gl_capture_buffers;
+    }
+
+    pub fn glCaptureMode(self: *const Runtime) gl_capture_mod.CaptureMode {
+        return self.gl_capture_mode;
     }
 
     fn updateInputTarget(self: *Runtime) void {
@@ -987,6 +993,14 @@ fn mapOutputProfile(profile: ?config_mod.OutputProfile) ?ts_kitty.OutputProfile 
     };
 }
 
+fn mapGlCaptureMode(mode: config_mod.GlCaptureMode) gl_capture_mod.CaptureMode {
+    return switch (mode) {
+        .disabled => .disabled,
+        .sync => .sync,
+        .pbo => .pbo,
+    };
+}
+
 fn applyClaimedInputWindowFlags(claimed: bool, flags: u32) u32 {
     if (!claimed) return flags;
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
@@ -1017,6 +1031,12 @@ test "payload buffer pool reuses exact-sized buffers" {
     const third = try pool.acquire(std.testing.allocator, 16);
     try std.testing.expect(third.ptr != first_ptr);
     pool.release(std.testing.allocator, third);
+}
+
+test "runtime maps configured GL capture mode to preload capture mode" {
+    try std.testing.expectEqual(gl_capture_mod.CaptureMode.disabled, mapGlCaptureMode(.disabled));
+    try std.testing.expectEqual(gl_capture_mod.CaptureMode.sync, mapGlCaptureMode(.sync));
+    try std.testing.expectEqual(gl_capture_mod.CaptureMode.pbo, mapGlCaptureMode(.pbo));
 }
 
 test "window policy controls terminal and real render routes" {

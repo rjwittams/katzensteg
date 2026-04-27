@@ -22,9 +22,7 @@
         "--renderer=software",
         "--path=$HOME/roms/mi2",
         "monkey2"
-      ],
-      "stdout": "/tmp/scummvm.out",
-      "stderr": "stdout"
+      ]
     }
   }
 }

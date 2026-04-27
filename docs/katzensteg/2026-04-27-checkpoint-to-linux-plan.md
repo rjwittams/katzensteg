@@ -65,20 +65,20 @@ Goal: make `katzensteg <profile>` the normal path for repeated local testing wit
 
 ### Tasks
 
-- [ ] Add a resolved launch-plan struct separate from raw parsed profile data.
-- [ ] Add launch defaults for logs, cleanup, preload, and runtime config.
-- [ ] Make `--dry-run` print the resolved launch plan, not just counts.
-- [ ] Simplify existing profiles after defaults exist.
-- [ ] Keep old scripts as shims or comparison paths until profiles prove equivalent.
-- [ ] Add one smoke profile that does not require SDL for launcher regression tests.
+- [x] Add a resolved launch-plan struct separate from raw parsed profile data.
+- [ ] Add launch defaults for logs, cleanup, preload, and runtime config. Logs and runtime config now default; preload selection remains explicit.
+- [x] Make `--dry-run` print the resolved launch plan, not just counts.
+- [x] Simplify existing profiles after defaults exist.
+- [x] Keep old scripts as shims or comparison paths until profiles prove equivalent.
+- [x] Add one smoke profile that does not require SDL for launcher regression tests.
 
 ### Verification
 
-- [ ] `zig test tools/katzensteg/launcher.zig`
-- [ ] `zig test tools/katzensteg/launcher_profiles.zig`
-- [ ] `zig build -freference-trace`
-- [ ] `./zig-out/bin/katzensteg --dry-run retroarch.sonic`
-- [ ] `./zig-out/bin/katzensteg --dry-run probe.input`
+- [x] `zig test tools/katzensteg/launcher.zig`
+- [x] `zig test tools/katzensteg/launcher_profiles.zig`
+- [x] `zig build -freference-trace`
+- [x] `./zig-out/bin/katzensteg retroarch.sonic --dry-run`
+- [x] `./zig-out/bin/katzensteg probe.input --dry-run`
 - [ ] Manual run: `probe.input`
 - [ ] Manual run: `retroarch.sonic`
 
@@ -116,7 +116,7 @@ Record:
 - [ ] Create `docs/katzensteg/external-projects.md`.
 - [ ] Add one section per external project.
 - [ ] For each project, create or confirm a `rjwittams` GitHub fork.
-- [ ] Push local Katzensteg-specific branches to those forks.
+- [ ] Push local branches to those forks with names describing the app-side change, not Katzensteg itself. Most branches should be named around macOS build fixes or end-to-end SDL output support.
 - [ ] Update launcher profiles to use stable checkout conventions where practical.
 
 ### Verification

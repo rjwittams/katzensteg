@@ -26,7 +26,7 @@ Hidden profiles such as `adapter.sdl2_preload` and `runtime.fullscreen_file` are
 ./zig-out/bin/katzensteg moonlight.steam_big_picture --dry-run
 ```
 
-Dry-run prints the resolved target, argument count, environment count, output log, and runtime window policy.
+Dry-run prints the resolved target, argv, environment variables, output log, runtime mode, window policy, composite mode, and output profile.
 
 ## Launch
 
@@ -58,10 +58,12 @@ KATZENSTEG_REPO=/path/to/ttytris ./zig-out/bin/katzensteg retroarch.sonic
 
 ## Logs
 
-Current profile logs:
+By default, profile stdout is redirected to `/tmp/katzensteg-<profile-name>.out`, with non-alphanumeric profile characters replaced by `-`. Profile stderr follows stdout unless explicitly configured otherwise.
 
-- `retroarch.sonic`: `/tmp/retro-sonic.out`
-- `retroarch.melonds.sm64ds`: `/tmp/retro-sm64ds-melonds.out`
-- `scummvm.monkey2`: `/tmp/scummvm.out`
-- `moonlight.steam_big_picture`: `/tmp/moonlight-katzensteg.out`
-- `probe.input`: `/tmp/katzensteg-input-probe.out`
+Current default profile logs:
+
+- `retroarch.sonic`: `/tmp/katzensteg-retroarch-sonic.out`
+- `retroarch.melonds.sm64ds`: `/tmp/katzensteg-retroarch-melonds-sm64ds.out`
+- `scummvm.monkey2`: `/tmp/katzensteg-scummvm-monkey2.out`
+- `moonlight.steam_big_picture`: `/tmp/katzensteg-moonlight-steam-big-picture.out`
+- `probe.input`: `/tmp/katzensteg-probe-input.out`

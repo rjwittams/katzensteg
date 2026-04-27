@@ -29,9 +29,7 @@
         "--video-codec",
         "HEVC",
         "--no-hdr"
-      ],
-      "stdout": "/tmp/moonlight-katzensteg.out",
-      "stderr": "stdout"
+      ]
     }
   }
 }
