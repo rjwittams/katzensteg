@@ -815,3 +815,13 @@ test "bundled profiles include smb3 ANESE launch target" {
     try std.testing.expectEqualStrings("$HOME/dev/ANESE/build/anese", profile.target);
     try std.testing.expectEqualStrings("$HOME/roms/smb3.nes", profile.args[0]);
 }
+
+test "bundled profiles include Cannonball launch target" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "tools/katzensteg/profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("cannonball").?;
+    try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/cannonball", profile.target);
+    try std.testing.expectEqualStrings("-cfgfile", profile.args[0]);
+    try std.testing.expectEqualStrings("$HOME/dev/cannonball/config.xml", profile.args[1]);
+}

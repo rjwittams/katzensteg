@@ -27,6 +27,7 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 | ScummVM | `https://github.com/scummvm/scummvm.git` | `https://github.com/rjwittams/scummvm.git` |
 | Cannonball | `https://github.com/djyt/cannonball.git` | `https://github.com/rjwittams/cannonball.git` |
 | Chiaki NG | `https://github.com/streetpea/chiaki-ng.git` | `https://github.com/rjwittams/chiaki-ng.git` |
+| cpp-steam-tools | `https://github.com/streetpea/cpp-steam-tools.git` | `https://github.com/rjwittams/cpp-steam-tools.git` |
 | ANESE | `https://github.com/daniel5151/ANESE.git` | `https://github.com/rjwittams/ANESE.git` |
 
 ## Projects
@@ -123,37 +124,40 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - stdint portability/build fixes
   - local launcher/config files
 - Launcher profile coverage:
-  - no Katzensteg launcher profile yet
-  - local script exists in the Cannonball checkout
+  - `cannonball`
 - Next cleanup:
-  - Add a Katzensteg launcher profile if Cannonball remains a useful smoke target.
+  - Decide whether `config.xml` should remain local-only or become a seeded launcher config.
 
 ### Chiaki NG
 
 - Local checkout: `/Users/robert/dev/chiaki-ng`
 - Current local branch: `macos-sdl-client-build`
-- Pushed fork branch: none yet; current changes are uncommitted.
-- Local state: dirty.
-- Uncommitted source changes:
-  - `CMakeLists.txt`
-  - `test/CMakeLists.txt`
-  - modified `third-party/cpp-steam-tools` submodule state
+- Pushed fork branch: `rjwittams/macos-sdl-client-build`
+- Local state: clean except generated `.codex-tmp/` build/test output.
+- Pushed source commits:
+  - `12d7c18c build: add SDL streamer toggle`
+  - `4e0b9dc8 sdl: add prototype stream-only frontend`
+- Submodule fork branch:
+  - `/Users/robert/dev/chiaki-ng/third-party/cpp-steam-tools`
+  - `rjwittams/macos-static-library`
+  - pushed commit `c089760 build: use static library on macOS`
 - Untracked local files:
   - `.codex-tmp/`
-  - `scripts/run-chiaki-sdl-from-gui.py`
-  - `sdl/`
-  - `test/macos_no_cpp_steam_tools_dylib.cmake`
 - Local change shape:
   - CMake changes
-  - SDL client/proxy work
-  - Steam tools test/build changes
+  - SDL stream-only client prototype
+  - Python wrapper that reuses GUI config and forwards to the SDL client
+  - cpp-steam-tools macOS static-library link fix
 - Launcher profile coverage:
   - `chiaki.sdl`
   - `chiaki.sdl.child`
+- Local verification:
+  - Configure with a `uv` Python 3.12 venv containing `protobuf`, and set both `PYTHON_EXECUTABLE` and `Python_EXECUTABLE` to that interpreter for nanopb generation.
+  - `cmake --build .codex-tmp/build-sdl-prototype-uv --target chiaki-sdl chiaki-sdl-options-test`
+  - `ctest --test-dir .codex-tmp/build-sdl-prototype-uv -R chiaki-sdl --output-on-failure`
 - Next cleanup:
-  - Separate build-system changes from the SDL client/proxy code.
-  - Decide whether the Python wrapper script should live in the fork or be replaced by a launcher feature.
-  - Record exact submodule commit/state before pushing a branch.
+  - Keep this branch as a prototype Linux/macOS test surface.
+  - Eventually give the SDL client the same launch/config behavior as the GUI, which should subsume the Python wrapper.
 
 ### ANESE
 
@@ -185,11 +189,12 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - pushed RetroArch committed app-side work to `rjwittams/macos-sdl2-video-output`
   - pushed Moonlight SDL renderer work to `rjwittams/macos-sdl-renderer-output`
   - pushed Cannonball macOS build fixes to `rjwittams/macos-sdl2-build-fixes`
+  - pushed cpp-steam-tools macOS static-library fix to `rjwittams/macos-static-library`
+  - pushed Chiaki NG SDL client prototype to `rjwittams/macos-sdl-client-build`
+  - added a first-class `cannonball` Katzensteg launcher profile
   - moved Moonlight dirty work from `master` to `macos-sdl-renderer-output`
   - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
   - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
 - Still needed:
-  - split and commit dirty work in RetroArch and Chiaki NG
-  - push those branch commits to the `rjwittams` forks
-  - decide whether Cannonball needs a first-class launcher profile
+  - split and commit dirty work in RetroArch
   - add bootstrap metadata after source branches settle

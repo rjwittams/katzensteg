@@ -21,6 +21,7 @@ Visible profiles currently include:
 - `ffplay.testsrc`
 - `anese.test`
 - `smb3`
+- `cannonball`
 - `chiaki.sdl`
 
 Hidden profiles such as `adapter.sdl2_preload` and `runtime.fullscreen_file` are reusable fragments, not direct launch targets.
@@ -91,4 +92,5 @@ Current default profile logs:
 - `ffplay.testsrc`: `/tmp/katzensteg-ffplay-testsrc.out`
 - `anese.test`: `/tmp/katzensteg-anese-test.out`
 - `smb3`: `/tmp/katzensteg-smb3.out`
+- `cannonball`: `/tmp/katzensteg-cannonball.out`
 - `chiaki.sdl`: `/tmp/katzensteg-chiaki-sdl.out`

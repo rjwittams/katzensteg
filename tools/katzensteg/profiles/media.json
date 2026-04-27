@@ -47,6 +47,24 @@
         "$HOME/roms/smb3.nes"
       ]
     },
+    "app.cannonball": {
+      "hidden": true,
+      "target": "$HOME/dev/cannonball/build/cannonball",
+      "env": {
+        "SDL_RENDER_DRIVER": "software"
+      }
+    },
+    "cannonball": {
+      "extends": [
+        "app.cannonball",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "-cfgfile",
+        "$HOME/dev/cannonball/config.xml"
+      ]
+    },
     "app.chiaki_gui_wrapper": {
       "hidden": true,
       "target": "$HOME/dev/chiaki-ng/scripts/run-chiaki-sdl-from-gui.py",
