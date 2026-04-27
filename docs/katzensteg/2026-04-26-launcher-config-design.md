@@ -32,7 +32,7 @@ The runtime remains responsible for simultaneous terminal graphics, input captur
 - Terminal image protocol negotiation and output.
 - Input capture and synthetic SDL events.
 - Window policy and real-window visibility actions.
-- Inspector socket, live state, and any future runtime menu/chrome.
+- Embedded fallback inspector socket/live state, and any future runtime menu/chrome.
 - Hot-applying runtime settings where possible.
 
 The launcher should not coordinate screen drawing with the runtime in the first version. If a future side-channel is added, it should be explicit rather than implicit shared terminal writes.
@@ -77,7 +77,7 @@ Runtime config describes Katzensteg behavior after the preload/runtime is active
 - `gl_capture`
 - `vulkan_capture`
 - scaler/filter mode
-- inspector/debug/socket paths
+- whiskers and embedded-inspector/debug/socket paths
 
 The runtime config should be represented by Zig structs with field metadata:
 
@@ -86,7 +86,7 @@ The runtime config should be represented by Zig structs with field metadata:
 - whether the field can be hot-applied
 - whether a change requires restart
 
-This lets the launcher, inspector, and future terminal menu talk about the same settings without inventing separate models.
+This lets the launcher, whiskers, the embedded fallback inspector, and a future terminal menu talk about the same settings without inventing separate models.
 
 ## File Format
 
@@ -183,7 +183,7 @@ This classification should be visible to future inspector/menu UI so it can show
 
 ### Phase 2: Launcher Skeleton
 
-- Add a `katzensteg launch <profile>` command.
+- Add a `katzensteg [options] <target>` command.
 - Load a profile file.
 - Resolve inheritance.
 - Generate runtime JSON.
