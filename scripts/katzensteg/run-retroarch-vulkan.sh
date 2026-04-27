@@ -7,10 +7,26 @@ CORE_PATH="${CORE_PATH:-$HOME/Library/Application Support/RetroArch/cores/flycas
 ROM_PATH="${ROM_PATH:-$HOME/roms/JGR/Jet Grind Radio (USA).cue}"
 BASE_CONFIG_PATH="${BASE_CONFIG_PATH:-/tmp/retroarch-sdl2.cfg}"
 CONFIG_PATH="${CONFIG_PATH:-/tmp/retroarch-sdl2-vulkan.cfg}"
-KATZENSTEG_LIB="${KATZENSTEG_LIB:-$ROOT/zig-out/lib/libkatzensteg-unlinked.dylib}"
-KATZENSTEG_VULKAN_LAYER="${KATZENSTEG_VULKAN_LAYER:-$ROOT/zig-out/lib/libkatzensteg-vulkan-layer.dylib}"
-KATZENSTEG_VULKAN_LOADER="${KATZENSTEG_VULKAN_LOADER:-/opt/homebrew/lib/libvulkan.1.dylib}"
 OUTPUT_LOG="${OUTPUT_LOG:-/tmp/retro-vulkan.out}"
+
+case "$(uname -s)" in
+  Linux)
+    KATZENSTEG_LIB="${KATZENSTEG_LIB:-$ROOT/zig-out/lib/libkatzensteg-unlinked.so}"
+    KATZENSTEG_VULKAN_LAYER="${KATZENSTEG_VULKAN_LAYER:-$ROOT/zig-out/lib/libkatzensteg-vulkan-layer.so}"
+    KATZENSTEG_VULKAN_LOADER="${KATZENSTEG_VULKAN_LOADER:-}"
+    PRELOAD_ENV=(LD_PRELOAD="$KATZENSTEG_LIB")
+    ;;
+  Darwin)
+    KATZENSTEG_LIB="${KATZENSTEG_LIB:-$ROOT/zig-out/lib/libkatzensteg-unlinked.dylib}"
+    KATZENSTEG_VULKAN_LAYER="${KATZENSTEG_VULKAN_LAYER:-$ROOT/zig-out/lib/libkatzensteg-vulkan-layer.dylib}"
+    KATZENSTEG_VULKAN_LOADER="${KATZENSTEG_VULKAN_LOADER:-/opt/homebrew/lib/libvulkan.1.dylib}"
+    PRELOAD_ENV=(DYLD_INSERT_LIBRARIES="$KATZENSTEG_LIB")
+    ;;
+  *)
+    echo "Unsupported platform for RetroArch Vulkan runner: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
 
 is_enabled() {
   case "${1:-}" in
@@ -32,7 +48,7 @@ if [[ ! -f "$ROM_PATH" ]]; then
   exit 1
 fi
 if [[ ! -f "$KATZENSTEG_LIB" ]]; then
-  echo "Katzensteg dylib not found: $KATZENSTEG_LIB" >&2
+  echo "Katzensteg preload library not found: $KATZENSTEG_LIB" >&2
   exit 1
 fi
 if [[ ! -f "$KATZENSTEG_VULKAN_LAYER" ]]; then
@@ -59,6 +75,30 @@ CFG
 
 rm -f "$OUTPUT_LOG" /tmp/katzensteg-*.log /tmp/katzensteg-composite.ppm
 
+MANIFEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/katzensteg-vulkan-layer.XXXXXX")"
+cleanup_manifest_dir() {
+  rm -rf "$MANIFEST_DIR"
+}
+trap cleanup_manifest_dir EXIT
+
+cat > "$MANIFEST_DIR/VK_LAYER_KATZENSTEG_capture.json" <<EOF
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_KATZENSTEG_capture",
+    "type": "GLOBAL",
+    "library_path": "$KATZENSTEG_VULKAN_LAYER",
+    "api_version": "1.0.0",
+    "implementation_version": "1",
+    "description": "Katzensteg Vulkan capture layer",
+    "functions": {
+      "vkGetInstanceProcAddr": "vkGetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "vkGetDeviceProcAddr"
+    }
+  }
+}
+EOF
+
 env_args=(
   -u KATZENSTEG_COMPOSITE_DEBUG
   -u KATZENSTEG_TRACE_SDL
@@ -71,10 +111,10 @@ env_args=(
   KATZENSTEG_VULKAN_LOADER="$KATZENSTEG_VULKAN_LOADER"
   KATZENSTEG_INPUT="${KATZENSTEG_INPUT:-1}"
   KATZENSTEG_INPUT_CLAIM="${KATZENSTEG_INPUT_CLAIM:-1}"
-  VK_LAYER_PATH="$ROOT/profiles"
+  VK_LAYER_PATH="$MANIFEST_DIR"
   VK_INSTANCE_LAYERS=VK_LAYER_KATZENSTEG_capture
   RETROARCH_COCOA_BOOTSTRAP_WINDOW=0
-  DYLD_INSERT_LIBRARIES="$KATZENSTEG_LIB"
+  "${PRELOAD_ENV[@]}"
 )
 
 if is_enabled "${KATZENSTEG_COMPOSITE_DEBUG:-}"; then
@@ -109,6 +149,7 @@ echo "  ROM_PATH=$ROM_PATH"
 echo "  CONFIG_PATH=$CONFIG_PATH"
 echo "  KATZENSTEG_LIB=$KATZENSTEG_LIB"
 echo "  KATZENSTEG_VULKAN_LAYER=$KATZENSTEG_VULKAN_LAYER"
+echo "  VK_LAYER_PATH=$MANIFEST_DIR"
 echo "  KATZENSTEG_VULKAN_CAPTURE=${KATZENSTEG_VULKAN_CAPTURE:-1}"
 echo "  KATZENSTEG_VULKAN_LOADER=$KATZENSTEG_VULKAN_LOADER"
 echo "  OUTPUT_LOG=$OUTPUT_LOG"
@@ -116,4 +157,4 @@ if is_enabled "${KATZENSTEG_TRACE_VULKAN:-}"; then
   echo "  KATZENSTEG_TRACE_VULKAN=1"
 fi
 
-exec env "${env_args[@]}" "$RETROARCH_BIN" "${retroarch_args[@]}" > "$OUTPUT_LOG" 2>&1
+env "${env_args[@]}" "$RETROARCH_BIN" "${retroarch_args[@]}" > "$OUTPUT_LOG" 2>&1
