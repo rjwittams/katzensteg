@@ -3,7 +3,7 @@ const config_mod = @import("config.zig");
 const sdl = @import("katzensteg_sdl");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
-const inspector_mod = @import("inspector.zig");
+const inspect_model = @import("inspect_model.zig");
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
 pub const InterceptMode = config_mod.InterceptMode;
@@ -478,7 +478,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
         const duration = std.time.nanoTimestamp() - start_ns;
         rt.notePresentDuration(duration);
         const summary = rt.frame_builder.inspectSummary();
-        const whiskers_frame: inspector_mod.FrameRecord = .{
+        const whiskers_frame: inspect_model.FrameRecord = .{
             .id = 0,
             .ts_ns = std.time.nanoTimestamp(),
             .present_ns = duration,
@@ -512,7 +512,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
                         },
                         .texture_key = res.texture_key,
                         .placement_id = res.placement_id,
-                        .alias = @import("inspector.zig").makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
+                        .alias = inspect_model.makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
                         .w = res.w,
                         .h = res.h,
                         .format = res.format,
@@ -537,7 +537,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
                     },
                     .texture_key = res.texture_key,
                     .placement_id = res.placement_id,
-                    .alias = @import("inspector.zig").makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
+                    .alias = inspect_model.makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
                     .w = res.w,
                     .h = res.h,
                     .format = res.format,

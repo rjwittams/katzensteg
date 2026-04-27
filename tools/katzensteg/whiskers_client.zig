@@ -1,6 +1,6 @@
 const std = @import("std");
 const Logger = @import("log.zig").Logger;
-const inspector_mod = @import("inspector.zig");
+const inspect_model = @import("inspect_model.zig");
 
 pub const ProducerHello = struct {
     producer_kind: []const u8,
@@ -143,7 +143,7 @@ pub const WhiskersClient = struct {
         return self.capture_enabled.load(.monotonic);
     }
 
-    pub fn notePresent(self: *WhiskersClient, frame: inspector_mod.FrameRecord, resources: []const inspector_mod.ResourceRecord) void {
+    pub fn notePresent(self: *WhiskersClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
         self.pollCaptureState() catch |err| {
             self.logger.writeFmt("katzensteg: whiskers capture poll failed: {any}", .{err});
         };
