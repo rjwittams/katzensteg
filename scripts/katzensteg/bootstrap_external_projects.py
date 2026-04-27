@@ -459,6 +459,38 @@ def run_plan(plan: list[PlannedProject], dry_run: bool) -> list[ProjectExecution
     return results
 
 
+def run_build_only(plan: list[PlannedProject], dry_run: bool) -> list[ProjectExecutionResult]:
+    results: list[ProjectExecutionResult] = []
+    for item in plan:
+        print(f"==> {item.name}: {item.path}")
+        if item.profiles:
+            print("profiles: " + ", ".join(item.profiles))
+        if item.build_commands:
+            print("build:")
+        build_result = run_build_commands([item], dry_run)[0]
+        results.append(
+            ProjectExecutionResult(
+                name=item.name,
+                path=item.path,
+                sync=skipped_phase_result(item),
+                build=build_result,
+            )
+        )
+    return results
+
+
+def run_doctor_only(plan: list[PlannedProject]) -> list[ProjectExecutionResult]:
+    return [
+        ProjectExecutionResult(
+            name=item.name,
+            path=item.path,
+            sync=skipped_phase_result(item),
+            build=skipped_phase_result(item),
+        )
+        for item in plan
+    ]
+
+
 def has_failures(results: list[ProjectExecutionResult]) -> bool:
     return any(
         result.sync.status == "failed" or result.build.status == "failed"
@@ -466,9 +498,47 @@ def has_failures(results: list[ProjectExecutionResult]) -> bool:
     )
 
 
+def doctor_has_failures(report: DoctorReport) -> bool:
+    return any(
+        [
+            report.missing_tools,
+            report.missing_packages,
+            report.missing_outputs,
+            report.missing_configs,
+            report.missing_assets,
+        ]
+    )
+
+
+def format_status_counts(statuses: Iterable[PhaseStatus]) -> str:
+    counts = {"succeeded": 0, "failed": 0, "skipped": 0}
+    for status in statuses:
+        counts[status] += 1
+    return ", ".join(f"{status}: {count}" for status, count in counts.items())
+
+
+def print_final_summary(results: list[ProjectExecutionResult], doctor_report: DoctorReport) -> None:
+    print("")
+    print("Final summary:")
+    print(f"  sync: {format_status_counts(result.sync.status for result in results)}")
+    print(f"  build: {format_status_counts(result.build.status for result in results)}")
+    print(f"  doctor: {doctor_report.summary}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Clone or update external app checkouts used by Katzensteg launcher profiles."
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--build-only",
+        action="store_true",
+        help="Skip clone/update commands and run build commands followed by doctor.",
+    )
+    mode_group.add_argument(
+        "--doctor-only",
+        action="store_true",
+        help="Skip clone/update and build commands, then run doctor.",
     )
     parser.add_argument(
         "selection",
@@ -505,8 +575,15 @@ def main(argv: list[str]) -> int:
     manifest = load_manifest(args.manifest)
     root = args.root if args.root is not None else expand_path(manifest.get("default_root", "$HOME/dev"))
     plan = plan_projects(manifest, root, args.selection, args.include_non_default)
-    results = run_plan(plan, args.dry_run)
-    if has_failures(results):
+    if args.doctor_only:
+        results = run_doctor_only(plan)
+    elif args.build_only:
+        results = run_build_only(plan, args.dry_run)
+    else:
+        results = run_plan(plan, args.dry_run)
+    doctor_report = run_doctor(manifest, root, args.selection, args.include_non_default)
+    print_final_summary(results, doctor_report)
+    if has_failures(results) or doctor_has_failures(doctor_report):
         return 1
     return 0
 

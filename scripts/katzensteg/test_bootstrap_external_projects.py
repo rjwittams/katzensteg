@@ -284,7 +284,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             profiles=[],
         )
 
-        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_build_commands([planned], dry_run=False)
 
         self.assertEqual(2, run_mock.call_count)
@@ -306,7 +307,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             profiles=[],
         )
 
-        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_build_commands([planned], dry_run=True)
 
         self.assertEqual([], run_mock.call_args_list)
@@ -324,7 +326,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             profiles=[],
         )
 
-        with mock.patch.object(bootstrap.subprocess, "run") as run_mock:
+        with mock.patch.object(bootstrap.subprocess, "run") as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_build_commands([planned], dry_run=False)
 
         self.assertEqual([], run_mock.call_args_list)
@@ -356,7 +359,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
                 CalledProcessError(1, "cmake -S . -B build"),
                 None,
             ],
-        ) as run_mock:
+        ) as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_build_commands([failing, succeeding], dry_run=False)
 
         self.assertEqual(2, run_mock.call_count)
@@ -392,7 +396,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
                 FileNotFoundError("missing build tool"),
                 None,
             ],
-        ) as run_mock:
+        ) as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_build_commands([failing, succeeding], dry_run=False)
 
         self.assertEqual(2, run_mock.call_count)
@@ -687,7 +692,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
                 FileNotFoundError("git not found"),
                 None,
             ],
-        ) as run_mock:
+        ) as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_sync_commands([failing, succeeding], dry_run=False)
 
         self.assertEqual(2, run_mock.call_count)
@@ -720,7 +726,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
                 CalledProcessError(1, ["git", "clone", "https://example.invalid/failing.git"]),
                 None,
             ],
-        ) as run_mock:
+        ) as run_mock, \
+            mock.patch("builtins.print"):
             results = bootstrap.run_plan([failing, succeeding], dry_run=False)
 
         self.assertEqual(2, run_mock.call_count)
@@ -756,7 +763,9 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
 
         with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp", "projects": []}), \
             mock.patch.object(bootstrap, "plan_projects", return_value=[]), \
-            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]):
+            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]), \
+            mock.patch.object(bootstrap, "run_doctor", return_value=bootstrap.DoctorReport([], [], [], [], [], "doctor ok")), \
+            mock.patch("builtins.print"):
             exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH)])
 
         self.assertEqual(1, exit_code)
@@ -784,7 +793,199 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
 
         with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp", "projects": []}), \
             mock.patch.object(bootstrap, "plan_projects", return_value=[]), \
-            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]):
+            mock.patch.object(bootstrap, "run_plan", return_value=[failed_result]), \
+            mock.patch.object(bootstrap, "run_doctor", return_value=bootstrap.DoctorReport([], [], [], [], [], "doctor ok")), \
+            mock.patch("builtins.print"):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH)])
+
+        self.assertEqual(1, exit_code)
+
+    def test_main_default_runs_sync_build_then_doctor(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[["git", "clone", "https://example.invalid/demo.git"]],
+            build_commands=["cmake -S . -B build"],
+            profiles=["demo.profile"],
+        )
+        events = []
+
+        def fake_sync(plan, dry_run):
+            events.append(("sync", [item.name for item in plan], dry_run))
+            return [
+                bootstrap.CommandPhaseResult(
+                    name=plan[0].name,
+                    path=plan[0].path,
+                    printed_commands=["git clone demo"],
+                    status="succeeded",
+                )
+            ]
+
+        def fake_build(plan, dry_run):
+            events.append(("build", [item.name for item in plan], dry_run))
+            return [
+                bootstrap.CommandPhaseResult(
+                    name=plan[0].name,
+                    path=plan[0].path,
+                    printed_commands=["cmake -S . -B build"],
+                    status="succeeded",
+                )
+            ]
+
+        def fake_doctor(manifest, root, names=None, include_non_default=False):
+            events.append(("doctor", list(names), include_non_default, root))
+            return bootstrap.DoctorReport([], [], [], [], [], "doctor ok")
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp/dev", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[planned]) as plan_projects_mock, \
+            mock.patch.object(bootstrap, "run_sync_commands", side_effect=fake_sync), \
+            mock.patch.object(bootstrap, "run_build_commands", side_effect=fake_build), \
+            mock.patch.object(bootstrap, "run_doctor", side_effect=fake_doctor), \
+            mock.patch("builtins.print"):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH), "demo.profile"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            [("sync", ["demo"], False), ("build", ["demo"], False), ("doctor", ["demo.profile"], False, Path("/tmp/dev"))],
+            events,
+        )
+        plan_projects_mock.assert_called_once_with(
+            {"default_root": "/tmp/dev", "projects": []},
+            Path("/tmp/dev"),
+            ["demo.profile"],
+            False,
+        )
+
+    def test_main_build_only_skips_sync_but_runs_build_and_doctor(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[["git", "clone", "https://example.invalid/demo.git"]],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+        recorded_sync_calls = []
+        recorded_build_calls = []
+
+        def fake_build(plan, dry_run):
+            recorded_build_calls.append((plan, dry_run))
+            return [
+                bootstrap.CommandPhaseResult(
+                    name=plan[0].name,
+                    path=plan[0].path,
+                    printed_commands=["cmake -S . -B build"],
+                    status="succeeded",
+                )
+            ]
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp/dev", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[planned]), \
+            mock.patch.object(bootstrap, "run_sync_commands", side_effect=lambda *args: recorded_sync_calls.append(args)), \
+            mock.patch.object(bootstrap, "run_build_commands", side_effect=fake_build), \
+            mock.patch.object(bootstrap, "run_doctor", return_value=bootstrap.DoctorReport([], [], [], [], [], "doctor ok")) as doctor_mock, \
+            mock.patch("builtins.print"):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH), "--build-only"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([], recorded_sync_calls)
+        self.assertEqual([([planned], False)], recorded_build_calls)
+        doctor_mock.assert_called_once_with({"default_root": "/tmp/dev", "projects": []}, Path("/tmp/dev"), [], False)
+
+    def test_main_doctor_only_skips_sync_and_build(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[["git", "clone", "https://example.invalid/demo.git"]],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+        recorded_sync_calls = []
+        recorded_build_calls = []
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp/dev", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[planned]), \
+            mock.patch.object(bootstrap, "run_sync_commands", side_effect=lambda *args: recorded_sync_calls.append(args)), \
+            mock.patch.object(bootstrap, "run_build_commands", side_effect=lambda *args: recorded_build_calls.append(args)), \
+            mock.patch.object(
+                bootstrap,
+                "run_doctor",
+                return_value=bootstrap.DoctorReport(["missing-tool"], [], [], [], [], "missing tools: 1"),
+            ) as doctor_mock, \
+            mock.patch("builtins.print"):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH), "--doctor-only", "demo"])
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual([], recorded_sync_calls)
+        self.assertEqual([], recorded_build_calls)
+        doctor_mock.assert_called_once_with({"default_root": "/tmp/dev", "projects": []}, Path("/tmp/dev"), ["demo"], False)
+
+    def test_main_dry_run_still_runs_doctor_and_summary(self):
+        bootstrap = load_module()
+
+        planned = bootstrap.PlannedProject(
+            name="demo",
+            path=Path("/tmp/demo-checkout"),
+            commands=[["git", "clone", "https://example.invalid/demo.git"]],
+            build_commands=["cmake -S . -B build"],
+            profiles=[],
+        )
+        dry_run_values = []
+        printed_lines = []
+
+        def fake_sync(plan, dry_run):
+            dry_run_values.append(("sync", dry_run))
+            return [
+                bootstrap.CommandPhaseResult(
+                    name=plan[0].name,
+                    path=plan[0].path,
+                    printed_commands=["git clone demo"],
+                    status="succeeded",
+                )
+            ]
+
+        def fake_build(plan, dry_run):
+            dry_run_values.append(("build", dry_run))
+            return [
+                bootstrap.CommandPhaseResult(
+                    name=plan[0].name,
+                    path=plan[0].path,
+                    printed_commands=["cmake -S . -B build"],
+                    status="succeeded",
+                )
+            ]
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp/dev", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[planned]), \
+            mock.patch.object(bootstrap, "run_sync_commands", side_effect=fake_sync), \
+            mock.patch.object(bootstrap, "run_build_commands", side_effect=fake_build), \
+            mock.patch.object(bootstrap, "run_doctor", return_value=bootstrap.DoctorReport([], [], [], [], [], "doctor ok")) as doctor_mock, \
+            mock.patch("builtins.print", side_effect=lambda line="": printed_lines.append(line)):
+            exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH), "--dry-run"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([("sync", True), ("build", True)], dry_run_values)
+        doctor_mock.assert_called_once()
+        self.assertTrue(any("Final summary" in line for line in printed_lines))
+        self.assertTrue(any("doctor: doctor ok" in line for line in printed_lines))
+
+    def test_main_returns_non_zero_on_doctor_failure(self):
+        bootstrap = load_module()
+
+        with mock.patch.object(bootstrap, "load_manifest", return_value={"default_root": "/tmp/dev", "projects": []}), \
+            mock.patch.object(bootstrap, "plan_projects", return_value=[]), \
+            mock.patch.object(bootstrap, "run_plan", return_value=[]), \
+            mock.patch.object(
+                bootstrap,
+                "run_doctor",
+                return_value=bootstrap.DoctorReport([], ["missing-module"], [], [], [], "missing pkg-config modules: 1"),
+            ), \
+            mock.patch("builtins.print"):
             exit_code = bootstrap.main(["--manifest", str(MANIFEST_PATH)])
 
         self.assertEqual(1, exit_code)
