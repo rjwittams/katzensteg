@@ -286,6 +286,15 @@ pub const Runtime = struct {
             .output_profile = runtime.output_profile_name,
             .present_fps = config.present_fps,
         });
+        if (runtime.whiskers_client) |*client| {
+            client.updateRuntimeInfo(
+                runtime.terminal_identity,
+                @tagName(config.composite_mode),
+                @tagName(config.intercept_mode),
+                runtime.output_profile_name,
+                config.present_fps,
+            );
+        }
         if (config.present_fps > 0) runtime.logger.writeFmt("katzensteg: present fps cap = {d}", .{config.present_fps});
         if (runtime.image_gc) runtime.logger.write("katzensteg: old image GC enabled");
         if (runtime.input_enabled) {

@@ -31,6 +31,13 @@ const ProducerSelfResponse = struct {
 
 const SegmentStartRequest = struct { segment_id: []const u8 };
 const SegmentStopRequest = struct { segment_id: []const u8 };
+const RuntimeInfoUpdateRequest = struct {
+    terminal_identity: ?[]const u8,
+    composite_mode: ?[]const u8,
+    intercept_mode: ?[]const u8,
+    output_profile: ?[]const u8,
+    present_fps: ?u32,
+};
 const FrameIngestRecord = struct {
     frame_id: []const u8,
     ts_ns: i128,
@@ -92,6 +99,7 @@ pub const WhiskersClient = struct {
     mutex: std.Thread.Mutex = .{},
     current_segment_id: ?[]u8 = null,
     next_segment_seq: u64 = 1,
+    runtime_info_sent: bool = false,
     last_capture_poll_ns: i128 = 0,
     next_frame_seq: u64 = 1,
     next_resource_seq: u64 = 1,
@@ -141,6 +149,20 @@ pub const WhiskersClient = struct {
 
     pub fn isCaptureEnabled(self: *const WhiskersClient) bool {
         return self.capture_enabled.load(.monotonic);
+    }
+
+    pub fn updateRuntimeInfo(self: *WhiskersClient, terminal_identity: []const u8, composite_mode: []const u8, intercept_mode: []const u8, output_profile: []const u8, present_fps: u32) void {
+        postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/runtime/info", RuntimeInfoUpdateRequest{
+            .terminal_identity = terminal_identity,
+            .composite_mode = composite_mode,
+            .intercept_mode = intercept_mode,
+            .output_profile = output_profile,
+            .present_fps = present_fps,
+        }) catch |err| {
+            self.logger.writeFmt("katzensteg: whiskers runtime info update failed: {any}", .{err});
+            return;
+        };
+        self.runtime_info_sent = true;
     }
 
     pub fn notePresent(self: *WhiskersClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
