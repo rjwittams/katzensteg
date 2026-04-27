@@ -67,16 +67,16 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - Split uncommitted work into at least SDL2 software, SDL GL, SDL Vulkan, and Cocoa/windowing commits.
   - Decide whether `gfx/drivers_context/sdl_vk_ctx.c` is source or a local experiment before committing.
   - Keep generated app bundles, crash logs, and shader products out of source branches.
+  - Use `docs/katzensteg/retroarch-agent-handoff.md` as the handoff prompt for splitting this work.
 
 ### Moonlight Qt
 
 - Local checkout: `/Users/robert/dev/moonlight-qt`
 - Current local branch: `macos-sdl-renderer-output`
-- Pushed fork branch: none yet; current changes are uncommitted.
-- Local state: dirty; source changes are confined to the SDL ffmpeg renderer plus generated qmake/build artifacts.
-- Uncommitted source changes:
-  - `app/streaming/video/ffmpeg-renderers/sdlvid.cpp`
-  - `app/streaming/video/ffmpeg-renderers/sdlvid.h`
+- Pushed fork branch: `rjwittams/macos-sdl-renderer-output`
+- Local state: dirty only due to generated qmake/build artifacts.
+- Pushed source commit:
+  - `fd8f5171 sdl: fall back to RGB for unsupported texture formats`
 - Untracked local artifacts:
   - qmake cache/stash and generated Makefiles
   - `app/Moonlight.app/`
@@ -91,7 +91,6 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - terminal streaming works, but terminal mouse input does not yet appear to hit Moonlight's input path
   - mixed-Retina setups can intermittently produce a renderer-output/window-size mismatch that shows the top-left quarter of the stream
 - Next cleanup:
-  - Commit only the `sdlvid.*` source changes on `macos-sdl-renderer-output`.
   - Keep generated qmake files, app bundles, release output, and built third-party libraries untracked.
 
 ### ScummVM
@@ -112,11 +111,10 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 
 - Local checkout: `/Users/robert/dev/cannonball`
 - Current local branch: `macos-sdl2-build-fixes`
-- Pushed fork branch: none yet; current changes are uncommitted.
-- Local state: dirty.
-- Uncommitted source changes:
-  - `cmake/CMakeLists.txt`
-  - `src/main/stdint.hpp`
+- Pushed fork branch: `rjwittams/macos-sdl2-build-fixes`
+- Local state: dirty only due to local config/script files.
+- Pushed source commit:
+  - `776d0e7 build: fix macOS CMake and static asserts`
 - Untracked local files:
   - `config.xml`
   - `run-cannonball-ks.sh`
@@ -128,7 +126,6 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - no Katzensteg launcher profile yet
   - local script exists in the Cannonball checkout
 - Next cleanup:
-  - Commit source build fixes separately from local config/script files.
   - Add a Katzensteg launcher profile if Cannonball remains a useful smoke target.
 
 ### Chiaki NG
@@ -186,11 +183,13 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
 - Done:
   - created `rjwittams` fork remotes for RetroArch, Moonlight Qt, ScummVM, Cannonball, Chiaki NG, and ANESE
   - pushed RetroArch committed app-side work to `rjwittams/macos-sdl2-video-output`
+  - pushed Moonlight SDL renderer work to `rjwittams/macos-sdl-renderer-output`
+  - pushed Cannonball macOS build fixes to `rjwittams/macos-sdl2-build-fixes`
   - moved Moonlight dirty work from `master` to `macos-sdl-renderer-output`
   - moved Cannonball dirty work from `master` to `macos-sdl2-build-fixes`
   - moved Chiaki dirty work from `main` to `macos-sdl-client-build`
 - Still needed:
-  - split and commit dirty work in RetroArch, Moonlight Qt, Cannonball, and Chiaki NG
+  - split and commit dirty work in RetroArch and Chiaki NG
   - push those branch commits to the `rjwittams` forks
   - decide whether Cannonball needs a first-class launcher profile
   - add bootstrap metadata after source branches settle
