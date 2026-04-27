@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const is_macos = target.result.os.tag == .macos;
+    const use_lld: ?bool = if (target.result.os.tag == .linux) false else null;
+    const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
 
     const termscene_mod = b.createModule(.{
         .root_source_file = b.path("src/termscene/mod.zig"),
@@ -20,6 +22,7 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "ttytris",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
@@ -38,6 +41,7 @@ pub fn build(b: *std.Build) void {
 
     const termscene_demo = b.addExecutable(.{
         .name = "termscene-demo",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/termscene-demo/main.zig"),
             .target = target,
@@ -49,6 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const kitty_placement_repro = b.addExecutable(.{
         .name = "kitty-placement-repro",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/kitty-placement-repro/main.zig"),
             .target = target,
@@ -60,6 +65,7 @@ pub fn build(b: *std.Build) void {
 
     const kitty_show_ppm = b.addExecutable(.{
         .name = "kitty-show-ppm",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/kitty-show-ppm/main.zig"),
             .target = target,
@@ -72,6 +78,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
@@ -96,6 +103,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_unlinked_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg-unlinked",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
@@ -133,6 +141,7 @@ pub fn build(b: *std.Build) void {
 
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/probes/basic_sdl_demo.zig"),
             .target = target,
@@ -147,6 +156,7 @@ pub fn build(b: *std.Build) void {
 
     const katzensteg_input_probe = b.addExecutable(.{
         .name = "katzensteg-input-probe",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -163,6 +173,7 @@ pub fn build(b: *std.Build) void {
 
     const katzensteg_gl_probe = b.addExecutable(.{
         .name = "katzensteg-gl-probe",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -182,39 +193,55 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_gl_probe);
 
-    const katzensteg_vulkan_layer = b.addLibrary(.{
-        .linkage = .dynamic,
-        .name = "katzensteg-vulkan-layer",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer.c") });
-    if (is_macos) katzensteg_vulkan_layer.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-    b.installArtifact(katzensteg_vulkan_layer);
+    if (enable_vulkan) {
+        const katzensteg_vulkan_layer = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = "katzensteg-vulkan-layer",
+            .use_lld = use_lld,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer.c") });
+        if (is_macos) katzensteg_vulkan_layer.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        b.installArtifact(katzensteg_vulkan_layer);
 
-    const katzensteg_vulkan_probe = b.addExecutable(.{
-        .name = "katzensteg-vulkan-probe",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("examples/probes/vulkan_probe.c") });
-    if (is_macos) {
-        katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
-        katzensteg_vulkan_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        const katzensteg_vulkan_probe = b.addExecutable(.{
+            .name = "katzensteg-vulkan-probe",
+            .use_lld = use_lld,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("examples/probes/vulkan_probe.c") });
+        if (is_macos) {
+            katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+            katzensteg_vulkan_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        }
+        katzensteg_vulkan_probe.linkSystemLibrary("SDL2");
+        katzensteg_vulkan_probe.linkSystemLibrary("vulkan");
+        b.installArtifact(katzensteg_vulkan_probe);
+
+        const katzensteg_vulkan_layer_build_step = b.step("katzensteg-vulkan-layer", "Build the Vulkan capture layer used by Katzensteg");
+        katzensteg_vulkan_layer_build_step.dependOn(&katzensteg_vulkan_layer.step);
+
+        const katzensteg_vulkan_probe_build_step = b.step("katzensteg-vulkan-probe", "Build the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
+        katzensteg_vulkan_probe_build_step.dependOn(&katzensteg_vulkan_probe.step);
+
+        const katzensteg_vulkan_probe_cmd = b.addRunArtifact(katzensteg_vulkan_probe);
+        if (b.args) |args| katzensteg_vulkan_probe_cmd.addArgs(args);
+        const katzensteg_vulkan_probe_step = b.step("run-katzensteg-vulkan-probe", "Run the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
+        katzensteg_vulkan_probe_step.dependOn(&katzensteg_vulkan_probe_cmd.step);
     }
-    katzensteg_vulkan_probe.linkSystemLibrary("SDL2");
-    katzensteg_vulkan_probe.linkSystemLibrary("vulkan");
-    b.installArtifact(katzensteg_vulkan_probe);
 
     const katzensteg_launcher = b.addExecutable(.{
         .name = "katzensteg",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
@@ -224,6 +251,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(katzensteg_launcher);
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
@@ -240,6 +268,7 @@ pub fn build(b: *std.Build) void {
 
     const debug_exe = b.addExecutable(.{
         .name = "ttytris-debug",
+        .use_lld = use_lld,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
@@ -292,14 +321,4 @@ pub fn build(b: *std.Build) void {
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
 
-    const katzensteg_vulkan_layer_build_step = b.step("katzensteg-vulkan-layer", "Build the Vulkan capture layer used by Katzensteg");
-    katzensteg_vulkan_layer_build_step.dependOn(&katzensteg_vulkan_layer.step);
-
-    const katzensteg_vulkan_probe_build_step = b.step("katzensteg-vulkan-probe", "Build the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
-    katzensteg_vulkan_probe_build_step.dependOn(&katzensteg_vulkan_probe.step);
-
-    const katzensteg_vulkan_probe_cmd = b.addRunArtifact(katzensteg_vulkan_probe);
-    if (b.args) |args| katzensteg_vulkan_probe_cmd.addArgs(args);
-    const katzensteg_vulkan_probe_step = b.step("run-katzensteg-vulkan-probe", "Run the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
-    katzensteg_vulkan_probe_step.dependOn(&katzensteg_vulkan_probe_cmd.step);
 }

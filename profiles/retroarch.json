@@ -118,7 +118,7 @@
         "$HOME/Library/Application Support/RetroArch/cores/bsnes_libretro.dylib",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
-        "$HOME/snes/smw.smc"
+        "$HOME/roms/smw.smc"
       ]
     },
     "jsr": {

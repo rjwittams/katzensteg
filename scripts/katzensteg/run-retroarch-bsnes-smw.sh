@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RETROARCH_BIN="${RETROARCH_BIN:-$HOME/dev/RetroArch/retroarch}"
 CORE_PATH="${CORE_PATH:-$HOME/Library/Application Support/RetroArch/cores/bsnes_libretro.dylib}"
 CONFIG_PATH="${CONFIG_PATH:-/tmp/retroarch-sdl2.cfg}"
-ROM_PATH="${ROM_PATH:-$HOME/snes/smw.smc}"
+ROM_PATH="${ROM_PATH:-$HOME/roms/smw.smc}"
 KATZENSTEG_LIB="${KATZENSTEG_LIB:-$ROOT/zig-out/lib/libkatzensteg-unlinked.dylib}"
 
 if [[ ! -x "$RETROARCH_BIN" ]]; then
