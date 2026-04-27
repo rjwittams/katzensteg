@@ -823,5 +823,5 @@ test "bundled profiles include Cannonball launch target" {
     const profile = catalog.find("cannonball").?;
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/cannonball", profile.target);
     try std.testing.expectEqualStrings("-cfgfile", profile.args[0]);
-    try std.testing.expectEqualStrings("$HOME/dev/cannonball/config.xml", profile.args[1]);
+    try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/config.xml", profile.args[1]);
 }

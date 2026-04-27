@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const sdl = @import("katzensteg_sdl");
+const real_sdl = @import("real_sdl.zig");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
@@ -28,6 +29,7 @@ const composite_strip_max_w: i32 = 4096;
 const primitive_composite_threshold: usize = 128;
 const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 const fullscreen_retained_placement_count: usize = 2;
+const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
 
 pub const ExternalFramebufferFormat = enum(u32) {
     rgba8 = 0,
@@ -60,14 +62,14 @@ extern fn ks_fast_bgra_to_rgba(dst_rgba: [*]u8, width: c_int, height: c_int, src
 extern fn ks_fast_scale_rgba(dst_rgba: [*]u8, dst_width: c_int, dst_height: c_int, src_rgba: [*]const u8, src_width: c_int, src_height: c_int) callconv(.c) c_int;
 
 fn tryFastBgraToRgba(dst: []u8, src: []const u8, width: i32, height: i32) bool {
-    if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+    if (comptime native_fastpaths_enabled) {
         return ks_fast_bgra_to_rgba(dst.ptr, @intCast(width), @intCast(height), src.ptr) != 0;
     }
     return false;
 }
 
 fn tryFastScaleRgba(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32) bool {
-    if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+    if (comptime native_fastpaths_enabled) {
         return ks_fast_scale_rgba(dst.ptr, @intCast(dst_w), @intCast(dst_h), src.ptr, @intCast(src_w), @intCast(src_h)) != 0;
     }
     return false;
@@ -465,11 +467,11 @@ pub const FrameBuilder = struct {
         const key = ptrKey(texture);
         const record = self.textures.getPtr(key) orelse return;
         if (surface == null) return;
-        const converted = sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+        const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
             logger.writeOnce("katzensteg: SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
             return;
         };
-        defer sdl.SDL_FreeSurface(converted);
+        defer real_sdl.SDL_FreeSurface(converted);
         const surf: *SurfaceView = @ptrCast(@alignCast(converted));
         record.w = surf.w;
         record.h = surf.h;
@@ -1909,14 +1911,14 @@ pub const FrameBuilder = struct {
     }
 
     fn tryFastYuv420PlanesToRgba(dst: []u8, w: i32, h: i32, yplane: [*]const u8, ypitch: i32, uplane: [*]const u8, upitch: i32, vplane: [*]const u8, vpitch: i32) bool {
-        if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+        if (comptime native_fastpaths_enabled) {
             return ks_fast_i420_to_rgba(dst.ptr, @intCast(w), @intCast(h), yplane, @intCast(ypitch), uplane, @intCast(upitch), vplane, @intCast(vpitch)) != 0;
         }
         return false;
     }
 
     fn tryFastNv12PlanesToRgba(dst: []u8, w: i32, h: i32, yplane: [*]const u8, ypitch: i32, uvplane: [*]const u8, uvpitch: i32) bool {
-        if (comptime (builtin.os.tag == .macos and !builtin.is_test)) {
+        if (comptime native_fastpaths_enabled) {
             return ks_fast_nv12_to_rgba(dst.ptr, @intCast(w), @intCast(h), yplane, @intCast(ypitch), uvplane, @intCast(uvpitch)) != 0;
         }
         return false;

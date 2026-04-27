@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const is_macos = target.result.os.tag == .macos;
-    const use_lld: ?bool = if (target.result.os.tag == .linux) false else null;
+    const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
     const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
 
     const termscene_mod = b.createModule(.{
@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "ttytris",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
 
     const termscene_demo = b.addExecutable(.{
         .name = "termscene-demo",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/termscene-demo/main.zig"),
             .target = target,
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const kitty_placement_repro = b.addExecutable(.{
         .name = "kitty-placement-repro",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/kitty-placement-repro/main.zig"),
             .target = target,
@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
 
     const kitty_show_ppm = b.addExecutable(.{
         .name = "kitty-show-ppm",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/kitty-show-ppm/main.zig"),
             .target = target,
@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
@@ -92,18 +92,25 @@ pub fn build(b: *std.Build) void {
     katzensteg_lib.root_module.omit_frame_pointer = false;
     if (is_macos) katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     katzensteg_lib.linkSystemLibrary("SDL2");
-    katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (is_macos) {
-        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_lib.linkFramework("Accelerate");
         katzensteg_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
+        katzensteg_lib.version_script = b.path("src/katzensteg/katzensteg_linux.map");
+        katzensteg_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_lib);
 
     const katzensteg_unlinked_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg-unlinked",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
@@ -116,11 +123,18 @@ pub fn build(b: *std.Build) void {
     katzensteg_unlinked_lib.root_module.strip = false;
     katzensteg_unlinked_lib.root_module.omit_frame_pointer = false;
     katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
-    katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
     if (is_macos) {
-        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/yuv_convert_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_unlinked_lib.linkFramework("Accelerate");
         katzensteg_unlinked_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
+        katzensteg_unlinked_lib.version_script = b.path("src/katzensteg/katzensteg_linux.map");
+        katzensteg_unlinked_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_unlinked_lib);
     if (is_macos and builtin.os.tag == .macos) {
@@ -141,7 +155,7 @@ pub fn build(b: *std.Build) void {
 
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/probes/basic_sdl_demo.zig"),
             .target = target,
@@ -156,7 +170,7 @@ pub fn build(b: *std.Build) void {
 
     const katzensteg_input_probe = b.addExecutable(.{
         .name = "katzensteg-input-probe",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -173,7 +187,7 @@ pub fn build(b: *std.Build) void {
 
     const katzensteg_gl_probe = b.addExecutable(.{
         .name = "katzensteg-gl-probe",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -197,7 +211,7 @@ pub fn build(b: *std.Build) void {
         const katzensteg_vulkan_layer = b.addLibrary(.{
             .linkage = .dynamic,
             .name = "katzensteg-vulkan-layer",
-            .use_lld = use_lld,
+            .use_llvm = use_llvm,
             .root_module = b.createModule(.{
                 .target = target,
                 .optimize = optimize,
@@ -210,7 +224,7 @@ pub fn build(b: *std.Build) void {
 
         const katzensteg_vulkan_probe = b.addExecutable(.{
             .name = "katzensteg-vulkan-probe",
-            .use_lld = use_lld,
+            .use_llvm = use_llvm,
             .root_module = b.createModule(.{
                 .target = target,
                 .optimize = optimize,
@@ -241,7 +255,7 @@ pub fn build(b: *std.Build) void {
 
     const katzensteg_launcher = b.addExecutable(.{
         .name = "katzensteg",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
@@ -251,7 +265,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(katzensteg_launcher);
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
@@ -268,7 +282,7 @@ pub fn build(b: *std.Build) void {
 
     const debug_exe = b.addExecutable(.{
         .name = "ttytris-debug",
-        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
