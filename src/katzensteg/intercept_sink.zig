@@ -31,26 +31,6 @@ const SurfaceView = extern struct {
     refcount: i32,
 };
 
-fn sdlTexture(handle: CoreHandle) ?*sdl.SDL_Texture {
-    return sdl_adapter.ptrFromHandle(sdl.SDL_Texture, handle);
-}
-
-fn sdlRenderer(handle: CoreHandle) ?*sdl.SDL_Renderer {
-    return sdl_adapter.ptrFromHandle(sdl.SDL_Renderer, handle);
-}
-
-fn sdlWindow(handle: CoreHandle) ?*sdl.SDL_Window {
-    return sdl_adapter.ptrFromHandle(sdl.SDL_Window, handle);
-}
-
-fn toSdlRect(rect: CoreRect) sdl.SDL_Rect {
-    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
-}
-
-fn toSdlPoint(point: CorePoint) sdl.SDL_Point {
-    return .{ .x = point.x, .y = point.y };
-}
-
 fn pixelFormatToSdl2(format: core.PixelFormat) u32 {
     if (core.keep_producer_tokens) {
         if (format.source) |source| switch (source) {
@@ -230,49 +210,52 @@ fn cloneBytesToPayloadBuffer(rt: *runtime_mod.Runtime, src: ?[]u8) !?[]u8 {
 }
 
 pub fn onCreateWindow(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
-    rt.frame_builder.onCreateWindow(window, w, h);
+    rt.frame_builder.onCreateWindow(sdl_adapter.handleFromPtr(window), w, h);
 }
 
 pub fn onCreateRenderer(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) void {
-    rt.frame_builder.onCreateRenderer(window, renderer);
+    rt.frame_builder.onCreateRenderer(sdl_adapter.handleFromPtr(window), sdl_adapter.handleFromPtr(renderer));
 }
 
 pub fn onDestroyRenderer(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
-    rt.frame_builder.onDestroyRenderer(renderer);
+    rt.frame_builder.onDestroyRenderer(sdl_adapter.handleFromPtr(renderer));
 }
 
 pub fn onCreateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32) void {
-    rt.frame_builder.onCreateTexture(texture, format, w, h);
+    rt.frame_builder.onCreateTexture(sdl_adapter.handleFromPtr(texture), format, w, h);
 }
 
 pub fn onDestroyTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
-    rt.frame_builder.onDestroyTexture(texture);
+    rt.frame_builder.onDestroyTexture(sdl_adapter.handleFromPtr(texture));
 }
 
 pub fn onUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, pixels, pitch);
+        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture_handle, if (core_rect) |*r| r else null, pixels, pitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, pixels, pitch);
+        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture_handle, if (core_rect) |*r| r else null, pixels, pitch);
     }
 }
 
 pub fn onUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
+        rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture_handle, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
+        rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, texture_handle, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
     }
 }
 
 pub fn onUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
+        rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture_handle, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
+        rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, texture_handle, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
     }
 }
 
@@ -448,10 +431,11 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
 }
 
 pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, texture, surface);
+        rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, texture_handle, surface);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onCreateTextureFromSurfaceBatch(&rt.logger, texture, surface);
+        rt.frame_builder.onCreateTextureFromSurfaceBatch(&rt.logger, texture_handle, surface);
     }
 }
 
@@ -493,55 +477,58 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
 
 pub fn onLockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
-    rt.frame_builder.onLockTexture(&rt.logger, texture, if (core_rect) |*r| r else null, pixels, pitch);
+    rt.frame_builder.onLockTexture(&rt.logger, sdl_adapter.handleFromPtr(texture), if (core_rect) |*r| r else null, pixels, pitch);
 }
 
 pub fn onUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, texture);
+    if (rt.active and rt.backend != null) rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, sdl_adapter.handleFromPtr(texture));
 }
 
 pub fn onSetTextureColorMod(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, texture, r, g, b);
+        rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, texture_handle, r, g, b);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onSetTextureColorModBatch(texture, r, g, b);
+        rt.frame_builder.onSetTextureColorModBatch(texture_handle, r, g, b);
     }
 }
 
 pub fn onSetTextureAlphaMod(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, a: u8) void {
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, texture, a);
+        rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, texture_handle, a);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onSetTextureAlphaModBatch(texture, a);
+        rt.frame_builder.onSetTextureAlphaModBatch(texture_handle, a);
     }
 }
 
 pub fn onSetTextureBlendMode(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
-    rt.frame_builder.onSetTextureBlendMode(&rt.logger, texture, blend_mode);
+    rt.frame_builder.onSetTextureBlendMode(&rt.logger, sdl_adapter.handleFromPtr(texture), blend_mode);
 }
 
 pub fn onSetRenderDrawColor(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8) void {
-    rt.frame_builder.onSetRenderDrawColor(renderer, r, g, b, a);
+    rt.frame_builder.onSetRenderDrawColor(sdl_adapter.handleFromPtr(renderer), r, g, b, a);
 }
 
 pub fn onRenderClear(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
-    rt.frame_builder.onRenderClear(renderer);
+    rt.frame_builder.onRenderClear(sdl_adapter.handleFromPtr(renderer));
 }
 
 pub fn onRenderCopy(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
     var core_src = sdl_adapter.rectFromSdl(src);
     var core_dst = sdl_adapter.rectFromSdl(dst);
-    rt.frame_builder.onRenderCopy(&rt.logger, renderer, texture, if (core_src) |*r| r else null, if (core_dst) |*r| r else null);
+    rt.frame_builder.onRenderCopy(&rt.logger, sdl_adapter.handleFromPtr(renderer), sdl_adapter.handleFromPtr(texture), if (core_src) |*r| r else null, if (core_dst) |*r| r else null);
 }
 
 pub fn onRenderCopyEx(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
     var core_src = sdl_adapter.rectFromSdl(src);
     var core_dst = sdl_adapter.rectFromSdl(dst);
-    rt.frame_builder.onRenderCopyEx(&rt.logger, renderer, texture, if (core_src) |*r| r else null, if (core_dst) |*r| r else null, angle, center, flip);
+    var core_center = sdl_adapter.pointFromSdl(center);
+    rt.frame_builder.onRenderCopyEx(&rt.logger, sdl_adapter.handleFromPtr(renderer), sdl_adapter.handleFromPtr(texture), if (core_src) |*r| r else null, if (core_dst) |*r| r else null, angle, if (core_center) |*p| p else null, flip);
 }
 
 pub fn onRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
-    rt.frame_builder.onRenderGeometryRaw(&rt.logger, renderer, texture, xy, xy_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices);
+    rt.frame_builder.onRenderGeometryRaw(&rt.logger, sdl_adapter.handleFromPtr(renderer), sdl_adapter.handleFromPtr(texture), xy, xy_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices);
 }
 
 pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
@@ -565,25 +552,25 @@ pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Re
 
 pub fn onRenderFillRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
-    rt.frame_builder.onRenderFillRect(renderer, if (core_rect) |*r| r else null);
+    rt.frame_builder.onRenderFillRect(sdl_adapter.handleFromPtr(renderer), if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderDrawPoint(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
-    rt.frame_builder.onRenderDrawPoint(renderer, x, y);
+    rt.frame_builder.onRenderDrawPoint(sdl_adapter.handleFromPtr(renderer), x, y);
 }
 
 pub fn onRenderDrawLine(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
-    rt.frame_builder.onRenderDrawLine(&rt.logger, renderer, x1, y1, x2, y2);
+    rt.frame_builder.onRenderDrawLine(&rt.logger, sdl_adapter.handleFromPtr(renderer), x1, y1, x2, y2);
 }
 
 pub fn onRenderSetViewport(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
-    rt.frame_builder.onRenderSetViewport(renderer, if (core_rect) |*r| r else null);
+    rt.frame_builder.onRenderSetViewport(sdl_adapter.handleFromPtr(renderer), if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderSetClipRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
     var core_rect = sdl_adapter.rectFromSdl(rect);
-    rt.frame_builder.onRenderSetClipRect(renderer, if (core_rect) |*r| r else null);
+    rt.frame_builder.onRenderSetClipRect(sdl_adapter.handleFromPtr(renderer), if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
@@ -597,54 +584,59 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
             return;
         }
         const start_ns = std.time.nanoTimestamp();
-        rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.debug_protocol_replies, rt.image_gc);
-        rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
-        const duration = std.time.nanoTimestamp() - start_ns;
-        rt.notePresentDuration(duration);
-        const summary = rt.frame_builder.inspectSummary();
-        const whiskers_frame: inspect_model.FrameRecord = .{
-            .id = 0,
-            .ts_ns = std.time.nanoTimestamp(),
-            .present_ns = duration,
-            .queue_depth = rt.currentQueueDepth(),
-            .skipped_presents = rt.skipped_presents,
-            .render_strategy = summary.render_strategy,
-            .strategy_short = summary.strategy_short,
-            .copies = summary.copies,
-            .fills = summary.fills,
-            .lines = summary.lines,
-            .uploads = summary.uploads,
-            .placements = summary.placements,
-            .bytes_uploaded = summary.bytes_uploaded,
-            .fallback_texture_key = summary.fallback_texture_key,
-            .fallback_reason = summary.fallback_reason,
-            .image_id = summary.image_id,
-            .placement_id = summary.placement_id,
-        };
-        if (rt.whiskers_client) |*client| {
-            rt.inspect_resources.clearRetainingCapacity();
-            rt.frame_builder.appendSnapshotResources(rt.allocator, &rt.inspect_resources) catch return;
-            rt.inspect_resource_records.clearRetainingCapacity();
-            for (rt.inspect_resources.items) |res| {
-                rt.inspect_resource_records.append(rt.allocator, .{
-                    .kind = switch (res.kind) {
-                        .texture => .texture,
-                        .image => .image,
-                        .placement => .placement,
-                    },
-                    .texture_key = res.texture_key,
-                    .placement_id = res.placement_id,
-                    .alias = inspect_model.makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
-                    .w = res.w,
-                    .h = res.h,
-                    .format = res.format,
-                    .blend_mode = res.blend_mode,
-                    .update_count = res.update_count,
-                    .image_id = res.image_id,
-                }) catch {};
-            }
-            client.notePresent(whiskers_frame, rt.inspect_resource_records.items);
+        const renderer_handle = sdl_adapter.handleFromPtr(renderer);
+        onRenderPresentCore(rt, renderer_handle, start_ns);
+    }
+}
+
+fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns: i128) void {
+    rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.debug_protocol_replies, rt.image_gc);
+    rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
+    const duration = std.time.nanoTimestamp() - start_ns;
+    rt.notePresentDuration(duration);
+    const summary = rt.frame_builder.inspectSummary();
+    const whiskers_frame: inspect_model.FrameRecord = .{
+        .id = 0,
+        .ts_ns = std.time.nanoTimestamp(),
+        .present_ns = duration,
+        .queue_depth = rt.currentQueueDepth(),
+        .skipped_presents = rt.skipped_presents,
+        .render_strategy = summary.render_strategy,
+        .strategy_short = summary.strategy_short,
+        .copies = summary.copies,
+        .fills = summary.fills,
+        .lines = summary.lines,
+        .uploads = summary.uploads,
+        .placements = summary.placements,
+        .bytes_uploaded = summary.bytes_uploaded,
+        .fallback_texture_key = summary.fallback_texture_key,
+        .fallback_reason = summary.fallback_reason,
+        .image_id = summary.image_id,
+        .placement_id = summary.placement_id,
+    };
+    if (rt.whiskers_client) |*client| {
+        rt.inspect_resources.clearRetainingCapacity();
+        rt.frame_builder.appendSnapshotResources(rt.allocator, &rt.inspect_resources) catch return;
+        rt.inspect_resource_records.clearRetainingCapacity();
+        for (rt.inspect_resources.items) |res| {
+            rt.inspect_resource_records.append(rt.allocator, .{
+                .kind = switch (res.kind) {
+                    .texture => .texture,
+                    .image => .image,
+                    .placement => .placement,
+                },
+                .texture_key = res.texture_key,
+                .placement_id = res.placement_id,
+                .alias = inspect_model.makeAlias(if (res.texture_key != 0) res.texture_key else res.image_id),
+                .w = res.w,
+                .h = res.h,
+                .format = res.format,
+                .blend_mode = res.blend_mode,
+                .update_count = res.update_count,
+                .image_id = res.image_id,
+            }) catch {};
         }
+        client.notePresent(whiskers_frame, rt.inspect_resource_records.items);
     }
 }
 
@@ -654,59 +646,67 @@ pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height
 
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
-        .create_window => |c| onCreateWindow(rt, sdlWindow(c.window), c.w, c.h),
-        .create_renderer => |c| onCreateRenderer(rt, sdlWindow(c.window), sdlRenderer(c.renderer)),
-        .destroy_renderer => |c| onDestroyRenderer(rt, sdlRenderer(c.renderer)),
-        .create_texture => |c| onCreateTexture(rt, sdlTexture(c.texture), pixelFormatToSdl2(c.format), c.w, c.h),
-        .destroy_texture => |c| onDestroyTexture(rt, sdlTexture(c.texture)),
+        .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
+        .create_renderer => |c| rt.frame_builder.onCreateRenderer(c.window, c.renderer),
+        .destroy_renderer => |c| rt.frame_builder.onDestroyRenderer(c.renderer),
+        .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, pixelFormatToSdl2(c.format), c.w, c.h),
+        .destroy_texture => |c| rt.frame_builder.onDestroyTexture(c.texture),
         .update_texture => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onUpdateTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
+            var rect = c.rect;
+            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
         },
         .update_yuv_texture => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onUpdateYuvTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
+            var rect = c.rect;
+            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
         },
         .update_nv_texture => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onUpdateNvTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
+            var rect = c.rect;
+            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
         },
         .lock_texture => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onLockTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, c.pixels, c.pitch);
+            var rect = c.rect;
+            rt.frame_builder.onLockTexture(&rt.logger, c.texture, if (rect) |*r| r else null, c.pixels, c.pitch);
         },
-        .unlock_texture => |c| onUnlockTexture(rt, sdlTexture(c.texture)),
-        .set_texture_color_mod => |c| onSetTextureColorMod(rt, sdlTexture(c.texture), c.r, c.g, c.b),
-        .set_texture_alpha_mod => |c| onSetTextureAlphaMod(rt, sdlTexture(c.texture), c.a),
-        .set_texture_blend_mode => |c| onSetTextureBlendMode(rt, sdlTexture(c.texture), blendModeToSdl2(c.blend_mode)),
-        .set_render_draw_color => |c| onSetRenderDrawColor(rt, sdlRenderer(c.renderer), c.r, c.g, c.b, c.a),
-        .render_clear => |c| onRenderClear(rt, sdlRenderer(c.renderer)),
+        .unlock_texture => |c| if (rt.active and rt.backend != null) rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, c.texture),
+        .set_texture_color_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, c.texture, c.r, c.g, c.b),
+        .set_texture_alpha_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, c.texture, c.a),
+        .set_texture_blend_mode => |c| rt.frame_builder.onSetTextureBlendMode(&rt.logger, c.texture, blendModeToSdl2(c.blend_mode)),
+        .set_render_draw_color => |c| rt.frame_builder.onSetRenderDrawColor(c.renderer, c.r, c.g, c.b, c.a),
+        .render_clear => |c| rt.frame_builder.onRenderClear(c.renderer),
         .render_copy => |c| {
-            var src = if (c.src) |r| toSdlRect(r) else null;
-            var dst = if (c.dst) |r| toSdlRect(r) else null;
-            onRenderCopy(rt, sdlRenderer(c.renderer), sdlTexture(c.texture), if (src) |*r| r else null, if (dst) |*r| r else null);
+            var src = c.src;
+            var dst = c.dst;
+            rt.frame_builder.onRenderCopy(&rt.logger, c.renderer, c.texture, if (src) |*r| r else null, if (dst) |*r| r else null);
         },
         .render_copy_ex => |c| {
-            var src = if (c.src) |r| toSdlRect(r) else null;
-            var dst = if (c.dst) |r| toSdlRect(r) else null;
-            var center = if (c.center) |p| toSdlPoint(p) else null;
-            onRenderCopyEx(rt, sdlRenderer(c.renderer), sdlTexture(c.texture), if (src) |*r| r else null, if (dst) |*r| r else null, c.angle, if (center) |*p| p else null, c.flip);
+            var src = c.src;
+            var dst = c.dst;
+            var center = c.center;
+            rt.frame_builder.onRenderCopyEx(&rt.logger, c.renderer, c.texture, if (src) |*r| r else null, if (dst) |*r| r else null, c.angle, if (center) |*p| p else null, c.flip);
         },
         .render_fill_rect => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onRenderFillRect(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+            var rect = c.rect;
+            rt.frame_builder.onRenderFillRect(c.renderer, if (rect) |*r| r else null);
         },
-        .render_draw_point => |c| onRenderDrawPoint(rt, sdlRenderer(c.renderer), c.x, c.y),
-        .render_draw_line => |c| onRenderDrawLine(rt, sdlRenderer(c.renderer), c.x1, c.y1, c.x2, c.y2),
+        .render_draw_point => |c| rt.frame_builder.onRenderDrawPoint(c.renderer, c.x, c.y),
+        .render_draw_line => |c| rt.frame_builder.onRenderDrawLine(&rt.logger, c.renderer, c.x1, c.y1, c.x2, c.y2),
         .render_set_viewport => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onRenderSetViewport(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+            var rect = c.rect;
+            rt.frame_builder.onRenderSetViewport(c.renderer, if (rect) |*r| r else null);
         },
         .render_set_clip_rect => |c| {
-            var rect = if (c.rect) |r| toSdlRect(r) else null;
-            onRenderSetClipRect(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+            var rect = c.rect;
+            rt.frame_builder.onRenderSetClipRect(c.renderer, if (rect) |*r| r else null);
         },
-        .render_present => |c| onRenderPresent(rt, sdlRenderer(c.renderer)),
+        .render_present => |c| {
+            if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
+                if (!rt.terminalRenderingEnabled(null, null)) {
+                    rt.notePresentationLayout(.{});
+                    return;
+                }
+                onRenderPresentCore(rt, c.renderer, std.time.nanoTimestamp());
+            }
+        },
         .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),
     }
 }

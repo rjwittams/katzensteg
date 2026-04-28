@@ -388,23 +388,19 @@ pub const FrameBuilder = struct {
         self.next_composite_placement_id = start;
     }
 
-    pub fn onCreateWindow(self: *FrameBuilder, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
-        const key = ptrKey(window);
-        if (key == 0) return;
-        self.windows.put(key, .{ .w = w, .h = h }) catch {};
+    pub fn onCreateWindow(self: *FrameBuilder, window: core.CoreHandle, w: i32, h: i32) void {
+        if (window == 0) return;
+        self.windows.put(window, .{ .w = w, .h = h }) catch {};
     }
 
-    pub fn onCreateRenderer(self: *FrameBuilder, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) void {
-        const renderer_key = ptrKey(renderer);
-        const window_key = ptrKey(window);
-        if (renderer_key == 0) return;
-        const dims = self.windows.get(window_key) orelse WindowRecord{ .w = 640, .h = 480 };
-        self.renderers.put(renderer_key, RendererState.init(self.allocator, dims.w, dims.h)) catch {};
+    pub fn onCreateRenderer(self: *FrameBuilder, window: core.CoreHandle, renderer: core.CoreHandle) void {
+        if (renderer == 0) return;
+        const dims = self.windows.get(window) orelse WindowRecord{ .w = 640, .h = 480 };
+        self.renderers.put(renderer, RendererState.init(self.allocator, dims.w, dims.h)) catch {};
     }
 
-    pub fn onDestroyRenderer(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer) void {
-        const key = ptrKey(renderer);
-        if (self.renderers.fetchRemove(key)) |entry| {
+    pub fn onDestroyRenderer(self: *FrameBuilder, renderer: core.CoreHandle) void {
+        if (self.renderers.fetchRemove(renderer)) |entry| {
             var state = entry.value;
             state.deinit(self.allocator);
         }
@@ -464,15 +460,13 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onCreateTexture(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32) void {
-        const key = ptrKey(texture);
-        if (key == 0) return;
-        self.textures.put(key, .{ .w = w, .h = h, .format = format, .image_id = 0 }) catch {};
+    pub fn onCreateTexture(self: *FrameBuilder, texture: core.CoreHandle, format: sdl.Uint32, w: i32, h: i32) void {
+        if (texture == 0) return;
+        self.textures.put(texture, .{ .w = w, .h = h, .format = format, .image_id = 0 }) catch {};
     }
 
-    pub fn onDestroyTexture(self: *FrameBuilder, texture: ?*sdl.SDL_Texture) void {
-        const key = ptrKey(texture);
-        if (self.textures.fetchRemove(key)) |entry| {
+    pub fn onDestroyTexture(self: *FrameBuilder, texture: core.CoreHandle) void {
+        if (self.textures.fetchRemove(texture)) |entry| {
             if (entry.value.base_rgba) |buf| self.allocator.free(buf);
             if (entry.value.publish_rgba_owned) {
                 if (entry.value.publish_rgba) |buf| self.allocator.free(buf);
@@ -482,14 +476,13 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
+    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
         _ = backend;
         self.onUpdateTextureBatch(logger, texture, rect, pixels, pitch);
     }
 
-    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
-        const key = ptrKey(texture);
-        const record = self.textures.getPtr(key) orelse return;
+    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (rect != null) {
             logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateTexture rects are not supported in this slice");
             return;
@@ -501,13 +494,13 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         _ = backend;
         self.onUpdateYuvTextureBatch(logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
     }
 
-    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (yplane == null or uplane == null or vplane == null) return;
         self.captureYuvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uplane.?, upitch, vplane.?, vpitch) catch |err| switch (err) {
             error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported YUV texture pixel format: {d}", .{record.format}),
@@ -516,13 +509,13 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         _ = backend;
         self.onUpdateNvTextureBatch(logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
     }
 
-    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (yplane == null or uvplane == null) return;
         self.captureNvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uvplane.?, uvpitch) catch |err| switch (err) {
             error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported NV texture pixel format: {d}", .{record.format}),
@@ -531,14 +524,13 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
+    pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, surface: ?*sdl.SDL_Surface) void {
         _ = backend;
         self.onCreateTextureFromSurfaceBatch(logger, texture, surface);
     }
 
-    pub fn onCreateTextureFromSurfaceBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-        const key = ptrKey(texture);
-        const record = self.textures.getPtr(key) orelse return;
+    pub fn onCreateTextureFromSurfaceBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, surface: ?*sdl.SDL_Surface) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (surface == null) return;
         const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
             logger.writeOnceScoped(.warn, .frame_builder, "SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
@@ -556,41 +548,41 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
+    pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, r: u8, g: u8, b: u8) void {
         _ = logger;
         _ = backend;
         self.onSetTextureColorModBatch(texture, r, g, b);
     }
 
-    pub fn onSetTextureColorModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureColorModBatch(self: *FrameBuilder, texture: core.CoreHandle, r: u8, g: u8, b: u8) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (!setTextureColorMod(record, r, g, b)) return;
         self.invalidateTexturePublication(record);
     }
 
-    pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, a: u8) void {
+    pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, a: u8) void {
         _ = logger;
         _ = backend;
         self.onSetTextureAlphaModBatch(texture, a);
     }
 
-    pub fn onSetTextureAlphaModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, a: u8) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureAlphaModBatch(self: *FrameBuilder, texture: core.CoreHandle, a: u8) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (!setTextureAlphaMod(record, a)) return;
         self.invalidateTexturePublication(record);
     }
 
-    pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, blend_mode: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         record.blend_mode = blend_mode;
-        logger.writeFmtScoped(.info, .frame_builder, "SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ ptrKey(texture), blendModeName(blend_mode), blend_mode });
+        logger.writeFmtScoped(.info, .frame_builder, "SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ texture, blendModeName(blend_mode), blend_mode });
         if (blend_mode != sdl.SDL_BLENDMODE_NONE and blend_mode != sdl.SDL_BLENDMODE_BLEND) {
             logger.writeFmtScoped(.info, .frame_builder, "unsupported SDL texture blend mode {s} ({d}); some compositions may require framebuffer-side compositing before terminal upload", .{ blendModeName(blend_mode), blend_mode });
         }
     }
 
-    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (rect != null) {
             logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_LockTexture rects are not supported yet");
             record.locked_pixels = null;
@@ -602,8 +594,8 @@ pub const FrameBuilder = struct {
         record.locked_pitch = pitch;
     }
 
-    pub fn onUnlockTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUnlockTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle) void {
+        const record = self.textures.getPtr(texture) orelse return;
         const pixels = record.locked_pixels orelse return;
         const pitch = record.locked_pitch;
         record.locked_pixels = null;
@@ -726,23 +718,23 @@ pub const FrameBuilder = struct {
         return replacement;
     }
 
-    pub fn onSetRenderDrawColor(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onSetRenderDrawColor(self: *FrameBuilder, renderer: core.CoreHandle, r: u8, g: u8, b: u8, a: u8) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.draw_color = .{ r, g, b, a };
     }
 
-    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.viewport = if (rect) |r| r.* else core.CoreRect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
     }
 
-    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.clip_rect = if (rect) |r| applyViewportRect(r.*, state.viewport) else null;
     }
 
-    pub fn onRenderClear(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderClear(self: *FrameBuilder, renderer: core.CoreHandle) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.had_clear = true;
         state.clear_color = state.draw_color;
         state.copies.clearRetainingCapacity();
@@ -750,23 +742,23 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
-    pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderFillRect(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         const fill = rect orelse &core.CoreRect{ .x = 0, .y = 0, .w = state.viewport.w, .h = state.viewport.h };
         const mapped = applyViewportRect(fill.*, state.viewport);
         const clipped = clipRect(mapped, state.clip_rect) orelse return;
         state.fills.append(self.allocator, .{ .rect = clipped, .color = state.draw_color }) catch {};
     }
 
-    pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: core.CoreHandle, x: i32, y: i32) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         const mapped = applyViewportRect(.{ .x = x, .y = y, .w = 1, .h = 1 }, state.viewport);
         const clipped = clipRect(mapped, state.clip_rect) orelse return;
         state.fills.append(self.allocator, .{ .rect = clipped, .color = state.draw_color }) catch {};
     }
 
-    pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, x1: i32, y1: i32, x2: i32, y2: i32) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         if (x1 != x2 and y1 != y2) {
             logger.writeOnceScoped(.warn, .frame_builder, "diagonal SDL_RenderDrawLine mirroring not implemented yet; skipping line");
             return;
@@ -788,11 +780,11 @@ pub const FrameBuilder = struct {
         state.lines.append(self.allocator, mapped) catch {};
     }
 
-    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
+    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
         self.recordRenderCopy(logger, renderer, texture, src, dst);
     }
 
-    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
+    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect, angle: f64, center: ?*const core.CorePoint, flip: c_int) void {
         _ = center;
         if (angle != 0 or flip != sdl.SDL_FLIP_NONE) {
             logger.writeOnceScoped(.warn, .frame_builder, "SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
@@ -805,9 +797,9 @@ pub const FrameBuilder = struct {
         dst: core.CoreRect,
     };
 
-    pub fn onRenderGeometryRaw(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
+    pub fn onRenderGeometryRaw(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
         if (xy_stride <= 0 or uv_stride <= 0 or num_vertices <= 0 or num_indices < 0) return;
-        const record = self.textures.get(ptrKey(texture)) orelse return;
+        const record = self.textures.get(texture) orelse return;
         const copy = geometryRawAsCopy(xy, @intCast(xy_stride), uv, @intCast(uv_stride), @intCast(num_vertices), indices, @intCast(num_indices), @intCast(size_indices), record.w, record.h) orelse {
             logger.writeOnceScoped(.warn, .frame_builder, "unsupported SDL_RenderGeometryRaw shape; skipping geometry");
             return;
@@ -875,9 +867,9 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        const texture_key = ptrKey(texture);
+    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        const texture_key = texture;
         const record = self.textures.get(texture_key) orelse return;
         if (record.blend_mode != sdl.SDL_BLENDMODE_NONE and record.blend_mode != sdl.SDL_BLENDMODE_BLEND) {
             logger.writeFmtScoped(
@@ -912,10 +904,10 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
+    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
         var job = self.buildPresentJob(logger, tty, renderer, bg_only) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "buildPresentJob failed: {any}", .{err});
-            const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+            const state = self.renderers.getPtr(renderer) orelse return;
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
             state.lines.clearRetainingCapacity();
@@ -925,8 +917,8 @@ pub const FrameBuilder = struct {
         self.renderPresentJob(logger, tty, engine, backend, renderer, &job, debug_protocol_replies, image_gc);
     }
 
-    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer, bg_only: bool) !PresentJob {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return error.UnknownRenderer;
+    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool) !PresentJob {
+        const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
         const use_composite = !bg_only and self.needsFramebufferComposite(state);
         if (self.debug_composite) {
             if (self.changedPresentDebugSignature(state, use_composite)) |signature| {
@@ -999,8 +991,8 @@ pub const FrameBuilder = struct {
         return .{ .scene = .{ .had_clear = state.had_clear, .clear_color = state.clear_color, .publications = try self.allocator.dupe(AssetPublication, publications_list.items), .sprites = try self.allocator.dupe(SceneSprite, sprites_list.items), .solids = try self.allocator.dupe(SolidSprite, solids_list.items) } };
     }
 
-    pub fn renderPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, job: *PresentJob, debug_protocol_replies: bool, image_gc: bool) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn renderPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, job: *PresentJob, debug_protocol_replies: bool, image_gc: bool) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         switch (job.*) {
             .framebuffer => |fb| {
                 engine.beginScene();
@@ -1101,8 +1093,8 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
-    pub fn renderPresentJobBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: ?*sdl.SDL_Renderer, job: *PresentJob, writer: anytype) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn renderPresentJobBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle, job: *PresentJob, writer: anytype) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         if (!sink.isAttached()) {
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
@@ -1206,9 +1198,9 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer) presentation_layout.PresentationLayout {
+    pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: core.CoreHandle) presentation_layout.PresentationLayout {
         var layout = presentation_layout.PresentationLayout{};
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return layout;
+        const state = self.renderers.getPtr(renderer) orelse return layout;
         switch (self.composite_mode) {
             .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
         }
@@ -3402,7 +3394,7 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
         .base_opaque = true,
     });
 
-    var job = try builder.buildPresentJob(&logger, &tty, @ptrFromInt(renderer_key), false);
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false);
     defer job.deinit(std.testing.allocator);
 
     const scene_job = job.scene;
@@ -3760,16 +3752,16 @@ test "recorded copy snapshots unsupported blend mode without sticking renderer" 
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
-    const texture: ?*sdl.SDL_Texture = @ptrFromInt(0x1000);
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2000);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 8, 8));
-    try builder.textures.put(FrameBuilder.ptrKey(texture), .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0 });
+    const texture: core.CoreHandle = 0x1000;
+    const renderer: core.CoreHandle = 0x2000;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 8, 8));
+    try builder.textures.put(texture, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0 });
 
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
     builder.onSetTextureBlendMode(&logger, texture, sdl.SDL_BLENDMODE_ADD);
-    const state = builder.renderers.getPtr(FrameBuilder.ptrKey(renderer)).?;
+    const state = builder.renderers.getPtr(renderer).?;
     try std.testing.expect(!builder.needsFramebufferComposite(state));
 
     builder.recordRenderCopy(&logger, renderer, texture, null, null);
