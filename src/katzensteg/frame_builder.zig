@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
+const core = @import("core_types.zig");
 const sdl = @import("katzensteg_sdl");
 const real_sdl = @import("real_sdl.zig");
 const termscene = @import("termscene");
@@ -112,7 +113,7 @@ const CompositeStripEntry = struct {
 };
 
 const CompositeTileState = struct {
-    src_rect: sdl.SDL_Rect,
+    src_rect: core.CoreRect,
     dest_rect: ts_types.CellRect,
     image_id: u32 = 0,
     placement_id: u32 = 0,
@@ -134,15 +135,15 @@ const PresentDebugSignature = struct {
     missing_textures: usize = 0,
     first_copy_texture_key: usize = 0,
     first_copy_blend_mode: i32 = 0,
-    first_copy_src: sdl.SDL_Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    first_copy_dst: sdl.SDL_Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    first_copy_src: core.CoreRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    first_copy_dst: core.CoreRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 };
 
 const RendererState = struct {
     window_w: i32,
     window_h: i32,
-    viewport: sdl.SDL_Rect,
-    clip_rect: ?sdl.SDL_Rect = null,
+    viewport: core.CoreRect,
+    clip_rect: ?core.CoreRect = null,
     draw_color: [4]u8 = .{ 0, 0, 0, 255 },
     clear_color: [4]u8 = .{ 0, 0, 0, 255 },
     had_clear: bool = false,
@@ -239,8 +240,8 @@ const WindowRecord = struct {
 
 const RenderCopyOp = struct {
     texture_key: usize,
-    src: sdl.SDL_Rect,
-    dst: sdl.SDL_Rect,
+    src: core.CoreRect,
+    dst: core.CoreRect,
     blend_mode: i32 = sdl.SDL_BLENDMODE_NONE,
     color_mod: [3]u8 = .{ 255, 255, 255 },
     alpha_mod: u8 = 255,
@@ -249,7 +250,7 @@ const RenderCopyOp = struct {
 };
 
 const FillRectOp = struct {
-    rect: sdl.SDL_Rect,
+    rect: core.CoreRect,
     color: [4]u8,
 };
 
@@ -481,12 +482,12 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
+    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
         _ = backend;
         self.onUpdateTextureBatch(logger, texture, rect, pixels, pitch);
     }
 
-    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
+    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
         const key = ptrKey(texture);
         const record = self.textures.getPtr(key) orelse return;
         if (rect != null) {
@@ -500,12 +501,12 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         _ = backend;
         self.onUpdateYuvTextureBatch(logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
     }
 
-    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uplane == null or vplane == null) return;
         self.captureYuvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uplane.?, upitch, vplane.?, vpitch) catch |err| switch (err) {
@@ -515,12 +516,12 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         _ = backend;
         self.onUpdateNvTextureBatch(logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
     }
 
-    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uvplane == null) return;
         self.captureNvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uvplane.?, uvpitch) catch |err| switch (err) {
@@ -588,7 +589,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
+    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (rect != null) {
             logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_LockTexture rects are not supported yet");
@@ -676,7 +677,7 @@ pub const FrameBuilder = struct {
         self.invalidateTexturePublication(record);
     }
 
-    fn captureYuvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const sdl.SDL_Rect, yplane: [*]const u8, ypitch: i32, uplane: [*]const u8, upitch: i32, vplane: [*]const u8, vpitch: i32) !void {
+    fn captureYuvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const core.CoreRect, yplane: [*]const u8, ypitch: i32, uplane: [*]const u8, upitch: i32, vplane: [*]const u8, vpitch: i32) !void {
         if (record.format != sdl.SDL_PIXELFORMAT_IYUV and record.format != sdl.SDL_PIXELFORMAT_YV12) return error.UnsupportedTextureFormat;
         if (rect != null) return error.UnsupportedTextureRect;
         if (record.w <= 0 or record.h <= 0 or ypitch <= 0 or upitch <= 0 or vpitch <= 0) return error.UnsupportedTextureFormat;
@@ -695,7 +696,7 @@ pub const FrameBuilder = struct {
         self.invalidateTexturePublication(record);
     }
 
-    fn captureNvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const sdl.SDL_Rect, yplane: [*]const u8, ypitch: i32, uvplane: [*]const u8, uvpitch: i32) !void {
+    fn captureNvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const core.CoreRect, yplane: [*]const u8, ypitch: i32, uvplane: [*]const u8, uvpitch: i32) !void {
         if (record.format != sdl.SDL_PIXELFORMAT_NV12 and record.format != sdl.SDL_PIXELFORMAT_NV21) return error.UnsupportedTextureFormat;
         if (rect != null) return error.UnsupportedTextureRect;
         if (record.w <= 0 or record.h <= 0 or ypitch <= 0 or uvpitch <= 0) return error.UnsupportedTextureFormat;
@@ -730,12 +731,12 @@ pub const FrameBuilder = struct {
         state.draw_color = .{ r, g, b, a };
     }
 
-    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
+    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        state.viewport = if (rect) |r| r.* else sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
+        state.viewport = if (rect) |r| r.* else core.CoreRect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
     }
 
-    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
+    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         state.clip_rect = if (rect) |r| applyViewportRect(r.*, state.viewport) else null;
     }
@@ -749,9 +750,9 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
-    pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
+    pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const core.CoreRect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        const fill = rect orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.viewport.w, .h = state.viewport.h };
+        const fill = rect orelse &core.CoreRect{ .x = 0, .y = 0, .w = state.viewport.w, .h = state.viewport.h };
         const mapped = applyViewportRect(fill.*, state.viewport);
         const clipped = clipRect(mapped, state.clip_rect) orelse return;
         state.fills.append(self.allocator, .{ .rect = clipped, .color = state.draw_color }) catch {};
@@ -777,7 +778,7 @@ pub const FrameBuilder = struct {
             .y2 = y2 + state.viewport.y,
             .color = state.draw_color,
         };
-        const line_rect = sdl.SDL_Rect{
+        const line_rect = core.CoreRect{
             .x = @min(mapped.x1, mapped.x2),
             .y = @min(mapped.y1, mapped.y2),
             .w = @max(1, @max(mapped.x1, mapped.x2) - @min(mapped.x1, mapped.x2) + 1),
@@ -787,11 +788,11 @@ pub const FrameBuilder = struct {
         state.lines.append(self.allocator, mapped) catch {};
     }
 
-    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
+    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
         self.recordRenderCopy(logger, renderer, texture, src, dst);
     }
 
-    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
+    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
         _ = center;
         if (angle != 0 or flip != sdl.SDL_FLIP_NONE) {
             logger.writeOnceScoped(.warn, .frame_builder, "SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
@@ -800,8 +801,8 @@ pub const FrameBuilder = struct {
     }
 
     pub const GeometryCopy = struct {
-        src: sdl.SDL_Rect,
-        dst: sdl.SDL_Rect,
+        src: core.CoreRect,
+        dst: core.CoreRect,
     };
 
     pub fn onRenderGeometryRaw(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
@@ -874,7 +875,7 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
+    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         const texture_key = ptrKey(texture);
         const record = self.textures.get(texture_key) orelse return;
@@ -886,7 +887,7 @@ pub const FrameBuilder = struct {
                 .{ blendModeName(record.blend_mode), record.blend_mode, texture_key, record.alpha_mod, record.color_mod[0], record.color_mod[1], record.color_mod[2] },
             );
         }
-        const dst_rect = dst orelse &sdl.SDL_Rect{
+        const dst_rect = dst orelse &core.CoreRect{
             .x = 0,
             .y = 0,
             .w = if (state.viewport.w > 0) state.viewport.w else state.window_w,
@@ -895,7 +896,7 @@ pub const FrameBuilder = struct {
         if (dst == null) {
             logger.writeOnceScoped(.warn, .frame_builder, "null destination rect approximated to full viewport");
         }
-        const src_rect = src orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = record.w, .h = record.h };
+        const src_rect = src orelse &core.CoreRect{ .x = 0, .y = 0, .w = record.w, .h = record.h };
         const mapped_dst = applyViewportRect(dst_rect.*, state.viewport);
         if (clipCopyRect(src_rect.*, mapped_dst, state.clip_rect, record.w, record.h)) |clipped| {
             state.copies.append(self.allocator, .{
@@ -1740,7 +1741,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn tileDiffers(current: []const u8, previous: []const u8, window_w: i32, rect: sdl.SDL_Rect) bool {
+    fn tileDiffers(current: []const u8, previous: []const u8, window_w: i32, rect: core.CoreRect) bool {
         var row: i32 = 0;
         while (row < rect.h) : (row += 1) {
             const x: usize = @intCast(rect.x);
@@ -1752,7 +1753,7 @@ pub const FrameBuilder = struct {
         return false;
     }
 
-    fn extractTileRgba(dst: []u8, src: []const u8, window_w: i32, rect: sdl.SDL_Rect) void {
+    fn extractTileRgba(dst: []u8, src: []const u8, window_w: i32, rect: core.CoreRect) void {
         const src_w: usize = @intCast(window_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
@@ -1765,7 +1766,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn blitTileIntoStrip(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, rect: sdl.SDL_Rect, dst_x: i32, dst_y: i32) void {
+    fn blitTileIntoStrip(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, rect: core.CoreRect, dst_x: i32, dst_y: i32) void {
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
         const row_bytes: usize = @intCast(rect.w * 4);
@@ -1781,7 +1782,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn copyTileToLast(dst: []u8, window_w: i32, src: []const u8, rect: sdl.SDL_Rect) void {
+    fn copyTileToLast(dst: []u8, window_w: i32, src: []const u8, rect: core.CoreRect) void {
         const dst_w: usize = @intCast(window_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
@@ -1873,7 +1874,7 @@ pub const FrameBuilder = struct {
             @call(.never_inline, clearFramebuffer, .{ buf, state.window_w, state.window_h, state.clear_color });
             for (state.fills.items) |fill| @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, fill.rect, fill.color });
             for (state.lines.items) |line| {
-                const rect = sdl.SDL_Rect{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) };
+                const rect = core.CoreRect{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) };
                 @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, rect, line.color });
             }
             break :blk 0;
@@ -2398,7 +2399,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeFill(dst: []u8, dst_w: i32, dst_h: i32, rect: sdl.SDL_Rect, color: [4]u8) void {
+    fn compositeFill(dst: []u8, dst_w: i32, dst_h: i32, rect: core.CoreRect, color: [4]u8) void {
         const clipped = clipRect(rect, .{ .x = 0, .y = 0, .w = dst_w, .h = dst_h }) orelse return;
         var y = clipped.y;
         while (y < clipped.y + clipped.h) : (y += 1) {
@@ -2517,7 +2518,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopy(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
+    fn compositeCopy(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
         if (dst_rect.w <= 0 or dst_rect.h <= 0 or src_rect.w <= 0 or src_rect.h <= 0) return;
         const x_start = @max(0, -dst_rect.x);
         const y_start = @max(0, -dst_rect.y);
@@ -2609,7 +2610,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopyScaledNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
+    fn compositeCopyScaledNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
         _ = src_opaque;
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
@@ -2697,7 +2698,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn precomputeScaledRuns(runs: []ScaledRun, run_count: *usize, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, x_end: i32) bool {
+    fn precomputeScaledRuns(runs: []ScaledRun, run_count: *usize, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, x_end: i32) bool {
         var stepper = ScaledRunStepper.init(src_rect.w, dst_rect.w, x_start);
         var x = x_start;
         var count: usize = 0;
@@ -2755,7 +2756,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopyReference(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
+    fn compositeCopyReference(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_rect: core.CoreRect, dst_rect: core.CoreRect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
         if (dst_rect.w <= 0 or dst_rect.h <= 0 or src_rect.w <= 0 or src_rect.h <= 0) return;
         const x_start = @max(0, -dst_rect.x);
         const y_start = @max(0, -dst_rect.y);
@@ -2846,7 +2847,7 @@ pub const FrameBuilder = struct {
         return color_mod[0] == 255 and color_mod[1] == 255 and color_mod[2] == 255 and alpha_mod == 255;
     }
 
-    fn compositeCopySameSizeNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
+    fn compositeCopySameSizeNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
         const row_pixels: usize = @intCast(x_end - x_start);
@@ -2989,7 +2990,7 @@ pub const FrameBuilder = struct {
         return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
     }
 
-    fn mapRectToCells(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
+    fn mapRectToCells(dst: core.CoreRect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const cols: i32 = @intCast(tty_cols);
         const rows: i32 = @intCast(tty_rows);
         const col = 1 + @divTrunc(dst.x * cols, @max(window_w, 1));
@@ -2999,7 +3000,7 @@ pub const FrameBuilder = struct {
         return .{ .col = col, .row = row, .w = w, .h = h };
     }
 
-    fn mapRectToCellsInRegion(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+    fn mapRectToCellsInRegion(dst: core.CoreRect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
         const col = region.col + @divTrunc(dst.x * region.w, @max(window_w, 1));
         const row = region.row + @divTrunc(dst.y * region.h, @max(window_h, 1));
         const w = @max(1, @divTrunc(dst.w * region.w, @max(window_w, 1)));
@@ -3023,11 +3024,11 @@ pub const FrameBuilder = struct {
         return mapRectToCellsInRegion(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, region);
     }
 
-    fn applyViewportRect(rect: sdl.SDL_Rect, viewport: sdl.SDL_Rect) sdl.SDL_Rect {
+    fn applyViewportRect(rect: core.CoreRect, viewport: core.CoreRect) core.CoreRect {
         return .{ .x = rect.x + viewport.x, .y = rect.y + viewport.y, .w = rect.w, .h = rect.h };
     }
 
-    fn clipRect(rect: sdl.SDL_Rect, clip: ?sdl.SDL_Rect) ?sdl.SDL_Rect {
+    fn clipRect(rect: core.CoreRect, clip: ?core.CoreRect) ?core.CoreRect {
         const c = clip orelse return rect;
         const x1 = @max(rect.x, c.x);
         const y1 = @max(rect.y, c.y);
@@ -3037,7 +3038,7 @@ pub const FrameBuilder = struct {
         return .{ .x = x1, .y = y1, .w = x2 - x1, .h = y2 - y1 };
     }
 
-    fn clipCopyRect(src: sdl.SDL_Rect, dst: sdl.SDL_Rect, clip: ?sdl.SDL_Rect, tex_w: i32, tex_h: i32) ?struct { src: sdl.SDL_Rect, dst: sdl.SDL_Rect } {
+    fn clipCopyRect(src: core.CoreRect, dst: core.CoreRect, clip: ?core.CoreRect, tex_w: i32, tex_h: i32) ?struct { src: core.CoreRect, dst: core.CoreRect } {
         const clipped_dst = clipRect(dst, clip) orelse return null;
         if (clipped_dst.x == dst.x and clipped_dst.y == dst.y and clipped_dst.w == dst.w and clipped_dst.h == dst.h) {
             return .{ .src = src, .dst = dst };
@@ -3215,13 +3216,13 @@ test "fixed-point scaled composite matches reference division loop" {
     var base_dst_b: [dst_w * dst_h * 4]u8 = undefined;
     for (&base_dst_a, 0..) |*byte, i| byte.* = @intCast((i * 19 + 3) % 251);
 
-    const src_rects = [_]sdl.SDL_Rect{
+    const src_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 5, .h = 4 },
         .{ .x = -1, .y = 0, .w = 5, .h = 4 },
         .{ .x = 1, .y = -1, .w = 3, .h = 4 },
         .{ .x = 2, .y = 1, .w = 2, .h = 2 },
     };
-    const dst_rects = [_]sdl.SDL_Rect{
+    const dst_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 7, .h = 6 },
         .{ .x = -2, .y = 1, .w = 8, .h = 4 },
         .{ .x = 2, .y = -1, .w = 4, .h = 8 },
@@ -3267,8 +3268,8 @@ test "opaque blend scaled composite matches overwrite semantics" {
     for (&expected, 0..) |*byte, i| byte.* = @intCast((i * 29 + 13) % 251);
     actual = expected;
 
-    const src_rect = sdl.SDL_Rect{ .x = 0, .y = 0, .w = src_w, .h = src_h };
-    const dst_rect = sdl.SDL_Rect{ .x = 0, .y = 0, .w = dst_w, .h = dst_h };
+    const src_rect = core.CoreRect{ .x = 0, .y = 0, .w = src_w, .h = src_h };
+    const dst_rect = core.CoreRect{ .x = 0, .y = 0, .w = dst_w, .h = dst_h };
     FrameBuilder.compositeCopyReference(&expected, dst_w, dst_h, &src, src_w, src_h, src_rect, dst_rect, sdl.SDL_BLENDMODE_BLEND, .{ 255, 255, 255 }, 255);
     FrameBuilder.compositeCopy(&actual, dst_w, dst_h, &src, src_w, src_h, true, src_rect, dst_rect, sdl.SDL_BLENDMODE_BLEND, .{ 255, 255, 255 }, 255);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
@@ -3291,13 +3292,13 @@ test "effective overwrite fast paths match reference across clipped scaled copie
     var base: [dst_w * dst_h * 4]u8 = undefined;
     for (&base, 0..) |*byte, idx| byte.* = @intCast((idx * 43 + 9) % 251);
 
-    const src_rects = [_]sdl.SDL_Rect{
+    const src_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 6, .h = 5 },
         .{ .x = 1, .y = 1, .w = 4, .h = 3 },
         .{ .x = -1, .y = 0, .w = 5, .h = 4 },
         .{ .x = 2, .y = -1, .w = 4, .h = 5 },
     };
-    const dst_rects = [_]sdl.SDL_Rect{
+    const dst_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 8, .h = 7 },
         .{ .x = -2, .y = 1, .w = 9, .h = 4 },
         .{ .x = 2, .y = -2, .w = 5, .h = 9 },
@@ -4042,6 +4043,6 @@ test "axis-aligned render geometry raw maps textured quad to copy rect" {
         64,
     ) orelse return error.ExpectedGeometryCopy;
 
-    try std.testing.expectEqual(sdl.SDL_Rect{ .x = 0, .y = 0, .w = 64, .h = 64 }, copy.src);
-    try std.testing.expectEqual(sdl.SDL_Rect{ .x = 10, .y = 20, .w = 32, .h = 32 }, copy.dst);
+    try std.testing.expectEqual(core.CoreRect{ .x = 0, .y = 0, .w = 64, .h = 64 }, copy.src);
+    try std.testing.expectEqual(core.CoreRect{ .x = 10, .y = 20, .w = 32, .h = 32 }, copy.dst);
 }

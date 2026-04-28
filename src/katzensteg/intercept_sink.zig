@@ -250,26 +250,29 @@ pub fn onDestroyTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) vo
 }
 
 pub fn onUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
+    var core_rect = sdl_adapter.rectFromSdl(rect);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, rect, pixels, pitch);
+        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, pixels, pitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture, rect, pixels, pitch);
+        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, pixels, pitch);
     }
 }
 
 pub fn onUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+    var core_rect = sdl_adapter.rectFromSdl(rect);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+        rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+        rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, yplane, ypitch, uplane, upitch, vplane, vpitch);
     }
 }
 
 pub fn onUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+    var core_rect = sdl_adapter.rectFromSdl(rect);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uvplane, uvpitch);
+        rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
+        rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, texture, if (core_rect) |*r| r else null, yplane, ypitch, uvplane, uvpitch);
     }
 }
 
@@ -489,7 +492,8 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
 }
 
 pub fn onLockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
-    rt.frame_builder.onLockTexture(&rt.logger, texture, rect, pixels, pitch);
+    var core_rect = sdl_adapter.rectFromSdl(rect);
+    rt.frame_builder.onLockTexture(&rt.logger, texture, if (core_rect) |*r| r else null, pixels, pitch);
 }
 
 pub fn onUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
@@ -525,11 +529,15 @@ pub fn onRenderClear(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) voi
 }
 
 pub fn onRenderCopy(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
-    rt.frame_builder.onRenderCopy(&rt.logger, renderer, texture, src, dst);
+    var core_src = sdl_adapter.rectFromSdl(src);
+    var core_dst = sdl_adapter.rectFromSdl(dst);
+    rt.frame_builder.onRenderCopy(&rt.logger, renderer, texture, if (core_src) |*r| r else null, if (core_dst) |*r| r else null);
 }
 
 pub fn onRenderCopyEx(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
-    rt.frame_builder.onRenderCopyEx(&rt.logger, renderer, texture, src, dst, angle, center, flip);
+    var core_src = sdl_adapter.rectFromSdl(src);
+    var core_dst = sdl_adapter.rectFromSdl(dst);
+    rt.frame_builder.onRenderCopyEx(&rt.logger, renderer, texture, if (core_src) |*r| r else null, if (core_dst) |*r| r else null, angle, center, flip);
 }
 
 pub fn onRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
@@ -550,13 +558,14 @@ pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Re
     dispatchCommand(rt, .{ .render_copy = .{
         .renderer = sdl_adapter.handleFromPtr(renderer),
         .texture = sdl_adapter.handleFromPtr(texture),
-        .src = sdl_adapter.rectFromSdl(&copy.src),
-        .dst = sdl_adapter.rectFromSdl(&copy.dst),
+        .src = copy.src,
+        .dst = copy.dst,
     } });
 }
 
 pub fn onRenderFillRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-    rt.frame_builder.onRenderFillRect(renderer, rect);
+    var core_rect = sdl_adapter.rectFromSdl(rect);
+    rt.frame_builder.onRenderFillRect(renderer, if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderDrawPoint(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
@@ -568,11 +577,13 @@ pub fn onRenderDrawLine(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, 
 }
 
 pub fn onRenderSetViewport(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-    rt.frame_builder.onRenderSetViewport(renderer, rect);
+    var core_rect = sdl_adapter.rectFromSdl(rect);
+    rt.frame_builder.onRenderSetViewport(renderer, if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderSetClipRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-    rt.frame_builder.onRenderSetClipRect(renderer, rect);
+    var core_rect = sdl_adapter.rectFromSdl(rect);
+    rt.frame_builder.onRenderSetClipRect(renderer, if (core_rect) |*r| r else null);
 }
 
 pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {

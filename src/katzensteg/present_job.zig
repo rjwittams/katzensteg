@@ -1,6 +1,6 @@
 const std = @import("std");
+const core = @import("core_types.zig");
 const termscene = @import("termscene");
-const sdl = @import("katzensteg_sdl");
 
 const ts_types = termscene.types;
 
@@ -23,7 +23,7 @@ pub const AssetPublication = union(enum) {
 
 pub const SceneSprite = struct {
     asset_id: u64,
-    source_rect: sdl.SDL_Rect,
+    source_rect: core.CoreRect,
     dest_rect: ts_types.CellRect,
     z: i32,
 };
