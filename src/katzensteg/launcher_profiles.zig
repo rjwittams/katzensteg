@@ -1132,6 +1132,17 @@ test "bundled profiles include gamescope SDL Vulkan probe" {
     try std.testing.expect(profile.seed_files.len > 0);
 }
 
+test "bundled profiles include embed basic SDL probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.embed.basic_sdl").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/basic-sdl-demo", profile.target);
+    try std.testing.expectEqual(config.PresentationSink.jsonl_fd, profile.runtime.presentation_sink);
+    try std.testing.expectEqual(config.OutputProfile.direct_apc, profile.runtime.output_profile.?);
+}
+
 test "bundled profiles include Tempest Rising gamescope launch target" {
     var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();
