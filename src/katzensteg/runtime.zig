@@ -11,6 +11,7 @@ const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const render_batch_sink_mod = @import("render_batch_sink.zig");
+const upload_path_mod = @import("upload_path.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
 const sdl = @import("katzensteg_sdl");
@@ -666,9 +667,14 @@ pub const Runtime = struct {
     }
 
     fn processBatchControlLine(self: *Runtime, line: []const u8) void {
-        const attach = render_batch_protocol.parseAttachMessage(self.allocator, line) catch return;
+        var attach = render_batch_protocol.parseAttachMessage(self.allocator, line) catch return;
+        defer render_batch_protocol.deinitAttachMessage(self.allocator, &attach);
         if (self.batch_sink) |*sink| {
             sink.attach(attach.rect_cells);
+            sink.setUploadPolicy(attach.upload) catch |err| {
+                log.warn("batch upload policy failed: {any}", .{err});
+                return;
+            };
             self.frame_builder.setImageIdRange(attach.image_ids);
             self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
         }
@@ -1164,8 +1170,7 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
 }
 
 fn makeUploadPath(allocator: std.mem.Allocator) ![]u8 {
-    const tmpdir = if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
-    return try std.fmt.allocPrint(allocator, "{s}/tty-graphics-protocol-katzensteg-{d}.rgba", .{ tmpdir, std.c.getpid() });
+    return upload_path_mod.makeUploadPath(allocator);
 }
 
 fn mapOutputProfile(profile: ?config_mod.OutputProfile) ?ts_kitty.OutputProfile {

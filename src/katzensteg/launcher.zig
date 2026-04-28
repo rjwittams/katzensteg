@@ -716,7 +716,6 @@ fn applyEmbedJsonlRuntime(runtime: *@import("config.zig").RuntimeConfig, fds: Em
     runtime.presentation_sink = .jsonl_fd;
     runtime.presentation_fd = fds.presentation_fd;
     runtime.presentation_control_fd = fds.control_fd;
-    runtime.output_profile = .direct_apc;
 }
 
 fn resolveProfileStdout(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
@@ -1529,11 +1528,12 @@ test "launcher rejects attach exec without argv terminator" {
 
 test "launcher embed jsonl overrides runtime presentation fds" {
     var runtime = defaultRuntimeConfig();
+    const original_output_profile = runtime.output_profile;
     applyEmbedJsonlRuntime(&runtime, .{ .presentation_fd = 100, .control_fd = 101 });
     try std.testing.expectEqual(@import("config.zig").PresentationSink.jsonl_fd, runtime.presentation_sink);
     try std.testing.expectEqual(@as(i32, 100), runtime.presentation_fd.?);
     try std.testing.expectEqual(@as(i32, 101), runtime.presentation_control_fd.?);
-    try std.testing.expectEqual(@import("config.zig").OutputProfile.direct_apc, runtime.output_profile.?);
+    try std.testing.expectEqual(original_output_profile, runtime.output_profile);
 }
 
 test "launcher target parser skips options and supports option terminator" {

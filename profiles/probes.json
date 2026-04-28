@@ -17,8 +17,7 @@
     "runtime.embed_jsonl": {
       "hidden": true,
       "runtime": {
-        "presentation_sink": "jsonl_fd",
-        "output_profile": "direct_apc"
+        "presentation_sink": "jsonl_fd"
       }
     },
     "probe.embed.basic_sdl": {

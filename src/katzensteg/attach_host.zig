@@ -3,12 +3,15 @@ const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const DirectTty = @import("direct_tty.zig").DirectTty;
+const upload_path_mod = @import("upload_path.zig");
+const ts_kitty = @import("termscene").kitty;
 
 pub const AttachOptions = struct {
     window_id: []const u8 = "main",
     rect_cells: render_batch_protocol.PresentationRectCells,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
+    upload: render_batch_protocol.UploadPolicy = .{ .profile = .direct_apc },
 };
 
 pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
@@ -21,12 +24,21 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
     try writer.print("{d},{d}", .{ options.placement_ids.start, options.placement_ids.end });
-    try writer.writeAll("]]}}\n");
+    try writer.writeAll("]]},\"upload\":{\"profile\":");
+    try render_batch_protocol.writeJsonString(writer, @tagName(options.upload.profile));
+    if (options.upload.path) |path| {
+        try writer.writeAll(",\"path\":");
+        try render_batch_protocol.writeJsonString(writer, path);
+    }
+    try writer.print(",\"high_water\":{d}", .{options.upload.high_water});
+    try writer.writeAll("}}\n");
 }
 
 pub fn runExec(allocator: std.mem.Allocator, argv: []const []const u8) !u8 {
     var tty = try DirectTty.init();
     defer tty.deinit();
+    var upload = try selectUploadPolicy(allocator, tty.file);
+    defer deinitUploadPolicy(allocator, &upload);
 
     return runExecWithWriter(allocator, argv, tty.file.deprecatedWriter(), .{
         .rect_cells = .{
@@ -35,6 +47,7 @@ pub fn runExec(allocator: std.mem.Allocator, argv: []const []const u8) !u8 {
             .rows = tty.rows,
             .cols = tty.cols,
         },
+        .upload = upload,
     });
 }
 
@@ -101,6 +114,39 @@ fn childTermExitCode(term: std.process.Child.Term) u8 {
     };
 }
 
+fn selectUploadPolicy(allocator: std.mem.Allocator, tty: std.fs.File) !render_batch_protocol.UploadPolicy {
+    const path = try upload_path_mod.makeUploadPath(allocator);
+    errdefer allocator.free(path);
+    {
+        const probe_file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = true });
+        defer probe_file.close();
+        try probe_file.writeAll(&[_]u8{ 0, 0, 0, 255 });
+    }
+    const caps = ts_kitty.capabilities.probe(allocator, tty, path) catch {
+        std.fs.deleteFileAbsolute(path) catch {};
+        allocator.free(path);
+        return .{ .profile = .direct_apc };
+    };
+    const profile = ts_kitty.profile.choose(caps);
+    return switch (profile) {
+        .direct_apc => blk: {
+            std.fs.deleteFileAbsolute(path) catch {};
+            allocator.free(path);
+            break :blk .{ .profile = .direct_apc };
+        },
+        .file_whole => .{ .profile = .file_whole, .path = path },
+        .file_offset_ring => .{ .profile = .file_offset_ring, .path = path },
+    };
+}
+
+fn deinitUploadPolicy(allocator: std.mem.Allocator, upload: *render_batch_protocol.UploadPolicy) void {
+    if (upload.path) |path| {
+        std.fs.deleteFileAbsolute(path) catch {};
+        allocator.free(path);
+    }
+    upload.path = null;
+}
+
 test "attach host writes hello and attach control messages" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
@@ -114,6 +160,21 @@ test "attach host writes hello and attach control messages" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"hello\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"attach\"") != null);
+}
+
+test "attach host advertises file upload policy" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writeInitialControl(out.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
+        .upload = .{ .profile = .file_whole, .path = "/tmp/katzensteg-embed-upload", .high_water = 4096 },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"upload\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"file_whole\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"path\":\"/tmp/katzensteg-embed-upload\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"high_water\":4096") != null);
 }
 
 test "attach host exec loop applies fake peer frame batch" {

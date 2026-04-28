@@ -70,7 +70,7 @@ When an optional env value, arg, or seed file path has no value for the active p
 
 In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSONL protocol input. The launcher stays quiet, keeps the target program stdout on the normal profile log path, and passes dedicated fds to the preloaded runtime for render batches and control messages.
 
-The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect and id ranges. Until attach is received, the runtime suppresses graphics batches. First-cut embed mode uses inline terminal bytes in JSON strings and direct APC-style uploads; socket transport, target stdout events, file/shm payload side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
 
 ## Attach Host Mode
 
@@ -80,7 +80,7 @@ The first control message that enables graphics is an `attach` for `window_id: "
 ./zig-out/bin/katzensteg attach --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
 ```
 
-The outer `katzensteg attach` owns `/dev/tty`, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
+The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
 
 This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
 

@@ -1140,7 +1140,7 @@ test "bundled profiles include embed basic SDL probe" {
     try std.testing.expect(!profile.isBroken());
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/basic-sdl-demo", profile.target);
     try std.testing.expectEqual(config.PresentationSink.jsonl_fd, profile.runtime.presentation_sink);
-    try std.testing.expectEqual(config.OutputProfile.direct_apc, profile.runtime.output_profile.?);
+    try std.testing.expectEqual(@as(?config.OutputProfile, null), profile.runtime.output_profile);
 }
 
 test "bundled profiles include Tempest Rising gamescope launch target" {

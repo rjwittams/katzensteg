@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -19,6 +20,12 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
 
         env = os.environ.copy()
         env.setdefault("KATZENSTEG_REPO", str(REPO))
+        upload_base = str(Path(tempfile.gettempdir()) / f"katzensteg-embed-smoke-{os.getpid()}.rgba")
+        upload_first = Path(upload_base + ".0")
+        try:
+            upload_first.unlink()
+        except FileNotFoundError:
+            pass
         proc = subprocess.Popen(
             [str(launcher), "--embed-jsonl", "probe.embed.basic_sdl"],
             cwd=REPO,
@@ -44,6 +51,11 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
                         "image": [[100000, 199999]],
                         "placement": [[200000, 299999]],
                     },
+                    "upload": {
+                        "profile": "file_whole",
+                        "path": upload_base,
+                        "high_water": 4096,
+                    },
                 }
             )
             + "\n"
@@ -53,6 +65,8 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
         deadline = time.monotonic() + 8.0
         lines = []
         frame_batch = None
+        upload_was_file = False
+        upload_file_size = 0
         try:
             while time.monotonic() < deadline:
                 line = proc.stdout.readline()
@@ -66,6 +80,11 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
                 message = json.loads(line)
                 if message.get("type") == "frame_batch":
                     frame_batch = message
+                    groups = frame_batch["groups"]
+                    if groups["uploads"]:
+                        upload_was_file = "t=f" in groups["uploads"][0]
+                        if upload_first.exists():
+                            upload_file_size = upload_first.stat().st_size
                     break
         finally:
             if proc.poll() is None:
@@ -84,7 +103,13 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
         self.assertIsNotNone(frame_batch, f"no frame_batch in stdout={lines!r} stderr={stderr!r}")
         groups = frame_batch["groups"]
         self.assertGreater(len(groups["uploads"]), 0)
+        self.assertTrue(upload_was_file)
+        self.assertGreater(upload_file_size, 0)
         self.assertGreater(len(groups["placements"]), 0)
+        try:
+            upload_first.unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

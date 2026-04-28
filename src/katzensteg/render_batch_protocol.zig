@@ -27,12 +27,25 @@ pub const IdRange = struct {
     end: u32,
 };
 
+pub const UploadProfile = enum {
+    direct_apc,
+    file_whole,
+    file_offset_ring,
+};
+
+pub const UploadPolicy = struct {
+    profile: UploadProfile,
+    path: ?[]const u8 = null,
+    high_water: u64 = 10 * 1024 * 1024,
+};
+
 pub const AttachMessage = struct {
     window_id: []const u8,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
     image_ids: IdRange,
     placement_ids: IdRange,
+    upload: UploadPolicy,
 };
 
 pub const ParseError = error{
@@ -107,6 +120,7 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
     if (id_ranges_value != .object) return error.InvalidMessage;
     const image_ids = try parseFirstIdRange(id_ranges_value.object.get("image") orelse return error.InvalidMessage);
     const placement_ids = try parseFirstIdRange(id_ranges_value.object.get("placement") orelse return error.InvalidMessage);
+    const upload = try parseUploadPolicy(allocator, root.get("upload"));
 
     return .{
         .window_id = "main",
@@ -114,7 +128,13 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
         .aspect = aspect,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
+        .upload = upload,
     };
+}
+
+pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage) void {
+    if (attach.upload.path) |path| allocator.free(path);
+    attach.upload.path = null;
 }
 
 fn parseAspect(value: []const u8) ?PresentationAspect {
@@ -122,6 +142,32 @@ fn parseAspect(value: []const u8) ?PresentationAspect {
     if (std.mem.eql(u8, value, "contain")) return .contain;
     if (std.mem.eql(u8, value, "cover")) return .cover;
     return null;
+}
+
+fn parseUploadProfile(value: []const u8) ?UploadProfile {
+    if (std.mem.eql(u8, value, "direct_apc")) return .direct_apc;
+    if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
+    if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
+    return null;
+}
+
+fn parseUploadPolicy(allocator: std.mem.Allocator, value: ?std.json.Value) !UploadPolicy {
+    const upload_value = value orelse return .{ .profile = .direct_apc };
+    if (upload_value != .object) return error.InvalidMessage;
+    const profile_value = upload_value.object.get("profile") orelse return error.InvalidMessage;
+    if (profile_value != .string) return error.InvalidMessage;
+    const profile = parseUploadProfile(profile_value.string) orelse return error.InvalidMessage;
+    const path: ?[]const u8 = if (upload_value.object.get("path")) |path_value| blk: {
+        if (path_value != .string) return error.InvalidMessage;
+        break :blk try allocator.dupe(u8, path_value.string);
+    } else null;
+    errdefer if (path) |owned_path| allocator.free(owned_path);
+    if (profile != .direct_apc and path == null) return error.InvalidMessage;
+    const high_water: u64 = if (upload_value.object.get("high_water")) |high_water_value|
+        try jsonU64(high_water_value)
+    else
+        10 * 1024 * 1024;
+    return .{ .profile = profile, .path = path, .high_water = high_water };
 }
 
 fn parseRect(value: std.json.Value) !PresentationRectCells {
@@ -156,6 +202,12 @@ fn jsonU32(value: std.json.Value) !u32 {
     return @intCast(value.integer);
 }
 
+fn jsonU64(value: std.json.Value) !u64 {
+    if (value != .integer) return error.InvalidMessage;
+    if (value.integer < 0 or value.integer > std.math.maxInt(u64)) return error.InvalidMessage;
+    return @intCast(value.integer);
+}
+
 test "frame batch JSON escapes terminal control bytes" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
@@ -179,11 +231,27 @@ test "attach message parses window geometry and id ranges" {
         \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
     ;
 
-    const attach = try parseAttachMessage(std.testing.allocator, msg);
+    var attach = try parseAttachMessage(std.testing.allocator, msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
 
     try std.testing.expectEqualStrings("main", attach.window_id);
     try std.testing.expectEqual(PresentationAspect.contain, attach.aspect);
     try std.testing.expectEqual(PresentationRectCells{ .row = 4, .col = 1, .rows = 24, .cols = 80 }, attach.rect_cells);
     try std.testing.expectEqual(IdRange{ .start = 100000, .end = 199999 }, attach.image_ids);
     try std.testing.expectEqual(IdRange{ .start = 200000, .end = 299999 }, attach.placement_ids);
+    try std.testing.expectEqual(UploadProfile.direct_apc, attach.upload.profile);
+    try std.testing.expectEqual(@as(?[]const u8, null), attach.upload.path);
+}
+
+test "attach message parses host-selected file upload policy" {
+    const msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/katzensteg-embed-upload","high_water":4096}}
+    ;
+
+    var attach = try parseAttachMessage(std.testing.allocator, msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+
+    try std.testing.expectEqual(UploadProfile.file_whole, attach.upload.profile);
+    try std.testing.expectEqualStrings("/tmp/katzensteg-embed-upload", attach.upload.path.?);
+    try std.testing.expectEqual(@as(u64, 4096), attach.upload.high_water);
 }
