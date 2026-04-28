@@ -12,6 +12,8 @@ const Command = enum {
 
 const AttachArgs = struct {
     exec_argv: []const []const u8,
+    rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null,
+    aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit,
 };
 
 const ExpansionContext = struct {
@@ -163,7 +165,10 @@ pub fn main() !void {
                 std.debug.print("{s}", .{usageText()});
                 std.process.exit(64);
             };
-            const exit_code = try attach_host.runExec(allocator, attach.exec_argv);
+            const exit_code = try attach_host.runExec(allocator, attach.exec_argv, .{
+                .rect_cells = attach.rect_cells,
+                .aspect = attach.aspect,
+            });
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -178,7 +183,7 @@ fn usageText() []const u8 {
         \\Usage:
         \\  katzensteg --help
         \\  katzensteg [options] <target>
-        \\  katzensteg attach --exec -- <program> [args...]
+        \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
         \\  katzensteg
         \\
         \\Options:
@@ -214,19 +219,51 @@ fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
     if (!std.mem.eql(u8, args[1], "attach")) return null;
 
     var saw_exec = false;
-    for (args[2..], 2..) |arg, idx| {
+    var rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null;
+    var aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit;
+    var idx: usize = 2;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
         if (std.mem.eql(u8, arg, "--")) {
             if (!saw_exec or idx + 1 >= args.len) return null;
-            return .{ .exec_argv = args[idx + 1 ..] };
+            return .{ .exec_argv = args[idx + 1 ..], .rect_cells = rect_cells, .aspect = aspect };
         }
         if (std.mem.eql(u8, arg, "--exec")) {
             if (saw_exec) return null;
             saw_exec = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--rect")) {
+            if (idx + 1 >= args.len or rect_cells != null) return null;
+            idx += 1;
+            rect_cells = parseAttachRect(args[idx]) orelse return null;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--aspect")) {
+            if (idx + 1 >= args.len) return null;
+            idx += 1;
+            aspect = @import("render_batch_protocol.zig").parseAspect(args[idx]) orelse return null;
+            continue;
+        }
         return null;
     }
     return null;
+}
+
+fn parseAttachRect(value: []const u8) ?@import("render_batch_protocol.zig").PresentationRectCells {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    const x = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const y = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const w = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const h = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    if (parts.next() != null) return null;
+    return .{ .row = y, .col = x, .rows = h, .cols = w };
+}
+
+fn parsePositiveI32(value: []const u8) ?i32 {
+    const parsed = std.fmt.parseInt(i32, value, 10) catch return null;
+    if (parsed <= 0) return null;
+    return parsed;
 }
 
 fn launcherDryRun(args: []const []const u8) bool {
@@ -1519,11 +1556,24 @@ test "launcher parses attach exec argv command" {
     try std.testing.expectEqualStrings("katzensteg", attach.exec_argv[0]);
     try std.testing.expectEqualStrings("--embed-jsonl", attach.exec_argv[1]);
     try std.testing.expectEqualStrings("probe.embed.basic_sdl", attach.exec_argv[2]);
+    try std.testing.expectEqual(@as(?@import("render_batch_protocol.zig").PresentationRectCells, null), attach.rect_cells);
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationAspect.fit, attach.aspect);
+}
+
+test "launcher parses attach rect and aspect before exec argv" {
+    const args = &.{ "katzensteg", "attach", "--rect", "5,3,80,24", "--aspect", "stretch", "--exec", "--", "katzensteg", "--embed-jsonl", "probe.embed.basic_sdl" };
+    const attach = parseAttachArgs(args).?;
+
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationRectCells{ .row = 3, .col = 5, .rows = 24, .cols = 80 }, attach.rect_cells.?);
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationAspect.stretch, attach.aspect);
+    try std.testing.expectEqualStrings("katzensteg", attach.exec_argv[0]);
 }
 
 test "launcher rejects attach exec without argv terminator" {
     try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "katzensteg" }) == null);
     try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "--" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--rect", "0,1,80,24", "--exec", "--", "katzensteg" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--aspect", "contain", "--exec", "--", "katzensteg" }) != null);
 }
 
 test "launcher embed jsonl overrides runtime presentation fds" {

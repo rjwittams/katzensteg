@@ -1413,17 +1413,18 @@ pub const FrameBuilder = struct {
         state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
 
-        const dest = batchContainedCellRect(fb.width, fb.height, sink.presentationRect());
+        const dest = batchPlacementRect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
+        const source = batchSourceRectForAspect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
         try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
         try sink.place(dest.row, dest.col, .{
             .image_id = state.composite_image_id,
             .placement_id = state.composite_placement_id,
             .cols = dest.w,
             .rows = dest.h,
-            .src_x = 0,
-            .src_y = 0,
-            .src_w = fb.width,
-            .src_h = fb.height,
+            .src_x = source.x,
+            .src_y = source.y,
+            .src_w = source.w,
+            .src_h = source.h,
             .z = 100,
         });
         if (state.rememberFullscreenPlacement(old_placement)) |evicted| try self.deleteCompositePlacementBatch(sink, evicted);
@@ -1433,7 +1434,26 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn batchContainedCellRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
+    const PixelRect = struct {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    };
+
+    fn batchPlacementRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) ts_types.CellRect {
+        return switch (aspect) {
+            .stretch, .cover => .{
+                .col = rect.col,
+                .row = rect.row,
+                .w = rect.cols,
+                .h = rect.rows,
+            },
+            .fit => batchFitCellRect(source_w, source_h, rect),
+        };
+    }
+
+    fn batchFitCellRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
         var tty: DirectTty = undefined;
         tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
         tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
@@ -1445,6 +1465,25 @@ pub const FrameBuilder = struct {
             .row = rect.row + contained.row - 1,
             .w = contained.w,
             .h = contained.h,
+        };
+    }
+
+    fn batchSourceRectForAspect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) PixelRect {
+        if (aspect != .cover) return .{ .x = 0, .y = 0, .w = source_w, .h = source_h };
+        const safe_w = @max(1, source_w);
+        const safe_h = @max(1, source_h);
+        const cell_w_px: f64 = 10.0;
+        const cell_h_px: f64 = 20.0;
+        const dest_w = @as(f64, @floatFromInt(@max(1, rect.cols))) * cell_w_px;
+        const dest_h = @as(f64, @floatFromInt(@max(1, rect.rows))) * cell_h_px;
+        const scale = @max(dest_w / @as(f64, @floatFromInt(safe_w)), dest_h / @as(f64, @floatFromInt(safe_h)));
+        const crop_w = std.math.clamp(@as(i32, @intFromFloat(@ceil(dest_w / scale))), 1, safe_w);
+        const crop_h = std.math.clamp(@as(i32, @intFromFloat(@ceil(dest_h / scale))), 1, safe_h);
+        return .{
+            .x = @divTrunc(safe_w - crop_w, 2),
+            .y = @divTrunc(safe_h - crop_h, 2),
+            .w = crop_w,
+            .h = crop_h,
         };
     }
 
@@ -3432,6 +3471,66 @@ test "frame builder batch placement contains source inside attached rect" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;5H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
+}
+
+test "frame builder batch placement stretches source to attached rect" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2002);
+    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 }, .stretch);
+
+    const rgba = try std.testing.allocator.alloc(u8, 320 * 240 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[3;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=40") != null);
+}
+
+test "frame builder batch placement covers attached rect by cropping source" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2003);
+    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 }, .cover);
+
+    const rgba = try std.testing.allocator.alloc(u8, 320 * 240 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[3;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "x=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "w=300,h=240") != null);
 }
 
 test "composite builder can start at last full framebuffer overwrite" {

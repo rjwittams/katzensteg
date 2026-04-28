@@ -9,9 +9,15 @@ const ts_kitty = @import("termscene").kitty;
 pub const AttachOptions = struct {
     window_id: []const u8 = "main",
     rect_cells: render_batch_protocol.PresentationRectCells,
+    aspect: render_batch_protocol.PresentationAspect = .fit,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
     upload: render_batch_protocol.UploadPolicy = .{ .profile = .direct_apc },
+};
+
+pub const RunExecOptions = struct {
+    rect_cells: ?render_batch_protocol.PresentationRectCells = null,
+    aspect: render_batch_protocol.PresentationAspect = .fit,
 };
 
 pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
@@ -20,7 +26,9 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     try render_batch_protocol.writeJsonString(writer, options.window_id);
     try writer.writeAll(",\"rect_cells\":{");
     try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
-    try writer.writeAll("},\"aspect\":\"contain\",\"id_ranges\":{\"image\":[[");
+    try writer.writeAll("},\"aspect\":");
+    try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
+    try writer.writeAll(",\"id_ranges\":{\"image\":[[");
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
     try writer.print("{d},{d}", .{ options.placement_ids.start, options.placement_ids.end });
@@ -34,19 +42,20 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     try writer.writeAll("}}\n");
 }
 
-pub fn runExec(allocator: std.mem.Allocator, argv: []const []const u8) !u8 {
+pub fn runExec(allocator: std.mem.Allocator, argv: []const []const u8, options: RunExecOptions) !u8 {
     var tty = try DirectTty.init();
     defer tty.deinit();
     var upload = try selectUploadPolicy(allocator, tty.file);
     defer deinitUploadPolicy(allocator, &upload);
 
     return runExecWithWriter(allocator, argv, tty.file.deprecatedWriter(), .{
-        .rect_cells = .{
+        .rect_cells = options.rect_cells orelse .{
             .row = 1,
             .col = 1,
             .rows = tty.rows,
             .cols = tty.cols,
         },
+        .aspect = options.aspect,
         .upload = upload,
     });
 }
@@ -160,6 +169,7 @@ test "attach host writes hello and attach control messages" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"hello\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"attach\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aspect\":\"fit\"") != null);
 }
 
 test "attach host advertises file upload policy" {
@@ -175,6 +185,19 @@ test "attach host advertises file upload policy" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"file_whole\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"path\":\"/tmp/katzensteg-embed-upload\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"high_water\":4096") != null);
+}
+
+test "attach host writes requested aspect policy" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writeInitialControl(out.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = 3, .col = 5, .rows = 24, .cols = 80 },
+        .aspect = .stretch,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"rect_cells\":{\"row\":3,\"col\":5,\"rows\":24,\"cols\":80}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aspect\":\"stretch\"") != null);
 }
 
 test "attach host exec loop applies fake peer frame batch" {

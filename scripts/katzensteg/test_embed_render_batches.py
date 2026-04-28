@@ -46,7 +46,7 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
                     "type": "attach",
                     "window_id": "main",
                     "rect_cells": {"row": 1, "col": 1, "rows": 24, "cols": 80},
-                    "aspect": "contain",
+                    "aspect": "fit",
                     "id_ranges": {
                         "image": [[100000, 199999]],
                         "placement": [[200000, 299999]],

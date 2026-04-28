@@ -34,6 +34,7 @@ pub const RenderBatchSink = struct {
     after: std.ArrayList([]u8) = .empty,
     attached: bool = false,
     rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
+    aspect: render_batch_protocol.PresentationAspect = .fit,
     upload: UploadState = .direct_apc,
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
@@ -56,7 +57,12 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn attach(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells) void {
+        self.attachWithAspect(rect_cells, .fit);
+    }
+
+    pub fn attachWithAspect(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) void {
         self.rect_cells = rect_cells;
+        self.aspect = aspect;
         self.attached = true;
     }
 
@@ -72,6 +78,10 @@ pub const RenderBatchSink = struct {
 
     pub fn presentationRect(self: *const RenderBatchSink) render_batch_protocol.PresentationRectCells {
         return self.rect_cells;
+    }
+
+    pub fn presentationAspect(self: *const RenderBatchSink) render_batch_protocol.PresentationAspect {
+        return self.aspect;
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {

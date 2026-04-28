@@ -76,7 +76,7 @@ This keeps process launch separate from visual presentation. The target applicat
 The first cut only needs one window, `main`, but the protocol should still frame this as attachment:
 
 ```json
-{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
 ```
 
 After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, it can send another `attach` or `viewport` message for the same `window_id`.
@@ -152,7 +152,7 @@ The protocol includes a `window_id` from the start, even though the first implem
 The host sends viewport information whenever the target placement changes:
 
 ```json
-{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain"}
+{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
 ```
 
 The runtime should treat this as the current destination policy for that logical render window. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes.
@@ -162,10 +162,10 @@ This geometry model should not be treated as embed-only. Direct `/dev/tty` mode 
 Initial aspect policies can stay small:
 
 - `stretch`
-- `contain`
+- `fit`
 - `cover`
 
-The first proof should probably use `contain`.
+The first proof should probably use `fit`.
 
 ## Id Ranges
 
@@ -189,8 +189,8 @@ Host to runtime:
 
 ```json
 {"type":"hello","protocol":"katzensteg.render.v0"}
-{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
-{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain"}
+{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
+{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
 {"type":"shutdown"}
 ```
 

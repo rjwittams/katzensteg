@@ -78,9 +78,10 @@ The first control message that enables graphics is an `attach` for `window_id: "
 
 ```sh
 ./zig-out/bin/katzensteg attach --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+./zig-out/bin/katzensteg attach --rect 5,3,80,24 --aspect fit --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
 ```
 
-The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
+The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. `--rect x,y,w,h` uses 1-based terminal cells and maps to `col,row,cols,rows`; `--aspect` accepts `fit`, `stretch`, or `cover`. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
 
 This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
 

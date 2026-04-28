@@ -670,7 +670,7 @@ pub const Runtime = struct {
         var attach = render_batch_protocol.parseAttachMessage(self.allocator, line) catch return;
         defer render_batch_protocol.deinitAttachMessage(self.allocator, &attach);
         if (self.batch_sink) |*sink| {
-            sink.attach(attach.rect_cells);
+            sink.attachWithAspect(attach.rect_cells, attach.aspect);
             sink.setUploadPolicy(attach.upload) catch |err| {
                 log.warn("batch upload policy failed: {any}", .{err});
                 return;

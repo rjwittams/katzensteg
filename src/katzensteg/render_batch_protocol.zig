@@ -10,8 +10,8 @@ pub const BatchView = struct {
 };
 
 pub const PresentationAspect = enum {
+    fit,
     stretch,
-    contain,
     cover,
 };
 
@@ -137,9 +137,11 @@ pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage)
     attach.upload.path = null;
 }
 
-fn parseAspect(value: []const u8) ?PresentationAspect {
+pub fn parseAspect(value: []const u8) ?PresentationAspect {
+    if (std.mem.eql(u8, value, "fit")) return .fit;
+    // Compatibility with the first draft of the embed protocol.
+    if (std.mem.eql(u8, value, "contain")) return .fit;
     if (std.mem.eql(u8, value, "stretch")) return .stretch;
-    if (std.mem.eql(u8, value, "contain")) return .contain;
     if (std.mem.eql(u8, value, "cover")) return .cover;
     return null;
 }
@@ -228,14 +230,14 @@ test "frame batch JSON escapes terminal control bytes" {
 
 test "attach message parses window geometry and id ranges" {
     const msg =
-        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
     ;
 
     var attach = try parseAttachMessage(std.testing.allocator, msg);
     defer deinitAttachMessage(std.testing.allocator, &attach);
 
     try std.testing.expectEqualStrings("main", attach.window_id);
-    try std.testing.expectEqual(PresentationAspect.contain, attach.aspect);
+    try std.testing.expectEqual(PresentationAspect.fit, attach.aspect);
     try std.testing.expectEqual(PresentationRectCells{ .row = 4, .col = 1, .rows = 24, .cols = 80 }, attach.rect_cells);
     try std.testing.expectEqual(IdRange{ .start = 100000, .end = 199999 }, attach.image_ids);
     try std.testing.expectEqual(IdRange{ .start = 200000, .end = 299999 }, attach.placement_ids);
@@ -245,7 +247,7 @@ test "attach message parses window geometry and id ranges" {
 
 test "attach message parses host-selected file upload policy" {
     const msg =
-        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/katzensteg-embed-upload","high_water":4096}}
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/katzensteg-embed-upload","high_water":4096}}
     ;
 
     var attach = try parseAttachMessage(std.testing.allocator, msg);
@@ -254,4 +256,15 @@ test "attach message parses host-selected file upload policy" {
     try std.testing.expectEqual(UploadProfile.file_whole, attach.upload.profile);
     try std.testing.expectEqualStrings("/tmp/katzensteg-embed-upload", attach.upload.path.?);
     try std.testing.expectEqual(@as(u64, 4096), attach.upload.high_water);
+}
+
+test "attach message accepts contain as fit compatibility alias" {
+    const msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+
+    var attach = try parseAttachMessage(std.testing.allocator, msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+
+    try std.testing.expectEqual(PresentationAspect.fit, attach.aspect);
 }
