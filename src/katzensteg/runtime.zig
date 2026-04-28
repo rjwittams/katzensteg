@@ -596,12 +596,12 @@ pub const Runtime = struct {
 
     pub fn renderBatchPresent(self: *Runtime, renderer: ?*sdl.SDL_Renderer) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
+        self.pollBatchControl();
         if (!self.shouldPresent()) return;
         if (!self.terminalRenderingEnabled(null, renderer)) {
             self.notePresentationLayout(.{});
             return;
         }
-        self.pollBatchControl();
         if (!self.batch_sink.?.isAttached()) return;
 
         const start_ns = std.time.nanoTimestamp();
@@ -690,12 +690,23 @@ pub const Runtime = struct {
                 sink.viewport(viewport.rect_cells, viewport.aspect);
             },
             .detach => {
-                if (self.batch_writer) |writer| {
-                    self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
-                }
-                sink.detach();
+                self.detachBatchWindow(sink, "main");
+            },
+            .shutdown => {
+                self.detachBatchWindow(sink, "main");
             },
         }
+    }
+
+    fn detachBatchWindow(self: *Runtime, sink: *RenderBatchSink, window_id: []const u8) void {
+        if (self.batch_writer) |writer| {
+            const file_writer = writer.deprecatedWriter();
+            self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, file_writer);
+            render_batch_protocol.writeDetachedJsonl(file_writer, window_id) catch |err| {
+                log.warn("batch detached ack failed: {any}", .{err});
+            };
+        }
+        sink.detach();
     }
 
     fn batchVirtualTty(self: *Runtime) DirectTty {

@@ -60,11 +60,12 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
             )
             + "\n"
         )
-        proc.stdin.close()
+        proc.stdin.flush()
 
         deadline = time.monotonic() + 8.0
         lines = []
         frame_batch = None
+        detached = False
         upload_was_file = False
         upload_file_size = 0
         try:
@@ -86,7 +87,26 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
                         if upload_first.exists():
                             upload_file_size = upload_first.stat().st_size
                     break
+            if frame_batch is not None and proc.poll() is None:
+                proc.stdin.write(json.dumps({"type": "shutdown"}) + "\n")
+                proc.stdin.flush()
+                shutdown_deadline = time.monotonic() + 5.0
+                while time.monotonic() < shutdown_deadline:
+                    line = proc.stdout.readline()
+                    if not line:
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                        continue
+                    lines.append(line)
+                    self.assertTrue(line.startswith("{"), f"launcher wrote non-JSONL stdout: {line!r}")
+                    message = json.loads(line)
+                    if message.get("type") == "detached" and message.get("window_id") == "main":
+                        detached = True
+                        break
         finally:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
             if proc.poll() is None:
                 proc.terminate()
                 try:
@@ -106,6 +126,7 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
         self.assertTrue(upload_was_file)
         self.assertGreater(upload_file_size, 0)
         self.assertGreater(len(groups["placements"]), 0)
+        self.assertTrue(detached, f"shutdown did not produce detached ack in stdout={lines!r} stderr={stderr!r}")
         try:
             upload_first.unlink()
         except FileNotFoundError:
