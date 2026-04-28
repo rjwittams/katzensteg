@@ -795,6 +795,25 @@ test "external framebuffer present is a frame-local present command" {
     try std.testing.expect(isPresentCommand(cmd));
 }
 
+test "sync dispatch recycles cloned external framebuffer payload" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.intercept_mode = .sync_compose;
+    var pixels = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    intercept_sink.dispatchCommand(&runtime, .{
+        .external_framebuffer_present = .{
+            .width = 1,
+            .height = 2,
+            .format = .rgba8,
+            .pixels = pixels[0..],
+        },
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), runtime.payload_pool.buffers.items.len);
+    try std.testing.expectEqual(@as(usize, pixels.len), runtime.payload_pool.bytes);
+}
+
 test "SDL mouse events are recognized for ownership handoff" {
     var event: sdl.SDL_Event = undefined;
     event.type = sdl.SDL_MOUSEMOTION;
