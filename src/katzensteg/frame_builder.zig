@@ -9,6 +9,7 @@ const DirectTty = @import("direct_tty.zig").DirectTty;
 const presentation_layout = @import("presentation_layout.zig");
 const present_job = @import("present_job.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const render_batch_sink_mod = @import("render_batch_sink.zig");
 
 const ts_types = termscene.types;
 const ts_scene = termscene.scene;
@@ -20,6 +21,7 @@ const FramebufferJob = present_job.FramebufferJob;
 const AssetPublication = present_job.AssetPublication;
 const SceneSprite = present_job.SceneSprite;
 const SolidSprite = present_job.SolidSprite;
+const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
 
 const bg_namespace: u24 = 210;
 const sprite_namespace: u24 = 211;
@@ -1066,6 +1068,93 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
+    pub fn renderPresentJobBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: ?*sdl.SDL_Renderer, job: *PresentJob, writer: anytype) void {
+        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+        if (!sink.isAttached()) {
+            state.copies.clearRetainingCapacity();
+            state.fills.clearRetainingCapacity();
+            state.lines.clearRetainingCapacity();
+            return;
+        }
+
+        self.renderPresentJobBatchInner(sink, state, job) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderPresentJobBatch failed: {any}", .{err});
+            sink.clearRetainingCapacity();
+            state.copies.clearRetainingCapacity();
+            state.fills.clearRetainingCapacity();
+            state.lines.clearRetainingCapacity();
+            return;
+        };
+        self.last_inspect_summary = self.buildInspectSummary(state, job);
+        self.deleteRetiredImagesBatch(logger, sink);
+        sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "render batch flush failed: {any}", .{err});
+        if (self.stats.enabled) {
+            self.stats.frame_count += 1;
+            self.stats.copy_ops += state.copies.items.len;
+            self.stats.fill_ops += state.fills.items.len;
+            self.stats.line_ops += state.lines.items.len;
+            self.maybeReportStats(logger);
+        }
+        state.copies.clearRetainingCapacity();
+        state.fills.clearRetainingCapacity();
+        state.lines.clearRetainingCapacity();
+    }
+
+    fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
+        switch (job.*) {
+            .framebuffer => |fb| try self.presentCompositeFullscreenBatch(sink, state, fb),
+            .scene => |scene_job| {
+                try self.deleteCompositeFullscreenBatch(sink, state);
+                for (scene_job.publications) |publication| {
+                    switch (publication) {
+                        .new_asset => |asset| {
+                            if (!self.published_assets.contains(asset.asset_id)) {
+                                const image_id = self.allocImageId();
+                                try sink.uploadRgba(image_id, asset.rgba, asset.width, asset.height);
+                                try self.published_assets.put(asset.asset_id, image_id);
+                                if (self.stats.enabled) {
+                                    self.stats.texture_uploads += 1;
+                                    self.stats.texture_upload_bytes += asset.rgba.len;
+                                }
+                            }
+                        },
+                    }
+                }
+                var solid_sprite_count: usize = 0;
+                for (scene_job.solids) |solid| {
+                    const image_id = try self.ensureSolidImageBatch(sink, solid.color);
+                    solid_sprite_count += 1;
+                    try sink.place(solid.dest_rect.row, solid.dest_rect.col, .{
+                        .image_id = image_id,
+                        .placement_id = self.allocCompositePlacementId(),
+                        .cols = solid.dest_rect.w,
+                        .rows = solid.dest_rect.h,
+                        .src_x = 0,
+                        .src_y = 0,
+                        .src_w = 1,
+                        .src_h = 1,
+                        .z = solid.z,
+                    });
+                }
+                for (scene_job.sprites) |sprite| {
+                    const image_id = self.published_assets.get(sprite.asset_id) orelse continue;
+                    try sink.place(sprite.dest_rect.row, sprite.dest_rect.col, .{
+                        .image_id = image_id,
+                        .placement_id = self.allocCompositePlacementId(),
+                        .cols = sprite.dest_rect.w,
+                        .rows = sprite.dest_rect.h,
+                        .src_x = sprite.source_rect.x,
+                        .src_y = sprite.source_rect.y,
+                        .src_w = sprite.source_rect.w,
+                        .src_h = sprite.source_rect.h,
+                        .z = sprite.z,
+                    });
+                }
+                if (self.stats.enabled) self.stats.sprite_ops += solid_sprite_count + scene_job.sprites.len;
+            },
+        }
+    }
+
     pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer) presentation_layout.PresentationLayout {
         var layout = presentation_layout.PresentationLayout{};
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return layout;
@@ -1286,6 +1375,32 @@ pub const FrameBuilder = struct {
         }
     }
 
+    fn presentCompositeFullscreenBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, fb: FramebufferJob) !void {
+        const old_placement = CompositePlacement{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id };
+        state.composite_image_id = self.allocImageId();
+        state.composite_placement_id = self.allocCompositePlacementId();
+        self.last_composite_image_id = state.composite_image_id;
+
+        const rect = sink.presentationRect();
+        try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
+        try sink.place(rect.row, rect.col, .{
+            .image_id = state.composite_image_id,
+            .placement_id = state.composite_placement_id,
+            .cols = rect.cols,
+            .rows = rect.rows,
+            .src_x = 0,
+            .src_y = 0,
+            .src_w = fb.width,
+            .src_h = fb.height,
+            .z = 100,
+        });
+        if (state.rememberFullscreenPlacement(old_placement)) |evicted| try self.deleteCompositePlacementBatch(sink, evicted);
+        if (self.stats.enabled) {
+            self.stats.texture_uploads += 1;
+            self.stats.texture_upload_bytes += fb.rgba.len;
+        }
+    }
+
     fn deleteCompositeFullscreenDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
         if (state.composite_image_id != 0 and state.composite_placement_id != 0) {
             self.deleteCompositePlacement(logger, tty, .{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id });
@@ -1294,6 +1409,15 @@ pub const FrameBuilder = struct {
         state.composite_image_id = 0;
         state.composite_placement_id = 0;
         if (state.composite_last_presented) |last| @memset(last, 0);
+    }
+
+    fn deleteCompositeFullscreenBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !void {
+        if (state.composite_image_id != 0 and state.composite_placement_id != 0) {
+            try self.deleteCompositePlacementBatch(sink, .{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id });
+        }
+        try self.deleteRetainedFullscreenPlacementsBatch(sink, state);
+        state.composite_image_id = 0;
+        state.composite_placement_id = 0;
     }
 
     fn presentCompositeTilesDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, backend: *ts_kitty.Backend, state: *RendererState) !void {
@@ -1776,6 +1900,12 @@ pub const FrameBuilder = struct {
         self.retireImageId(placement.image_id);
     }
 
+    fn deleteCompositePlacementBatch(self: *FrameBuilder, sink: *RenderBatchSink, placement: CompositePlacement) !void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement.placement_id });
+        self.retireImageId(placement.image_id);
+    }
+
     fn deleteRetainedFullscreenPlacements(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
         var i: usize = 0;
         while (i < state.retained_fullscreen_placement_count) : (i += 1) {
@@ -1785,10 +1915,28 @@ pub const FrameBuilder = struct {
         state.retained_fullscreen_placement_count = 0;
     }
 
+    fn deleteRetainedFullscreenPlacementsBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !void {
+        var i: usize = 0;
+        while (i < state.retained_fullscreen_placement_count) : (i += 1) {
+            try self.deleteCompositePlacementBatch(sink, state.retained_fullscreen_placements[i]);
+            state.retained_fullscreen_placements[i] = .{};
+        }
+        state.retained_fullscreen_placement_count = 0;
+    }
+
     fn deleteRetiredImages(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend) void {
         if (self.retired_image_ids.items.len == 0) return;
         for (self.retired_image_ids.items) |image_id| {
             backend.deleteImageData(image_id) catch |err| logger.writeFmtScoped(.info, .frame_builder, "deleteImageData failed: {any}", .{err});
+        }
+        if (self.stats.enabled) self.stats.retired_images += self.retired_image_ids.items.len;
+        self.retired_image_ids.clearRetainingCapacity();
+    }
+
+    fn deleteRetiredImagesBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink) void {
+        if (self.retired_image_ids.items.len == 0) return;
+        for (self.retired_image_ids.items) |image_id| {
+            sink.deleteImageData(image_id) catch |err| logger.writeFmtScoped(.info, .frame_builder, "batch deleteImageData failed: {any}", .{err});
         }
         if (self.stats.enabled) self.stats.retired_images += self.retired_image_ids.items.len;
         self.retired_image_ids.clearRetainingCapacity();
@@ -1862,6 +2010,16 @@ pub const FrameBuilder = struct {
         const pixel = [_]u8{ color[0], color[1], color[2], color[3] };
         backend.registerRawImage(image_id, &pixel, 1, 1) catch |err| logger.writeFmtScoped(.info, .frame_builder, "solid image upload failed: {any}", .{err});
         self.solid_images.put(key, image_id) catch {};
+        return image_id;
+    }
+
+    fn ensureSolidImageBatch(self: *FrameBuilder, sink: *RenderBatchSink, color: [4]u8) !u32 {
+        const key = std.mem.readInt(u32, &color, .little);
+        if (self.solid_images.get(key)) |image_id| return image_id;
+        const image_id = self.allocImageId();
+        const pixel = [_]u8{ color[0], color[1], color[2], color[3] };
+        try sink.uploadRgba(image_id, &pixel, 1, 1);
+        try self.solid_images.put(key, image_id);
         return image_id;
     }
 
@@ -3170,6 +3328,36 @@ test "frame builder allocates composite placement ids from configured range" {
     try std.testing.expectEqual(@as(u32, 200000), builder.allocCompositePlacementId());
 }
 
+test "frame builder renders framebuffer present jobs to batch sink" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2000);
+    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 2 * 2 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
+}
+
 test "composite builder can start at last full framebuffer overwrite" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
@@ -3570,9 +3758,9 @@ test "external framebuffer conversion expands a2b10g10r10 to rgba" {
 
     try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 3, 1, .a2b10g10r10_unorm_pack32));
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        0, 128, 255, 255,
-        255, 255, 0, 0,
-        127, 0, 0, 255,
+        0,   128, 255, 255,
+        255, 255, 0,   0,
+        127, 0,   0,   255,
     }, &dst);
 }
 

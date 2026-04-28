@@ -10,6 +10,8 @@ pub const RenderBatchSink = struct {
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
     after: std.ArrayList([]u8) = .empty,
+    attached: bool = false,
+    rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
         return .{
@@ -27,6 +29,19 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
+    }
+
+    pub fn attach(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells) void {
+        self.rect_cells = rect_cells;
+        self.attached = true;
+    }
+
+    pub fn isAttached(self: *const RenderBatchSink) bool {
+        return self.attached;
+    }
+
+    pub fn presentationRect(self: *const RenderBatchSink) render_batch_protocol.PresentationRectCells {
+        return self.rect_cells;
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
