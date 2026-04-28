@@ -25,6 +25,11 @@ pub const GlCaptureMode = enum {
     pbo,
 };
 
+pub const PresentationSink = enum {
+    tty,
+    jsonl_fd,
+};
+
 pub const RuntimeConfig = struct {
     composite_mode: CompositeMode = .fullscreen,
     intercept_mode: InterceptMode = .sync_compose,
@@ -44,6 +49,9 @@ pub const RuntimeConfig = struct {
     file_transport_max_bytes: u64 = default_file_transport_max_bytes,
     gl_capture: GlCaptureMode = .disabled,
     vulkan_capture: bool = false,
+    presentation_sink: PresentationSink = .tty,
+    presentation_fd: ?i32 = null,
+    presentation_control_fd: ?i32 = null,
 };
 
 pub const default_file_transport_max_bytes: u64 = 10 * 1024 * 1024;
@@ -181,6 +189,25 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     if (parsed.value.object.get("gl_capture")) |value| {
         if (value == .string) config.gl_capture = parseGlCaptureMode(value.string);
     }
+    if (parsed.value.object.get("presentation_sink")) |value| {
+        if (value == .string) config.presentation_sink = parsePresentationSink(value.string) orelse config.presentation_sink;
+    }
+    if (parsed.value.object.get("presentation_fd")) |value| {
+        switch (value) {
+            .integer => |n| {
+                if (n >= 0 and n <= std.math.maxInt(i32)) config.presentation_fd = @intCast(n);
+            },
+            else => {},
+        }
+    }
+    if (parsed.value.object.get("presentation_control_fd")) |value| {
+        switch (value) {
+            .integer => |n| {
+                if (n >= 0 and n <= std.math.maxInt(i32)) config.presentation_control_fd = @intCast(n);
+            },
+            else => {},
+        }
+    }
     return config;
 }
 
@@ -292,6 +319,12 @@ pub fn parseOutputProfile(value: []const u8) ?OutputProfile {
     if (std.mem.eql(u8, value, "direct_apc")) return .direct_apc;
     if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
     if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
+    return null;
+}
+
+pub fn parsePresentationSink(value: []const u8) ?PresentationSink {
+    if (std.mem.eql(u8, value, "tty")) return .tty;
+    if (std.mem.eql(u8, value, "jsonl_fd")) return .jsonl_fd;
     return null;
 }
 
@@ -449,6 +482,22 @@ test "runtime config JSON parses extended env-compatible fields" {
     try std.testing.expectEqual(@as(u64, 4096), config.file_transport_max_bytes);
     try std.testing.expectEqual(GlCaptureMode.pbo, config.gl_capture);
     try std.testing.expect(config.vulkan_capture);
+}
+
+test "runtime config JSON parses stdio batch presentation fields" {
+    const json =
+        \\{
+        \\  "presentation_sink": "jsonl_fd",
+        \\  "presentation_fd": 3,
+        \\  "presentation_control_fd": 4
+        \\}
+    ;
+
+    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json);
+
+    try std.testing.expectEqual(PresentationSink.jsonl_fd, config.presentation_sink);
+    try std.testing.expectEqual(@as(i32, 3), config.presentation_fd.?);
+    try std.testing.expectEqual(@as(i32, 4), config.presentation_control_fd.?);
 }
 
 test "runtime config env values override extended fields" {
