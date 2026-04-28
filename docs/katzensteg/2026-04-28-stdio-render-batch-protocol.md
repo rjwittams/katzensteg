@@ -25,6 +25,59 @@ The initial end-to-end proof is:
 
 Pi is the first integration target because it is expected to be easiest to modify. Open-source Codex is a likely second integration target after the test programs and Pi extension prove the shape.
 
+## Current Integration Contract
+
+This section is the current handoff contract for a TypeScript host. Later sections include design intent and reserved extensions.
+
+Launch Katzensteg in producer mode:
+
+```sh
+./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+```
+
+In this mode, Katzensteg stdout is JSONL protocol output and Katzensteg stdin is JSONL protocol input. The first required host message is `attach`, written as one JSON object plus `\n`:
+
+```json
+{"type":"attach","window_id":"main","rect_cells":{"row":1,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"direct_apc","high_water":10485760}}
+```
+
+The host may send `hello` before `attach`, but the current producer does not require it. `attach` is the gate that allows graphics batches. Until `attach` is processed, the producer must not write terminal graphics bytes to stdout.
+
+The producer writes `frame_batch` messages as JSONL:
+
+```json
+{"type":"frame_batch","window_id":"main","seq":1,"groups":{"deletes":[],"uploads":["\u001b_G...;\u001b\\"],"placements":["\u001b[1;1H\u001b_G...;\u001b\\"],"after":[]}}
+```
+
+The minimal host loop is:
+
+```ts
+for await (const line of producerStdoutLines) {
+  const msg = JSON.parse(line);
+  if (msg.type !== "frame_batch") continue;
+
+  for (const chunk of msg.groups.deletes) writeTerminalBytes(chunk);
+  for (const chunk of msg.groups.uploads) writeTerminalBytes(chunk);
+  drawHostUiIfNeeded();
+  for (const chunk of msg.groups.placements) writeTerminalBytes(chunk);
+  for (const chunk of msg.groups.after) writeTerminalBytes(chunk);
+}
+```
+
+JSON string decoding is enough. Do not base64-decode the group strings. Kitty inline image data inside APCs is already base64 ASCII; the JSON layer only escapes string control bytes such as ESC.
+
+Current constraints:
+
+- `window_id` must be `"main"`.
+- `rect_cells` uses 1-based terminal cells: `row`, `col`, `rows`, `cols`.
+- `aspect` is `fit`, `stretch`, or `cover`. `contain` is accepted as a compatibility alias for `fit`, but new clients should send `fit`.
+- `id_ranges.image` and `id_ranges.placement` are required. Ranges are inclusive; the first range in each list is the only range used today.
+- `upload.profile` may be `direct_apc`, `file_whole`, or `file_offset_ring`. `direct_apc` needs no path. File upload modes require `path`, and that path must be visible to both the producer process and the terminal host.
+- Unknown or non-`frame_batch` producer messages should be ignored by a minimal host.
+- To change geometry in the current implementation, send another `attach` for `"main"`. `viewport` is reserved for the later explicit geometry-update message.
+
+A small TypeScript reference host lives at `examples/pi-agent-embed-host.ts`, with a fixture test at `examples/pi-agent-embed-host.test.ts`.
+
 ## Non-Goals
 
 - Do not make this MCP, JSON-RPC, or a socket protocol in the first cut.
@@ -79,7 +132,7 @@ The first cut only needs one window, `main`, but the protocol should still frame
 {"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
 ```
 
-After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, it can send another `attach` or `viewport` message for the same `window_id`.
+After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, the current implementation accepts another `attach` for the same `window_id`. A separate `viewport` message is reserved for the later explicit geometry-update path.
 
 The runtime may send non-graphics lifecycle messages before attach, such as `hello`, `launched`, or later `window_created`. Those messages must not contain terminal graphics bytes.
 
@@ -149,13 +202,13 @@ Do not make double-base64 the default path.
 
 The protocol includes a `window_id` from the start, even though the first implementation may only support one window. This leaves room for multiple panes, attached views, or future host-managed surfaces without changing every message shape.
 
-The host sends viewport information whenever the target placement changes:
+The current implementation uses `attach` for the initial placement and for geometry changes. A future explicit geometry-update message is expected to look like:
 
 ```json
 {"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
 ```
 
-The runtime should treat this as the current destination policy for that logical render window. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes.
+Once implemented, the runtime should treat `viewport` as the current destination policy for that logical render window. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes.
 
 This geometry model should not be treated as embed-only. Direct `/dev/tty` mode also needs the same concept over time: terminal menus may shrink a captured window, chrome may reserve space, multiple captured windows may share one terminal, and a user may later break one window out into a different view. The first cut only uses host-provided geometry for stdio embed mode, but the data model should not preclude direct-tty presentation layouts using the same window/viewport concepts.
 
@@ -174,7 +227,7 @@ The host grants id ranges during handshake. The runtime allocates image ids and 
 Example:
 
 ```json
-{"type":"hello","protocol":"katzensteg.render.v0","window_id":"main","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
 ```
 
 This prevents collisions when the host has its own terminal graphics state or multiple embedded renderers.
@@ -188,23 +241,23 @@ The first message set can remain intentionally small.
 Host to runtime:
 
 ```json
-{"type":"hello","protocol":"katzensteg.render.v0"}
+{"type":"hello","protocol":"katzensteg.embed_jsonl","version":1}
 {"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
-{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
+{"type":"attach","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
 {"type":"shutdown"}
 ```
 
 Runtime to host:
 
 ```json
-{"type":"hello","protocol":"katzensteg.render.v0","capabilities":{"batch_groups":["deletes","uploads","placements","after"]}}
+{"type":"hello","protocol":"katzensteg.embed_jsonl","version":1,"capabilities":{"batch_groups":["deletes","uploads","placements","after"]}}
 {"type":"launched","pid":12345}
 {"type":"window_created","window_id":"main"}
 {"type":"frame_batch","window_id":"main","seq":1,"groups":{"deletes":[],"uploads":["\u001b_G...;\u001b\\"],"placements":["\u001b[4;1H\u001b_G...;\u001b\\"],"after":[]}}
 {"type":"status","level":"info","message":"first frame presented"}
 ```
 
-These examples are illustrative, not a frozen schema. The important first-cut commitments are JSONL, explicit launcher embed mode, `window_id`, host attach before graphics output, host-provided id ranges, host-provided geometry/upload policy, and opaque renderer-generated byte groups.
+These examples are illustrative, not a frozen schema. In the current implementation, `attach` and `frame_batch` are the reliable messages. `hello`, `shutdown`, `launched`, `window_created`, and `status` are reserved or optional lifecycle shape, not required for a minimal host. The important first-cut commitments are JSONL, explicit launcher embed mode, `window_id`, host attach before graphics output, host-provided id ranges, host-provided geometry/upload policy, and opaque renderer-generated byte groups.
 
 ## Launcher Configuration Implications
 
@@ -237,8 +290,6 @@ Today the launcher redirects target stdout to protect terminal rendering. Embed 
 
 ## Open Questions
 
-- Should the first implementation write batches to stdout or to a dedicated fd supplied by the launcher?
-- How should host-to-runtime control messages reach the preloaded runtime in stdio mode?
-- What is the smallest quiet-mode change needed so launcher output cannot corrupt the embedding host UI?
 - Should deletes be purely renderer-scheduled in the first proof, or should the host be able to request a full cleanup batch for a window?
 - How should terminal capability hints be represented without forcing the host to understand terminal graphics protocol details?
+- Should `viewport` become the explicit geometry-update message, or should repeated `attach` remain the only geometry update for v0?
