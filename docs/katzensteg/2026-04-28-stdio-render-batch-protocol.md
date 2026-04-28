@@ -74,7 +74,8 @@ Current constraints:
 - `id_ranges.image` and `id_ranges.placement` are required. Ranges are inclusive; the first range in each list is the only range used today.
 - `upload.profile` may be `direct_apc`, `file_whole`, or `file_offset_ring`. `direct_apc` needs no path. File upload modes require `path`, and that path must be visible to both the producer process and the terminal host.
 - Unknown or non-`frame_batch` producer messages should be ignored by a minimal host.
-- To change geometry in the current implementation, send another `attach` for `"main"`. `viewport` is reserved for the later explicit geometry-update message.
+- After `attach`, send `viewport` to change geometry or aspect without changing id ranges or upload policy. The runtime may emit deletes for old placements before using the new viewport.
+- Send `detach` to remove known visible placements and stop receiving future graphics batches while keeping the producer process alive. A later `attach` re-enables presentation.
 
 A small TypeScript reference host lives at `examples/pi-agent-embed-host.ts`, with a fixture test at `examples/pi-agent-embed-host.test.ts`.
 
@@ -132,7 +133,21 @@ The first cut only needs one window, `main`, but the protocol should still frame
 {"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
 ```
 
-After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, the current implementation accepts another `attach` for the same `window_id`. A separate `viewport` message is reserved for the later explicit geometry-update path.
+After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, it should send `viewport` for the same `window_id`:
+
+```json
+{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit"}
+```
+
+`viewport` updates only destination geometry and aspect. It does not grant new id ranges, change upload policy, or attach a detached window. If the current window has visible placements, the runtime emits a delete batch for those placements before presenting future frames at the new viewport.
+
+If the host wants to hide or dispose the surface while leaving the target process alive, it should send `detach`:
+
+```json
+{"type":"detach","window_id":"main"}
+```
+
+`detach` emits a final delete-only `frame_batch` for currently known placements, then suppresses future graphics batches until another `attach`.
 
 The runtime may send non-graphics lifecycle messages before attach, such as `hello`, `launched`, or later `window_created`. Those messages must not contain terminal graphics bytes.
 
@@ -202,13 +217,13 @@ Do not make double-base64 the default path.
 
 The protocol includes a `window_id` from the start, even though the first implementation may only support one window. This leaves room for multiple panes, attached views, or future host-managed surfaces without changing every message shape.
 
-The current implementation uses `attach` for the initial placement and for geometry changes. A future explicit geometry-update message is expected to look like:
+The host sends `viewport` whenever the destination placement changes:
 
 ```json
 {"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
 ```
 
-Once implemented, the runtime should treat `viewport` as the current destination policy for that logical render window. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes.
+The runtime treats `viewport` as the current destination policy for that logical render window, provided the window is already attached. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes. A viewport change may produce a delete-only batch so old placements do not remain visible at the previous location.
 
 This geometry model should not be treated as embed-only. Direct `/dev/tty` mode also needs the same concept over time: terminal menus may shrink a captured window, chrome may reserve space, multiple captured windows may share one terminal, and a user may later break one window out into a different view. The first cut only uses host-provided geometry for stdio embed mode, but the data model should not preclude direct-tty presentation layouts using the same window/viewport concepts.
 
@@ -243,7 +258,8 @@ Host to runtime:
 ```json
 {"type":"hello","protocol":"katzensteg.embed_jsonl","version":1}
 {"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
-{"type":"attach","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"file_whole","path":"/tmp/tty-graphics-protocol-katzensteg-12345.rgba","high_water":10485760}}
+{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit"}
+{"type":"detach","window_id":"main"}
 {"type":"shutdown"}
 ```
 
@@ -257,7 +273,7 @@ Runtime to host:
 {"type":"status","level":"info","message":"first frame presented"}
 ```
 
-These examples are illustrative, not a frozen schema. In the current implementation, `attach` and `frame_batch` are the reliable messages. `hello`, `shutdown`, `launched`, `window_created`, and `status` are reserved or optional lifecycle shape, not required for a minimal host. The important first-cut commitments are JSONL, explicit launcher embed mode, `window_id`, host attach before graphics output, host-provided id ranges, host-provided geometry/upload policy, and opaque renderer-generated byte groups.
+These examples are illustrative, not a frozen schema. In the current implementation, `attach`, `viewport`, `detach`, and `frame_batch` are the reliable messages. `hello`, `shutdown`, `launched`, `window_created`, and `status` are reserved or optional lifecycle shape, not required for a minimal host. The important first-cut commitments are JSONL, explicit launcher embed mode, `window_id`, host attach before graphics output, host-provided id ranges, host-provided geometry/upload policy, and opaque renderer-generated byte groups.
 
 ## Launcher Configuration Implications
 
@@ -292,4 +308,4 @@ Today the launcher redirects target stdout to protect terminal rendering. Embed 
 
 - Should deletes be purely renderer-scheduled in the first proof, or should the host be able to request a full cleanup batch for a window?
 - How should terminal capability hints be represented without forcing the host to understand terminal graphics protocol details?
-- Should `viewport` become the explicit geometry-update message, or should repeated `attach` remain the only geometry update for v0?
+- Should a future `clear` message mean delete current placements but remain attached, or is `detach` enough for v0?

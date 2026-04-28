@@ -1132,6 +1132,24 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
+    pub fn flushBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, writer: anytype) void {
+        var renderer_it = self.renderers.iterator();
+        while (renderer_it.next()) |entry| {
+            const state = entry.value_ptr;
+            self.deleteCompositeFullscreenBatch(sink, state) catch |err| {
+                logger.writeFmtScoped(.info, .frame_builder, "presentation reset fullscreen delete failed: {any}", .{err});
+            };
+            self.deleteCompositeTilesBatch(sink, state) catch |err| {
+                logger.writeFmtScoped(.info, .frame_builder, "presentation reset tile delete failed: {any}", .{err});
+            };
+            if (state.composite_last_presented) |last| @memset(last, 0);
+        }
+        self.deleteRetiredImagesBatch(logger, sink);
+        if (sink.hasPendingBytes()) {
+            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentation reset render batch flush failed: {any}", .{err});
+        }
+    }
+
     fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
         switch (job.*) {
             .framebuffer => |fb| try self.presentCompositeFullscreenBatch(sink, state, fb),
@@ -1621,6 +1639,18 @@ pub const FrameBuilder = struct {
             self.retireCompositeTileImageIfUnreferenced(state, old_image_id);
         }
         if (state.composite_last_presented) |last| @memset(last, 0);
+    }
+
+    fn deleteCompositeTilesBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !void {
+        for (state.composite_tiles.items) |*tile| {
+            if (tile.image_id != 0 and tile.placement_id != 0) {
+                try sink.deletePlacement(.{ .image_id = tile.image_id, .placement_id = tile.placement_id });
+            }
+            const old_image_id = tile.image_id;
+            tile.image_id = 0;
+            tile.placement_id = 0;
+            self.retireCompositeTileImageIfUnreferenced(state, old_image_id);
+        }
     }
 
     fn ensureCompositeTiles(self: *FrameBuilder, state: *RendererState, tty: *const DirectTty) !void {
@@ -3442,6 +3472,44 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
+}
+
+test "frame builder detach flushes known batch placements and suppresses future frames" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2100);
+    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 2 * 2 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const after_present_len = out.items.len;
+
+    builder.flushBatchDeletesForPresentationReset(&logger, &sink, out.writer(std.testing.allocator));
+    sink.detach();
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items[after_present_len..], "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[after_present_len..], "a=d") != null);
+    try std.testing.expect(!sink.isAttached());
+
+    const after_detach_len = out.items.len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    try std.testing.expectEqual(after_detach_len, out.items.len);
 }
 
 test "frame builder batch placement contains source inside attached rect" {

@@ -667,16 +667,34 @@ pub const Runtime = struct {
     }
 
     fn processBatchControlLine(self: *Runtime, line: []const u8) void {
-        var attach = render_batch_protocol.parseAttachMessage(self.allocator, line) catch return;
-        defer render_batch_protocol.deinitAttachMessage(self.allocator, &attach);
-        if (self.batch_sink) |*sink| {
-            sink.attachWithAspect(attach.rect_cells, attach.aspect);
-            sink.setUploadPolicy(attach.upload) catch |err| {
-                log.warn("batch upload policy failed: {any}", .{err});
-                return;
-            };
-            self.frame_builder.setImageIdRange(attach.image_ids);
-            self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
+        var control = render_batch_protocol.parseControlMessage(self.allocator, line) catch return;
+        defer render_batch_protocol.deinitControlMessage(self.allocator, &control);
+        const sink = &(self.batch_sink orelse return);
+        switch (control) {
+            .attach => |attach| {
+                sink.attachWithAspect(attach.rect_cells, attach.aspect);
+                sink.setUploadPolicy(attach.upload) catch |err| {
+                    log.warn("batch upload policy failed: {any}", .{err});
+                    return;
+                };
+                self.frame_builder.setImageIdRange(attach.image_ids);
+                self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
+            },
+            .viewport => |viewport| {
+                if (!sink.isAttached()) return;
+                if (!std.meta.eql(sink.presentationRect(), viewport.rect_cells) or sink.presentationAspect() != viewport.aspect) {
+                    if (self.batch_writer) |writer| {
+                        self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
+                    }
+                }
+                sink.viewport(viewport.rect_cells, viewport.aspect);
+            },
+            .detach => {
+                if (self.batch_writer) |writer| {
+                    self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
+                }
+                sink.detach();
+            },
         }
     }
 

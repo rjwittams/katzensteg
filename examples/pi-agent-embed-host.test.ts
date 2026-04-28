@@ -1,5 +1,7 @@
 import {
   makeAttachMessage,
+  makeDetachMessage,
+  makeViewportMessage,
   orderedTerminalChunks,
   parseFrameBatchLine,
 } from "./pi-agent-embed-host.ts";
@@ -28,6 +30,23 @@ Deno.test("builds the current attach message contract", () => {
   if (message.upload.profile !== "direct_apc") {
     throw new Error("expected direct_apc upload");
   }
+});
+
+Deno.test("builds viewport and detach control messages", () => {
+  const viewport = JSON.parse(makeViewportMessage({
+    windowId: "main",
+    rectCells: { row: 6, col: 10, rows: 20, cols: 64 },
+    aspect: "cover",
+  }));
+
+  if (viewport.type !== "viewport") throw new Error("expected viewport");
+  if (viewport.window_id !== "main") throw new Error("expected main window");
+  if (viewport.rect_cells.col !== 10) throw new Error("expected col 10");
+  if (viewport.aspect !== "cover") throw new Error("expected cover aspect");
+
+  const detach = JSON.parse(makeDetachMessage());
+  if (detach.type !== "detach") throw new Error("expected detach");
+  if (detach.window_id !== "main") throw new Error("expected main window");
 });
 
 Deno.test("parses frame batches and preserves presentation order", async () => {
