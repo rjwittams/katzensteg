@@ -7,6 +7,8 @@ const frame_builder_mod = @import("frame_builder.zig");
 const inspect_model = @import("inspect_model.zig");
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
+const log = std.log.scoped(.intercept);
+
 pub const InterceptMode = config_mod.InterceptMode;
 
 const SurfaceView = extern struct {
@@ -61,7 +63,7 @@ pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (rt.intercept_mode) {
         .sync_compose => {
             var owned = cloneCommand(rt, cmd) catch {
-                rt.logger.write("katzensteg: cloneCommand failed in sync_compose; dropping command");
+                log.warn("cloneCommand failed in sync_compose; dropping command", .{});
                 return;
             };
             defer rt.recycleCommand(&owned);
@@ -69,7 +71,7 @@ pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         },
         .queued_replay => {
             const owned = cloneCommand(rt, cmd) catch {
-                rt.logger.write("katzensteg: cloneCommand failed in queued_replay; dropping command");
+                log.warn("cloneCommand failed in queued_replay; dropping command", .{});
                 return;
             };
             rt.enqueueCommand(owned);
@@ -216,14 +218,14 @@ pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture
         }
     }
     if (copied == null and pixels != null) {
-        rt.logger.write("katzensteg: failed to copy update_texture payload for queued replay");
+        log.warn("failed to copy update_texture payload for queued replay", .{});
     }
     rt.enqueueCommand(.{ .update_texture = .{ .texture = texture, .rect = if (rect) |r| r.* else null, .pixels = copied, .pitch = pitch } });
 }
 
 pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
     const dims = textureUpdateDimensions(texture, rect) orelse {
-        rt.logger.write("katzensteg: failed to size SDL_UpdateYUVTexture payload");
+        log.warn("failed to size SDL_UpdateYUVTexture payload", .{});
         return;
     };
     const chroma_h = @divTrunc(dims.h + 1, 2);
@@ -231,7 +233,7 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
     const copied_u = copyPlanePayload(rt, uplane, upitch, chroma_h);
     const copied_v = copyPlanePayload(rt, vplane, vpitch, chroma_h);
     if (copied_y == null or copied_u == null or copied_v == null) {
-        rt.logger.write("katzensteg: failed to copy SDL_UpdateYUVTexture payload");
+        log.warn("failed to copy SDL_UpdateYUVTexture payload", .{});
         var doomed = Command{ .update_yuv_texture = .{
             .texture = texture,
             .rect = null,
@@ -259,14 +261,14 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
 
 pub fn enqueueUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
     const dims = textureUpdateDimensions(texture, rect) orelse {
-        rt.logger.write("katzensteg: failed to size SDL_UpdateNVTexture payload");
+        log.warn("failed to size SDL_UpdateNVTexture payload", .{});
         return;
     };
     const chroma_h = @divTrunc(dims.h + 1, 2);
     const copied_y = copyPlanePayload(rt, yplane, ypitch, dims.h);
     const copied_uv = copyPlanePayload(rt, uvplane, uvpitch, chroma_h);
     if (copied_y == null or copied_uv == null) {
-        rt.logger.write("katzensteg: failed to copy SDL_UpdateNVTexture payload");
+        log.warn("failed to copy SDL_UpdateNVTexture payload", .{});
         var doomed = Command{ .update_nv_texture = .{
             .texture = texture,
             .rect = null,
@@ -313,11 +315,11 @@ pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, h
     if (width <= 0 or height <= 0) return;
     const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
     if (pixels.len < byte_len) {
-        rt.logger.writeFmt("katzensteg: external framebuffer payload too small: got={d} want={d}", .{ pixels.len, byte_len });
+        log.warn("external framebuffer payload too small: got={d} want={d}", .{ pixels.len, byte_len });
         return;
     }
     const copied = rt.acquirePayloadBuffer(byte_len) catch {
-        rt.logger.write("katzensteg: alloc failed in enqueueExternalFramebufferPresent");
+        log.warn("alloc failed in enqueueExternalFramebufferPresent", .{});
         return;
     };
     @memcpy(copied, pixels[0..byte_len]);
@@ -332,21 +334,21 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
     var w: c_int = 0;
     var h: c_int = 0;
     if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) {
-        rt.logger.write("katzensteg: SDL_QueryTexture failed in enqueueCreateTextureFromSurface; using fallback metadata");
+        log.warn("SDL_QueryTexture failed in enqueueCreateTextureFromSurface; using fallback metadata", .{});
         format = sdl.SDL_PIXELFORMAT_ABGR8888;
     }
     rt.enqueueCommand(.{ .create_texture = .{ .texture = texture, .format = format, .w = w, .h = h } });
 
     if (surface == null) return;
     const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
-        rt.logger.write("katzensteg: SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface");
+        log.warn("SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface", .{});
         return;
     };
     defer real_sdl.SDL_FreeSurface(converted);
     const surf: *SurfaceView = @ptrCast(@alignCast(converted));
     const byte_len: usize = @intCast(surf.pitch * surf.h);
     const copied = rt.acquirePayloadBuffer(byte_len) catch {
-        rt.logger.write("katzensteg: alloc failed in enqueueCreateTextureFromSurface");
+        log.warn("alloc failed in enqueueCreateTextureFromSurface", .{});
         return;
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(surf.pixels.?))[0..byte_len]);
@@ -366,11 +368,11 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
     const start_ns = std.time.nanoTimestamp();
     defer rt.noteProducerTime(.unlock_texture, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
     const capture = rt.takeQueuedLock(texture) orelse {
-        rt.logger.write("katzensteg: queued unlock without remembered lock capture");
+        log.warn("queued unlock without remembered lock capture", .{});
         return;
     };
     const pixels = capture.pixels orelse {
-        rt.logger.write("katzensteg: queued unlock capture had null pixels");
+        log.warn("queued unlock capture had null pixels", .{});
         return;
     };
     const byte_len: usize = if (capture.rect) |r| @intCast(capture.pitch * r.h) else blk: {
@@ -382,11 +384,11 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
         break :blk @as(usize, @intCast(capture.pitch * h));
     };
     if (byte_len == 0) {
-        rt.logger.write("katzensteg: queued unlock capture had zero-sized payload");
+        log.warn("queued unlock capture had zero-sized payload", .{});
         return;
     }
     const copied = rt.acquirePayloadBuffer(byte_len) catch {
-        rt.logger.write("katzensteg: alloc failed in enqueueQueuedUnlockTexture");
+        log.warn("alloc failed in enqueueQueuedUnlockTexture", .{});
         return;
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(pixels))[0..byte_len]);
@@ -446,7 +448,7 @@ pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Re
     var h: c_int = 0;
     if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) return;
     const copy = frame_builder_mod.FrameBuilder.geometryRawAsCopy(xy, @intCast(xy_stride), uv, @intCast(uv_stride), @intCast(num_vertices), indices, @intCast(num_indices), @intCast(size_indices), w, h) orelse {
-        rt.logger.writeOnce("katzensteg: unsupported SDL_RenderGeometryRaw shape; skipping geometry");
+        rt.logger.writeOnceScoped(.warn, .intercept, "unsupported SDL_RenderGeometryRaw shape; skipping geometry");
         return;
     };
     dispatchCommand(rt, .{ .render_copy = .{
