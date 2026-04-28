@@ -5,7 +5,12 @@ const Command = enum {
     help,
     menu,
     run,
+    attach,
     unknown,
+};
+
+const AttachArgs = struct {
+    exec_argv: []const []const u8,
 };
 
 const ExpansionContext = struct {
@@ -152,6 +157,10 @@ pub fn main() !void {
             const exit_code = try runTarget(allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
             std.process.exit(exit_code);
         },
+        .attach => {
+            std.debug.print("{s}", .{usageText()});
+            std.process.exit(64);
+        },
         .unknown => {
             std.debug.print("{s}", .{usageText()});
             std.process.exit(64);
@@ -164,6 +173,7 @@ fn usageText() []const u8 {
         \\Usage:
         \\  katzensteg --help
         \\  katzensteg [options] <target>
+        \\  katzensteg attach --exec -- <program> [args...]
         \\  katzensteg
         \\
         \\Options:
@@ -189,8 +199,29 @@ fn isProxyExecutablePath(path: []const u8) bool {
 fn parseCommand(args: []const []const u8) Command {
     if (args.len <= 1) return .menu;
     if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
+    if (std.mem.eql(u8, args[1], "attach")) return if (parseAttachArgs(args) != null) .attach else .unknown;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
+}
+
+fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
+    if (args.len < 5) return null;
+    if (!std.mem.eql(u8, args[1], "attach")) return null;
+
+    var saw_exec = false;
+    for (args[2..], 2..) |arg, idx| {
+        if (std.mem.eql(u8, arg, "--")) {
+            if (!saw_exec or idx + 1 >= args.len) return null;
+            return .{ .exec_argv = args[idx + 1 ..] };
+        }
+        if (std.mem.eql(u8, arg, "--exec")) {
+            if (saw_exec) return null;
+            saw_exec = true;
+            continue;
+        }
+        return null;
+    }
+    return null;
 }
 
 fn launcherDryRun(args: []const []const u8) bool {
@@ -1475,6 +1506,20 @@ test "launcher command parser recognizes embed jsonl before target" {
     try std.testing.expectEqual(Command.run, parseCommand(args));
     try std.testing.expectEqualStrings("probe.embed.basic_sdl", targetArg(args).?);
     try std.testing.expect(launcherEmbedJsonl(args));
+}
+
+test "launcher parses attach exec argv command" {
+    const args = &.{ "katzensteg", "attach", "--exec", "--", "katzensteg", "--embed-jsonl", "probe.embed.basic_sdl" };
+    try std.testing.expectEqual(Command.attach, parseCommand(args));
+    const attach = parseAttachArgs(args).?;
+    try std.testing.expectEqualStrings("katzensteg", attach.exec_argv[0]);
+    try std.testing.expectEqualStrings("--embed-jsonl", attach.exec_argv[1]);
+    try std.testing.expectEqualStrings("probe.embed.basic_sdl", attach.exec_argv[2]);
+}
+
+test "launcher rejects attach exec without argv terminator" {
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "katzensteg" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "--" }) == null);
 }
 
 test "launcher embed jsonl overrides runtime presentation fds" {
