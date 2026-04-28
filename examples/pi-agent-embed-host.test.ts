@@ -1,8 +1,10 @@
 import {
   makeAttachMessage,
   makeDetachMessage,
+  makeShutdownMessage,
   makeViewportMessage,
   orderedTerminalChunks,
+  parseDetachedLine,
   parseFrameBatchLine,
 } from "./pi-agent-embed-host.ts";
 
@@ -47,6 +49,12 @@ Deno.test("builds viewport and detach control messages", () => {
   const detach = JSON.parse(makeDetachMessage());
   if (detach.type !== "detach") throw new Error("expected detach");
   if (detach.window_id !== "main") throw new Error("expected main window");
+
+  const shutdown = JSON.parse(makeShutdownMessage());
+  if (shutdown.type !== "shutdown") throw new Error("expected shutdown");
+  if ("window_id" in shutdown) {
+    throw new Error("shutdown should be session scoped");
+  }
 });
 
 Deno.test("parses frame batches and preserves presentation order", async () => {
@@ -72,5 +80,14 @@ Deno.test("ignores non-frame JSONL messages", () => {
   );
   if (message !== null) {
     throw new Error("hello should be ignored by the minimal host");
+  }
+});
+
+Deno.test("parses detached lifecycle messages", () => {
+  const detached = parseDetachedLine('{"type":"detached","window_id":"main"}');
+  if (detached === null) throw new Error("expected detached");
+  if (detached.window_id !== "main") throw new Error("expected main window");
+  if (parseDetachedLine('{"type":"shutdown"}') !== null) {
+    throw new Error("shutdown should not parse as detached");
   }
 });

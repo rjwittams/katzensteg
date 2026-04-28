@@ -43,6 +43,11 @@ export interface FrameBatch {
   };
 }
 
+export interface Detached {
+  type: "detached";
+  window_id: string;
+}
+
 export function makeAttachMessage(options: AttachOptions): string {
   return JSON.stringify({
     type: "attach",
@@ -79,6 +84,12 @@ export function makeDetachMessage(windowId: "main" = "main"): string {
   }) + "\n";
 }
 
+export function makeShutdownMessage(): string {
+  return JSON.stringify({
+    type: "shutdown",
+  }) + "\n";
+}
+
 export function parseFrameBatchLine(line: string): FrameBatch | null {
   let message: unknown;
   try {
@@ -108,6 +119,22 @@ export function parseFrameBatchLine(line: string): FrameBatch | null {
       placements: groups.placements,
       after: groups.after,
     },
+  };
+}
+
+export function parseDetachedLine(line: string): Detached | null {
+  let message: unknown;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(message)) return null;
+  if (message.type !== "detached") return null;
+  if (typeof message.window_id !== "string") return null;
+  return {
+    type: "detached",
+    window_id: message.window_id,
   };
 }
 

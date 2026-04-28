@@ -1,6 +1,7 @@
 const std = @import("std");
 const attach_host = @import("attach_host.zig");
 const profiles_mod = @import("launcher_profiles.zig");
+const render_batch_protocol = @import("render_batch_protocol.zig");
 
 const Command = enum {
     help,
@@ -59,6 +60,8 @@ const OutputSpec = union(enum) {
         }
     }
 };
+
+var embed_signal_child_pgid = std.atomic.Value(std.posix.pid_t).init(0);
 
 const ResolvedLaunchPlan = struct {
     allocator: std.mem.Allocator,
@@ -876,8 +879,11 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
     var stderr_sink: ?FileSink = try openStderrSink(stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
     defer if (stderr_sink) |*sink| sink.deinit();
 
+    child.pgid = 0;
     try child.spawn();
     pipes.closeChildFds();
+    var signal_handlers = installEmbedSignalHandlers(child.id);
+    defer signal_handlers.restore();
 
     var stdout_thread: ?std.Thread = null;
     if (child.stdout) |stdout_file| {
@@ -903,11 +909,10 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
         .close_source = true,
         .close_dest = false,
     }});
-    const control_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
+    const control_thread = try std.Thread.spawn(.{}, forwardEmbedControl, .{EmbedControlForwardArgs{
         .source = std.fs.File.stdin(),
         .dest = pipes.takeControlWrite(),
-        .close_source = false,
-        .close_dest = true,
+        .child_pgid = child.id,
     }});
     control_thread.detach();
 
@@ -916,6 +921,107 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
     if (stderr_thread) |thread| thread.join();
     render_thread.join();
     return term;
+}
+
+const EmbedSignalHandlers = struct {
+    old_int: std.posix.Sigaction,
+    old_term: std.posix.Sigaction,
+
+    fn restore(self: *const EmbedSignalHandlers) void {
+        embed_signal_child_pgid.store(0, .seq_cst);
+        std.posix.sigaction(std.posix.SIG.INT, &self.old_int, null);
+        std.posix.sigaction(std.posix.SIG.TERM, &self.old_term, null);
+    }
+};
+
+fn installEmbedSignalHandlers(child_pgid: std.posix.pid_t) EmbedSignalHandlers {
+    embed_signal_child_pgid.store(child_pgid, .seq_cst);
+    const action = std.posix.Sigaction{
+        .handler = .{ .handler = embedSignalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var handlers: EmbedSignalHandlers = undefined;
+    std.posix.sigaction(std.posix.SIG.INT, &action, &handlers.old_int);
+    std.posix.sigaction(std.posix.SIG.TERM, &action, &handlers.old_term);
+    return handlers;
+}
+
+fn embedSignalHandler(sig: i32) callconv(.c) void {
+    const pgid = embed_signal_child_pgid.load(.seq_cst);
+    if (pgid > 0) {
+        std.posix.kill(-pgid, std.posix.SIG.TERM) catch {};
+    }
+    std.posix.exit(@intCast(128 + sig));
+}
+
+const EmbedControlForwardArgs = struct {
+    source: std.fs.File,
+    dest: std.fs.File,
+    child_pgid: std.posix.pid_t,
+};
+
+fn forwardEmbedControl(args: EmbedControlForwardArgs) void {
+    var source = args.source;
+    var dest = args.dest;
+    defer dest.close();
+
+    var line = std.ArrayList(u8).empty;
+    defer line.deinit(std.heap.page_allocator);
+
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = source.read(&buf) catch {
+            terminateEmbedChildAfterGrace(args.child_pgid);
+            return;
+        };
+        if (n == 0) {
+            terminateEmbedChildAfterGrace(args.child_pgid);
+            return;
+        }
+        dest.writeAll(buf[0..n]) catch {
+            terminateEmbedChildAfterGrace(args.child_pgid);
+            return;
+        };
+        for (buf[0..n]) |byte| {
+            if (byte == '\n') {
+                if (embedControlLineRequestsShutdown(line.items)) {
+                    terminateEmbedChildAfterGrace(args.child_pgid);
+                    return;
+                }
+                line.clearRetainingCapacity();
+            } else if (byte != '\r') {
+                if (line.items.len < 64 * 1024) {
+                    line.append(std.heap.page_allocator, byte) catch {
+                        line.clearRetainingCapacity();
+                    };
+                } else {
+                    line.clearRetainingCapacity();
+                }
+            }
+        }
+    }
+}
+
+fn embedControlLineRequestsShutdown(line: []const u8) bool {
+    var control = render_batch_protocol.parseControlMessage(std.heap.page_allocator, line) catch return false;
+    defer render_batch_protocol.deinitControlMessage(std.heap.page_allocator, &control);
+    return switch (control) {
+        .shutdown => true,
+        else => false,
+    };
+}
+
+fn terminateEmbedChildAfterGrace(child_pgid: std.posix.pid_t) void {
+    if (child_pgid <= 0) return;
+    std.Thread.sleep(1500 * std.time.ns_per_ms);
+    terminateProcessGroup(child_pgid);
+}
+
+fn terminateProcessGroup(pgid: std.posix.pid_t) void {
+    std.posix.kill(-pgid, std.posix.SIG.TERM) catch {};
+    std.Thread.sleep(250 * std.time.ns_per_ms);
+    std.posix.kill(-pgid, std.posix.SIG.KILL) catch {};
 }
 
 const CopyFileArgs = struct {
@@ -1584,6 +1690,15 @@ test "launcher embed jsonl overrides runtime presentation fds" {
     try std.testing.expectEqual(@as(i32, 100), runtime.presentation_fd.?);
     try std.testing.expectEqual(@as(i32, 101), runtime.presentation_control_fd.?);
     try std.testing.expectEqual(original_output_profile, runtime.output_profile);
+}
+
+test "launcher recognizes shutdown as an embed session lifetime command" {
+    try std.testing.expect(!embedControlLineRequestsShutdown(
+        "{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":1,\"col\":1,\"rows\":24,\"cols\":80},\"aspect\":\"fit\",\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]}}",
+    ));
+    try std.testing.expect(embedControlLineRequestsShutdown("{\"type\":\"shutdown\"}"));
+    try std.testing.expect(embedControlLineRequestsShutdown("{\"type\":\"shutdown\",\"reason\":\"host_closed\"}"));
+    try std.testing.expect(!embedControlLineRequestsShutdown("{\"type\":\"detach\",\"window_id\":\"main\"}"));
 }
 
 test "launcher target parser skips options and supports option terminator" {

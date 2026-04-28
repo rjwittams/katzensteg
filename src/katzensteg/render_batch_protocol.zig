@@ -62,6 +62,7 @@ pub const ControlMessage = union(enum) {
     attach: AttachMessage,
     viewport: ViewportMessage,
     detach: DetachMessage,
+    shutdown,
 };
 
 pub const ParseError = error{
@@ -81,6 +82,12 @@ pub fn writeFrameBatchJsonl(_: std.mem.Allocator, writer: anytype, batch: BatchV
     try writer.writeAll(",");
     try writeGroup(writer, "after", batch.after);
     try writer.writeAll("}}\n");
+}
+
+pub fn writeDetachedJsonl(writer: anytype, window_id: []const u8) !void {
+    try writer.writeAll("{\"type\":\"detached\",\"window_id\":");
+    try writeJsonString(writer, window_id);
+    try writer.writeAll("}\n");
 }
 
 fn writeGroup(writer: anytype, name: []const u8, chunks: []const []const u8) !void {
@@ -121,6 +128,7 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
         .attach => |attach| return attach,
         .viewport => return error.InvalidMessage,
         .detach => return error.InvalidMessage,
+        .shutdown => return error.InvalidMessage,
     }
 }
 
@@ -131,6 +139,10 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 
     const type_value = root.get("type") orelse return error.InvalidMessage;
     if (type_value != .string) return error.InvalidMessage;
+
+    if (std.mem.eql(u8, type_value.string, "shutdown")) {
+        return .shutdown;
+    }
 
     const window_value = root.get("window_id") orelse return error.InvalidMessage;
     if (window_value != .string) return error.InvalidMessage;
@@ -180,6 +192,7 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
     switch (control.*) {
         .attach => |*attach| deinitAttachMessage(allocator, attach),
         .viewport, .detach => {},
+        .shutdown => {},
     }
 }
 
@@ -274,6 +287,15 @@ test "frame batch JSON escapes terminal control bytes" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b_G") != null);
 }
 
+test "detached JSON names the completed window" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writeDetachedJsonl(out.writer(std.testing.allocator), "main");
+
+    try std.testing.expectEqualStrings("{\"type\":\"detached\",\"window_id\":\"main\"}\n", out.items);
+}
+
 test "attach message parses window geometry and id ranges" {
     const msg =
         \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
@@ -338,4 +360,15 @@ test "control message parses detach" {
     defer deinitControlMessage(std.testing.allocator, &control);
 
     try std.testing.expectEqualStrings("main", control.detach.window_id);
+}
+
+test "control message parses global shutdown without window id" {
+    const msg =
+        \\{"type":"shutdown"}
+    ;
+
+    var control = try parseControlMessage(std.testing.allocator, msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    try std.testing.expectEqual(ControlMessage.shutdown, control);
 }
