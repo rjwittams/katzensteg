@@ -267,6 +267,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    katzensteg_launcher.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(katzensteg_launcher);
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
@@ -277,6 +278,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    katzensteg_proxy.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(katzensteg_proxy);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -339,5 +341,4 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
-
 }

@@ -1,11 +1,19 @@
 const std = @import("std");
+const attach_host = @import("attach_host.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 
 const Command = enum {
     help,
     menu,
     run,
+    attach,
     unknown,
+};
+
+const AttachArgs = struct {
+    exec_argv: []const []const u8,
+    rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null,
+    aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit,
 };
 
 const ExpansionContext = struct {
@@ -146,10 +154,21 @@ pub fn main() !void {
             const target_idx = targetArgIndex(args) orelse unreachable;
             const target = args[target_idx];
             if (launcherDryRun(args)) {
-                try dryRunTarget(allocator, target, args[target_idx + 1 ..]);
+                try dryRunTarget(allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
                 return;
             }
-            const exit_code = try runTarget(allocator, target, args[target_idx + 1 ..]);
+            const exit_code = try runTarget(allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
+            std.process.exit(exit_code);
+        },
+        .attach => {
+            const attach = parseAttachArgs(args) orelse {
+                std.debug.print("{s}", .{usageText()});
+                std.process.exit(64);
+            };
+            const exit_code = try attach_host.runExec(allocator, attach.exec_argv, .{
+                .rect_cells = attach.rect_cells,
+                .aspect = attach.aspect,
+            });
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -164,10 +183,12 @@ fn usageText() []const u8 {
         \\Usage:
         \\  katzensteg --help
         \\  katzensteg [options] <target>
+        \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
         \\  katzensteg
         \\
         \\Options:
-        \\  --dry-run  Resolve the target and print what would run.
+        \\  --dry-run      Resolve the target and print what would run.
+        \\  --embed-jsonl  Quiet launcher mode; stdout is Katzensteg JSONL batches.
         \\
         \\Targets:
         \\  A target can be a named profile or, later, a command/path/URL matched by the launcher.
@@ -188,14 +209,75 @@ fn isProxyExecutablePath(path: []const u8) bool {
 fn parseCommand(args: []const []const u8) Command {
     if (args.len <= 1) return .menu;
     if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
+    if (std.mem.eql(u8, args[1], "attach")) return if (parseAttachArgs(args) != null) .attach else .unknown;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
+}
+
+fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
+    if (args.len < 5) return null;
+    if (!std.mem.eql(u8, args[1], "attach")) return null;
+
+    var saw_exec = false;
+    var rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null;
+    var aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit;
+    var idx: usize = 2;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        if (std.mem.eql(u8, arg, "--")) {
+            if (!saw_exec or idx + 1 >= args.len) return null;
+            return .{ .exec_argv = args[idx + 1 ..], .rect_cells = rect_cells, .aspect = aspect };
+        }
+        if (std.mem.eql(u8, arg, "--exec")) {
+            if (saw_exec) return null;
+            saw_exec = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--rect")) {
+            if (idx + 1 >= args.len or rect_cells != null) return null;
+            idx += 1;
+            rect_cells = parseAttachRect(args[idx]) orelse return null;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--aspect")) {
+            if (idx + 1 >= args.len) return null;
+            idx += 1;
+            aspect = @import("render_batch_protocol.zig").parseAspect(args[idx]) orelse return null;
+            continue;
+        }
+        return null;
+    }
+    return null;
+}
+
+fn parseAttachRect(value: []const u8) ?@import("render_batch_protocol.zig").PresentationRectCells {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    const x = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const y = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const w = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    const h = parsePositiveI32(parts.next() orelse return null) orelse return null;
+    if (parts.next() != null) return null;
+    return .{ .row = y, .col = x, .rows = h, .cols = w };
+}
+
+fn parsePositiveI32(value: []const u8) ?i32 {
+    const parsed = std.fmt.parseInt(i32, value, 10) catch return null;
+    if (parsed <= 0) return null;
+    return parsed;
 }
 
 fn launcherDryRun(args: []const []const u8) bool {
     const target_idx = targetArgIndex(args) orelse args.len;
     for (args[1..target_idx]) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) return true;
+    }
+    return false;
+}
+
+fn launcherEmbedJsonl(args: []const []const u8) bool {
+    const target_idx = targetArgIndex(args) orelse args.len;
+    for (args[1..target_idx]) |arg| {
+        if (std.mem.eql(u8, arg, "--embed-jsonl")) return true;
     }
     return false;
 }
@@ -215,6 +297,7 @@ fn targetArgIndex(args: []const []const u8) ?usize {
             continue;
         }
         if (std.mem.eql(u8, arg, "--dry-run")) continue;
+        if (std.mem.eql(u8, arg, "--embed-jsonl")) continue;
         if (std.mem.startsWith(u8, arg, "-")) continue;
         return idx;
     }
@@ -247,7 +330,7 @@ fn showProfiles(allocator: std.mem.Allocator) !void {
     try writer.interface.flush();
 }
 
-fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) !void {
+fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, embed_jsonl: bool) !void {
     var catalog = try loadProfileCatalog(allocator);
     defer catalog.deinit();
 
@@ -266,6 +349,7 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     defer expansion.deinit(allocator);
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
+    if (embed_jsonl) applyEmbedJsonlRuntime(&plan.runtime, defaultEmbedRuntimeFds());
 
     std.debug.print(
         "katzensteg dry-run\nprofile={s}\ntarget={s}\nstdout={s}\nstderr={s}\n",
@@ -316,11 +400,12 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     );
 }
 
-fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) !u8 {
+fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, embed_jsonl: bool) !u8 {
     var catalog = try loadProfileCatalog(allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
+        if (embed_jsonl) return 66;
         return runCommand(allocator, target, extra_args);
     };
     if (profileLaunchProblem(profile)) |problem| {
@@ -333,6 +418,13 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
+    var embed_pipes: ?EmbedPipes = null;
+    if (embed_jsonl) {
+        embed_pipes = try EmbedPipes.init();
+        applyEmbedJsonlRuntime(&plan.runtime, embed_pipes.?.runtimeFds());
+    }
+    defer if (embed_pipes) |*pipes| pipes.deinit();
+
     const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
     defer allocator.free(runtime_config_path);
     defer std.fs.deleteFileAbsolute(runtime_config_path) catch {};
@@ -342,27 +434,37 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
 
-    std.debug.print("katzensteg: launching {s}\n", .{plan.profile_name});
-    std.debug.print("  target: {s}\n", .{plan.target});
-    std.debug.print("  runtime config: {s}\n", .{runtime_config_path});
-    std.debug.print("  output: {s}\n", .{outputSpecLabel(plan.stdout)});
+    if (!embed_jsonl) {
+        std.debug.print("katzensteg: launching {s}\n", .{plan.profile_name});
+        std.debug.print("  target: {s}\n", .{plan.target});
+        std.debug.print("  runtime config: {s}\n", .{runtime_config_path});
+        std.debug.print("  output: {s}\n", .{outputSpecLabel(plan.stdout)});
+    }
     try ensureSeedFiles(allocator, plan.seed_files);
 
     var child = std.process.Child.init(plan.argv, allocator);
     child.env_map = &env_map;
     child.cwd = plan.cwd;
-    child.stdin_behavior = .Inherit;
+    child.stdin_behavior = if (embed_jsonl) .Ignore else .Inherit;
     child.stdout_behavior = stdioForStdout(plan.stdout);
     child.stderr_behavior = stdioForStderr(plan.stdout, plan.stderr);
 
-    const term = spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
+    const term = if (embed_jsonl)
+        spawnAndWaitEmbedJsonl(allocator, &child, plan.stdout, plan.stderr, &embed_pipes.?) catch |err| {
+            printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
+            return spawnFailureExitCode(err);
+        }
+    else
+        spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
+            resetTerminalBestEffort();
+            printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
+            return spawnFailureExitCode(err);
+        };
+    if (!embed_jsonl) {
         resetTerminalBestEffort();
-        printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
-        return spawnFailureExitCode(err);
-    };
-    resetTerminalBestEffort();
+    }
     const exit_code = childExitCode(term);
-    if (exit_code != 0) {
+    if (exit_code != 0 and !embed_jsonl) {
         reportExecutedCommand(allocator, plan.argv);
         reportOutputTail(allocator, plan.stdout, plan.stderr);
     }
@@ -632,7 +734,25 @@ fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) @import("co
     if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
     if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
     if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;
+    if (fields.presentation_sink) runtime.presentation_sink = profile.runtime.presentation_sink;
+    if (fields.presentation_fd) runtime.presentation_fd = profile.runtime.presentation_fd;
+    if (fields.presentation_control_fd) runtime.presentation_control_fd = profile.runtime.presentation_control_fd;
     return runtime;
+}
+
+const EmbedRuntimeFds = struct {
+    presentation_fd: i32,
+    control_fd: i32,
+};
+
+fn defaultEmbedRuntimeFds() EmbedRuntimeFds {
+    return .{ .presentation_fd = 100, .control_fd = 101 };
+}
+
+fn applyEmbedJsonlRuntime(runtime: *@import("config.zig").RuntimeConfig, fds: EmbedRuntimeFds) void {
+    runtime.presentation_sink = .jsonl_fd;
+    runtime.presentation_fd = fds.presentation_fd;
+    runtime.presentation_control_fd = fds.control_fd;
 }
 
 fn resolveProfileStdout(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
@@ -685,6 +805,146 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdou
     if (stdout_thread) |thread| thread.join();
     if (stderr_thread) |thread| thread.join();
     return term;
+}
+
+const embed_fd_min: std.posix.fd_t = 100;
+
+const EmbedPipes = struct {
+    render_read: ?std.fs.File,
+    control_write: ?std.fs.File,
+    child_render_fd: ?std.posix.fd_t,
+    child_control_fd: ?std.posix.fd_t,
+
+    fn init() !EmbedPipes {
+        const render_pipe = try std.posix.pipe();
+        errdefer destroyRawPipe(render_pipe);
+        const control_pipe = try std.posix.pipe();
+        errdefer destroyRawPipe(control_pipe);
+
+        const child_render_fd = try dupFdAtLeast(render_pipe[1], embed_fd_min);
+        errdefer std.posix.close(child_render_fd);
+        const child_control_fd = try dupFdAtLeast(control_pipe[0], child_render_fd + 1);
+        errdefer std.posix.close(child_control_fd);
+
+        std.posix.close(render_pipe[1]);
+        std.posix.close(control_pipe[0]);
+
+        return .{
+            .render_read = .{ .handle = render_pipe[0] },
+            .control_write = .{ .handle = control_pipe[1] },
+            .child_render_fd = child_render_fd,
+            .child_control_fd = child_control_fd,
+        };
+    }
+
+    fn runtimeFds(self: *const EmbedPipes) EmbedRuntimeFds {
+        return .{
+            .presentation_fd = @intCast(self.child_render_fd.?),
+            .control_fd = @intCast(self.child_control_fd.?),
+        };
+    }
+
+    fn closeChildFds(self: *EmbedPipes) void {
+        if (self.child_render_fd) |fd| std.posix.close(fd);
+        if (self.child_control_fd) |fd| std.posix.close(fd);
+        self.child_render_fd = null;
+        self.child_control_fd = null;
+    }
+
+    fn takeRenderRead(self: *EmbedPipes) std.fs.File {
+        const file = self.render_read.?;
+        self.render_read = null;
+        return file;
+    }
+
+    fn takeControlWrite(self: *EmbedPipes) std.fs.File {
+        const file = self.control_write.?;
+        self.control_write = null;
+        return file;
+    }
+
+    fn deinit(self: *EmbedPipes) void {
+        if (self.render_read) |file| file.close();
+        if (self.control_write) |file| file.close();
+        self.closeChildFds();
+    }
+};
+
+fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, pipes: *EmbedPipes) !std.process.Child.Term {
+    var stdout_sink: ?FileSink = try openStdoutSink(stdout_spec);
+    defer if (stdout_sink) |*sink| sink.deinit();
+    var stderr_sink: ?FileSink = try openStderrSink(stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
+    defer if (stderr_sink) |*sink| sink.deinit();
+
+    try child.spawn();
+    pipes.closeChildFds();
+
+    var stdout_thread: ?std.Thread = null;
+    if (child.stdout) |stdout_file| {
+        child.stdout = null;
+        const sink = if (stdout_sink) |*sink| sink else unreachable;
+        stdout_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stdout_file, .sink = sink }});
+    }
+
+    var stderr_thread: ?std.Thread = null;
+    if (child.stderr) |stderr_file| {
+        child.stderr = null;
+        const sink = switch (stderr_spec) {
+            .stdout => if (stdout_sink) |*sink| sink else unreachable,
+            .file => if (stderr_sink) |*sink| sink else unreachable,
+            else => unreachable,
+        };
+        stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink }});
+    }
+
+    const render_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
+        .source = pipes.takeRenderRead(),
+        .dest = std.fs.File.stdout(),
+        .close_source = true,
+        .close_dest = false,
+    }});
+    const control_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
+        .source = std.fs.File.stdin(),
+        .dest = pipes.takeControlWrite(),
+        .close_source = false,
+        .close_dest = true,
+    }});
+    control_thread.detach();
+
+    const term = try child.wait();
+    if (stdout_thread) |thread| thread.join();
+    if (stderr_thread) |thread| thread.join();
+    render_thread.join();
+    return term;
+}
+
+const CopyFileArgs = struct {
+    source: std.fs.File,
+    dest: std.fs.File,
+    close_source: bool,
+    close_dest: bool,
+};
+
+fn copyFileToFile(args: CopyFileArgs) void {
+    var source = args.source;
+    var dest = args.dest;
+    defer if (args.close_source) source.close();
+    defer if (args.close_dest) dest.close();
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = source.read(&buf) catch return;
+        if (n == 0) return;
+        dest.writeAll(buf[0..n]) catch return;
+    }
+}
+
+fn dupFdAtLeast(fd: std.posix.fd_t, min: std.posix.fd_t) !std.posix.fd_t {
+    return @intCast(try std.posix.fcntl(fd, std.posix.F.DUPFD, @intCast(min)));
+}
+
+fn destroyRawPipe(pipe: [2]std.posix.fd_t) void {
+    std.posix.close(pipe[0]);
+    std.posix.close(pipe[1]);
 }
 
 fn drainPipeToSink(args: DrainArgs) void {
@@ -984,7 +1244,22 @@ fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: @import("config.zig")
     } else {
         try writer.writeAll("null");
     }
-    try writer.print(",\"gl_capture\":\"{s}\",\"vulkan_capture\":{}}}\n", .{ @tagName(runtime.gl_capture), runtime.vulkan_capture });
+    try writer.print(
+        ",\"gl_capture\":\"{s}\",\"vulkan_capture\":{},\"presentation_sink\":\"{s}\",\"presentation_fd\":",
+        .{ @tagName(runtime.gl_capture), runtime.vulkan_capture, @tagName(runtime.presentation_sink) },
+    );
+    if (runtime.presentation_fd) |fd| {
+        try writer.print("{d}", .{fd});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"presentation_control_fd\":");
+    if (runtime.presentation_control_fd) |fd| {
+        try writer.print("{d}", .{fd});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}\n");
 }
 
 fn resetTerminalBestEffort() void {
@@ -1267,6 +1542,50 @@ test "launcher command parser recognizes help menu and run targets" {
     try std.testing.expectEqual(Command.unknown, parseCommand(&.{ "katzensteg", "--dry-run" }));
 }
 
+test "launcher command parser recognizes embed jsonl before target" {
+    const args = &.{ "katzensteg", "--embed-jsonl", "probe.embed.basic_sdl" };
+    try std.testing.expectEqual(Command.run, parseCommand(args));
+    try std.testing.expectEqualStrings("probe.embed.basic_sdl", targetArg(args).?);
+    try std.testing.expect(launcherEmbedJsonl(args));
+}
+
+test "launcher parses attach exec argv command" {
+    const args = &.{ "katzensteg", "attach", "--exec", "--", "katzensteg", "--embed-jsonl", "probe.embed.basic_sdl" };
+    try std.testing.expectEqual(Command.attach, parseCommand(args));
+    const attach = parseAttachArgs(args).?;
+    try std.testing.expectEqualStrings("katzensteg", attach.exec_argv[0]);
+    try std.testing.expectEqualStrings("--embed-jsonl", attach.exec_argv[1]);
+    try std.testing.expectEqualStrings("probe.embed.basic_sdl", attach.exec_argv[2]);
+    try std.testing.expectEqual(@as(?@import("render_batch_protocol.zig").PresentationRectCells, null), attach.rect_cells);
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationAspect.fit, attach.aspect);
+}
+
+test "launcher parses attach rect and aspect before exec argv" {
+    const args = &.{ "katzensteg", "attach", "--rect", "5,3,80,24", "--aspect", "stretch", "--exec", "--", "katzensteg", "--embed-jsonl", "probe.embed.basic_sdl" };
+    const attach = parseAttachArgs(args).?;
+
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationRectCells{ .row = 3, .col = 5, .rows = 24, .cols = 80 }, attach.rect_cells.?);
+    try std.testing.expectEqual(@import("render_batch_protocol.zig").PresentationAspect.stretch, attach.aspect);
+    try std.testing.expectEqualStrings("katzensteg", attach.exec_argv[0]);
+}
+
+test "launcher rejects attach exec without argv terminator" {
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "katzensteg" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--exec", "--" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--rect", "0,1,80,24", "--exec", "--", "katzensteg" }) == null);
+    try std.testing.expect(parseAttachArgs(&.{ "katzensteg", "attach", "--aspect", "contain", "--exec", "--", "katzensteg" }) != null);
+}
+
+test "launcher embed jsonl overrides runtime presentation fds" {
+    var runtime = defaultRuntimeConfig();
+    const original_output_profile = runtime.output_profile;
+    applyEmbedJsonlRuntime(&runtime, .{ .presentation_fd = 100, .control_fd = 101 });
+    try std.testing.expectEqual(@import("config.zig").PresentationSink.jsonl_fd, runtime.presentation_sink);
+    try std.testing.expectEqual(@as(i32, 100), runtime.presentation_fd.?);
+    try std.testing.expectEqual(@as(i32, 101), runtime.presentation_control_fd.?);
+    try std.testing.expectEqual(original_output_profile, runtime.output_profile);
+}
+
 test "launcher target parser skips options and supports option terminator" {
     try std.testing.expectEqualStrings("example", targetArg(&.{ "katzensteg", "--dry-run", "example" }).?);
     try std.testing.expectEqualStrings("--odd-command-name", targetArg(&.{ "katzensteg", "--", "--odd-command-name" }).?);
@@ -1277,4 +1596,18 @@ test "launcher target parser skips options and supports option terminator" {
 test "launcher dry-run option is only consumed before target" {
     try std.testing.expect(launcherDryRun(&.{ "katzensteg", "--dry-run", "example" }));
     try std.testing.expect(!launcherDryRun(&.{ "katzensteg", "example", "--dry-run" }));
+}
+
+test "runtime config JSON includes render batch fds" {
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    var runtime = defaultRuntimeConfig();
+    applyEmbedJsonlRuntime(&runtime, .{ .presentation_fd = 100, .control_fd = 101 });
+    try writeRuntimeConfigJson(&writer, runtime);
+    const out = writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_sink\":\"jsonl_fd\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_fd\":100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_control_fd\":101") != null);
 }
