@@ -60,6 +60,18 @@ Profile string values are resolved by the launcher before spawning the child. `~
 
 When an optional env value, arg, or seed file path has no value for the active platform, that item is omitted. A target with no value for the active platform is treated as a broken profile.
 
+## JSONL Embed Mode
+
+`--embed-jsonl` is an explicit launcher mode for hosts that own the PTY and want Katzensteg render batches on stdout:
+
+```sh
+./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+```
+
+In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSONL protocol input. The launcher stays quiet, keeps the target program stdout on the normal profile log path, and passes dedicated fds to the preloaded runtime for render batches and control messages.
+
+The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect and id ranges. Until attach is received, the runtime suppresses graphics batches. First-cut embed mode uses inline terminal bytes in JSON strings and direct APC-style uploads; socket transport, target stdout events, file/shm payload side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+
 ## Current Smoke Status
 
 The current profile set has been smoke-tested on macOS. The known meaningful exceptions are Moonlight-specific:
