@@ -60,6 +60,31 @@ Profile string values are resolved by the launcher before spawning the child. `~
 
 When an optional env value, arg, or seed file path has no value for the active platform, that item is omitted. A target with no value for the active platform is treated as a broken profile.
 
+## JSONL Embed Mode
+
+`--embed-jsonl` is an explicit launcher mode for hosts that own the PTY and want Katzensteg render batches on stdout:
+
+```sh
+./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+```
+
+In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSONL protocol input. The launcher stays quiet, keeps the target program stdout on the normal profile log path, and passes dedicated fds to the preloaded runtime for render batches and control messages.
+
+The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+
+## Attach Host Mode
+
+`attach` is the terminal-owning host for a stdio JSONL peer. The peer command is argv-only and starts after `--`:
+
+```sh
+./zig-out/bin/katzensteg attach --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+./zig-out/bin/katzensteg attach --rect 5,3,80,24 --aspect fit --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+```
+
+The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. `--rect x,y,w,h` uses 1-based terminal cells and maps to `col,row,cols,rows`; `--aspect` accepts `fit`, `stretch`, or `cover`. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
+
+This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
+
 ## Current Smoke Status
 
 The current profile set has been smoke-tested on macOS. The known meaningful exceptions are Moonlight-specific:

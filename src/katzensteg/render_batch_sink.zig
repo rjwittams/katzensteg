@@ -1,0 +1,285 @@
+const std = @import("std");
+const kitty_protocol = @import("termscene").kitty.protocol;
+const render_batch_protocol = @import("render_batch_protocol.zig");
+
+const rotating_file_count = 256;
+
+pub const RenderBatchSink = struct {
+    const FileUploadState = struct {
+        file: std.fs.File,
+        path: []u8,
+        high_water: u64,
+        next_offset: u64,
+        file_len: u64,
+    };
+
+    const RotatingFileUploadState = struct {
+        paths: [rotating_file_count][]u8,
+        file_lens: [rotating_file_count]u64,
+        next_index: usize,
+    };
+
+    const UploadState = union(render_batch_protocol.UploadProfile) {
+        direct_apc,
+        file_whole: RotatingFileUploadState,
+        file_offset_ring: FileUploadState,
+    };
+
+    allocator: std.mem.Allocator,
+    window_id: []const u8,
+    seq: u64 = 0,
+    deletes: std.ArrayList([]u8) = .empty,
+    uploads: std.ArrayList([]u8) = .empty,
+    placements: std.ArrayList([]u8) = .empty,
+    after: std.ArrayList([]u8) = .empty,
+    attached: bool = false,
+    rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
+    aspect: render_batch_protocol.PresentationAspect = .fit,
+    upload: UploadState = .direct_apc,
+
+    pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
+        return .{
+            .allocator = allocator,
+            .window_id = window_id,
+        };
+    }
+
+    pub fn deinit(self: *RenderBatchSink) void {
+        self.deinitUploadState();
+        self.clearGroup(&self.deletes);
+        self.clearGroup(&self.uploads);
+        self.clearGroup(&self.placements);
+        self.clearGroup(&self.after);
+        self.deletes.deinit(self.allocator);
+        self.uploads.deinit(self.allocator);
+        self.placements.deinit(self.allocator);
+        self.after.deinit(self.allocator);
+    }
+
+    pub fn attach(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells) void {
+        self.attachWithAspect(rect_cells, .fit);
+    }
+
+    pub fn attachWithAspect(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) void {
+        self.rect_cells = rect_cells;
+        self.aspect = aspect;
+        self.attached = true;
+    }
+
+    pub fn setUploadPolicy(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !void {
+        const next_upload = try self.initUploadState(policy);
+        self.deinitUploadState();
+        self.upload = next_upload;
+    }
+
+    pub fn isAttached(self: *const RenderBatchSink) bool {
+        return self.attached;
+    }
+
+    pub fn presentationRect(self: *const RenderBatchSink) render_batch_protocol.PresentationRectCells {
+        return self.rect_cells;
+    }
+
+    pub fn presentationAspect(self: *const RenderBatchSink) render_batch_protocol.PresentationAspect {
+        return self.aspect;
+    }
+
+    pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        switch (self.upload) {
+            .direct_apc => try kitty_protocol.writeTransmitRgba(out.writer(self.allocator), image_id, rgba, w, h),
+            .file_whole => |*state| {
+                const index = state.next_index;
+                state.next_index = (state.next_index + 1) % state.paths.len;
+                var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
+                defer file.close();
+                try file.pwriteAll(rgba, 0);
+                const rgba_len_u64: u64 = @intCast(rgba.len);
+                if (rgba_len_u64 > state.file_lens[index]) {
+                    try file.setEndPos(rgba.len);
+                    state.file_lens[index] = rgba_len_u64;
+                }
+                try file.sync();
+                try kitty_protocol.writeTransmitRgbaFileWhole(out.writer(self.allocator), image_id, state.paths[index], w, h);
+            },
+            .file_offset_ring => |*state| {
+                const region = try reserveFileRegion(state, rgba.len);
+                try state.file.pwriteAll(rgba, region.offset);
+                try state.file.sync();
+                try kitty_protocol.writeTransmitRgbaFileRegion(out.writer(self.allocator), image_id, state.path, region.offset, rgba.len, w, h);
+            },
+        }
+        try self.uploads.append(self.allocator, try out.toOwnedSlice(self.allocator));
+    }
+
+    pub fn place(self: *RenderBatchSink, row: i32, col: i32, placement: kitty_protocol.Placement) !void {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try kitty_protocol.writePlace(out.writer(self.allocator), row, col, placement);
+        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+    }
+
+    pub fn deletePlacement(self: *RenderBatchSink, target: kitty_protocol.ExactPlacement) !void {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try kitty_protocol.writeDeleteExactPlacement(out.writer(self.allocator), target);
+        try self.deletes.append(self.allocator, try out.toOwnedSlice(self.allocator));
+    }
+
+    pub fn deleteImageData(self: *RenderBatchSink, image_id: u32) !void {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try kitty_protocol.writeDeleteImageWithQuiet(out.writer(self.allocator), .suppress_fail, .free_data, image_id);
+        try self.deletes.append(self.allocator, try out.toOwnedSlice(self.allocator));
+    }
+
+    pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {
+        self.seq += 1;
+        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, writer, .{
+            .window_id = self.window_id,
+            .seq = self.seq,
+            .deletes = self.deletes.items,
+            .uploads = self.uploads.items,
+            .placements = self.placements.items,
+            .after = self.after.items,
+        });
+        self.clearRetainingCapacity();
+    }
+
+    pub fn clearRetainingCapacity(self: *RenderBatchSink) void {
+        self.clearGroup(&self.deletes);
+        self.clearGroup(&self.uploads);
+        self.clearGroup(&self.placements);
+        self.clearGroup(&self.after);
+    }
+
+    fn clearGroup(self: *RenderBatchSink, group: *std.ArrayList([]u8)) void {
+        for (group.items) |bytes| self.allocator.free(bytes);
+        group.clearRetainingCapacity();
+    }
+
+    fn initUploadState(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !UploadState {
+        return switch (policy.profile) {
+            .direct_apc => .direct_apc,
+            .file_whole => blk: {
+                const path = policy.path orelse return error.MissingUploadFilePath;
+                break :blk .{ .file_whole = try initRotatingFileUploadState(self.allocator, path) };
+            },
+            .file_offset_ring => blk: {
+                const path = policy.path orelse return error.MissingUploadFilePath;
+                break :blk .{ .file_offset_ring = try initSingleFileUploadState(self.allocator, path, policy.high_water) };
+            },
+        };
+    }
+
+    fn deinitUploadState(self: *RenderBatchSink) void {
+        switch (self.upload) {
+            .direct_apc => {},
+            .file_whole => |*state| {
+                for (&state.paths) |*path| {
+                    std.fs.deleteFileAbsolute(path.*) catch {};
+                    self.allocator.free(path.*);
+                }
+            },
+            .file_offset_ring => |*state| {
+                state.file.close();
+                std.fs.deleteFileAbsolute(state.path) catch {};
+                self.allocator.free(state.path);
+            },
+        }
+        self.upload = .direct_apc;
+    }
+
+    fn initRotatingFileUploadState(allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
+        var paths: [rotating_file_count][]u8 = undefined;
+        var initialized: usize = 0;
+        errdefer {
+            for (paths[0..initialized]) |path| {
+                std.fs.deleteFileAbsolute(path) catch {};
+                allocator.free(path);
+            }
+        }
+        for (&paths, 0..) |*path, index| {
+            path.* = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ base_path, index });
+            initialized += 1;
+            std.fs.deleteFileAbsolute(path.*) catch {};
+        }
+        return .{
+            .paths = paths,
+            .file_lens = [_]u64{0} ** rotating_file_count,
+            .next_index = 0,
+        };
+    }
+
+    fn initSingleFileUploadState(allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
+        const duped_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(duped_path);
+        const upload_file = try std.fs.createFileAbsolute(duped_path, .{ .read = true, .truncate = false });
+        return .{
+            .file = upload_file,
+            .path = duped_path,
+            .high_water = high_water,
+            .next_offset = 0,
+            .file_len = 0,
+        };
+    }
+
+    fn reserveFileRegion(state: *FileUploadState, byte_len: usize) !struct { offset: u64 } {
+        const byte_len_u64: u64 = @intCast(byte_len);
+        if (byte_len_u64 > state.high_water or state.next_offset + byte_len_u64 > state.high_water) {
+            state.next_offset = 0;
+        }
+        const offset = state.next_offset;
+        state.next_offset += byte_len_u64;
+        if (state.next_offset > state.file_len) {
+            try state.file.setEndPos(state.next_offset);
+            state.file_len = state.next_offset;
+        }
+        return .{ .offset = offset };
+    }
+};
+
+test "batch sink groups upload place and delete bytes" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    try sink.uploadRgba(100000, &[_]u8{ 255, 0, 0, 255 }, 1, 1);
+    try sink.place(4, 1, .{
+        .image_id = 100000,
+        .placement_id = 200000,
+        .cols = 1,
+        .rows = 1,
+        .src_x = 0,
+        .src_y = 0,
+        .src_w = 1,
+        .src_h = 1,
+        .z = 100,
+    });
+    try sink.deletePlacement(.{ .image_id = 100000, .placement_id = 200000 });
+    try sink.flushFrame(out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"deletes\":[") != null);
+}
+
+test "batch sink file whole upload writes image bytes to path and emits file APC" {
+    const path = "/tmp/katzensteg-batch-sink-file-upload";
+    std.fs.deleteFileAbsolute(path ++ ".0") catch {};
+    defer std.fs.deleteFileAbsolute(path ++ ".0") catch {};
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    try sink.setUploadPolicy(.{ .profile = .file_whole, .path = path, .high_water = 4096 });
+
+    try sink.uploadRgba(100000, &[_]u8{ 255, 0, 0, 255 }, 1, 1);
+
+    try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "t=f") != null);
+    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, path ++ ".0", 16);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, bytes);
+}

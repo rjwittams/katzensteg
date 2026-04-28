@@ -41,3 +41,5 @@ This suggests two output modes:
 LÖVE is a good pressure test for an SDL3 adapter and for agent-authored interactive Lua programs. Pygame likely exercises SDL2 plus software-surface and OpenGL display paths. Manim is probably a file/frame producer first: it can use OpenGL directly, read back frames, and produce images or videos, so its initial integration may be closer to `frame_descriptor` than live input.
 
 This path should not replace preload capture. It gives Katzensteg a cleaner authoring story for agent-generated visualizations while preserving the in-process path for existing apps and games.
+
+See `2026-04-28-stdio-render-batch-protocol.md` for the first-cut stdio/JSONL render batch shape that keeps the existing preload launcher path and lets an embedding client choose geometry while Katzensteg still constructs terminal graphics protocol bytes.

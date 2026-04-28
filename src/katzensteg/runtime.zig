@@ -9,6 +9,9 @@ const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
+const render_batch_protocol = @import("render_batch_protocol.zig");
+const render_batch_sink_mod = @import("render_batch_sink.zig");
+const upload_path_mod = @import("upload_path.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
 const sdl = @import("katzensteg_sdl");
@@ -22,6 +25,7 @@ const InterceptMode = config_mod.InterceptMode;
 const Command = intercept_sink.Command;
 const PixelSize = frame_builder_mod.PixelSize;
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
+const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
 
 const log = std.log.scoped(.runtime);
 
@@ -113,6 +117,10 @@ pub const Runtime = struct {
     tty: ?DirectTty = null,
     engine: ?ts_scene.SceneEngine = null,
     backend: ?ts_kitty.Backend = null,
+    batch_writer: ?std.fs.File = null,
+    batch_control: ?std.fs.File = null,
+    batch_control_line: std.ArrayList(u8),
+    batch_sink: ?RenderBatchSink = null,
     frame_builder: FrameBuilder,
     bg_only: bool = false,
     stats: bool = false,
@@ -177,6 +185,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .logger = logger,
             .frame_builder = FrameBuilder.init(allocator, stats, config.composite_mode, dump_composites, debug_composite),
+            .batch_control_line = .empty,
             .bg_only = bg_only,
             .stats = stats,
             .debug_protocol_replies = debug_protocol_replies,
@@ -229,6 +238,20 @@ pub const Runtime = struct {
                 log.info("whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
             }
         }
+        const presentation_options = presentationOptionsFromConfig(config);
+        if (presentation_options.batch_enabled) {
+            runtime.initBatchPresentation(presentation_options) catch |err| {
+                log.warn("batch presentation init failed: {any}", .{err});
+                return runtime;
+            };
+            runtime.active = true;
+            runtime.output_profile_name = "jsonl_fd";
+            runtime.file_transport_enabled = false;
+            runtime.input_enabled = false;
+            log.info("runtime initialized in JSONL fd presentation mode", .{});
+            return runtime;
+        }
+
         runtime.tty = DirectTty.init() catch |err| {
             log.warn("direct tty init failed: {any}", .{err});
             return runtime;
@@ -306,6 +329,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .logger = Logger.init(allocator),
             .frame_builder = FrameBuilder.init(allocator, false, .fullscreen, false, false),
+            .batch_control_line = .empty,
             .input_enabled = false,
             .input_claimed = false,
             .intercept_mode = .sync_compose,
@@ -372,6 +396,10 @@ pub const Runtime = struct {
         self.inspect_resources.deinit(self.allocator);
         self.inspect_resource_records.deinit(self.allocator);
         self.queued_lock_captures.deinit();
+        if (self.batch_sink) |*sink| sink.deinit();
+        self.batch_control_line.deinit(self.allocator);
+        if (self.batch_control) |file| file.close();
+        if (self.batch_writer) |file| file.close();
         if (self.tty) |*tty| {
             tty.disableInputCapture() catch {};
             self.pollTerminalInput();
@@ -382,6 +410,15 @@ pub const Runtime = struct {
         if (self.engine) |*engine| engine.deinit();
         if (self.tty) |*tty| tty.deinit();
         self.logger.deinit();
+    }
+
+    fn initBatchPresentation(self: *Runtime, options: PresentationOptions) !void {
+        const presentation_fd = options.presentation_fd orelse return error.MissingPresentationFd;
+        const control_fd = options.control_fd orelse return error.MissingPresentationControlFd;
+        self.batch_writer = std.fs.File{ .handle = @intCast(presentation_fd) };
+        self.batch_control = std.fs.File{ .handle = @intCast(control_fd) };
+        setNonblocking(self.batch_control.?.handle);
+        self.batch_sink = RenderBatchSink.init(self.allocator, "main");
     }
 
     pub fn noteProducerTime(self: *Runtime, kind: ProducerStatKind, duration_ns: u64) void {
@@ -557,6 +594,28 @@ pub const Runtime = struct {
         self.notePresentDuration(duration);
     }
 
+    pub fn renderBatchPresent(self: *Runtime, renderer: ?*sdl.SDL_Renderer) void {
+        if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
+        if (!self.shouldPresent()) return;
+        if (!self.terminalRenderingEnabled(null, renderer)) {
+            self.notePresentationLayout(.{});
+            return;
+        }
+        self.pollBatchControl();
+        if (!self.batch_sink.?.isAttached()) return;
+
+        const start_ns = std.time.nanoTimestamp();
+        var virtual_tty = self.batchVirtualTty();
+        var job = self.frame_builder.buildPresentJob(&self.logger, &virtual_tty, renderer, self.bg_only) catch |err| {
+            self.logger.writeFmtScoped(.info, .runtime, "batch buildPresentJob failed: {any}", .{err});
+            return;
+        };
+        defer job.deinit(self.allocator);
+        self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
+        const duration = std.time.nanoTimestamp() - start_ns;
+        self.notePresentDuration(duration);
+    }
+
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
         const tty = &(self.tty orelse return .{ .w = source_w, .h = source_h });
         return self.frame_builder.externalFramebufferUploadSize(tty, source_w, source_h);
@@ -578,6 +637,57 @@ pub const Runtime = struct {
         var parser = &(self.input_parser orelse return);
         const tty = self.tty orelse return;
         parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, self.presentation_layout));
+    }
+
+    fn pollBatchControl(self: *Runtime) void {
+        const file = &(self.batch_control orelse return);
+        var buf: [1024]u8 = undefined;
+        while (true) {
+            const n = file.read(&buf) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    log.warn("batch control read failed: {any}", .{err});
+                    return;
+                },
+            };
+            if (n == 0) return;
+            for (buf[0..n]) |byte| {
+                if (byte == '\n') {
+                    self.processBatchControlLine(self.batch_control_line.items);
+                    self.batch_control_line.clearRetainingCapacity();
+                } else if (byte != '\r') {
+                    self.batch_control_line.append(self.allocator, byte) catch {
+                        self.batch_control_line.clearRetainingCapacity();
+                        return;
+                    };
+                }
+            }
+            if (n < buf.len) return;
+        }
+    }
+
+    fn processBatchControlLine(self: *Runtime, line: []const u8) void {
+        var attach = render_batch_protocol.parseAttachMessage(self.allocator, line) catch return;
+        defer render_batch_protocol.deinitAttachMessage(self.allocator, &attach);
+        if (self.batch_sink) |*sink| {
+            sink.attachWithAspect(attach.rect_cells, attach.aspect);
+            sink.setUploadPolicy(attach.upload) catch |err| {
+                log.warn("batch upload policy failed: {any}", .{err});
+                return;
+            };
+            self.frame_builder.setImageIdRange(attach.image_ids);
+            self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
+        }
+    }
+
+    fn batchVirtualTty(self: *Runtime) DirectTty {
+        var tty: DirectTty = undefined;
+        const rect: render_batch_protocol.PresentationRectCells = if (self.batch_sink) |*sink| sink.presentationRect() else .{ .row = 1, .col = 1, .rows = 1, .cols = 1 };
+        tty.cols = @intCast(@max(1, rect.cols));
+        tty.rows = @intCast(@max(1, rect.rows));
+        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
+        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+        return tty;
     }
 
     fn maybeReportProducerStats(self: *Runtime) void {
@@ -964,6 +1074,35 @@ fn routeRealRendering(policy: window_policy_mod.WindowPresentationPolicy) bool {
     return policy.realRenderEnabled();
 }
 
+const PresentationOptions = struct {
+    batch_enabled: bool,
+    open_direct_tty: bool,
+    presentation_fd: ?i32,
+    control_fd: ?i32,
+};
+
+fn presentationOptionsFromConfig(config: config_mod.RuntimeConfig) PresentationOptions {
+    return switch (config.presentation_sink) {
+        .tty => .{
+            .batch_enabled = false,
+            .open_direct_tty = true,
+            .presentation_fd = null,
+            .control_fd = null,
+        },
+        .jsonl_fd => .{
+            .batch_enabled = true,
+            .open_direct_tty = false,
+            .presentation_fd = config.presentation_fd,
+            .control_fd = config.presentation_control_fd,
+        },
+    };
+}
+
+fn setNonblocking(fd: std.posix.fd_t) void {
+    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, flags | (1 << @bitOffsetOf(std.posix.O, "NONBLOCK"))) catch {};
+}
+
 pub fn shutdownGlobal() callconv(.c) void {
     global_mutex.lock();
     defer global_mutex.unlock();
@@ -1031,8 +1170,7 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
 }
 
 fn makeUploadPath(allocator: std.mem.Allocator) ![]u8 {
-    const tmpdir = if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
-    return try std.fmt.allocPrint(allocator, "{s}/tty-graphics-protocol-katzensteg-{d}.rgba", .{ tmpdir, std.c.getpid() });
+    return upload_path_mod.makeUploadPath(allocator);
 }
 
 fn mapOutputProfile(profile: ?config_mod.OutputProfile) ?ts_kitty.OutputProfile {
@@ -1087,6 +1225,18 @@ test "runtime maps configured GL capture mode to preload capture mode" {
     try std.testing.expectEqual(gl_capture_mod.CaptureMode.disabled, mapGlCaptureMode(.disabled));
     try std.testing.expectEqual(gl_capture_mod.CaptureMode.sync, mapGlCaptureMode(.sync));
     try std.testing.expectEqual(gl_capture_mod.CaptureMode.pbo, mapGlCaptureMode(.pbo));
+}
+
+test "batch presentation forces fd sink without direct tty" {
+    const options = presentationOptionsFromConfig(.{
+        .presentation_sink = .jsonl_fd,
+        .presentation_fd = 3,
+        .presentation_control_fd = 4,
+    });
+    try std.testing.expect(options.batch_enabled);
+    try std.testing.expect(!options.open_direct_tty);
+    try std.testing.expectEqual(@as(i32, 3), options.presentation_fd.?);
+    try std.testing.expectEqual(@as(i32, 4), options.control_fd.?);
 }
 
 test "window policy controls terminal and real render routes" {
