@@ -29,6 +29,9 @@ pub const RuntimeFieldSet = struct {
     output_profile: bool = false,
     gl_capture: bool = false,
     vulkan_capture: bool = false,
+    presentation_sink: bool = false,
+    presentation_fd: bool = false,
+    presentation_control_fd: bool = false,
 };
 
 pub const LaunchProfile = struct {
@@ -467,6 +470,33 @@ fn parseRuntimeObject(value: std.json.Value, platform: ProfilePlatform) !ParsedR
             fields.vulkan_capture = true;
         }
     }
+    if (value.object.get("presentation_sink")) |sink| {
+        const selected = try selectedPlatformString(sink, platform, error.InvalidRuntime) orelse null;
+        if (selected) |sink_value| {
+            runtime.presentation_sink = config.parsePresentationSink(sink_value) orelse return error.InvalidRuntime;
+            fields.presentation_sink = true;
+        }
+    }
+    if (value.object.get("presentation_fd")) |fd| {
+        switch (fd) {
+            .integer => |n| {
+                if (n < 0) return error.InvalidRuntime;
+                runtime.presentation_fd = @intCast(n);
+            },
+            else => return error.InvalidRuntime,
+        }
+        fields.presentation_fd = true;
+    }
+    if (value.object.get("presentation_control_fd")) |fd| {
+        switch (fd) {
+            .integer => |n| {
+                if (n < 0) return error.InvalidRuntime;
+                runtime.presentation_control_fd = @intCast(n);
+            },
+            else => return error.InvalidRuntime,
+        }
+        fields.presentation_control_fd = true;
+    }
     return .{ .config = runtime, .fields = fields };
 }
 
@@ -676,6 +706,18 @@ fn inheritRuntime(child: *LaunchProfile, parent: *const LaunchProfile) void {
         child.runtime.vulkan_capture = parent.runtime.vulkan_capture;
         child.runtime_fields.vulkan_capture = true;
     }
+    if (!child.runtime_fields.presentation_sink and parent.runtime_fields.presentation_sink) {
+        child.runtime.presentation_sink = parent.runtime.presentation_sink;
+        child.runtime_fields.presentation_sink = true;
+    }
+    if (!child.runtime_fields.presentation_fd and parent.runtime_fields.presentation_fd) {
+        child.runtime.presentation_fd = parent.runtime.presentation_fd;
+        child.runtime_fields.presentation_fd = true;
+    }
+    if (!child.runtime_fields.presentation_control_fd and parent.runtime_fields.presentation_control_fd) {
+        child.runtime.presentation_control_fd = parent.runtime.presentation_control_fd;
+        child.runtime_fields.presentation_control_fd = true;
+    }
 }
 
 fn findProfileIndex(profiles: []const LaunchProfile, name: []const u8) ?usize {
@@ -763,6 +805,34 @@ test "profile parser supports hidden internal fragments" {
     const profile = catalog.find("app.env").?;
     try std.testing.expect(profile.hidden);
     try std.testing.expectEqualStrings("/usr/bin/env", profile.target);
+}
+
+test "launcher profiles parse render batch runtime settings" {
+    const json =
+        \\{
+        \\  "profiles": {
+        \\    "embed": {
+        \\      "target": "/bin/echo",
+        \\      "runtime": {
+        \\        "presentation_sink": "jsonl_fd",
+        \\        "presentation_fd": 3,
+        \\        "presentation_control_fd": 4
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var catalog = try ProfileCatalog.parse(std.testing.allocator, json);
+    defer catalog.deinit();
+
+    const profile = catalog.find("embed").?;
+    try std.testing.expectEqual(config.PresentationSink.jsonl_fd, profile.runtime.presentation_sink);
+    try std.testing.expectEqual(@as(i32, 3), profile.runtime.presentation_fd.?);
+    try std.testing.expectEqual(@as(i32, 4), profile.runtime.presentation_control_fd.?);
+    try std.testing.expect(profile.runtime_fields.presentation_sink);
+    try std.testing.expect(profile.runtime_fields.presentation_fd);
+    try std.testing.expect(profile.runtime_fields.presentation_control_fd);
 }
 
 test "profile parser resolves platform-specific string values" {

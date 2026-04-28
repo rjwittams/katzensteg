@@ -632,6 +632,9 @@ fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) @import("co
     if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
     if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
     if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;
+    if (fields.presentation_sink) runtime.presentation_sink = profile.runtime.presentation_sink;
+    if (fields.presentation_fd) runtime.presentation_fd = profile.runtime.presentation_fd;
+    if (fields.presentation_control_fd) runtime.presentation_control_fd = profile.runtime.presentation_control_fd;
     return runtime;
 }
 
