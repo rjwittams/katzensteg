@@ -1,4 +1,5 @@
 const std = @import("std");
+const attach_host = @import("attach_host.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 
 const Command = enum {
@@ -158,8 +159,12 @@ pub fn main() !void {
             std.process.exit(exit_code);
         },
         .attach => {
-            std.debug.print("{s}", .{usageText()});
-            std.process.exit(64);
+            const attach = parseAttachArgs(args) orelse {
+                std.debug.print("{s}", .{usageText()});
+                std.process.exit(64);
+            };
+            const exit_code = try attach_host.runExec(allocator, attach.exec_argv);
+            std.process.exit(exit_code);
         },
         .unknown => {
             std.debug.print("{s}", .{usageText()});
