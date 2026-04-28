@@ -8,6 +8,7 @@ const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const presentation_layout = @import("presentation_layout.zig");
 const present_job = @import("present_job.zig");
+const render_batch_protocol = @import("render_batch_protocol.zig");
 
 const ts_types = termscene.types;
 const ts_scene = termscene.scene;
@@ -325,10 +326,14 @@ pub const FrameBuilder = struct {
     debug_composite: bool = false,
     last_inspect_summary: InspectFrameSummary = .{},
     next_image_id: u32 = 5000,
+    image_id_start: u32 = 5000,
+    image_id_end: u32 = std.math.maxInt(u32),
     next_asset_id: u64 = 1,
     last_composite_dump_ns: i128 = 0,
     last_composite_image_id: u32 = 0,
     next_composite_placement_id: u32 = 1,
+    composite_placement_id_start: u32 = 1,
+    composite_placement_id_end: u32 = std.math.maxInt(u32),
 
     pub fn init(allocator: std.mem.Allocator, stats_enabled: bool, composite_mode: CompositeMode, dump_composites: bool, debug_composite: bool) FrameBuilder {
         return .{
@@ -362,6 +367,22 @@ pub const FrameBuilder = struct {
         self.published_assets.deinit();
         self.solid_images.deinit();
         self.retired_image_ids.deinit(self.allocator);
+    }
+
+    pub fn setImageIdRange(self: *FrameBuilder, range: render_batch_protocol.IdRange) void {
+        const start = @max(@as(u32, 1), range.start);
+        const end = @max(start, range.end);
+        self.image_id_start = start;
+        self.image_id_end = end;
+        self.next_image_id = start;
+    }
+
+    pub fn setCompositePlacementIdRange(self: *FrameBuilder, range: render_batch_protocol.IdRange) void {
+        const start = @max(@as(u32, 1), range.start);
+        const end = @max(start, range.end);
+        self.composite_placement_id_start = start;
+        self.composite_placement_id_end = end;
+        self.next_composite_placement_id = start;
     }
 
     pub fn onCreateWindow(self: *FrameBuilder, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
@@ -1231,9 +1252,7 @@ pub const FrameBuilder = struct {
 
         const old_placement = CompositePlacement{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id };
         state.composite_image_id = self.allocImageId();
-        state.composite_placement_id = self.next_composite_placement_id;
-        self.next_composite_placement_id +%= 1;
-        if (self.next_composite_placement_id == 0) self.next_composite_placement_id = 1;
+        state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
         const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
@@ -1349,9 +1368,7 @@ pub const FrameBuilder = struct {
             const tile = &state.composite_tiles.items[entry.tile_index];
             const old_image_id = tile.image_id;
             const old_placement_id = tile.placement_id;
-            tile.placement_id = self.next_composite_placement_id;
-            self.next_composite_placement_id +%= 1;
-            if (self.next_composite_placement_id == 0) self.next_composite_placement_id = 1;
+            tile.placement_id = self.allocCompositePlacementId();
             tile.image_id = strip_image_id;
             const dest = tile.dest_rect;
             if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite tile place image_id={d} placement_id={d} tile={d} src={d},0 {d}x{d} cell={d},{d} {d}x{d}", .{ strip_image_id, tile.placement_id, entry.tile_index, entry.x, tile.src_rect.w, tile.src_rect.h, dest.col, dest.row, dest.w, dest.h });
@@ -1814,9 +1831,20 @@ pub const FrameBuilder = struct {
     }
 
     fn allocImageId(self: *FrameBuilder) u32 {
+        if (self.next_image_id < self.image_id_start or self.next_image_id > self.image_id_end) {
+            self.next_image_id = self.image_id_start;
+        }
         const id = self.next_image_id;
-        self.next_image_id +%= 1;
-        if (self.next_image_id == 0) self.next_image_id = 1;
+        self.next_image_id = if (id >= self.image_id_end) self.image_id_start else id + 1;
+        return id;
+    }
+
+    fn allocCompositePlacementId(self: *FrameBuilder) u32 {
+        if (self.next_composite_placement_id < self.composite_placement_id_start or self.next_composite_placement_id > self.composite_placement_id_end) {
+            self.next_composite_placement_id = self.composite_placement_id_start;
+        }
+        const id = self.next_composite_placement_id;
+        self.next_composite_placement_id = if (id >= self.composite_placement_id_end) self.composite_placement_id_start else id + 1;
         return id;
     }
 
@@ -3118,6 +3146,28 @@ test "fullscreen composite upload size falls back to source without terminal pix
     const upload = FrameBuilder.fullscreenCompositeUploadSize(dest, 320, 240, &tty);
     try std.testing.expectEqual(@as(i32, 320), upload.w);
     try std.testing.expectEqual(@as(i32, 240), upload.h);
+}
+
+test "frame builder allocates image ids from configured range" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+
+    try std.testing.expectEqual(@as(u32, 100000), builder.allocImageId());
+    try std.testing.expectEqual(@as(u32, 100001), builder.allocImageId());
+    try std.testing.expectEqual(@as(u32, 100000), builder.allocImageId());
+}
+
+test "frame builder allocates composite placement ids from configured range" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    try std.testing.expectEqual(@as(u32, 200000), builder.allocCompositePlacementId());
+    try std.testing.expectEqual(@as(u32, 200001), builder.allocCompositePlacementId());
+    try std.testing.expectEqual(@as(u32, 200000), builder.allocCompositePlacementId());
 }
 
 test "composite builder can start at last full framebuffer overwrite" {
