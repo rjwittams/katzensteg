@@ -68,6 +68,22 @@ int ks_fast_bgra_to_rgba(uint8_t *dst_rgba,
                       height) == 0;
 }
 
+int ks_fast_a2b10g10r10_to_rgba(uint8_t *dst_rgba,
+                                int width,
+                                int height,
+                                const uint8_t *src_a2b10g10r10) {
+    if (!dst_rgba || !src_a2b10g10r10 || width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    return AB30ToABGR(src_a2b10g10r10,
+                      width * 4,
+                      dst_rgba,
+                      width * 4,
+                      width,
+                      height) == 0;
+}
+
 int ks_fast_scale_rgba(uint8_t *dst_rgba,
                        int dst_width,
                        int dst_height,

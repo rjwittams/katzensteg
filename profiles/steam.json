@@ -1,44 +1,35 @@
 {
   "profiles": {
-    "app.input_probe": {
-      "hidden": true,
-      "target": "{repo}/zig-out/bin/katzensteg-input-probe",
-      "args": [
-        "--log-events"
-      ]
-    },
-    "probe.input": {
-      "extends": [
-        "app.input_probe",
-        "adapter.sdl2_preload",
-        "runtime.fullscreen_file"
-      ]
-    },
-    "app.vulkan_probe": {
-      "hidden": true,
-      "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe"
-    },
-    "app.gamescope": {
-      "hidden": true,
+    "steam.tempest_rising": {
       "target": "$HOME/dev/gamescope/build-sdl/src/gamescope",
       "args": [
         "--backend",
         "sdl",
         "-W",
-        "640",
+        "1280",
         "-H",
-        "360",
+        "720",
         "-w",
-        "640",
+        "1280",
         "-h",
-        "360",
+        "720",
+        "--steam",
+        "--virtual-connector-strategy",
+        "SingleApplication",
         "--",
-        "vkcube",
-        "--wsi",
-        "xcb"
+        "$HOME/.local/share/Steam/steamapps/common/SteamLinuxRuntime_4/_v2-entry-point",
+        "--verb=waitforexitandrun",
+        "--",
+        "$HOME/.local/share/Steam/steamapps/common/Proton - Experimental/proton",
+        "waitforexitandrun",
+        "$HOME/.local/share/Steam/steamapps/common/Tempest Rising/Tempest/Binaries/Win64/Tempest-Win64-Shipping.exe"
       ],
       "env": {
         "PATH": "$HOME/dev/gamescope/build-sdl/src:$PATH",
+        "STEAM_COMPAT_CLIENT_INSTALL_PATH": "$HOME/.local/share/Steam",
+        "STEAM_COMPAT_DATA_PATH": "$HOME/.local/share/Steam/steamapps/compatdata/1486920",
+        "SteamAppId": "1486920",
+        "SteamGameId": "1486920",
         "ENABLE_GAMESCOPE_WSI": "1",
         "VK_LAYER_PATH": {
           "linux": "{repo}/profiles/vulkan/linux:/tmp",
@@ -52,26 +43,15 @@
           "path": "/tmp/katzensteg-gamescope-wsi-layer.json",
           "content": "{\n  \"file_format_version\": \"1.0.0\",\n  \"layer\": {\n    \"name\": \"VK_LAYER_FROG_gamescope_wsi_x86_64\",\n    \"type\": \"GLOBAL\",\n    \"api_version\": \"1.3.221\",\n    \"library_path\": \"$HOME/dev/gamescope/build-sdl/layer/libVkLayer_FROG_gamescope_wsi_x86_64.so\",\n    \"implementation_version\": \"1\",\n    \"description\": \"Gamescope WSI (XWayland Bypass) Layer (x86_64)\",\n    \"functions\": {\n      \"vkNegotiateLoaderLayerInterfaceVersion\": \"vkNegotiateLoaderLayerInterfaceVersion\"\n    },\n    \"enable_environment\": {\n      \"ENABLE_GAMESCOPE_WSI\": \"1\"\n    },\n    \"disable_environment\": {\n      \"DISABLE_GAMESCOPE_WSI\": \"1\"\n    }\n  }\n}\n"
         }
-      ]
-    },
-    "probe.vulkan": {
+      ],
       "extends": [
-        "app.vulkan_probe",
         "adapter.sdl2_preload",
         "runtime.fullscreen_file",
         "capture.vulkan"
       ],
       "runtime": {
-        "vulkan_capture": true
+        "real_window": "show"
       }
-    },
-    "probe.gamescope": {
-      "extends": [
-        "app.gamescope",
-        "adapter.sdl2_preload",
-        "runtime.fullscreen_file",
-        "capture.vulkan"
-      ]
     }
   }
 }
