@@ -14,17 +14,11 @@
         "runtime.fullscreen_file"
       ]
     },
-    "runtime.embed_jsonl": {
-      "hidden": true,
-      "runtime": {
-        "presentation_sink": "jsonl_fd"
-      }
-    },
     "probe.embed.basic_sdl": {
       "hidden": true,
       "extends": [
         "adapter.sdl2_preload",
-        "runtime.embed_jsonl"
+        "runtime.fullscreen_file"
       ],
       "target": "{repo}/zig-out/bin/basic-sdl-demo"
     },

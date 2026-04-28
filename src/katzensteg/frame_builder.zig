@@ -1413,13 +1413,13 @@ pub const FrameBuilder = struct {
         state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
 
-        const rect = sink.presentationRect();
+        const dest = batchContainedCellRect(fb.width, fb.height, sink.presentationRect());
         try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
-        try sink.place(rect.row, rect.col, .{
+        try sink.place(dest.row, dest.col, .{
             .image_id = state.composite_image_id,
             .placement_id = state.composite_placement_id,
-            .cols = rect.cols,
-            .rows = rect.rows,
+            .cols = dest.w,
+            .rows = dest.h,
             .src_x = 0,
             .src_y = 0,
             .src_w = fb.width,
@@ -1431,6 +1431,21 @@ pub const FrameBuilder = struct {
             self.stats.texture_uploads += 1;
             self.stats.texture_upload_bytes += fb.rgba.len;
         }
+    }
+
+    fn batchContainedCellRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
+        var tty: DirectTty = undefined;
+        tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
+        tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
+        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
+        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+        const contained = containedCellRect(source_w, source_h, &tty);
+        return .{
+            .col = rect.col + contained.col - 1,
+            .row = rect.row + contained.row - 1,
+            .w = contained.w,
+            .h = contained.h,
+        };
     }
 
     fn deleteCompositeFullscreenDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
@@ -3388,6 +3403,35 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
+}
+
+test "frame builder batch placement contains source inside attached rect" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2001);
+    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 320 * 240 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
 }
 
 test "composite builder can start at last full framebuffer overwrite" {
