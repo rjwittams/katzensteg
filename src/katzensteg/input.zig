@@ -5,6 +5,8 @@ const presentation_layout = @import("presentation_layout.zig");
 const max_pending_bytes = 256;
 const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
 
+pub const sdl_num_scancodes = sdl.SDL_NUM_SCANCODES;
+
 pub const Target = struct {
     cols: i32 = 80,
     rows: i32 = 24,
@@ -123,8 +125,8 @@ pub const TerminalInputParser = struct {
     last_mouse_y: i32 = 0,
     mouse_buttons: u32 = 0,
     mouse_activity: bool = false,
-    keyboard_state: [sdl.SDL_NUM_SCANCODES]u8 = [_]u8{0} ** sdl.SDL_NUM_SCANCODES,
-    keyboard_deadline_ns: [sdl.SDL_NUM_SCANCODES]i128 = [_]i128{0} ** sdl.SDL_NUM_SCANCODES,
+    keyboard_state: [sdl_num_scancodes]u8 = [_]u8{0} ** sdl_num_scancodes,
+    keyboard_deadline_ns: [sdl_num_scancodes]i128 = [_]i128{0} ** sdl_num_scancodes,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{

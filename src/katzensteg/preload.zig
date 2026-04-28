@@ -3,6 +3,7 @@ const sdl = @import("katzensteg_sdl");
 const sdl_adapter = @import("sdl2_adapter.zig");
 const real_gl = @import("real_gl.zig");
 const real_sdl = @import("real_sdl.zig");
+const sdl_input = @import("sdl2_input_adapter.zig");
 const log_mod = @import("log.zig");
 const runtime = @import("runtime.zig");
 const sink = @import("intercept_sink.zig");
@@ -343,7 +344,7 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
 
 pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.Uint32 {
     const flags = real_sdl.SDL_GetWindowFlags(window);
-    return runtime.get().claimedWindowFlags(flags);
+    return sdl_input.claimedWindowFlags(runtime.get(), flags);
 }
 
 pub export fn ks_SDL_ShowWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
@@ -958,7 +959,7 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
-    } else if (rt.popSdlInputEvent(event)) {
+    } else if (sdl_input.popInputEvent(rt, event)) {
         if (event) |out| traceSdlEvent("SDL_PollEvent synthetic", out, false);
         return 1;
     }
@@ -966,12 +967,12 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     while (true) {
         const rc = real_sdl.SDL_PollEvent(out);
         if (rc == 0) return 0;
-        if (rt.shouldSuppressSdlEvent(out)) {
+        if (sdl_input.shouldSuppressEvent(rt, out)) {
             traceSdlEvent("SDL_PollEvent suppressed", out, true);
             continue;
         }
         traceSdlEvent("SDL_PollEvent delivered", out, false);
-        rt.noteRealSdlEvent(out);
+        sdl_input.noteRealEvent(rt, out);
         return rc;
     }
 }
@@ -990,7 +991,7 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     var emitted: c_int = 0;
     while (emitted < numevents) : (emitted += 1) {
         const idx: usize = @intCast(emitted);
-        if (!rt.popSdlInputEventInRange(&out[idx], minType, maxType)) break;
+        if (!sdl_input.popInputEventInRange(rt, &out[idx], minType, maxType)) break;
         traceSdlEvent("SDL_PeepEvents synthetic", &out[idx], false);
     }
 
@@ -1007,7 +1008,7 @@ pub export fn ks_SDL_GetKeyboardState(numkeys: ?*c_int) callconv(.c) ?[*]const s
     const real_state = real_sdl.SDL_GetKeyboardState(&real_count);
     const rt = runtime.get();
     rt.pollTerminalInput();
-    return rt.mergedKeyboardState(real_state, real_count, numkeys);
+    return sdl_input.mergedKeyboardState(rt, real_state, real_count, numkeys);
 }
 
 pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {

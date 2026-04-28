@@ -132,6 +132,37 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, runtime_text)
 
+    def test_runtime_does_not_own_sdl_event_adapter_functions(self):
+        runtime_text = (ROOT / "src" / "katzensteg" / "runtime.zig").read_text()
+        adapter_text = (ROOT / "src" / "katzensteg" / "sdl2_input_adapter.zig").read_text()
+
+        runtime_forbidden = (
+            "popSdlInputEvent",
+            "popSdlInputEventInRange",
+            "noteRealSdlEvent",
+            "mergedKeyboardState",
+            "claimedWindowFlags",
+            "shouldSuppressSdlEvent",
+            "fillSdlEvent",
+            "eventIsMouse",
+            "applyClaimedInputWindowFlags",
+            "shouldSuppressClaimedWindowEvent",
+        )
+        for needle in runtime_forbidden:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, runtime_text)
+
+        for symbol in (
+            "popInputEvent",
+            "popInputEventInRange",
+            "noteRealEvent",
+            "mergedKeyboardState",
+            "claimedWindowFlags",
+            "shouldSuppressEvent",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, adapter_text)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF preload export test")
     def test_unlinked_preload_exports_linux_sdl_interpose_symbols(self):
         lib_path = self.preload_path()

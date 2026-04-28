@@ -574,7 +574,7 @@ pub fn onRenderSetClipRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Rendere
 
 pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
     if (rt.batch_sink != null) {
-        rt.renderBatchPresent(renderer);
+        rt.renderBatchPresent(sdl_adapter.handleFromPtr(renderer));
         return;
     }
     if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
