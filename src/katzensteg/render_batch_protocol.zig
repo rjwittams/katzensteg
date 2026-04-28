@@ -48,6 +48,22 @@ pub const AttachMessage = struct {
     upload: UploadPolicy,
 };
 
+pub const ViewportMessage = struct {
+    window_id: []const u8,
+    rect_cells: PresentationRectCells,
+    aspect: PresentationAspect,
+};
+
+pub const DetachMessage = struct {
+    window_id: []const u8,
+};
+
+pub const ControlMessage = union(enum) {
+    attach: AttachMessage,
+    viewport: ViewportMessage,
+    detach: DetachMessage,
+};
+
 pub const ParseError = error{
     InvalidMessage,
     UnsupportedWindow,
@@ -100,21 +116,44 @@ pub fn writeJsonString(writer: anytype, value: []const u8) !void {
 }
 
 pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !AttachMessage {
+    const control = try parseControlMessage(allocator, bytes);
+    switch (control) {
+        .attach => |attach| return attach,
+        .viewport => return error.InvalidMessage,
+        .detach => return error.InvalidMessage,
+    }
+}
+
+pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !ControlMessage {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     const root = if (parsed.value == .object) parsed.value.object else return error.InvalidMessage;
 
     const type_value = root.get("type") orelse return error.InvalidMessage;
-    if (type_value != .string or !std.mem.eql(u8, type_value.string, "attach")) return error.InvalidMessage;
+    if (type_value != .string) return error.InvalidMessage;
 
     const window_value = root.get("window_id") orelse return error.InvalidMessage;
     if (window_value != .string) return error.InvalidMessage;
     if (!std.mem.eql(u8, window_value.string, "main")) return error.UnsupportedWindow;
 
+    if (std.mem.eql(u8, type_value.string, "detach")) {
+        return .{ .detach = .{ .window_id = "main" } };
+    }
+
     const rect = try parseRect(root.get("rect_cells") orelse return error.InvalidMessage);
     const aspect_value = root.get("aspect") orelse return error.InvalidMessage;
     if (aspect_value != .string) return error.InvalidMessage;
     const aspect = parseAspect(aspect_value.string) orelse return error.InvalidMessage;
+
+    if (std.mem.eql(u8, type_value.string, "viewport")) {
+        return .{ .viewport = .{
+            .window_id = "main",
+            .rect_cells = rect,
+            .aspect = aspect,
+        } };
+    }
+
+    if (!std.mem.eql(u8, type_value.string, "attach")) return error.InvalidMessage;
 
     const id_ranges_value = root.get("id_ranges") orelse return error.InvalidMessage;
     if (id_ranges_value != .object) return error.InvalidMessage;
@@ -122,19 +161,26 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
     const placement_ids = try parseFirstIdRange(id_ranges_value.object.get("placement") orelse return error.InvalidMessage);
     const upload = try parseUploadPolicy(allocator, root.get("upload"));
 
-    return .{
+    return .{ .attach = .{
         .window_id = "main",
         .rect_cells = rect,
         .aspect = aspect,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
-    };
+    } };
 }
 
 pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage) void {
     if (attach.upload.path) |path| allocator.free(path);
     attach.upload.path = null;
+}
+
+pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessage) void {
+    switch (control.*) {
+        .attach => |*attach| deinitAttachMessage(allocator, attach),
+        .viewport, .detach => {},
+    }
 }
 
 pub fn parseAspect(value: []const u8) ?PresentationAspect {
@@ -267,4 +313,29 @@ test "attach message accepts contain as fit compatibility alias" {
     defer deinitAttachMessage(std.testing.allocator, &attach);
 
     try std.testing.expectEqual(PresentationAspect.fit, attach.aspect);
+}
+
+test "control message parses viewport geometry without id ranges" {
+    const msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"cover"}
+    ;
+
+    var control = try parseControlMessage(std.testing.allocator, msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    const viewport = control.viewport;
+    try std.testing.expectEqualStrings("main", viewport.window_id);
+    try std.testing.expectEqual(PresentationAspect.cover, viewport.aspect);
+    try std.testing.expectEqual(PresentationRectCells{ .row = 6, .col = 10, .rows = 20, .cols = 64 }, viewport.rect_cells);
+}
+
+test "control message parses detach" {
+    const msg =
+        \\{"type":"detach","window_id":"main"}
+    ;
+
+    var control = try parseControlMessage(std.testing.allocator, msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    try std.testing.expectEqualStrings("main", control.detach.window_id);
 }

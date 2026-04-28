@@ -70,7 +70,7 @@ When an optional env value, arg, or seed file path has no value for the active p
 
 In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSONL protocol input. The launcher stays quiet, keeps the target program stdout on the normal profile log path, and passes dedicated fds to the preloaded runtime for render batches and control messages.
 
-The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. After attach, the host may send `viewport` to resize or move the presentation rect, or `detach` to remove known placements and suppress future batches while the producer keeps running. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
 
 ## Attach Host Mode
 
