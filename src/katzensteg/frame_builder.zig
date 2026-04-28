@@ -482,6 +482,11 @@ pub const FrameBuilder = struct {
     }
 
     pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
+        _ = backend;
+        self.onUpdateTextureBatch(logger, texture, rect, pixels, pitch);
+    }
+
+    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
         const key = ptrKey(texture);
         const record = self.textures.getPtr(key) orelse return;
         if (rect != null) {
@@ -489,11 +494,18 @@ pub const FrameBuilder = struct {
             return;
         }
         if (pixels == null) return;
-        self.captureTexturePixels(logger, backend, record, @ptrCast(@constCast(pixels.?)), pitch);
+        self.captureTexturePixelsIntoRecord(record, @ptrCast(@constCast(pixels.?)), pitch) catch |err| switch (err) {
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
+        };
     }
 
     pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         _ = backend;
+        self.onUpdateYuvTextureBatch(logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+    }
+
+    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uplane == null or vplane == null) return;
         self.captureYuvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uplane.?, upitch, vplane.?, vpitch) catch |err| switch (err) {
@@ -505,6 +517,10 @@ pub const FrameBuilder = struct {
 
     pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         _ = backend;
+        self.onUpdateNvTextureBatch(logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
+    }
+
+    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uvplane == null) return;
         self.captureNvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uvplane.?, uvpitch) catch |err| switch (err) {
@@ -515,6 +531,11 @@ pub const FrameBuilder = struct {
     }
 
     pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
+        _ = backend;
+        self.onCreateTextureFromSurfaceBatch(logger, texture, surface);
+    }
+
+    pub fn onCreateTextureFromSurfaceBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
         const key = ptrKey(texture);
         const record = self.textures.getPtr(key) orelse return;
         if (surface == null) return;
@@ -528,12 +549,19 @@ pub const FrameBuilder = struct {
         record.h = surf.h;
         record.format = sdl.SDL_PIXELFORMAT_ABGR8888;
         const src: [*]u8 = @ptrCast(surf.pixels.?);
-        self.captureTexturePixels(logger, backend, record, src, surf.pitch);
+        self.captureTexturePixelsIntoRecord(record, src, surf.pitch) catch |err| switch (err) {
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
+        };
     }
 
     pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
         _ = logger;
         _ = backend;
+        self.onSetTextureColorModBatch(texture, r, g, b);
+    }
+
+    pub fn onSetTextureColorModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (!setTextureColorMod(record, r, g, b)) return;
         self.invalidateTexturePublication(record);
@@ -542,6 +570,10 @@ pub const FrameBuilder = struct {
     pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, a: u8) void {
         _ = logger;
         _ = backend;
+        self.onSetTextureAlphaModBatch(texture, a);
+    }
+
+    pub fn onSetTextureAlphaModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, a: u8) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (!setTextureAlphaMod(record, a)) return;
         self.invalidateTexturePublication(record);

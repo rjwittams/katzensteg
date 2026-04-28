@@ -188,15 +188,27 @@ pub fn onDestroyTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) vo
 }
 
 pub fn onUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, rect, pixels, pitch);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture, rect, pixels, pitch);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture, rect, pixels, pitch);
+    }
 }
 
 pub fn onUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
+    }
 }
 
 pub fn onUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uvplane, uvpitch);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, texture, rect, yplane, ypitch, uvplane, uvpitch);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
+    }
 }
 
 pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
@@ -361,7 +373,11 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
 }
 
 pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, texture, surface);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, texture, surface);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onCreateTextureFromSurfaceBatch(&rt.logger, texture, surface);
+    }
 }
 
 pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
@@ -409,11 +425,19 @@ pub fn onUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) voi
 }
 
 pub fn onSetTextureColorMod(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, texture, r, g, b);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, texture, r, g, b);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onSetTextureColorModBatch(texture, r, g, b);
+    }
 }
 
 pub fn onSetTextureAlphaMod(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, a: u8) void {
-    if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, texture, a);
+    if (rt.active and rt.backend != null) {
+        rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, texture, a);
+    } else if (rt.active and rt.batch_sink != null) {
+        rt.frame_builder.onSetTextureAlphaModBatch(texture, a);
+    }
 }
 
 pub fn onSetTextureBlendMode(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
