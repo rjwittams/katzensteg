@@ -204,6 +204,7 @@
       },
       "notes": [
         "Pushed branch includes macOS SDL2 video/input enablement, Cocoa bootstrap suppression, SDL-owned GL windows, and SDL Vulkan context work.",
+        "After first run, use RetroArch's Online Updater to fetch Core Info Files, Controller Profiles, Assets, Databases, and any shader packages needed by selected cores; these live in user-configurable RetroArch directories and are not currently doctor-checked.",
         "Linux should still validate which pieces are portable before treating this branch as upstreamable there."
       ]
     },
