@@ -25,6 +25,12 @@ export interface AttachOptions {
   };
 }
 
+export interface ViewportOptions {
+  windowId: "main";
+  rectCells: RectCells;
+  aspect: Aspect;
+}
+
 export interface FrameBatch {
   type: "frame_batch";
   window_id: string;
@@ -54,6 +60,22 @@ export function makeAttachMessage(options: AttachOptions): string {
         : { path: options.upload.path }),
       high_water: options.upload.highWater,
     },
+  }) + "\n";
+}
+
+export function makeViewportMessage(options: ViewportOptions): string {
+  return JSON.stringify({
+    type: "viewport",
+    window_id: options.windowId,
+    rect_cells: options.rectCells,
+    aspect: options.aspect,
+  }) + "\n";
+}
+
+export function makeDetachMessage(windowId: "main" = "main"): string {
+  return JSON.stringify({
+    type: "detach",
+    window_id: windowId,
   }) + "\n";
 }
 

@@ -66,6 +66,15 @@ pub const RenderBatchSink = struct {
         self.attached = true;
     }
 
+    pub fn viewport(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) void {
+        self.rect_cells = rect_cells;
+        self.aspect = aspect;
+    }
+
+    pub fn detach(self: *RenderBatchSink) void {
+        self.attached = false;
+    }
+
     pub fn setUploadPolicy(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !void {
         const next_upload = try self.initUploadState(policy);
         self.deinitUploadState();
@@ -145,6 +154,10 @@ pub const RenderBatchSink = struct {
             .after = self.after.items,
         });
         self.clearRetainingCapacity();
+    }
+
+    pub fn hasPendingBytes(self: *const RenderBatchSink) bool {
+        return self.deletes.items.len != 0 or self.uploads.items.len != 0 or self.placements.items.len != 0 or self.after.items.len != 0;
     }
 
     pub fn clearRetainingCapacity(self: *RenderBatchSink) void {
@@ -264,6 +277,36 @@ test "batch sink groups upload place and delete bytes" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"deletes\":[") != null);
+}
+
+test "batch sink viewport updates geometry without changing attach state" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    try std.testing.expect(!sink.isAttached());
+    sink.viewport(.{ .row = 6, .col = 10, .rows = 20, .cols = 64 }, .cover);
+    try std.testing.expect(!sink.isAttached());
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 6, .col = 10, .rows = 20, .cols = 64 }, sink.presentationRect());
+    try std.testing.expectEqual(render_batch_protocol.PresentationAspect.cover, sink.presentationAspect());
+
+    sink.attach(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 });
+    sink.viewport(.{ .row = 3, .col = 5, .rows = 12, .cols = 40 }, .stretch);
+    try std.testing.expect(sink.isAttached());
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 3, .col = 5, .rows = 12, .cols = 40 }, sink.presentationRect());
+    try std.testing.expectEqual(render_batch_protocol.PresentationAspect.stretch, sink.presentationAspect());
+}
+
+test "batch sink detach suppresses attachment without clearing pending deletes" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    sink.attach(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 });
+    try sink.deletePlacement(.{ .image_id = 100000, .placement_id = 200000 });
+    try std.testing.expect(sink.hasPendingBytes());
+
+    sink.detach();
+    try std.testing.expect(!sink.isAttached());
+    try std.testing.expect(sink.hasPendingBytes());
 }
 
 test "batch sink file whole upload writes image bytes to path and emits file APC" {
