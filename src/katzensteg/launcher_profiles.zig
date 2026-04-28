@@ -104,7 +104,7 @@ pub const ProfileCatalog = struct {
         for (documents, 0..) |bytes, index| {
             const document_name = try std.fmt.allocPrint(allocator, "document[{d}]", .{index});
             defer allocator.free(document_name);
-            try parseDocumentInto(allocator, &profiles, bytes, document_name, platform);
+            try parseDocumentInto(allocator, &profiles, bytes, document_name, .strict, platform);
         }
         try resolveInheritance(allocator, profiles.items);
 
@@ -134,7 +134,7 @@ pub const ProfileCatalog = struct {
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
             const bytes = try dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
             defer allocator.free(bytes);
-            try parseDocumentInto(allocator, &profiles, bytes, entry.name, platform);
+            try parseDocumentInto(allocator, &profiles, bytes, entry.name, .ignore_non_profile, platform);
         }
 
         try resolveInheritance(allocator, profiles.items);
@@ -166,7 +166,12 @@ fn currentProfilePlatform() ProfilePlatform {
     };
 }
 
-fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(LaunchProfile), bytes: []const u8, document_name: []const u8, platform: ProfilePlatform) !void {
+const DocumentParseMode = enum {
+    strict,
+    ignore_non_profile,
+};
+
+fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(LaunchProfile), bytes: []const u8, document_name: []const u8, mode: DocumentParseMode, platform: ProfilePlatform) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return err;
         try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "document parse failed: {s}", .{@errorName(err)}));
@@ -175,10 +180,12 @@ fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(Laun
     defer parsed.deinit();
 
     if (parsed.value != .object) {
+        if (mode == .ignore_non_profile) return;
         try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "document root is not an object", .{}));
         return;
     }
     const profiles_value = parsed.value.object.get("profiles") orelse {
+        if (mode == .ignore_non_profile) return;
         try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "missing profiles object", .{}));
         return;
     };
@@ -999,6 +1006,14 @@ test "bundled profiles include smb3 ANESE launch target" {
     const profile = catalog.find("smb3").?;
     try std.testing.expectEqualStrings("$HOME/dev/ANESE/build/anese", profile.target);
     try std.testing.expectEqualStrings("$HOME/roms/smb3.nes", profile.args[0]);
+}
+
+test "bundled profile directory ignores non-profile JSON documents" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    try std.testing.expect(catalog.find("external-projects.json") == null);
+    try std.testing.expect(catalog.find("VK_LAYER_KATZENSTEG_capture.json") == null);
 }
 
 test "bundled profiles include Cannonball launch target" {

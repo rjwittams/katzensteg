@@ -67,6 +67,7 @@ Forks now exist under `rjwittams` and each local checkout has a separate `rjwitt
   - `bsnes_libretro.so` for SMW
   - `flycast_libretro.so` for JSR
   - Source-built RetroArch defaults to a user cores directory such as `~/.config/retroarch/cores`; use RetroArch's Online Updater > Core Downloader entries printed by the bootstrap doctor.
+  - Also run RetroArch's Online Updater for its supporting assets: Core Info Files, Controller Profiles, Assets, Databases, and any GLSL/slang shader packages needed by a core. These live under user-configurable RetroArch directories, so the bootstrap doctor does not currently try to prove they are complete.
   - Distro packages such as Arch's `libretro-genesis-plus-gx libretro-melonds libretro-bsnes libretro-flycast` are a fallback, but the RetroArch config or `LIBRETRO_DIRECTORY` must point at the system core directory.
 - Next cleanup:
   - Keep generated app bundles, crash logs, and shader products out of source branches.
