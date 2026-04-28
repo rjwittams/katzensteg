@@ -392,7 +392,7 @@ pub const FrameBuilder = struct {
         if (pixels.len < expected_len) return;
 
         const result = self.renderers.getOrPut(external_framebuffer_renderer_key) catch |err| {
-            logger.writeFmt("katzensteg: external framebuffer state allocation failed: {any}", .{err});
+            logger.writeFmtScoped(.info, .frame_builder, "external framebuffer state allocation failed: {any}", .{err});
             return;
         };
         if (!result.found_existing) {
@@ -407,23 +407,23 @@ pub const FrameBuilder = struct {
 
         engine.beginScene();
         engine.diff() catch |err| {
-            logger.writeFmt("katzensteg: scene diff failed while entering GL framebuffer mode: {any}", .{err});
+            logger.writeFmtScoped(.info, .frame_builder, "scene diff failed while entering GL framebuffer mode: {any}", .{err});
             return;
         };
-        backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
-        engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed while entering GL framebuffer mode: {any}", .{err});
+        backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
+        engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering GL framebuffer mode: {any}", .{err});
 
         if (state.composite_rgba == null or state.composite_rgba.?.len != expected_len) {
             if (state.composite_rgba) |old| self.allocator.free(old);
             state.composite_rgba = self.allocator.alloc(u8, expected_len) catch |err| {
-                logger.writeFmt("katzensteg: GL framebuffer copy allocation failed: {any}", .{err});
+                logger.writeFmtScoped(.info, .frame_builder, "GL framebuffer copy allocation failed: {any}", .{err});
                 return;
             };
         }
         if (!convertExternalFramebufferToRgba(state.composite_rgba.?[0..expected_len], pixels[0..expected_len], width, height, format)) return;
         state.composite_mode_active = true;
 
-        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: external framebuffer present failed: {any}", .{err});
+        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
 
         var job = PresentJob{ .framebuffer = .{
             .width = width,
@@ -462,7 +462,7 @@ pub const FrameBuilder = struct {
         const key = ptrKey(texture);
         const record = self.textures.getPtr(key) orelse return;
         if (rect != null) {
-            logger.writeOnce("katzensteg: partial SDL_UpdateTexture rects are not supported in this slice");
+            logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateTexture rects are not supported in this slice");
             return;
         }
         if (pixels == null) return;
@@ -474,9 +474,9 @@ pub const FrameBuilder = struct {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uplane == null or vplane == null) return;
         self.captureYuvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uplane.?, upitch, vplane.?, vpitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmt("katzensteg: unsupported YUV texture pixel format: {d}", .{record.format}),
-            error.UnsupportedTextureRect => logger.writeOnce("katzensteg: partial SDL_UpdateYUVTexture rects are not supported yet"),
-            error.OutOfMemory => logger.writeOnce("katzensteg: failed to allocate YUV texture pixel storage"),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported YUV texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureRect => logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateYUVTexture rects are not supported yet"),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate YUV texture pixel storage"),
         };
     }
 
@@ -485,9 +485,9 @@ pub const FrameBuilder = struct {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (yplane == null or uvplane == null) return;
         self.captureNvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uvplane.?, uvpitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmt("katzensteg: unsupported NV texture pixel format: {d}", .{record.format}),
-            error.UnsupportedTextureRect => logger.writeOnce("katzensteg: partial SDL_UpdateNVTexture rects are not supported yet"),
-            error.OutOfMemory => logger.writeOnce("katzensteg: failed to allocate NV texture pixel storage"),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported NV texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureRect => logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateNVTexture rects are not supported yet"),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate NV texture pixel storage"),
         };
     }
 
@@ -496,7 +496,7 @@ pub const FrameBuilder = struct {
         const record = self.textures.getPtr(key) orelse return;
         if (surface == null) return;
         const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
-            logger.writeOnce("katzensteg: SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
+            logger.writeOnceScoped(.warn, .frame_builder, "SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
             return;
         };
         defer real_sdl.SDL_FreeSurface(converted);
@@ -527,16 +527,16 @@ pub const FrameBuilder = struct {
     pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         record.blend_mode = blend_mode;
-        logger.writeFmt("katzensteg: SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ ptrKey(texture), blendModeName(blend_mode), blend_mode });
+        logger.writeFmtScoped(.info, .frame_builder, "SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ ptrKey(texture), blendModeName(blend_mode), blend_mode });
         if (blend_mode != sdl.SDL_BLENDMODE_NONE and blend_mode != sdl.SDL_BLENDMODE_BLEND) {
-            logger.writeFmt("katzensteg: unsupported SDL texture blend mode {s} ({d}); some compositions may require framebuffer-side compositing before terminal upload", .{ blendModeName(blend_mode), blend_mode });
+            logger.writeFmtScoped(.info, .frame_builder, "unsupported SDL texture blend mode {s} ({d}); some compositions may require framebuffer-side compositing before terminal upload", .{ blendModeName(blend_mode), blend_mode });
         }
     }
 
     pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
         const record = self.textures.getPtr(ptrKey(texture)) orelse return;
         if (rect != null) {
-            logger.writeOnce("katzensteg: partial SDL_LockTexture rects are not supported yet");
+            logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_LockTexture rects are not supported yet");
             record.locked_pixels = null;
             record.locked_pitch = 0;
             return;
@@ -591,8 +591,8 @@ pub const FrameBuilder = struct {
     fn captureTexturePixels(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord, src: [*]u8, pitch: i32) void {
         _ = backend;
         self.captureTexturePixelsIntoRecord(record, src, pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmt("katzensteg: unsupported texture pixel format: {d}", .{record.format}),
-            error.OutOfMemory => logger.writeOnce("katzensteg: failed to allocate texture pixel storage"),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
         };
     }
 
@@ -712,7 +712,7 @@ pub const FrameBuilder = struct {
     pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
         const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
         if (x1 != x2 and y1 != y2) {
-            logger.writeOnce("katzensteg: diagonal SDL_RenderDrawLine mirroring not implemented yet; skipping line");
+            logger.writeOnceScoped(.warn, .frame_builder, "diagonal SDL_RenderDrawLine mirroring not implemented yet; skipping line");
             return;
         }
         const mapped = LineOp{
@@ -739,7 +739,7 @@ pub const FrameBuilder = struct {
     pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
         _ = center;
         if (angle != 0 or flip != sdl.SDL_FLIP_NONE) {
-            logger.writeOnce("katzensteg: SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
+            logger.writeOnceScoped(.warn, .frame_builder, "SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
         }
         self.recordRenderCopy(logger, renderer, texture, src, dst);
     }
@@ -753,7 +753,7 @@ pub const FrameBuilder = struct {
         if (xy_stride <= 0 or uv_stride <= 0 or num_vertices <= 0 or num_indices < 0) return;
         const record = self.textures.get(ptrKey(texture)) orelse return;
         const copy = geometryRawAsCopy(xy, @intCast(xy_stride), uv, @intCast(uv_stride), @intCast(num_vertices), indices, @intCast(num_indices), @intCast(size_indices), record.w, record.h) orelse {
-            logger.writeOnce("katzensteg: unsupported SDL_RenderGeometryRaw shape; skipping geometry");
+            logger.writeOnceScoped(.warn, .frame_builder, "unsupported SDL_RenderGeometryRaw shape; skipping geometry");
             return;
         };
         self.recordRenderCopy(logger, renderer, texture, &copy.src, &copy.dst);
@@ -824,8 +824,10 @@ pub const FrameBuilder = struct {
         const texture_key = ptrKey(texture);
         const record = self.textures.get(texture_key) orelse return;
         if (record.blend_mode != sdl.SDL_BLENDMODE_NONE and record.blend_mode != sdl.SDL_BLENDMODE_BLEND) {
-            logger.writeFmt(
-                "katzensteg: SDL_RenderCopy using unsupported texture blend mode {s} ({d}) tex={x} alpha_mod={d} color_mod=({d},{d},{d})",
+            logger.writeFmtScoped(
+                .info,
+                .frame_builder,
+                "SDL_RenderCopy using unsupported texture blend mode {s} ({d}) tex={x} alpha_mod={d} color_mod=({d},{d},{d})",
                 .{ blendModeName(record.blend_mode), record.blend_mode, texture_key, record.alpha_mod, record.color_mod[0], record.color_mod[1], record.color_mod[2] },
             );
         }
@@ -836,7 +838,7 @@ pub const FrameBuilder = struct {
             .h = if (state.viewport.h > 0) state.viewport.h else state.window_h,
         };
         if (dst == null) {
-            logger.writeOnce("katzensteg: null destination rect approximated to full viewport");
+            logger.writeOnceScoped(.warn, .frame_builder, "null destination rect approximated to full viewport");
         }
         const src_rect = src orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = record.w, .h = record.h };
         const mapped_dst = applyViewportRect(dst_rect.*, state.viewport);
@@ -856,7 +858,7 @@ pub const FrameBuilder = struct {
 
     pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
         var job = self.buildPresentJob(logger, tty, renderer, bg_only) catch |err| {
-            logger.writeFmt("katzensteg: buildPresentJob failed: {any}", .{err});
+            logger.writeFmtScoped(.info, .frame_builder, "buildPresentJob failed: {any}", .{err});
             const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
@@ -947,21 +949,21 @@ pub const FrameBuilder = struct {
             .framebuffer => |fb| {
                 engine.beginScene();
                 engine.diff() catch |err| {
-                    logger.writeFmt("katzensteg: scene diff failed while entering composite direct mode: {any}", .{err});
+                    logger.writeFmtScoped(.info, .frame_builder, "scene diff failed while entering composite direct mode: {any}", .{err});
                     state.copies.clearRetainingCapacity();
                     state.fills.clearRetainingCapacity();
                     state.lines.clearRetainingCapacity();
                     return;
                 };
-                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed while entering composite direct mode: {any}", .{err});
-                engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed while entering composite direct mode: {any}", .{err});
+                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering composite direct mode: {any}", .{err});
+                engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering composite direct mode: {any}", .{err});
                 if (state.composite_rgba == null or state.composite_rgba.?.ptr != fb.rgba.ptr or state.composite_rgba.?.len != fb.rgba.len) {
                     if (state.composite_rgba) |old| self.allocator.free(old);
                     state.composite_rgba = self.allocator.dupe(u8, fb.rgba) catch null;
                 }
                 switch (self.composite_mode) {
-                    .fullscreen => self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: presentCompositeFullscreenDirect failed: {any}", .{err}),
-                    .tiled_strip => self.presentCompositeTilesDirect(logger, tty, backend, state) catch |err| logger.writeFmt("katzensteg: presentCompositeTilesDirect failed: {any}", .{err}),
+                    .fullscreen => self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentCompositeFullscreenDirect failed: {any}", .{err}),
+                    .tiled_strip => self.presentCompositeTilesDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentCompositeTilesDirect failed: {any}", .{err}),
                 }
             },
             .scene => |scene_job| {
@@ -971,7 +973,7 @@ pub const FrameBuilder = struct {
                             if (!self.published_assets.contains(asset.asset_id)) {
                                 const image_id = self.allocImageId();
                                 backend.registerRawImage(image_id, asset.rgba, asset.width, asset.height) catch |err| {
-                                    logger.writeFmt("katzensteg: scene asset publish failed: {any}", .{err});
+                                    logger.writeFmtScoped(.info, .frame_builder, "scene asset publish failed: {any}", .{err});
                                     continue;
                                 };
                                 self.published_assets.put(asset.asset_id, image_id) catch {};
@@ -992,7 +994,7 @@ pub const FrameBuilder = struct {
                 for (scene_job.solids, 0..) |solid, i| {
                     const image_id = self.ensureSolidImage(logger, backend, solid.color);
                     if (i == 0 and scene_job.had_clear and image_id != state.last_logged_bg_image_id) {
-                        logger.writeFmt("katzensteg: bg clear=rgba({d},{d},{d},{d}) image_id={d}", .{ solid.color[0], solid.color[1], solid.color[2], solid.color[3], image_id });
+                        logger.writeFmtScoped(.info, .frame_builder, "bg clear=rgba({d},{d},{d},{d}) image_id={d}", .{ solid.color[0], solid.color[1], solid.color[2], solid.color[3], image_id });
                         state.last_logged_bg_image_id = image_id;
                     }
                     const image: ts_types.ImageHandle = @enumFromInt(image_id);
@@ -1007,7 +1009,7 @@ pub const FrameBuilder = struct {
                     engine.sprite(.{ .key = ts_types.NodeKey.sprite(sprite_namespace, @as(u32, @intCast(i + 1))), .image = image, .source_rect = .{ .x = sprite.source_rect.x, .y = sprite.source_rect.y, .w = sprite.source_rect.w, .h = sprite.source_rect.h }, .dest_rect = sprite.dest_rect, .z = sprite.z }) catch {};
                 }
                 engine.diff() catch |err| {
-                    logger.writeFmt("katzensteg: scene diff failed: {any}", .{err});
+                    logger.writeFmtScoped(.info, .frame_builder, "scene diff failed: {any}", .{err});
                     state.copies.clearRetainingCapacity();
                     state.fills.clearRetainingCapacity();
                     state.lines.clearRetainingCapacity();
@@ -1016,13 +1018,13 @@ pub const FrameBuilder = struct {
                 if (scene_job.had_clear and engine.sprite_ops.items.len > 0) {
                     for (engine.sprite_ops.items) |op| {
                         if (op.key.namespace == bg_namespace and op.key.id == 1) {
-                            logger.writeFmt("katzensteg: bg sprite op={s} total_sprite_ops={d}", .{ @tagName(op.tag), engine.sprite_ops.items.len });
+                            logger.writeFmtScoped(.info, .frame_builder, "bg sprite op={s} total_sprite_ops={d}", .{ @tagName(op.tag), engine.sprite_ops.items.len });
                             break;
                         }
                     }
                 }
-                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmt("katzensteg: applySpriteOps failed: {any}", .{err});
-                engine.commit() catch |err| logger.writeFmt("katzensteg: scene commit failed: {any}", .{err});
+                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed: {any}", .{err});
+                engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed: {any}", .{err});
                 if (self.stats.enabled) {
                     self.stats.sprite_ops += engine.sprite_ops.items.len;
                 }
@@ -1193,7 +1195,7 @@ pub const FrameBuilder = struct {
             const n = tty.file.read(&buf) catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => {
-                    logger.writeFmt("katzensteg: failed reading kitty reply: {any}", .{err});
+                    logger.writeFmtScoped(.info, .frame_builder, "failed reading kitty reply: {any}", .{err});
                     return;
                 },
             };
@@ -1201,15 +1203,15 @@ pub const FrameBuilder = struct {
             const encoded_len = std.base64.standard.Encoder.calcSize(n);
             if (encoded_len <= b64_buf.len) {
                 const b64 = std.base64.standard.Encoder.encode(b64_buf[0..encoded_len], buf[0..n]);
-                logger.writeFmt("katzensteg: kitty reply b64={s}", .{b64});
+                logger.writeFmtScoped(.info, .frame_builder, "kitty reply b64={s}", .{b64});
             } else {
-                logger.writeFmt("katzensteg: kitty reply {d} bytes (too large for inline log)", .{n});
+                logger.writeFmtScoped(.info, .frame_builder, "kitty reply {d} bytes (too large for inline log)", .{n});
             }
             if (self.last_composite_image_id != 0) {
                 var needle_buf: [32]u8 = undefined;
                 const needle = std.fmt.bufPrint(&needle_buf, "i={d}", .{self.last_composite_image_id}) catch return;
                 if (std.mem.indexOf(u8, buf[0..n], needle) != null) {
-                    logger.writeFmt("katzensteg: kitty reply mentions composite image_id={d}", .{self.last_composite_image_id});
+                    logger.writeFmtScoped(.info, .frame_builder, "kitty reply mentions composite image_id={d}", .{self.last_composite_image_id});
                 }
             }
             if (n < buf.len) return;
@@ -1244,7 +1246,7 @@ pub const FrameBuilder = struct {
             scaled_buf = scratch;
             break :blk scratch;
         };
-        if (self.debug_composite) logger.writeFmt("katzensteg: composite fullscreen upload image_id={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d}", .{ state.composite_image_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h });
+        if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen upload image_id={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d}", .{ state.composite_image_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h });
         try backend.registerRawImage(state.composite_image_id, upload_buf, upload_size.w, upload_size.h);
         try kitty_protocol.writePlace(tty.file.deprecatedWriter(), dest.row, dest.col, .{
             .image_id = state.composite_image_id,
@@ -1340,7 +1342,7 @@ pub const FrameBuilder = struct {
 
         const strip_image_id = self.allocImageId();
         self.last_composite_image_id = strip_image_id;
-        if (self.debug_composite) logger.writeFmt("katzensteg: composite strip upload image_id={d} entries={d} size={d}x{d}", .{ strip_image_id, entries.len, strip_w, strip_h });
+        if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite strip upload image_id={d} entries={d} size={d}x{d}", .{ strip_image_id, entries.len, strip_w, strip_h });
         try backend.registerRawImage(strip_image_id, strip_rgba, strip_w, strip_h);
 
         for (entries) |entry| {
@@ -1352,7 +1354,7 @@ pub const FrameBuilder = struct {
             if (self.next_composite_placement_id == 0) self.next_composite_placement_id = 1;
             tile.image_id = strip_image_id;
             const dest = tile.dest_rect;
-            if (self.debug_composite) logger.writeFmt("katzensteg: composite tile place image_id={d} placement_id={d} tile={d} src={d},0 {d}x{d} cell={d},{d} {d}x{d}", .{ strip_image_id, tile.placement_id, entry.tile_index, entry.x, tile.src_rect.w, tile.src_rect.h, dest.col, dest.row, dest.w, dest.h });
+            if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite tile place image_id={d} placement_id={d} tile={d} src={d},0 {d}x{d} cell={d},{d} {d}x{d}", .{ strip_image_id, tile.placement_id, entry.tile_index, entry.x, tile.src_rect.w, tile.src_rect.h, dest.col, dest.row, dest.w, dest.h });
             try kitty_protocol.writePlace(writer, dest.row, dest.col, .{
                 .image_id = strip_image_id,
                 .placement_id = tile.placement_id,
@@ -1366,7 +1368,7 @@ pub const FrameBuilder = struct {
             });
             if (old_image_id != 0 and old_placement_id != 0) {
                 kitty_protocol.writeDeleteExactPlacement(writer, .{ .image_id = old_image_id, .placement_id = old_placement_id }) catch |err| {
-                    logger.writeFmt("katzensteg: composite tile delete failed: {any}", .{err});
+                    logger.writeFmtScoped(.info, .frame_builder, "composite tile delete failed: {any}", .{err});
                 };
                 self.retireCompositeTileImageIfUnreferenced(state, old_image_id);
             }
@@ -1383,7 +1385,7 @@ pub const FrameBuilder = struct {
         for (state.composite_tiles.items) |*tile| {
             if (tile.image_id != 0 and tile.placement_id != 0) {
                 kitty_protocol.writeDeleteExactPlacement(writer, .{ .image_id = tile.image_id, .placement_id = tile.placement_id }) catch |err| {
-                    logger.writeFmt("katzensteg: composite tile delete failed: {any}", .{err});
+                    logger.writeFmtScoped(.info, .frame_builder, "composite tile delete failed: {any}", .{err});
                 };
             }
             const old_image_id = tile.image_id;
@@ -1586,14 +1588,18 @@ pub const FrameBuilder = struct {
 
     fn logPresentDecision(self: *FrameBuilder, logger: *Logger, state: *const RendererState, signature: PresentDebugSignature) void {
         _ = self;
-        logger.writeFmt(
-            "katzensteg: present decision composite={} copies={} fills={} lines={} unsupported_copies={} mod_mismatch_copies={} scaled_copies={} missing_textures={}",
+        logger.writeFmtScoped(
+            .info,
+            .frame_builder,
+            "present decision composite={} copies={} fills={} lines={} unsupported_copies={} mod_mismatch_copies={} scaled_copies={} missing_textures={}",
             .{ signature.use_composite, state.copies.items.len, state.fills.items.len, state.lines.items.len, signature.unsupported_copies, signature.mod_mismatch_copies, signature.scaled_copies, signature.missing_textures },
         );
         const limit = @min(state.copies.items.len, 4);
         for (state.copies.items[0..limit], 0..) |copy, i| {
-            logger.writeFmt(
-                "katzensteg: present copy[{d}] tex={x} blend={s}({d}) mod=({d},{d},{d}) alpha={d} src={d},{d} {d}x{d} dst={d},{d} {d}x{d}",
+            logger.writeFmtScoped(
+                .info,
+                .frame_builder,
+                "present copy[{d}] tex={x} blend={s}({d}) mod=({d},{d},{d}) alpha={d} src={d},{d} {d}x{d} dst={d},{d} {d}x{d}",
                 .{ i, copy.texture_key, blendModeName(copy.blend_mode), copy.blend_mode, copy.color_mod[0], copy.color_mod[1], copy.color_mod[2], copy.alpha_mod, copy.src.x, copy.src.y, copy.src.w, copy.src.h, copy.dst.x, copy.dst.y, copy.dst.w, copy.dst.h },
             );
         }
@@ -1641,7 +1647,7 @@ pub const FrameBuilder = struct {
         if (state.composite_last_presented) |last| {
             if (last.len == buf.len and std.mem.eql(u8, last, buf)) {
                 if (self.debug_composite and !state.logged_debug_composite_unchanged) {
-                    logger.write("katzensteg: composite unchanged; skipping tile uploads");
+                    logger.writeScoped(.info, .frame_builder, "composite unchanged; skipping tile uploads");
                     state.logged_debug_composite_unchanged = true;
                 }
                 return;
@@ -1686,8 +1692,10 @@ pub const FrameBuilder = struct {
             if (buf[i + 0] != 0 or buf[i + 1] != 0 or buf[i + 2] != 0) non_black += 1;
             if (buf[i + 3] != 0) non_zero_alpha += 1;
         }
-        logger.writeFmt(
-            "katzensteg: composite stats {d}x{d} non_black={d}/{d} non_zero_alpha={d}/{d}",
+        logger.writeFmtScoped(
+            .info,
+            .frame_builder,
+            "composite stats {d}x{d} non_black={d}/{d} non_zero_alpha={d}/{d}",
             .{ w, h, non_black, @as(usize, @intCast(w * h)), non_zero_alpha, @as(usize, @intCast(w * h)) },
         );
         return non_black;
@@ -1697,7 +1705,7 @@ pub const FrameBuilder = struct {
         _ = self;
         const path = "/tmp/katzensteg-composite.ppm";
         const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
-            logger.writeFmt("katzensteg: failed to create composite dump: {any}", .{err});
+            logger.writeFmtScoped(.info, .frame_builder, "failed to create composite dump: {any}", .{err});
             return;
         };
         defer file.close();
@@ -1712,7 +1720,7 @@ pub const FrameBuilder = struct {
             writer.interface.writeAll(&rgb) catch return;
         }
         writer.interface.flush() catch return;
-        logger.writeFmt("katzensteg: wrote composite dump to {s}", .{path});
+        logger.writeFmtScoped(.info, .frame_builder, "wrote composite dump to {s}", .{path});
     }
 
     fn blendModeName(blend_mode: i32) []const u8 {
@@ -1746,7 +1754,7 @@ pub const FrameBuilder = struct {
     fn deleteCompositePlacement(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, placement: CompositePlacement) void {
         if (placement.image_id == 0 or placement.placement_id == 0) return;
         kitty_protocol.writeDeleteExactPlacement(tty.file.deprecatedWriter(), .{ .image_id = placement.image_id, .placement_id = placement.placement_id }) catch |err| {
-            logger.writeFmt("katzensteg: composite fullscreen delete failed: {any}", .{err});
+            logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen delete failed: {any}", .{err});
         };
         self.retireImageId(placement.image_id);
     }
@@ -1763,7 +1771,7 @@ pub const FrameBuilder = struct {
     fn deleteRetiredImages(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend) void {
         if (self.retired_image_ids.items.len == 0) return;
         for (self.retired_image_ids.items) |image_id| {
-            backend.deleteImageData(image_id) catch |err| logger.writeFmt("katzensteg: deleteImageData failed: {any}", .{err});
+            backend.deleteImageData(image_id) catch |err| logger.writeFmtScoped(.info, .frame_builder, "deleteImageData failed: {any}", .{err});
         }
         if (self.stats.enabled) self.stats.retired_images += self.retired_image_ids.items.len;
         self.retired_image_ids.clearRetainingCapacity();
@@ -1777,8 +1785,10 @@ pub const FrameBuilder = struct {
         const frames_per_s = if (elapsed_s > 0) @as(f64, @floatFromInt(self.stats.frame_count)) / elapsed_s else 0;
         const mib_uploaded = @as(f64, @floatFromInt(self.stats.texture_upload_bytes)) / (1024.0 * 1024.0);
         const mib_per_s = if (elapsed_s > 0) mib_uploaded / elapsed_s else 0;
-        logger.writeFmt(
-            "katzensteg: stats {d} frames ({d:.1} fps) uploads={d} ({d:.2} MiB, {d:.2} MiB/s) retired={d} copies={d} fills={d} lines={d} sprite_ops={d}",
+        logger.writeFmtScoped(
+            .info,
+            .frame_builder,
+            "stats {d} frames ({d:.1} fps) uploads={d} ({d:.2} MiB, {d:.2} MiB/s) retired={d} copies={d} fills={d} lines={d} sprite_ops={d}",
             .{
                 self.stats.frame_count,
                 frames_per_s,
@@ -1822,7 +1832,7 @@ pub const FrameBuilder = struct {
         if (self.solid_images.get(key)) |image_id| return image_id;
         const image_id = self.allocImageId();
         const pixel = [_]u8{ color[0], color[1], color[2], color[3] };
-        backend.registerRawImage(image_id, &pixel, 1, 1) catch |err| logger.writeFmt("katzensteg: solid image upload failed: {any}", .{err});
+        backend.registerRawImage(image_id, &pixel, 1, 1) catch |err| logger.writeFmtScoped(.info, .frame_builder, "solid image upload failed: {any}", .{err});
         self.solid_images.put(key, image_id) catch {};
         return image_id;
     }

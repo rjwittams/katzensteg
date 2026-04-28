@@ -1,6 +1,7 @@
 const std = @import("std");
-const Logger = @import("log.zig").Logger;
 const window_policy = @import("window_policy.zig");
+
+const log = std.log.scoped(.config);
 
 pub const CompositeMode = enum {
     fullscreen,
@@ -86,40 +87,40 @@ pub fn getRuntimeFieldMetadata(name: []const u8) ?RuntimeFieldMetadata {
     return null;
 }
 
-pub fn loadRuntimeConfig(allocator: std.mem.Allocator, logger: ?*Logger) RuntimeConfig {
+pub fn loadRuntimeConfig(allocator: std.mem.Allocator) RuntimeConfig {
     var config = RuntimeConfig{};
     if (getEnvOwned(allocator, "KATZENSTEG_CONFIG")) |path| {
         defer allocator.free(path);
         const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| {
-            logFmt(logger, "katzensteg: failed to read config {s}: {any}", .{ path, err });
+            log.warn("failed to read config {s}: {any}", .{ path, err });
             return config;
         };
         defer allocator.free(bytes);
-        config = parseRuntimeConfigJsonSlice(allocator, bytes, logger) catch |err| {
-            logFmt(logger, "katzensteg: failed to parse config {s}: {any}", .{ path, err });
+        config = parseRuntimeConfigJsonSlice(allocator, bytes) catch |err| {
+            log.warn("failed to parse config {s}: {any}", .{ path, err });
             return config;
         };
-        logFmt(logger, "katzensteg: loaded config from {s}", .{path});
+        log.info("loaded config from {s}", .{path});
     }
 
     for (runtime_field_metadata) |metadata| {
         const env_name = metadata.env_name orelse continue;
         if (getEnvOwned(allocator, env_name)) |value| {
             defer allocator.free(value);
-            _ = applyRuntimeConfigEnvValue(&config, env_name, value, logger);
+            _ = applyRuntimeConfigEnvValue(&config, env_name, value);
         }
     }
     return config;
 }
 
-pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const u8, logger: ?*Logger) !RuntimeConfig {
+pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) !RuntimeConfig {
     var config = RuntimeConfig{};
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     if (parsed.value.object.get("composite_mode")) |value| {
         if (value == .string) {
             config.composite_mode = parseCompositeMode(value.string) orelse blk: {
-                logFmt(logger, "katzensteg: unknown composite_mode in config: {s}", .{value.string});
+                log.warn("unknown composite_mode in config: {s}", .{value.string});
                 break :blk config.composite_mode;
             };
         }
@@ -127,7 +128,7 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     if (parsed.value.object.get("intercept_mode")) |value| {
         if (value == .string) {
             config.intercept_mode = parseInterceptMode(value.string) orelse blk: {
-                logFmt(logger, "katzensteg: unknown intercept_mode in config: {s}", .{value.string});
+                log.warn("unknown intercept_mode in config: {s}", .{value.string});
                 break :blk config.intercept_mode;
             };
         }
@@ -136,7 +137,7 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
         if (value == .string) {
             config.window_policy = parseWindowPolicyValue(value.string, config.window_policy);
             if (window_policy.parse(value.string) == null) {
-                logFmt(logger, "katzensteg: unknown window_policy in config: {s}", .{value.string});
+                log.warn("unknown window_policy in config: {s}", .{value.string});
             }
         }
     }
@@ -144,7 +145,7 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
         if (value == .string) {
             config.real_window_visibility = parseRealWindowVisibilityValue(value.string, config.real_window_visibility);
             if (window_policy.parseRealWindowVisibility(value.string) == null) {
-                logFmt(logger, "katzensteg: unknown real_window in config: {s}", .{value.string});
+                log.warn("unknown real_window in config: {s}", .{value.string});
             }
         }
     }
@@ -183,12 +184,12 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     return config;
 }
 
-pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, value: []const u8, logger: ?*Logger) bool {
+pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, value: []const u8) bool {
     if (std.mem.eql(u8, env_name, "KATZENSTEG_COMPOSITE_MODE")) {
         if (parseCompositeMode(value)) |parsed| {
             config.composite_mode = parsed;
         } else {
-            logFmt(logger, "katzensteg: unknown KATZENSTEG_COMPOSITE_MODE value: {s}", .{value});
+            log.warn("unknown KATZENSTEG_COMPOSITE_MODE value: {s}", .{value});
         }
         return true;
     }
@@ -196,7 +197,7 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
         if (parseInterceptMode(value)) |parsed| {
             config.intercept_mode = parsed;
         } else {
-            logFmt(logger, "katzensteg: unknown KATZENSTEG_INTERCEPT_MODE value: {s}", .{value});
+            log.warn("unknown KATZENSTEG_INTERCEPT_MODE value: {s}", .{value});
         }
         return true;
     }
@@ -204,7 +205,7 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
         const before = config.window_policy;
         config.window_policy = parseWindowPolicyValue(value, config.window_policy);
         if (config.window_policy == before and window_policy.parse(value) == null) {
-            logFmt(logger, "katzensteg: unknown KATZENSTEG_WINDOW_POLICY value: {s}", .{value});
+            log.warn("unknown KATZENSTEG_WINDOW_POLICY value: {s}", .{value});
         }
         return true;
     }
@@ -212,7 +213,7 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
         const before = config.real_window_visibility;
         config.real_window_visibility = parseRealWindowVisibilityValue(value, config.real_window_visibility);
         if (config.real_window_visibility == before and window_policy.parseRealWindowVisibility(value) == null) {
-            logFmt(logger, "katzensteg: unknown KATZENSTEG_REAL_WINDOW value: {s}", .{value});
+            log.warn("unknown KATZENSTEG_REAL_WINDOW value: {s}", .{value});
         }
         return true;
     }
@@ -318,10 +319,6 @@ fn getEnvOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
     };
 }
 
-fn logFmt(logger: ?*Logger, comptime fmt: []const u8, args: anytype) void {
-    if (logger) |l| l.writeFmt(fmt, args);
-}
-
 fn applyJsonBool(root: std.json.Value, key: []const u8, field: *bool) void {
     const value = root.object.get(key) orelse return;
     switch (value) {
@@ -349,7 +346,7 @@ test "runtime config JSON overrides existing fields" {
         \\}
     ;
 
-    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json, null);
+    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json);
 
     try std.testing.expectEqual(CompositeMode.tiled_strip, config.composite_mode);
     try std.testing.expectEqual(InterceptMode.queued_replay, config.intercept_mode);
@@ -369,7 +366,7 @@ test "runtime config JSON ignores invalid values and preserves defaults" {
         \\}
     ;
 
-    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json, null);
+    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json);
 
     try std.testing.expectEqual(CompositeMode.fullscreen, config.composite_mode);
     try std.testing.expectEqual(InterceptMode.sync_compose, config.intercept_mode);
@@ -437,7 +434,7 @@ test "runtime config JSON parses extended env-compatible fields" {
         \\}
     ;
 
-    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json, null);
+    const config = try parseRuntimeConfigJsonSlice(std.testing.allocator, json);
 
     try std.testing.expect(!config.input_enabled);
     try std.testing.expect(!config.input_claimed);
@@ -457,16 +454,16 @@ test "runtime config JSON parses extended env-compatible fields" {
 test "runtime config env values override extended fields" {
     var config = RuntimeConfig{};
 
-    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_INPUT", "0", null));
-    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "direct_apc", null));
-    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_FILE_TRANSPORT_MAX_BYTES", "8192", null));
-    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_GL_CAPTURE", "async", null));
-    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_VULKAN_CAPTURE", "1", null));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_INPUT", "0"));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "direct_apc"));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_FILE_TRANSPORT_MAX_BYTES", "8192"));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_GL_CAPTURE", "async"));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_VULKAN_CAPTURE", "1"));
 
     try std.testing.expect(!config.input_enabled);
     try std.testing.expectEqual(OutputProfile.direct_apc, config.output_profile.?);
     try std.testing.expectEqual(@as(u64, 8192), config.file_transport_max_bytes);
     try std.testing.expectEqual(GlCaptureMode.pbo, config.gl_capture);
     try std.testing.expect(config.vulkan_capture);
-    try std.testing.expect(!applyRuntimeConfigEnvValue(&config, "KATZENSTEG_UNKNOWN", "1", null));
+    try std.testing.expect(!applyRuntimeConfigEnvValue(&config, "KATZENSTEG_UNKNOWN", "1"));
 }

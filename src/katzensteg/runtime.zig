@@ -23,6 +23,8 @@ const Command = intercept_sink.Command;
 const PixelSize = frame_builder_mod.PixelSize;
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 
+const log = std.log.scoped(.runtime);
+
 const queue_compact_threshold = 4096;
 const payload_pool_max_buffers = 64;
 const payload_pool_max_bytes = 64 * 1024 * 1024;
@@ -161,8 +163,8 @@ pub const Runtime = struct {
 
     fn init() Runtime {
         const allocator = std.heap.c_allocator;
-        var logger = Logger.init(allocator);
-        const config = config_mod.loadRuntimeConfig(allocator, &logger);
+        const logger = Logger.init(allocator);
+        const config = config_mod.loadRuntimeConfig(allocator);
         const bg_only = std.c.getenv("KATZENSTEG_BG_ONLY") != null;
         const stats = config.stats;
         const debug_protocol_replies = config.debug_protocol_replies;
@@ -202,7 +204,7 @@ pub const Runtime = struct {
         if (std.c.getenv("KATZENSTEG_WHISKERS_SOCKET")) |path_z| {
             var free_producer_hello = true;
             const producer_hello = runtime.buildWhiskersHello() catch |err| blk: {
-                runtime.logger.writeFmt("katzensteg: whiskers hello build failed: {any}", .{err});
+                log.warn("whiskers hello build failed: {any}", .{err});
                 free_producer_hello = false;
                 break :blk whiskers_client_mod.ProducerHello{
                     .producer_kind = "katzensteg",
@@ -213,39 +215,39 @@ pub const Runtime = struct {
                     .terminal = runtime.terminal_identity,
                 };
             };
-            runtime.logger.writeFmt("katzensteg: whiskers socket configured: {s}", .{std.mem.span(path_z)});
+            log.info("whiskers socket configured: {s}", .{std.mem.span(path_z)});
             defer if (free_producer_hello) runtime.freeWhiskersHello(producer_hello);
-            runtime.whiskers_client = WhiskersClient.init(allocator, &runtime.logger, std.mem.span(path_z), producer_hello) catch |err| blk: {
-                runtime.logger.writeFmt("katzensteg: whiskers client init failed: {any}", .{err});
+            runtime.whiskers_client = WhiskersClient.init(allocator, std.mem.span(path_z), producer_hello) catch |err| blk: {
+                log.warn("whiskers client init failed: {any}", .{err});
                 break :blk null;
             };
             if (runtime.whiskers_client) |*client| {
                 if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") != null) {
                     client.capture_enabled.store(true, .release);
-                    runtime.logger.write("katzensteg: whiskers force capture enabled");
+                    log.info("whiskers force capture enabled", .{});
                 }
-                runtime.logger.writeFmt("katzensteg: whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
+                log.info("whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
             }
         }
         runtime.tty = DirectTty.init() catch |err| {
-            runtime.logger.writeFmt("katzensteg: direct tty init failed: {any}", .{err});
+            log.warn("direct tty init failed: {any}", .{err});
             return runtime;
         };
         runtime.engine = ts_scene.SceneEngine.init(allocator);
 
         const backend_options = selectBackendOptions(allocator, &runtime) catch |err| blk: {
-            runtime.logger.writeFmt("katzensteg: upload transport selection failed; falling back to direct APC: {any}", .{err});
+            log.warn("upload transport selection failed; falling back to direct APC: {any}", .{err});
             break :blk ts_kitty.Options{};
         };
         var actual_upload_medium = backend_options.upload_medium;
         runtime.backend = ts_kitty.Backend.initWithOptions(allocator, runtime.tty.?.file, backend_options) catch |err| blk: {
-            runtime.logger.writeFmt("katzensteg: backend init failed: {any}", .{err});
-            runtime.logger.write("katzensteg: retrying backend init with direct APC fallback");
+            log.warn("backend init failed: {any}", .{err});
+            log.info("retrying backend init with direct APC fallback", .{});
             actual_upload_medium = .direct;
             break :blk ts_kitty.Backend.initWithOptions(allocator, runtime.tty.?.file, .{
                 .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail,
             }) catch |fallback_err| {
-                runtime.logger.writeFmt("katzensteg: direct APC fallback backend init failed: {any}", .{fallback_err});
+                log.warn("direct APC fallback backend init failed: {any}", .{fallback_err});
                 return runtime;
             };
         };
@@ -255,22 +257,22 @@ pub const Runtime = struct {
             .file_whole => "file_whole",
             .file_offset => "file_offset_ring",
         };
-        runtime.logger.write("katzensteg: runtime initialized in direct tty mode");
+        log.info("runtime initialized in direct tty mode", .{});
         switch (actual_upload_medium) {
-            .direct => runtime.logger.write("katzensteg: upload transport profile = direct_apc"),
+            .direct => log.info("upload transport profile = direct_apc", .{}),
             .file_whole => {
-                runtime.logger.writeFmt("katzensteg: upload transport profile = file_whole path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
+                log.info("upload transport profile = file_whole path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
             },
             .file_offset => {
-                runtime.logger.writeFmt("katzensteg: upload transport profile = file_offset_ring path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
+                log.info("upload transport profile = file_offset_ring path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
             },
         }
         if (backend_options.upload_file_path) |path| allocator.free(path);
-        if (runtime.bg_only) runtime.logger.write("katzensteg: background-only debug mode enabled");
-        if (runtime.stats) runtime.logger.write("katzensteg: periodic stats enabled");
-        if (runtime.debug_protocol_replies) runtime.logger.write("katzensteg: kitty protocol reply logging enabled (q=0)");
-        runtime.logger.writeFmt("katzensteg: composite mode = {s}", .{@tagName(config.composite_mode)});
-        runtime.logger.writeFmt("katzensteg: intercept mode = {s}", .{@tagName(config.intercept_mode)});
+        if (runtime.bg_only) log.info("background-only debug mode enabled", .{});
+        if (runtime.stats) log.info("periodic stats enabled", .{});
+        if (runtime.debug_protocol_replies) log.info("kitty protocol reply logging enabled (q=0)", .{});
+        log.info("composite mode = {s}", .{@tagName(config.composite_mode)});
+        log.info("intercept mode = {s}", .{@tagName(config.intercept_mode)});
         if (runtime.whiskers_client) |*client| {
             client.updateRuntimeInfo(
                 runtime.terminal_identity,
@@ -280,21 +282,21 @@ pub const Runtime = struct {
                 config.present_fps,
             );
         }
-        if (config.present_fps > 0) runtime.logger.writeFmt("katzensteg: present fps cap = {d}", .{config.present_fps});
-        if (runtime.image_gc) runtime.logger.write("katzensteg: old image GC enabled");
+        if (config.present_fps > 0) log.info("present fps cap = {d}", .{config.present_fps});
+        if (runtime.image_gc) log.info("old image GC enabled", .{});
         if (runtime.input_enabled) {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
             runtime.updateInputTarget();
             runtime.tty.?.enableInputCapture() catch |err| {
-                runtime.logger.writeFmt("katzensteg: terminal input capture enable failed: {any}", .{err});
+                log.warn("terminal input capture enable failed: {any}", .{err});
                 if (runtime.input_parser) |*parser| parser.deinit();
                 runtime.input_parser = null;
                 runtime.input_enabled = false;
             };
-            if (runtime.input_enabled) runtime.logger.write("katzensteg: terminal input capture enabled");
+            if (runtime.input_enabled) log.info("terminal input capture enabled", .{});
         }
-        if (runtime.dump_composites) runtime.logger.write("katzensteg: composite framebuffer dump enabled");
-        if (runtime.debug_composite) runtime.logger.write("katzensteg: composite debug logging enabled");
+        if (runtime.dump_composites) log.info("composite framebuffer dump enabled", .{});
+        if (runtime.debug_composite) log.info("composite debug logging enabled", .{});
         return runtime;
     }
 
@@ -418,19 +420,19 @@ pub const Runtime = struct {
                 switch (err) {
                     error.WouldBlock => return,
                     else => {
-                        self.logger.writeFmt("katzensteg: terminal input read failed: {any}", .{err});
+                        log.warn("terminal input read failed: {any}", .{err});
                         return;
                     },
                 }
             };
             if (n == 0) {
                 parser.flushStandaloneEscape() catch |err| {
-                    self.logger.writeFmt("katzensteg: terminal input escape flush failed: {any}", .{err});
+                    log.warn("terminal input escape flush failed: {any}", .{err});
                 };
                 return;
             }
             parser.feed(buf[0..n]) catch |err| {
-                self.logger.writeFmt("katzensteg: terminal input parse failed: {any}", .{err});
+                log.warn("terminal input parse failed: {any}", .{err});
                 return;
             };
             if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
@@ -562,7 +564,7 @@ pub const Runtime = struct {
 
     pub fn ensureGlCaptureBuffers(self: *Runtime, len: usize) ?*gl_capture_mod.Buffers {
         self.gl_capture_buffers.ensure(self.allocator, len) catch |err| {
-            self.logger.writeFmt("katzensteg: GL capture buffer allocation failed: {any}", .{err});
+            log.warn("GL capture buffer allocation failed: {any}", .{err});
             return null;
         };
         return &self.gl_capture_buffers;
@@ -587,8 +589,8 @@ pub const Runtime = struct {
         const unl = self.producer_stats.unlock_texture;
         const c = self.producer_stats.create_texture_from_surface;
         const p = self.producer_stats.render_present;
-        self.logger.writeFmt(
-            "katzensteg: producer generic={d}({d:.1}us avg/{d:.1}us max) update={d}({d:.1}us/{d:.1}us) unlock={d}({d:.1}us/{d:.1}us) ctfs={d}({d:.1}us/{d:.1}us) present={d}({d:.1}us/{d:.1}us)",
+        log.info(
+            "producer generic={d}({d:.1}us avg/{d:.1}us max) update={d}({d:.1}us/{d:.1}us) unlock={d}({d:.1}us/{d:.1}us) ctfs={d}({d:.1}us/{d:.1}us) present={d}({d:.1}us/{d:.1}us)",
             .{
                 g.calls,   avgMicros(g),   maxMicros(g),
                 u.calls,   avgMicros(u),   maxMicros(u),
@@ -610,7 +612,7 @@ pub const Runtime = struct {
         if (now < self.next_present_ns) {
             self.skipped_presents += 1;
             if ((self.skipped_presents % 120) == 1) {
-                self.logger.writeFmt("katzensteg: skipped presents={d}", .{self.skipped_presents});
+                log.info("skipped presents={d}", .{self.skipped_presents});
             }
             return false;
         }
@@ -630,7 +632,7 @@ pub const Runtime = struct {
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
         self.queued_lock_captures.put(key, .{ .rect = if (rect) |r| r.* else null, .pixels = pixels, .pitch = pitch }) catch |err| {
-            self.logger.writeFmt("katzensteg: failed to remember queued lock capture: {any}", .{err});
+            log.warn("failed to remember queued lock capture: {any}", .{err});
         };
     }
 
@@ -656,7 +658,7 @@ pub const Runtime = struct {
             self.dropQueuedFrameLocalsBeforeLatestPresent();
         }
         self.queue.append(self.allocator, owned) catch |err| {
-            self.logger.writeFmt("katzensteg: failed to enqueue command: {any}", .{err});
+            log.warn("failed to enqueue command: {any}", .{err});
             self.recycleCommandLocked(&owned);
             return;
         };
@@ -737,7 +739,7 @@ pub const Runtime = struct {
         for (self.queue.items[self.queue_head..]) |queued| {
             if (isPresentCommand(queued)) self.pending_presents += 1;
         }
-        if (dropped_any) self.logger.write("katzensteg: dropped stale queued frame-local commands before latest present");
+        if (dropped_any) log.info("dropped stale queued frame-local commands before latest present", .{});
     }
 };
 
@@ -894,7 +896,7 @@ fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_
 }
 
 fn workerMain(runtime: *Runtime) void {
-    runtime.logger.write("katzensteg: queued replay worker started");
+    log.info("queued replay worker started", .{});
     while (true) {
         runtime.queue_mutex.lock();
         while (!runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
@@ -902,7 +904,7 @@ fn workerMain(runtime: *Runtime) void {
         }
         if (runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
             runtime.queue_mutex.unlock();
-            runtime.logger.write("katzensteg: queued replay worker exiting");
+            log.info("queued replay worker exiting", .{});
             return;
         }
         var cmd = runtime.queue.items[runtime.queue_head];
@@ -936,7 +938,7 @@ pub fn get() *Runtime {
                 if (std.Thread.spawn(.{}, workerMain, .{runtime})) |thread| {
                     runtime.worker_thread = thread;
                 } else |err| {
-                    runtime.logger.writeFmt("katzensteg: failed to start queued replay worker: {any}", .{err});
+                    log.warn("failed to start queued replay worker: {any}", .{err});
                     runtime.active = false;
                 }
             }
@@ -991,8 +993,8 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
 
     const caps = try ts_kitty.capabilities.probe(allocator, tty, upload_path);
     runtime.terminal_identity = @tagName(caps.terminal);
-    runtime.logger.writeFmt(
-        "katzensteg: terminal={s} graphics={s} file_whole={s}/{s} file_offset={s}/{s}",
+    log.info(
+        "terminal={s} graphics={s} file_whole={s}/{s} file_offset={s}/{s}",
         .{
             @tagName(caps.terminal),
             @tagName(caps.graphics_basic.probe),
@@ -1005,12 +1007,12 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
 
     const chosen = forced_profile orelse ts_kitty.profile.choose(caps);
     if (forced_profile) |profile| {
-        runtime.logger.writeFmt("katzensteg: forced output profile = {s}", .{@tagName(profile)});
+        log.info("forced output profile = {s}", .{@tagName(profile)});
     }
     return switch (chosen) {
         .direct_apc => blk: {
             allocator.free(upload_path);
-            runtime.logger.write("katzensteg: file upload transport unavailable or avoided; falling back to inline APC");
+            log.info("file upload transport unavailable or avoided; falling back to inline APC", .{});
             break :blk .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
         },
         .file_whole => .{
