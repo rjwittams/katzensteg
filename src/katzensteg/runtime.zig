@@ -672,6 +672,22 @@ pub const Runtime = struct {
         const sink = &(self.batch_sink orelse return);
         switch (control) {
             .attach => |attach| {
+                log.info(
+                    "batch attach window={s} rect=({d},{d} {d}x{d}) aspect={s} image_ids={d}..{d} placement_ids={d}..{d} upload={s}",
+                    .{
+                        attach.window_id,
+                        attach.rect_cells.row,
+                        attach.rect_cells.col,
+                        attach.rect_cells.cols,
+                        attach.rect_cells.rows,
+                        @tagName(attach.aspect),
+                        attach.image_ids.start,
+                        attach.image_ids.end,
+                        attach.placement_ids.start,
+                        attach.placement_ids.end,
+                        @tagName(attach.upload.profile),
+                    },
+                );
                 sink.attachWithAspect(attach.rect_cells, attach.aspect);
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
@@ -679,15 +695,49 @@ pub const Runtime = struct {
                 };
                 self.frame_builder.setImageIdRange(attach.image_ids);
                 self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
+                const applied = sink.presentationRect();
+                log.info(
+                    "batch attach applied rect=({d},{d} {d}x{d}) aspect={s}",
+                    .{ applied.row, applied.col, applied.cols, applied.rows, @tagName(sink.presentationAspect()) },
+                );
             },
             .viewport => |viewport| {
-                if (!sink.isAttached()) return;
-                if (!std.meta.eql(sink.presentationRect(), viewport.rect_cells) or sink.presentationAspect() != viewport.aspect) {
+                if (!sink.isAttached()) {
+                    log.warn(
+                        "batch viewport ignored while detached window={s} rect=({d},{d} {d}x{d}) aspect={s}",
+                        .{ viewport.window_id, viewport.rect_cells.row, viewport.rect_cells.col, viewport.rect_cells.cols, viewport.rect_cells.rows, @tagName(viewport.aspect) },
+                    );
+                    return;
+                }
+                const previous = sink.presentationRect();
+                const previous_aspect = sink.presentationAspect();
+                log.info(
+                    "batch viewport window={s} from=({d},{d} {d}x{d})/{s} to=({d},{d} {d}x{d})/{s}",
+                    .{
+                        viewport.window_id,
+                        previous.row,
+                        previous.col,
+                        previous.cols,
+                        previous.rows,
+                        @tagName(previous_aspect),
+                        viewport.rect_cells.row,
+                        viewport.rect_cells.col,
+                        viewport.rect_cells.cols,
+                        viewport.rect_cells.rows,
+                        @tagName(viewport.aspect),
+                    },
+                );
+                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect) {
                     if (self.batch_writer) |writer| {
                         self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
                     }
                 }
                 sink.viewport(viewport.rect_cells, viewport.aspect);
+                const applied = sink.presentationRect();
+                log.info(
+                    "batch viewport applied rect=({d},{d} {d}x{d}) aspect={s}",
+                    .{ applied.row, applied.col, applied.cols, applied.rows, @tagName(sink.presentationAspect()) },
+                );
             },
             .detach => {
                 self.detachBatchWindow(sink, "main");
@@ -699,6 +749,11 @@ pub const Runtime = struct {
     }
 
     fn detachBatchWindow(self: *Runtime, sink: *RenderBatchSink, window_id: []const u8) void {
+        const previous = sink.presentationRect();
+        log.info(
+            "batch detach window={s} rect=({d},{d} {d}x{d}) aspect={s}",
+            .{ window_id, previous.row, previous.col, previous.cols, previous.rows, @tagName(sink.presentationAspect()) },
+        );
         if (self.batch_writer) |writer| {
             const file_writer = writer.deprecatedWriter();
             self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, file_writer);

@@ -1,0 +1,13 @@
+{
+  "name": "katzensteg-pi-extension",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
