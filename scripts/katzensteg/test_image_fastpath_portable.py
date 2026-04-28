@@ -145,21 +145,22 @@ class PortableImageFastpathTests(unittest.TestCase):
         self.assertEqual([30, 20, 10, 40, 70, 60, 50, 80], list(dst))
 
     def test_a2b10g10r10_to_rgba_expands_10_bit_channels(self):
-        src = (ctypes.c_uint32 * 2)(
+        src = (ctypes.c_uint32 * 3)(
             (3 << 30) | (1023 << 20) | (512 << 10) | 0,
             (0 << 30) | (0 << 20) | (1023 << 10) | 1023,
+            (3 << 30) | (0 << 20) | (0 << 10) | 511,
         )
-        dst = (ctypes.c_uint8 * 8)()
+        dst = (ctypes.c_uint8 * 12)()
 
         rc = self.lib.ks_fast_a2b10g10r10_to_rgba(
             dst,
-            2,
+            3,
             1,
             ctypes.cast(src, ctypes.POINTER(ctypes.c_uint8)),
         )
 
         self.assertEqual(1, rc)
-        self.assertEqual([0, 128, 255, 255, 255, 255, 0, 0], list(dst))
+        self.assertEqual([0, 128, 255, 255, 255, 255, 0, 0, 127, 0, 0, 255], list(dst))
 
     def test_scale_rgba_uses_nearest_neighbor_mapping(self):
         src = (ctypes.c_uint8 * 16)(

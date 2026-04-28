@@ -20,7 +20,7 @@ src/termscene/      reusable engine + kitty backend
 src/katzensteg/     preload runtime, launcher, frame builder, inspector client, C interposers
 examples/           ttytris, termscene-demo, kitty-* repros
 profiles/           JSON launcher profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
-                    and VK_LAYER_KATZENSTEG_capture.json (Vulkan layer registration)
+                    plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
 docs/katzensteg/    design notes, roadmap, port plans, handoffs
 .github/workflows/  claude-code-review.yml — automated PR review

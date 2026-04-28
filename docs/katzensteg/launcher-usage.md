@@ -49,6 +49,17 @@ The launcher writes a temporary runtime JSON file, passes it through `KATZENSTEG
 
 Profiles may also declare seed files. The launcher creates those files only when they do not already exist, so app-managed configs such as RetroArch can keep their own later edits.
 
+Profile string values are resolved by the launcher before spawning the child. `~`, `$HOME`, `${HOME}`, `$ROOT`, `${ROOT}`, `{repo}`, `$PATH`, and `${PATH}` are expanded in paths, args, env values, and seed file fields. A string value may also be written as a platform map, for example:
+
+```json
+"VK_LAYER_PATH": {
+  "linux": "{repo}/profiles/vulkan/linux",
+  "macos": "{repo}/profiles/vulkan/macos"
+}
+```
+
+When an optional env value, arg, or seed file path has no value for the active platform, that item is omitted. A target with no value for the active platform is treated as a broken profile.
+
 ## Current Smoke Status
 
 The current profile set has been smoke-tested on macOS. The known meaningful exceptions are Moonlight-specific:

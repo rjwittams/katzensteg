@@ -166,6 +166,8 @@ int ks_fast_a2b10g10r10_to_rgba(uint8_t *dst_rgba,
                                 int width,
                                 int height,
                                 const uint8_t *src_a2b10g10r10) {
+    /* No simple vImage one-call path for this uncommon Vulkan swapchain
+       format; use the Zig scalar conversion on macOS for now. */
     (void)dst_rgba;
     (void)width;
     (void)height;
