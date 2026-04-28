@@ -31,7 +31,7 @@ pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c
         else => return,
     };
     const rt = runtime.get();
-    if (!rt.shouldCaptureExternalFrame(null)) return;
+    if (!rt.shouldCaptureExternalFrame()) return;
     switch (rt.intercept_mode) {
         .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, data[0..byte_len]),
         .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, data[0..byte_len]),

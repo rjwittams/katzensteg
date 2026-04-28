@@ -1,6 +1,7 @@
 const std = @import("std");
 const termscene = @import("termscene");
 const config_mod = @import("config.zig");
+const core = @import("core_types.zig");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
@@ -34,7 +35,7 @@ const payload_pool_max_buffers = 64;
 const payload_pool_max_bytes = 64 * 1024 * 1024;
 
 const QueuedLockCapture = struct {
-    rect: ?@import("katzensteg_sdl").SDL_Rect,
+    rect: ?core.CoreRect,
     pixels: ?*anyopaque,
     pitch: i32,
 };
@@ -548,41 +549,33 @@ pub const Runtime = struct {
         return shouldSuppressClaimedWindowEvent(true, event.type, event.window.event);
     }
 
-    pub fn terminalRenderingEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
-        _ = window;
-        _ = renderer;
+    pub fn terminalRenderingEnabled(self: *const Runtime) bool {
         return routeTerminalRendering(self.window_policy);
     }
 
-    pub fn realRenderEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
-        _ = window;
-        _ = renderer;
+    pub fn realRenderEnabled(self: *const Runtime) bool {
         return routeRealRendering(self.window_policy);
     }
 
-    pub fn realWindowEnabled(self: *const Runtime, window: ?*sdl.SDL_Window) bool {
-        _ = window;
+    pub fn realWindowEnabled(self: *const Runtime) bool {
         return self.window_policy.realWindowEnabled();
     }
 
-    pub fn realWindowCreateAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowCreateAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.createAction();
     }
 
-    pub fn realWindowShowAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowShowAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.showAction();
     }
 
-    pub fn realWindowRestoreAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowRestoreAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.restoreAction();
     }
 
-    pub fn shouldCaptureExternalFrame(self: *Runtime, window: ?*sdl.SDL_Window) bool {
+    pub fn shouldCaptureExternalFrame(self: *Runtime) bool {
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return false;
-        if (!self.terminalRenderingEnabled(window, null)) {
+        if (!self.terminalRenderingEnabled()) {
             self.notePresentationLayout(.{});
             return false;
         }
@@ -825,20 +818,20 @@ pub const Runtime = struct {
         self.next_present_ns = std.time.nanoTimestamp() + extra;
     }
 
-    pub fn rememberQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture, rect: ?*const @import("katzensteg_sdl").SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
-        const key = if (texture) |t| @intFromPtr(t) else return;
+    pub fn rememberQueuedLock(self: *Runtime, texture: core.CoreHandle, rect: ?core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
+        if (texture == 0) return;
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
-        self.queued_lock_captures.put(key, .{ .rect = if (rect) |r| r.* else null, .pixels = pixels, .pitch = pitch }) catch |err| {
+        self.queued_lock_captures.put(texture, .{ .rect = rect, .pixels = pixels, .pitch = pitch }) catch |err| {
             log.warn("failed to remember queued lock capture: {any}", .{err});
         };
     }
 
-    pub fn takeQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture) ?QueuedLockCapture {
-        const key = if (texture) |t| @intFromPtr(t) else return null;
+    pub fn takeQueuedLock(self: *Runtime, texture: core.CoreHandle) ?QueuedLockCapture {
+        if (texture == 0) return null;
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
-        if (self.queued_lock_captures.fetchRemove(key)) |entry| return entry.value;
+        if (self.queued_lock_captures.fetchRemove(texture)) |entry| return entry.value;
         return null;
     }
 

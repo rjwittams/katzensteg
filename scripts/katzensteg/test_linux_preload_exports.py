@@ -114,6 +114,24 @@ class LinuxPreloadExportsTests(unittest.TestCase):
                 self.assertNotIn(f"pub export fn {symbol}", preload_text)
                 self.assertIn(f"pub export fn {symbol}", core_exports_text)
 
+    def test_runtime_policy_and_lock_helpers_do_not_expose_sdl_pointer_types(self):
+        runtime_text = (ROOT / "src" / "katzensteg" / "runtime.zig").read_text()
+
+        forbidden = (
+            "terminalRenderingEnabled(self: *const Runtime, window:",
+            "realRenderEnabled(self: *const Runtime, window:",
+            "realWindowEnabled(self: *const Runtime, window:",
+            "realWindowCreateAction(self: *const Runtime, window:",
+            "realWindowShowAction(self: *const Runtime, window:",
+            "realWindowRestoreAction(self: *const Runtime, window:",
+            "shouldCaptureExternalFrame(self: *Runtime, window:",
+            "rememberQueuedLock(self: *Runtime, texture: ?*@import(\"katzensteg_sdl\").SDL_Texture",
+            "takeQueuedLock(self: *Runtime, texture: ?*@import(\"katzensteg_sdl\").SDL_Texture",
+        )
+        for needle in forbidden:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, runtime_text)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF preload export test")
     def test_unlinked_preload_exports_linux_sdl_interpose_symbols(self):
         lib_path = self.preload_path()

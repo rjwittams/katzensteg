@@ -440,7 +440,8 @@ pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
 pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
     const start_ns = std.time.nanoTimestamp();
     defer rt.noteProducerTime(.unlock_texture, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
-    const capture = rt.takeQueuedLock(texture) orelse {
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
+    const capture = rt.takeQueuedLock(texture_handle) orelse {
         log.warn("queued unlock without remembered lock capture", .{});
         return;
     };
@@ -466,8 +467,8 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(pixels))[0..byte_len]);
     rt.enqueueCommand(.{ .update_texture = .{
-        .texture = sdl_adapter.handleFromPtr(texture),
-        .rect = if (capture.rect) |*r| sdl_adapter.rectFromSdl(r) else null,
+        .texture = texture_handle,
+        .rect = capture.rect,
         .pixels = copied,
         .pitch = capture.pitch,
     } });
@@ -577,7 +578,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
         return;
     }
     if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
-        if (!rt.terminalRenderingEnabled(null, renderer)) {
+        if (!rt.terminalRenderingEnabled()) {
             rt.notePresentationLayout(.{});
             return;
         }
@@ -698,7 +699,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         },
         .render_present => |c| {
             if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
-                if (!rt.terminalRenderingEnabled(null, null)) {
+                if (!rt.terminalRenderingEnabled()) {
                     rt.notePresentationLayout(.{});
                     return;
                 }
