@@ -50,24 +50,6 @@ pub const Command = union(enum) {
     render_set_clip_rect: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
     render_present: struct { renderer: ?*sdl.SDL_Renderer },
     external_framebuffer_present: struct { width: i32, height: i32, format: ExternalFramebufferFormat, pixels: ?[]u8 },
-
-    pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .update_texture => |*c| if (c.pixels) |buf| allocator.free(buf),
-            .update_yuv_texture => |*c| {
-                if (c.yplane) |buf| allocator.free(buf);
-                if (c.uplane) |buf| allocator.free(buf);
-                if (c.vplane) |buf| allocator.free(buf);
-            },
-            .update_nv_texture => |*c| {
-                if (c.yplane) |buf| allocator.free(buf);
-                if (c.uvplane) |buf| allocator.free(buf);
-            },
-            .external_framebuffer_present => |*c| if (c.pixels) |buf| allocator.free(buf),
-            else => {},
-        }
-        self.* = undefined;
-    }
 };
 
 pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
@@ -82,7 +64,7 @@ pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
                 rt.logger.write("katzensteg: cloneCommand failed in sync_compose; dropping command");
                 return;
             };
-            defer owned.deinit(rt.allocator);
+            defer rt.recycleCommand(&owned);
             handleCommand(rt, owned);
         },
         .queued_replay => {
@@ -120,24 +102,37 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
             }
             break :blk .{ .update_texture = .{ .texture = c.texture, .rect = if (c.rect) |r| r else null, .pixels = copied, .pitch = c.pitch } };
         },
-        .update_yuv_texture => |c| .{ .update_yuv_texture = .{
-            .texture = c.texture,
-            .rect = c.rect,
-            .yplane = try cloneBytes(rt, c.yplane),
-            .ypitch = c.ypitch,
-            .uplane = try cloneBytes(rt, c.uplane),
-            .upitch = c.upitch,
-            .vplane = try cloneBytes(rt, c.vplane),
-            .vpitch = c.vpitch,
-        } },
-        .update_nv_texture => |c| .{ .update_nv_texture = .{
-            .texture = c.texture,
-            .rect = c.rect,
-            .yplane = try cloneBytes(rt, c.yplane),
-            .ypitch = c.ypitch,
-            .uvplane = try cloneBytes(rt, c.uvplane),
-            .uvpitch = c.uvpitch,
-        } },
+        .update_yuv_texture => |c| blk: {
+            var cloned = Command{ .update_yuv_texture = .{
+                .texture = c.texture,
+                .rect = c.rect,
+                .yplane = null,
+                .ypitch = c.ypitch,
+                .uplane = null,
+                .upitch = c.upitch,
+                .vplane = null,
+                .vpitch = c.vpitch,
+            } };
+            errdefer rt.recycleCommand(&cloned);
+            cloned.update_yuv_texture.yplane = try cloneBytesToPayloadBuffer(rt, c.yplane);
+            cloned.update_yuv_texture.uplane = try cloneBytesToPayloadBuffer(rt, c.uplane);
+            cloned.update_yuv_texture.vplane = try cloneBytesToPayloadBuffer(rt, c.vplane);
+            break :blk cloned;
+        },
+        .update_nv_texture => |c| blk: {
+            var cloned = Command{ .update_nv_texture = .{
+                .texture = c.texture,
+                .rect = c.rect,
+                .yplane = null,
+                .ypitch = c.ypitch,
+                .uvplane = null,
+                .uvpitch = c.uvpitch,
+            } };
+            errdefer rt.recycleCommand(&cloned);
+            cloned.update_nv_texture.yplane = try cloneBytesToPayloadBuffer(rt, c.yplane);
+            cloned.update_nv_texture.uvplane = try cloneBytesToPayloadBuffer(rt, c.uvplane);
+            break :blk cloned;
+        },
         .create_texture_from_surface => |c| .{ .create_texture_from_surface = c },
         .lock_texture => |c| .{ .lock_texture = c },
         .unlock_texture => |c| .{ .unlock_texture = c },
@@ -158,12 +153,12 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
             .width = c.width,
             .height = c.height,
             .format = c.format,
-            .pixels = try cloneBytes(rt, c.pixels),
+            .pixels = try cloneBytesToPayloadBuffer(rt, c.pixels),
         } },
     };
 }
 
-fn cloneBytes(rt: *runtime_mod.Runtime, src: ?[]u8) !?[]u8 {
+fn cloneBytesToPayloadBuffer(rt: *runtime_mod.Runtime, src: ?[]u8) !?[]u8 {
     const bytes = src orelse return null;
     const copied = try rt.acquirePayloadBuffer(bytes.len);
     @memcpy(copied, bytes);
@@ -237,9 +232,17 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
     const copied_v = copyPlanePayload(rt, vplane, vpitch, chroma_h);
     if (copied_y == null or copied_u == null or copied_v == null) {
         rt.logger.write("katzensteg: failed to copy SDL_UpdateYUVTexture payload");
-        if (copied_y) |buf| rt.allocator.free(buf);
-        if (copied_u) |buf| rt.allocator.free(buf);
-        if (copied_v) |buf| rt.allocator.free(buf);
+        var doomed = Command{ .update_yuv_texture = .{
+            .texture = texture,
+            .rect = null,
+            .yplane = copied_y,
+            .ypitch = ypitch,
+            .uplane = copied_u,
+            .upitch = upitch,
+            .vplane = copied_v,
+            .vpitch = vpitch,
+        } };
+        rt.recycleCommand(&doomed);
         return;
     }
     rt.enqueueCommand(.{ .update_yuv_texture = .{
@@ -264,8 +267,15 @@ pub fn enqueueUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Textu
     const copied_uv = copyPlanePayload(rt, uvplane, uvpitch, chroma_h);
     if (copied_y == null or copied_uv == null) {
         rt.logger.write("katzensteg: failed to copy SDL_UpdateNVTexture payload");
-        if (copied_y) |buf| rt.allocator.free(buf);
-        if (copied_uv) |buf| rt.allocator.free(buf);
+        var doomed = Command{ .update_nv_texture = .{
+            .texture = texture,
+            .rect = null,
+            .yplane = copied_y,
+            .ypitch = ypitch,
+            .uvplane = copied_uv,
+            .uvpitch = uvpitch,
+        } };
+        rt.recycleCommand(&doomed);
         return;
     }
     rt.enqueueCommand(.{ .update_nv_texture = .{
