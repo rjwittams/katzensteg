@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("core_types.zig");
-const sdl = @import("sdl2.zig");
+const sdl = @import("katzensteg_sdl");
 
 pub fn handleFromPtr(ptr: anytype) core.CoreHandle {
     return if (ptr) |p| @intFromPtr(p) else 0;

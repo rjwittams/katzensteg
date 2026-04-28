@@ -1,6 +1,8 @@
 const std = @import("std");
 const config_mod = @import("config.zig");
+const core = @import("core_types.zig");
 const sdl = @import("katzensteg_sdl");
+const sdl_adapter = @import("sdl2_adapter.zig");
 const real_sdl = @import("real_sdl.zig");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
@@ -10,6 +12,9 @@ const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 const log = std.log.scoped(.intercept);
 
 pub const InterceptMode = config_mod.InterceptMode;
+const CoreHandle = core.CoreHandle;
+const CoreRect = core.CoreRect;
+const CorePoint = core.CorePoint;
 
 const SurfaceView = extern struct {
     flags: u32,
@@ -26,31 +31,88 @@ const SurfaceView = extern struct {
     refcount: i32,
 };
 
+fn sdlTexture(handle: CoreHandle) ?*sdl.SDL_Texture {
+    return sdl_adapter.ptrFromHandle(sdl.SDL_Texture, handle);
+}
+
+fn sdlRenderer(handle: CoreHandle) ?*sdl.SDL_Renderer {
+    return sdl_adapter.ptrFromHandle(sdl.SDL_Renderer, handle);
+}
+
+fn sdlWindow(handle: CoreHandle) ?*sdl.SDL_Window {
+    return sdl_adapter.ptrFromHandle(sdl.SDL_Window, handle);
+}
+
+fn toSdlRect(rect: CoreRect) sdl.SDL_Rect {
+    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+}
+
+fn toSdlPoint(point: CorePoint) sdl.SDL_Point {
+    return .{ .x = point.x, .y = point.y };
+}
+
+fn pixelFormatToSdl2(format: core.PixelFormat) u32 {
+    if (core.keep_producer_tokens) {
+        if (format.source) |source| switch (source) {
+            .sdl2 => |raw| return raw,
+            else => {},
+        };
+    }
+    return switch (format.semantic) {
+        .rgba8 => sdl.SDL_PIXELFORMAT_ABGR8888,
+        .argb8888 => sdl.SDL_PIXELFORMAT_ARGB8888,
+        .xrgb8888 => sdl.SDL_PIXELFORMAT_XRGB8888,
+        .rgb565 => sdl.SDL_PIXELFORMAT_RGB565,
+        .rgba4444 => sdl.SDL_PIXELFORMAT_RGBA4444,
+        .i420 => sdl.SDL_PIXELFORMAT_IYUV,
+        .yv12 => sdl.SDL_PIXELFORMAT_YV12,
+        .nv12 => sdl.SDL_PIXELFORMAT_NV12,
+        .nv21 => sdl.SDL_PIXELFORMAT_NV21,
+        .bgra8, .a2b10g10r10_unorm_pack32, .unknown => 0,
+    };
+}
+
+fn blendModeToSdl2(mode: core.BlendMode) i32 {
+    if (core.keep_producer_tokens) {
+        if (mode.source) |source| switch (source) {
+            .sdl2 => |raw| return raw,
+            else => {},
+        };
+    }
+    return switch (mode.semantic) {
+        .none => sdl.SDL_BLENDMODE_NONE,
+        .blend => sdl.SDL_BLENDMODE_BLEND,
+        .add => sdl.SDL_BLENDMODE_ADD,
+        .mod => sdl.SDL_BLENDMODE_MOD,
+        .mul => sdl.SDL_BLENDMODE_MUL,
+        .unknown => -1,
+    };
+}
+
 pub const Command = union(enum) {
-    create_window: struct { window: ?*sdl.SDL_Window, w: i32, h: i32 },
-    create_renderer: struct { window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer },
-    destroy_renderer: struct { renderer: ?*sdl.SDL_Renderer },
-    create_texture: struct { texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32 },
-    destroy_texture: struct { texture: ?*sdl.SDL_Texture },
-    update_texture: struct { texture: ?*sdl.SDL_Texture, rect: ?sdl.SDL_Rect, pixels: ?[]u8, pitch: i32 },
-    update_yuv_texture: struct { texture: ?*sdl.SDL_Texture, rect: ?sdl.SDL_Rect, yplane: ?[]u8, ypitch: i32, uplane: ?[]u8, upitch: i32, vplane: ?[]u8, vpitch: i32 },
-    update_nv_texture: struct { texture: ?*sdl.SDL_Texture, rect: ?sdl.SDL_Rect, yplane: ?[]u8, ypitch: i32, uvplane: ?[]u8, uvpitch: i32 },
-    create_texture_from_surface: struct { texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface },
-    lock_texture: struct { texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32 },
-    unlock_texture: struct { texture: ?*sdl.SDL_Texture },
-    set_texture_color_mod: struct { texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8 },
-    set_texture_alpha_mod: struct { texture: ?*sdl.SDL_Texture, a: u8 },
-    set_texture_blend_mode: struct { texture: ?*sdl.SDL_Texture, blend_mode: i32 },
-    set_render_draw_color: struct { renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8 },
-    render_clear: struct { renderer: ?*sdl.SDL_Renderer },
-    render_copy: struct { renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?sdl.SDL_Rect, dst: ?sdl.SDL_Rect },
-    render_copy_ex: struct { renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?sdl.SDL_Rect, dst: ?sdl.SDL_Rect, angle: f64, center: ?sdl.SDL_Point, flip: c_int },
-    render_fill_rect: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
-    render_draw_point: struct { renderer: ?*sdl.SDL_Renderer, x: i32, y: i32 },
-    render_draw_line: struct { renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32 },
-    render_set_viewport: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
-    render_set_clip_rect: struct { renderer: ?*sdl.SDL_Renderer, rect: ?sdl.SDL_Rect },
-    render_present: struct { renderer: ?*sdl.SDL_Renderer },
+    create_window: struct { window: CoreHandle, w: i32, h: i32 },
+    create_renderer: struct { window: CoreHandle, renderer: CoreHandle },
+    destroy_renderer: struct { renderer: CoreHandle },
+    create_texture: struct { texture: CoreHandle, format: core.PixelFormat, w: i32, h: i32 },
+    destroy_texture: struct { texture: CoreHandle },
+    update_texture: struct { texture: CoreHandle, rect: ?CoreRect, pixels: ?[]u8, pitch: i32 },
+    update_yuv_texture: struct { texture: CoreHandle, rect: ?CoreRect, yplane: ?[]u8, ypitch: i32, uplane: ?[]u8, upitch: i32, vplane: ?[]u8, vpitch: i32 },
+    update_nv_texture: struct { texture: CoreHandle, rect: ?CoreRect, yplane: ?[]u8, ypitch: i32, uvplane: ?[]u8, uvpitch: i32 },
+    lock_texture: struct { texture: CoreHandle, rect: ?CoreRect, pixels: ?*anyopaque, pitch: i32 },
+    unlock_texture: struct { texture: CoreHandle },
+    set_texture_color_mod: struct { texture: CoreHandle, r: u8, g: u8, b: u8 },
+    set_texture_alpha_mod: struct { texture: CoreHandle, a: u8 },
+    set_texture_blend_mode: struct { texture: CoreHandle, blend_mode: core.BlendMode },
+    set_render_draw_color: struct { renderer: CoreHandle, r: u8, g: u8, b: u8, a: u8 },
+    render_clear: struct { renderer: CoreHandle },
+    render_copy: struct { renderer: CoreHandle, texture: CoreHandle, src: ?CoreRect, dst: ?CoreRect },
+    render_copy_ex: struct { renderer: CoreHandle, texture: CoreHandle, src: ?CoreRect, dst: ?CoreRect, angle: f64, center: ?CorePoint, flip: c_int },
+    render_fill_rect: struct { renderer: CoreHandle, rect: ?CoreRect },
+    render_draw_point: struct { renderer: CoreHandle, x: i32, y: i32 },
+    render_draw_line: struct { renderer: CoreHandle, x1: i32, y1: i32, x2: i32, y2: i32 },
+    render_set_viewport: struct { renderer: CoreHandle, rect: ?CoreRect },
+    render_set_clip_rect: struct { renderer: CoreHandle, rect: ?CoreRect },
+    render_present: struct { renderer: CoreHandle },
     external_framebuffer_present: struct { width: i32, height: i32, format: ExternalFramebufferFormat, pixels: ?[]u8 },
 };
 
@@ -94,7 +156,8 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
                     var access: c_int = 0;
                     var w: c_int = 0;
                     var h: c_int = 0;
-                    if (real_sdl.SDL_QueryTexture(c.texture, &format, &access, &w, &h) != 0) break :blk2 0;
+                    const texture = sdl_adapter.ptrFromHandle(sdl.SDL_Texture, c.texture);
+                    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) break :blk2 0;
                     break :blk2 @as(usize, @intCast(c.pitch * h));
                 };
                 if (byte_len > 0) {
@@ -135,7 +198,6 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
             cloned.update_nv_texture.uvplane = try cloneBytesToPayloadBuffer(rt, c.uvplane);
             break :blk cloned;
         },
-        .create_texture_from_surface => |c| .{ .create_texture_from_surface = c },
         .lock_texture => |c| .{ .lock_texture = c },
         .unlock_texture => |c| .{ .unlock_texture = c },
         .set_texture_color_mod => |c| .{ .set_texture_color_mod = c },
@@ -232,7 +294,12 @@ pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture
     if (copied == null and pixels != null) {
         log.warn("failed to copy update_texture payload for queued replay", .{});
     }
-    rt.enqueueCommand(.{ .update_texture = .{ .texture = texture, .rect = if (rect) |r| r.* else null, .pixels = copied, .pitch = pitch } });
+    rt.enqueueCommand(.{ .update_texture = .{
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .rect = sdl_adapter.rectFromSdl(rect),
+        .pixels = copied,
+        .pitch = pitch,
+    } });
 }
 
 pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
@@ -247,7 +314,7 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
     if (copied_y == null or copied_u == null or copied_v == null) {
         log.warn("failed to copy SDL_UpdateYUVTexture payload", .{});
         var doomed = Command{ .update_yuv_texture = .{
-            .texture = texture,
+            .texture = sdl_adapter.handleFromPtr(texture),
             .rect = null,
             .yplane = copied_y,
             .ypitch = ypitch,
@@ -260,8 +327,8 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
         return;
     }
     rt.enqueueCommand(.{ .update_yuv_texture = .{
-        .texture = texture,
-        .rect = if (rect) |r| r.* else null,
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .rect = sdl_adapter.rectFromSdl(rect),
         .yplane = copied_y,
         .ypitch = ypitch,
         .uplane = copied_u,
@@ -282,7 +349,7 @@ pub fn enqueueUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Textu
     if (copied_y == null or copied_uv == null) {
         log.warn("failed to copy SDL_UpdateNVTexture payload", .{});
         var doomed = Command{ .update_nv_texture = .{
-            .texture = texture,
+            .texture = sdl_adapter.handleFromPtr(texture),
             .rect = null,
             .yplane = copied_y,
             .ypitch = ypitch,
@@ -293,8 +360,8 @@ pub fn enqueueUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Textu
         return;
     }
     rt.enqueueCommand(.{ .update_nv_texture = .{
-        .texture = texture,
-        .rect = if (rect) |r| r.* else null,
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .rect = sdl_adapter.rectFromSdl(rect),
         .yplane = copied_y,
         .ypitch = ypitch,
         .uvplane = copied_uv,
@@ -349,7 +416,12 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
         log.warn("SDL_QueryTexture failed in enqueueCreateTextureFromSurface; using fallback metadata", .{});
         format = sdl.SDL_PIXELFORMAT_ABGR8888;
     }
-    rt.enqueueCommand(.{ .create_texture = .{ .texture = texture, .format = format, .w = w, .h = h } });
+    rt.enqueueCommand(.{ .create_texture = .{
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .format = sdl_adapter.pixelFormatFromSdl2(format),
+        .w = w,
+        .h = h,
+    } });
 
     if (surface == null) return;
     const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
@@ -365,7 +437,7 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(surf.pixels.?))[0..byte_len]);
     rt.enqueueCommand(.{ .update_texture = .{
-        .texture = texture,
+        .texture = sdl_adapter.handleFromPtr(texture),
         .rect = null,
         .pixels = copied,
         .pitch = surf.pitch,
@@ -409,8 +481,8 @@ pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(pixels))[0..byte_len]);
     rt.enqueueCommand(.{ .update_texture = .{
-        .texture = texture,
-        .rect = capture.rect,
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .rect = if (capture.rect) |*r| sdl_adapter.rectFromSdl(r) else null,
         .pixels = copied,
         .pitch = capture.pitch,
     } });
@@ -476,10 +548,10 @@ pub fn enqueueRenderGeometryRaw(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Re
         return;
     };
     dispatchCommand(rt, .{ .render_copy = .{
-        .renderer = renderer,
-        .texture = texture,
-        .src = copy.src,
-        .dst = copy.dst,
+        .renderer = sdl_adapter.handleFromPtr(renderer),
+        .texture = sdl_adapter.handleFromPtr(texture),
+        .src = sdl_adapter.rectFromSdl(&copy.src),
+        .dst = sdl_adapter.rectFromSdl(&copy.dst),
     } });
 }
 
@@ -571,30 +643,59 @@ pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height
 
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
-        .create_window => |c| onCreateWindow(rt, c.window, c.w, c.h),
-        .create_renderer => |c| onCreateRenderer(rt, c.window, c.renderer),
-        .destroy_renderer => |c| onDestroyRenderer(rt, c.renderer),
-        .create_texture => |c| onCreateTexture(rt, c.texture, c.format, c.w, c.h),
-        .destroy_texture => |c| onDestroyTexture(rt, c.texture),
-        .update_texture => |c| onUpdateTexture(rt, c.texture, if (c.rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch),
-        .update_yuv_texture => |c| onUpdateYuvTexture(rt, c.texture, if (c.rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch),
-        .update_nv_texture => |c| onUpdateNvTexture(rt, c.texture, if (c.rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch),
-        .create_texture_from_surface => |c| onCreateTextureFromSurface(rt, c.texture, c.surface),
-        .lock_texture => |c| onLockTexture(rt, c.texture, c.rect, c.pixels, c.pitch),
-        .unlock_texture => |c| onUnlockTexture(rt, c.texture),
-        .set_texture_color_mod => |c| onSetTextureColorMod(rt, c.texture, c.r, c.g, c.b),
-        .set_texture_alpha_mod => |c| onSetTextureAlphaMod(rt, c.texture, c.a),
-        .set_texture_blend_mode => |c| onSetTextureBlendMode(rt, c.texture, c.blend_mode),
-        .set_render_draw_color => |c| onSetRenderDrawColor(rt, c.renderer, c.r, c.g, c.b, c.a),
-        .render_clear => |c| onRenderClear(rt, c.renderer),
-        .render_copy => |c| onRenderCopy(rt, c.renderer, c.texture, if (c.src) |*r| r else null, if (c.dst) |*r| r else null),
-        .render_copy_ex => |c| onRenderCopyEx(rt, c.renderer, c.texture, if (c.src) |*r| r else null, if (c.dst) |*r| r else null, c.angle, if (c.center) |*p| p else null, c.flip),
-        .render_fill_rect => |c| onRenderFillRect(rt, c.renderer, if (c.rect) |*r| r else null),
-        .render_draw_point => |c| onRenderDrawPoint(rt, c.renderer, c.x, c.y),
-        .render_draw_line => |c| onRenderDrawLine(rt, c.renderer, c.x1, c.y1, c.x2, c.y2),
-        .render_set_viewport => |c| onRenderSetViewport(rt, c.renderer, if (c.rect) |*r| r else null),
-        .render_set_clip_rect => |c| onRenderSetClipRect(rt, c.renderer, if (c.rect) |*r| r else null),
-        .render_present => |c| onRenderPresent(rt, c.renderer),
+        .create_window => |c| onCreateWindow(rt, sdlWindow(c.window), c.w, c.h),
+        .create_renderer => |c| onCreateRenderer(rt, sdlWindow(c.window), sdlRenderer(c.renderer)),
+        .destroy_renderer => |c| onDestroyRenderer(rt, sdlRenderer(c.renderer)),
+        .create_texture => |c| onCreateTexture(rt, sdlTexture(c.texture), pixelFormatToSdl2(c.format), c.w, c.h),
+        .destroy_texture => |c| onDestroyTexture(rt, sdlTexture(c.texture)),
+        .update_texture => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onUpdateTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
+        },
+        .update_yuv_texture => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onUpdateYuvTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
+        },
+        .update_nv_texture => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onUpdateNvTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
+        },
+        .lock_texture => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onLockTexture(rt, sdlTexture(c.texture), if (rect) |*r| r else null, c.pixels, c.pitch);
+        },
+        .unlock_texture => |c| onUnlockTexture(rt, sdlTexture(c.texture)),
+        .set_texture_color_mod => |c| onSetTextureColorMod(rt, sdlTexture(c.texture), c.r, c.g, c.b),
+        .set_texture_alpha_mod => |c| onSetTextureAlphaMod(rt, sdlTexture(c.texture), c.a),
+        .set_texture_blend_mode => |c| onSetTextureBlendMode(rt, sdlTexture(c.texture), blendModeToSdl2(c.blend_mode)),
+        .set_render_draw_color => |c| onSetRenderDrawColor(rt, sdlRenderer(c.renderer), c.r, c.g, c.b, c.a),
+        .render_clear => |c| onRenderClear(rt, sdlRenderer(c.renderer)),
+        .render_copy => |c| {
+            var src = if (c.src) |r| toSdlRect(r) else null;
+            var dst = if (c.dst) |r| toSdlRect(r) else null;
+            onRenderCopy(rt, sdlRenderer(c.renderer), sdlTexture(c.texture), if (src) |*r| r else null, if (dst) |*r| r else null);
+        },
+        .render_copy_ex => |c| {
+            var src = if (c.src) |r| toSdlRect(r) else null;
+            var dst = if (c.dst) |r| toSdlRect(r) else null;
+            var center = if (c.center) |p| toSdlPoint(p) else null;
+            onRenderCopyEx(rt, sdlRenderer(c.renderer), sdlTexture(c.texture), if (src) |*r| r else null, if (dst) |*r| r else null, c.angle, if (center) |*p| p else null, c.flip);
+        },
+        .render_fill_rect => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onRenderFillRect(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+        },
+        .render_draw_point => |c| onRenderDrawPoint(rt, sdlRenderer(c.renderer), c.x, c.y),
+        .render_draw_line => |c| onRenderDrawLine(rt, sdlRenderer(c.renderer), c.x1, c.y1, c.x2, c.y2),
+        .render_set_viewport => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onRenderSetViewport(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+        },
+        .render_set_clip_rect => |c| {
+            var rect = if (c.rect) |r| toSdlRect(r) else null;
+            onRenderSetClipRect(rt, sdlRenderer(c.renderer), if (rect) |*r| r else null);
+        },
+        .render_present => |c| onRenderPresent(rt, sdlRenderer(c.renderer)),
         .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),
     }
 }

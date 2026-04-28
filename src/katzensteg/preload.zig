@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdl = @import("katzensteg_sdl");
+const sdl_adapter = @import("sdl2_adapter.zig");
 const real_gl = @import("real_gl.zig");
 const real_sdl = @import("real_sdl.zig");
 const log_mod = @import("log.zig");
@@ -339,7 +340,7 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
     traceLimited(rt, &trace_create_window, "SDL_CreateWindow window={x} size={d}x{d} flags=0x{x} tracked_windows={d}", .{ if (window) |p| @intFromPtr(p) else 0, w, h, flags, tracked_windows });
     switch (rt.intercept_mode) {
         .sync_compose => sink.onCreateWindow(rt, window, w, h),
-        .queued_replay => sink.dispatchCommand(rt, .{ .create_window = .{ .window = window, .w = w, .h = h } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .create_window = .{ .window = sdl_adapter.handleFromPtr(window), .w = w, .h = h } }),
     }
     applyRealWindowAction(rt.realWindowCreateAction(window), window);
     return window;
@@ -410,7 +411,7 @@ pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flag
     traceLimited(rt, &trace_create_renderer, "SDL_CreateRenderer window={x} renderer={x} index={d} flags=0x{x}", .{ if (window) |p| @intFromPtr(p) else 0, if (renderer) |p| @intFromPtr(p) else 0, index, flags });
     switch (rt.intercept_mode) {
         .sync_compose => sink.onCreateRenderer(rt, window, renderer),
-        .queued_replay => sink.dispatchCommand(rt, .{ .create_renderer = .{ .window = window, .renderer = renderer } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .create_renderer = .{ .window = sdl_adapter.handleFromPtr(window), .renderer = sdl_adapter.handleFromPtr(renderer) } }),
     }
     return renderer;
 }
@@ -434,7 +435,7 @@ pub export fn ks_SDL_DestroyRenderer(renderer: ?*sdl.SDL_Renderer) callconv(.c) 
     const rt = runtime.get();
     switch (rt.intercept_mode) {
         .sync_compose => sink.onDestroyRenderer(rt, renderer),
-        .queued_replay => sink.dispatchCommand(rt, .{ .destroy_renderer = .{ .renderer = renderer } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .destroy_renderer = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
     }
     real_sdl.SDL_DestroyRenderer(renderer);
 }
@@ -445,7 +446,7 @@ pub export fn ks_SDL_CreateTexture(renderer: ?*sdl.SDL_Renderer, format: sdl.Uin
     traceLimited(rt, &trace_create_texture, "SDL_CreateTexture renderer={x} texture={x} format={d} access={d} size={d}x{d}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, format, access, w, h });
     switch (rt.intercept_mode) {
         .sync_compose => sink.onCreateTexture(rt, texture, format, w, h),
-        .queued_replay => sink.dispatchCommand(rt, .{ .create_texture = .{ .texture = texture, .format = format, .w = w, .h = h } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .create_texture = .{ .texture = sdl_adapter.handleFromPtr(texture), .format = sdl_adapter.pixelFormatFromSdl2(format), .w = w, .h = h } }),
     }
     return texture;
 }
@@ -469,7 +470,7 @@ pub export fn ks_SDL_DestroyTexture(texture: ?*sdl.SDL_Texture) callconv(.c) voi
     const rt = runtime.get();
     switch (rt.intercept_mode) {
         .sync_compose => sink.onDestroyTexture(rt, texture),
-        .queued_replay => sink.dispatchCommand(rt, .{ .destroy_texture = .{ .texture = texture } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .destroy_texture = .{ .texture = sdl_adapter.handleFromPtr(texture) } }),
     }
     real_sdl.SDL_DestroyTexture(texture);
 }
@@ -535,7 +536,7 @@ pub export fn ks_SDL_SetTextureColorMod(texture: ?*sdl.SDL_Texture, r: sdl.Uint8
     const rt = runtime.get();
     if (rc == 0) switch (rt.intercept_mode) {
         .sync_compose => sink.onSetTextureColorMod(rt, texture, r, g, b),
-        .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_color_mod = .{ .texture = texture, .r = r, .g = g, .b = b } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_color_mod = .{ .texture = sdl_adapter.handleFromPtr(texture), .r = r, .g = g, .b = b } }),
     };
     return rc;
 }
@@ -545,7 +546,7 @@ pub export fn ks_SDL_SetTextureAlphaMod(texture: ?*sdl.SDL_Texture, a: sdl.Uint8
     const rt = runtime.get();
     if (rc == 0) switch (rt.intercept_mode) {
         .sync_compose => sink.onSetTextureAlphaMod(rt, texture, a),
-        .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_alpha_mod = .{ .texture = texture, .a = a } }),
+        .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_alpha_mod = .{ .texture = sdl_adapter.handleFromPtr(texture), .a = a } }),
     };
     return rc;
 }
@@ -556,7 +557,7 @@ pub export fn ks_SDL_SetTextureBlendMode(texture: ?*sdl.SDL_Texture, blendMode: 
         const rt = runtime.get();
         switch (rt.intercept_mode) {
             .sync_compose => sink.onSetTextureBlendMode(rt, texture, blendMode),
-            .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_blend_mode = .{ .texture = texture, .blend_mode = blendMode } }),
+            .queued_replay => sink.dispatchCommand(rt, .{ .set_texture_blend_mode = .{ .texture = sdl_adapter.handleFromPtr(texture), .blend_mode = sdl_adapter.blendModeFromSdl2(blendMode) } }),
         }
     }
     return rc;
@@ -568,7 +569,7 @@ pub export fn ks_SDL_SetRenderDrawColor(renderer: ?*sdl.SDL_Renderer, r: sdl.Uin
         const rt = runtime.get();
         switch (rt.intercept_mode) {
             .sync_compose => sink.onSetRenderDrawColor(rt, renderer, r, g, b, a),
-            .queued_replay => sink.dispatchCommand(rt, .{ .set_render_draw_color = .{ .renderer = renderer, .r = r, .g = g, .b = b, .a = a } }),
+            .queued_replay => sink.dispatchCommand(rt, .{ .set_render_draw_color = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .r = r, .g = g, .b = b, .a = a } }),
         }
     }
     return rc;
@@ -582,7 +583,7 @@ pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_in
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderClear(rt, renderer),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_clear = .{ .renderer = renderer } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_clear = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
             }
         }
     }
@@ -597,7 +598,7 @@ pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderCopy(rt, renderer, texture, srcrect, dstrect),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_copy = .{ .renderer = renderer, .texture = texture, .src = if (srcrect) |r| r.* else null, .dst = if (dstrect) |r| r.* else null } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_copy = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .texture = sdl_adapter.handleFromPtr(texture), .src = sdl_adapter.rectFromSdl(srcrect), .dst = sdl_adapter.rectFromSdl(dstrect) } }),
             }
         }
     }
@@ -612,7 +613,7 @@ pub export fn ks_SDL_RenderCopyEx(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.S
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderCopyEx(rt, renderer, texture, srcrect, dstrect, angle, center, flip),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_copy_ex = .{ .renderer = renderer, .texture = texture, .src = if (srcrect) |r| r.* else null, .dst = if (dstrect) |r| r.* else null, .angle = angle, .center = if (center) |p| p.* else null, .flip = flip } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_copy_ex = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .texture = sdl_adapter.handleFromPtr(texture), .src = sdl_adapter.rectFromSdl(srcrect), .dst = sdl_adapter.rectFromSdl(dstrect), .angle = angle, .center = sdl_adapter.pointFromSdl(center), .flip = flip } }),
             }
         }
     }
@@ -641,7 +642,7 @@ pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const 
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderFillRect(rt, renderer, rect),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_fill_rect = .{ .renderer = renderer, .rect = if (rect) |r| r.* else null } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_fill_rect = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .rect = sdl_adapter.rectFromSdl(rect) } }),
             }
         }
     }
@@ -655,7 +656,7 @@ pub export fn ks_SDL_RenderDrawPoint(renderer: ?*sdl.SDL_Renderer, x: c_int, y: 
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderDrawPoint(rt, renderer, x, y),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_draw_point = .{ .renderer = renderer, .x = x, .y = y } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_draw_point = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .x = x, .y = y } }),
             }
         }
     }
@@ -669,7 +670,7 @@ pub export fn ks_SDL_RenderDrawLine(renderer: ?*sdl.SDL_Renderer, x1: c_int, y1:
         if (rt.terminalRenderingEnabled(null, renderer)) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderDrawLine(rt, renderer, x1, y1, x2, y2),
-                .queued_replay => sink.dispatchCommand(rt, .{ .render_draw_line = .{ .renderer = renderer, .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 } }),
+                .queued_replay => sink.dispatchCommand(rt, .{ .render_draw_line = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 } }),
             }
         }
     }
@@ -682,7 +683,7 @@ pub export fn ks_SDL_RenderSetViewport(renderer: ?*sdl.SDL_Renderer, rect: ?*con
         const rt = runtime.get();
         switch (rt.intercept_mode) {
             .sync_compose => sink.onRenderSetViewport(rt, renderer, rect),
-            .queued_replay => sink.dispatchCommand(rt, .{ .render_set_viewport = .{ .renderer = renderer, .rect = if (rect) |r| r.* else null } }),
+            .queued_replay => sink.dispatchCommand(rt, .{ .render_set_viewport = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .rect = sdl_adapter.rectFromSdl(rect) } }),
         }
     }
     return rc;
@@ -694,7 +695,7 @@ pub export fn ks_SDL_RenderSetClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*con
         const rt = runtime.get();
         switch (rt.intercept_mode) {
             .sync_compose => sink.onRenderSetClipRect(rt, renderer, rect),
-            .queued_replay => sink.dispatchCommand(rt, .{ .render_set_clip_rect = .{ .renderer = renderer, .rect = if (rect) |r| r.* else null } }),
+            .queued_replay => sink.dispatchCommand(rt, .{ .render_set_clip_rect = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .rect = sdl_adapter.rectFromSdl(rect) } }),
         }
     }
     return rc;
@@ -706,7 +707,7 @@ pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) vo
     if (rt.terminalRenderingEnabled(null, renderer)) {
         switch (rt.intercept_mode) {
             .sync_compose => sink.onRenderPresent(rt, renderer),
-            .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = renderer } }),
+            .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
         }
     }
     if (rt.realRenderEnabled(null, renderer)) real_sdl.SDL_RenderPresent(renderer);
