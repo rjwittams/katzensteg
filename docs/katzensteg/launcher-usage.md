@@ -72,6 +72,18 @@ In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSO
 
 The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect and id ranges. Until attach is received, the runtime suppresses graphics batches. First-cut embed mode uses inline terminal bytes in JSON strings and direct APC-style uploads; socket transport, target stdout events, file/shm payload side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
 
+## Attach Host Mode
+
+`attach` is the terminal-owning host for a stdio JSONL peer. The peer command is argv-only and starts after `--`:
+
+```sh
+./zig-out/bin/katzensteg attach --exec -- ./zig-out/bin/katzensteg --embed-jsonl probe.embed.basic_sdl
+```
+
+The outer `katzensteg attach` owns `/dev/tty`, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
+
+This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
+
 ## Current Smoke Status
 
 The current profile set has been smoke-tested on macOS. The known meaningful exceptions are Moonlight-specific:
