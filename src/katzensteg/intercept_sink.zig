@@ -31,44 +31,6 @@ const SurfaceView = extern struct {
     refcount: i32,
 };
 
-fn pixelFormatToSdl2(format: core.PixelFormat) u32 {
-    if (core.keep_producer_tokens) {
-        if (format.source) |source| switch (source) {
-            .sdl2 => |raw| return raw,
-            else => {},
-        };
-    }
-    return switch (format.semantic) {
-        .rgba8 => sdl.SDL_PIXELFORMAT_ABGR8888,
-        .argb8888 => sdl.SDL_PIXELFORMAT_ARGB8888,
-        .xrgb8888 => sdl.SDL_PIXELFORMAT_XRGB8888,
-        .rgb565 => sdl.SDL_PIXELFORMAT_RGB565,
-        .rgba4444 => sdl.SDL_PIXELFORMAT_RGBA4444,
-        .i420 => sdl.SDL_PIXELFORMAT_IYUV,
-        .yv12 => sdl.SDL_PIXELFORMAT_YV12,
-        .nv12 => sdl.SDL_PIXELFORMAT_NV12,
-        .nv21 => sdl.SDL_PIXELFORMAT_NV21,
-        .bgra8, .a2b10g10r10_unorm_pack32, .unknown => 0,
-    };
-}
-
-fn blendModeToSdl2(mode: core.BlendMode) i32 {
-    if (core.keep_producer_tokens) {
-        if (mode.source) |source| switch (source) {
-            .sdl2 => |raw| return raw,
-            else => {},
-        };
-    }
-    return switch (mode.semantic) {
-        .none => sdl.SDL_BLENDMODE_NONE,
-        .blend => sdl.SDL_BLENDMODE_BLEND,
-        .add => sdl.SDL_BLENDMODE_ADD,
-        .mod => sdl.SDL_BLENDMODE_MOD,
-        .mul => sdl.SDL_BLENDMODE_MUL,
-        .unknown => -1,
-    };
-}
-
 pub const Command = union(enum) {
     create_window: struct { window: CoreHandle, w: i32, h: i32 },
     create_renderer: struct { window: CoreHandle, renderer: CoreHandle },
@@ -222,7 +184,7 @@ pub fn onDestroyRenderer(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer)
 }
 
 pub fn onCreateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32) void {
-    rt.frame_builder.onCreateTexture(sdl_adapter.handleFromPtr(texture), format, w, h);
+    rt.frame_builder.onCreateTexture(sdl_adapter.handleFromPtr(texture), sdl_adapter.pixelFormatFromSdl2(format), w, h);
 }
 
 pub fn onDestroyTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
@@ -503,7 +465,7 @@ pub fn onSetTextureAlphaMod(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture
 }
 
 pub fn onSetTextureBlendMode(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
-    rt.frame_builder.onSetTextureBlendMode(&rt.logger, sdl_adapter.handleFromPtr(texture), blend_mode);
+    rt.frame_builder.onSetTextureBlendMode(&rt.logger, sdl_adapter.handleFromPtr(texture), sdl_adapter.blendModeFromSdl2(blend_mode));
 }
 
 pub fn onSetRenderDrawColor(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8) void {
@@ -649,7 +611,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
         .create_renderer => |c| rt.frame_builder.onCreateRenderer(c.window, c.renderer),
         .destroy_renderer => |c| rt.frame_builder.onDestroyRenderer(c.renderer),
-        .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, pixelFormatToSdl2(c.format), c.w, c.h),
+        .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, c.format, c.w, c.h),
         .destroy_texture => |c| rt.frame_builder.onDestroyTexture(c.texture),
         .update_texture => |c| {
             var rect = c.rect;
@@ -670,7 +632,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         .unlock_texture => |c| if (rt.active and rt.backend != null) rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, c.texture),
         .set_texture_color_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, c.texture, c.r, c.g, c.b),
         .set_texture_alpha_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, c.texture, c.a),
-        .set_texture_blend_mode => |c| rt.frame_builder.onSetTextureBlendMode(&rt.logger, c.texture, blendModeToSdl2(c.blend_mode)),
+        .set_texture_blend_mode => |c| rt.frame_builder.onSetTextureBlendMode(&rt.logger, c.texture, c.blend_mode),
         .set_render_draw_color => |c| rt.frame_builder.onSetRenderDrawColor(c.renderer, c.r, c.g, c.b, c.a),
         .render_clear => |c| rt.frame_builder.onRenderClear(c.renderer),
         .render_copy => |c| {
