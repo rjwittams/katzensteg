@@ -31,7 +31,10 @@
         "SteamAppId": "1486920",
         "SteamGameId": "1486920",
         "ENABLE_GAMESCOPE_WSI": "1",
-        "VK_LAYER_PATH": "{repo}/profiles:/tmp",
+        "VK_LAYER_PATH": {
+          "linux": "{repo}/profiles/vulkan/linux:/tmp",
+          "macos": "{repo}/profiles/vulkan/macos:/tmp"
+        },
         "KATZENSTEG_TRACE_VULKAN": "1",
         "KATZENSTEG_TRACE_SDL": "1"
       },

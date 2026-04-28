@@ -10,6 +10,8 @@ PROTON_BIN="${PROTON_BIN:-$STEAM_ROOT/steamapps/common/Proton - Experimental/pro
 GAME_EXE="${GAME_EXE:-$STEAM_ROOT/steamapps/common/Tempest Rising/Tempest/Binaries/Win64/Tempest-Win64-Shipping.exe}"
 OUTPUT_LOG="${OUTPUT_LOG:-/tmp/gamescope-tempest-outside-ks.out}"
 
+# Diagnostic escape hatch for comparing gamescope/Proton behavior without
+# Katzensteg preload or Vulkan capture. Prefer launcher profiles for normal runs.
 if [[ ! -x "$GAMESCOPE_BIN" ]]; then
   echo "gamescope binary not found or not executable: $GAMESCOPE_BIN" >&2
   exit 1

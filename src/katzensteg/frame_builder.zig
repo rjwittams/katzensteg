@@ -3501,16 +3501,18 @@ test "external framebuffer conversion swaps bgra input to rgba" {
 }
 
 test "external framebuffer conversion expands a2b10g10r10 to rgba" {
-    var src: [8]u8 = undefined;
+    var src: [12]u8 = undefined;
     var dst: [src.len]u8 = undefined;
 
     std.mem.writeInt(u32, src[0..4], (3 << 30) | (1023 << 20) | (512 << 10) | 0, .little);
     std.mem.writeInt(u32, src[4..8], (0 << 30) | (0 << 20) | (1023 << 10) | 1023, .little);
+    std.mem.writeInt(u32, src[8..12], (3 << 30) | (0 << 20) | (0 << 10) | 511, .little);
 
-    try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 2, 1, .a2b10g10r10_unorm_pack32));
+    try std.testing.expect(convertExternalFramebufferToRgba(&dst, &src, 3, 1, .a2b10g10r10_unorm_pack32));
     try std.testing.expectEqualSlices(u8, &[_]u8{
         0, 128, 255, 255,
         255, 255, 0, 0,
+        127, 0, 0, 255,
     }, &dst);
 }
 

@@ -165,6 +165,8 @@ static void katzensteg_vulkan_layer_constructor(void)
 {
     g_capture_enabled = env_enabled("KATZENSTEG_VULKAN_CAPTURE");
     g_trace_enabled = env_enabled("KATZENSTEG_TRACE_VULKAN");
+    /* Capture this process only. Children get a scrubbed environment unless
+       their launcher/profile explicitly opts them back into Katzensteg. */
     ks_scrub_colon_env_entry("VK_INSTANCE_LAYERS", KS_LAYER_NAME);
     unsetenv("KATZENSTEG_VULKAN_CAPTURE");
     unsetenv("KATZENSTEG_TRACE_VULKAN");

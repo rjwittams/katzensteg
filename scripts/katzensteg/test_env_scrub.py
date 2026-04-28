@@ -108,8 +108,10 @@ class EnvScrubTests(unittest.TestCase):
         self.assertIsNone(self.c_getenv("KATZENSTEG_TRACE_VULKAN"))
         self.assertEqual("VK_LAYER_OTHER:VK_LAYER_LAST", self.c_getenv("VK_INSTANCE_LAYERS"))
 
-    def test_z_vulkan_layer_preserves_a2b10g10r10_format_for_present_layer(self):
-        vulkan_lib = ctypes.CDLL(str(self.vulkan_lib_path))
+    def test_vulkan_layer_preserves_a2b10g10r10_format_for_present_layer(self):
+        format_lib_path = pathlib.Path(self.tmpdir.name) / "libvulkan_layer_format_test.so"
+        shutil.copy2(self.vulkan_lib_path, format_lib_path)
+        vulkan_lib = ctypes.CDLL(str(format_lib_path))
         vulkan_lib.ks_vulkan_test_external_format_for_vk.argtypes = [ctypes.c_int]
         vulkan_lib.ks_vulkan_test_external_format_for_vk.restype = ctypes.c_int
 

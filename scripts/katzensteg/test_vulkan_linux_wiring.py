@@ -6,7 +6,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-MANIFEST_PATH = ROOT / "profiles" / "VK_LAYER_KATZENSTEG_capture.json"
+LINUX_MANIFEST_PATH = ROOT / "profiles" / "vulkan" / "linux" / "VK_LAYER_KATZENSTEG_capture.json"
+MACOS_MANIFEST_PATH = ROOT / "profiles" / "vulkan" / "macos" / "VK_LAYER_KATZENSTEG_capture.json"
 RUNNER_PATH = ROOT / "scripts" / "katzensteg" / "run-vulkan-probe.sh"
 RETROARCH_RUNNER_PATH = ROOT / "scripts" / "katzensteg" / "run-retroarch-vulkan.sh"
 
@@ -55,10 +56,18 @@ class VulkanLinuxWiringTests(unittest.TestCase):
         if platform.system() != "Linux":
             self.skipTest("Linux Vulkan manifest path test")
 
-        manifest = json.loads(MANIFEST_PATH.read_text())
+        manifest = json.loads(LINUX_MANIFEST_PATH.read_text())
 
         self.assertEqual(
-            "../zig-out/lib/libkatzensteg-vulkan-layer.so",
+            "../../../zig-out/lib/libkatzensteg-vulkan-layer.so",
+            manifest["layer"]["library_path"],
+        )
+
+    def test_layer_manifest_points_to_macos_shared_object(self):
+        manifest = json.loads(MACOS_MANIFEST_PATH.read_text())
+
+        self.assertEqual(
+            "../../../zig-out/lib/libkatzensteg-vulkan-layer.dylib",
             manifest["layer"]["library_path"],
         )
 
