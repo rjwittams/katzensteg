@@ -97,6 +97,23 @@ class LinuxPreloadExportsTests(unittest.TestCase):
     def preload_path(self):
         return ROOT / "zig-out" / "lib" / "libkatzensteg-unlinked.so"
 
+    def test_core_exports_are_defined_outside_sdl2_preload_source(self):
+        preload_source = ROOT / "src" / "katzensteg" / "preload.zig"
+        core_exports_source = ROOT / "src" / "katzensteg" / "core_exports.zig"
+
+        self.assertTrue(core_exports_source.exists())
+        preload_text = preload_source.read_text()
+        core_exports_text = core_exports_source.read_text()
+
+        for symbol in (
+            "ks_katzensteg_shutdown",
+            "ks_katzensteg_present_external_rgba",
+            "ks_katzensteg_present_external_framebuffer",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertNotIn(f"pub export fn {symbol}", preload_text)
+                self.assertIn(f"pub export fn {symbol}", core_exports_text)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF preload export test")
     def test_unlinked_preload_exports_linux_sdl_interpose_symbols(self):
         lib_path = self.preload_path()

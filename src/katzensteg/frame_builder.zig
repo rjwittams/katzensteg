@@ -2,8 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
-const sdl = @import("katzensteg_sdl");
-const real_sdl = @import("real_sdl.zig");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
@@ -35,16 +33,33 @@ const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 const fullscreen_retained_placement_count: usize = 2;
 const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
 
-const default_texture_format = core.pixelFormat(.rgba8, .{ .sdl2 = sdl.SDL_PIXELFORMAT_ABGR8888 });
-const argb8888_texture_format = core.pixelFormat(.argb8888, .{ .sdl2 = sdl.SDL_PIXELFORMAT_ARGB8888 });
-const xrgb8888_texture_format = core.pixelFormat(.xrgb8888, .{ .sdl2 = sdl.SDL_PIXELFORMAT_XRGB8888 });
-const rgb565_texture_format = core.pixelFormat(.rgb565, .{ .sdl2 = sdl.SDL_PIXELFORMAT_RGB565 });
-const rgba4444_texture_format = core.pixelFormat(.rgba4444, .{ .sdl2 = sdl.SDL_PIXELFORMAT_RGBA4444 });
-const i420_texture_format = core.pixelFormat(.i420, .{ .sdl2 = sdl.SDL_PIXELFORMAT_IYUV });
-const nv12_texture_format = core.pixelFormat(.nv12, .{ .sdl2 = sdl.SDL_PIXELFORMAT_NV12 });
-const default_blend_mode = core.blendMode(.none, .{ .sdl2 = sdl.SDL_BLENDMODE_NONE });
-const blend_mode_blend = core.blendMode(.blend, .{ .sdl2 = sdl.SDL_BLENDMODE_BLEND });
-const blend_mode_add = core.blendMode(.add, .{ .sdl2 = sdl.SDL_BLENDMODE_ADD });
+const compat_sdl_pixelformat_rgb565: u32 = 353701890;
+const compat_sdl_pixelformat_rgba4444: u32 = 356651010;
+const compat_sdl_pixelformat_xrgb8888: u32 = 370546692;
+const compat_sdl_pixelformat_argb8888: u32 = 372645892;
+const compat_sdl_pixelformat_abgr8888: u32 = 376840196;
+const compat_sdl_pixelformat_yv12: u32 = 842094169;
+const compat_sdl_pixelformat_iyuv: u32 = 1448433993;
+const compat_sdl_pixelformat_nv12: u32 = 842094158;
+const compat_sdl_pixelformat_nv21: u32 = 825382478;
+
+const compat_sdl_blendmode_none: i32 = 0x00000000;
+const compat_sdl_blendmode_blend: i32 = 0x00000001;
+const compat_sdl_blendmode_add: i32 = 0x00000002;
+const compat_sdl_blendmode_mod: i32 = 0x00000004;
+const compat_sdl_blendmode_mul: i32 = 0x00000008;
+const compat_sdl_flip_none: c_int = 0x00000000;
+
+const default_texture_format = core.pixelFormat(.rgba8, .{ .sdl2 = compat_sdl_pixelformat_abgr8888 });
+const argb8888_texture_format = core.pixelFormat(.argb8888, .{ .sdl2 = compat_sdl_pixelformat_argb8888 });
+const xrgb8888_texture_format = core.pixelFormat(.xrgb8888, .{ .sdl2 = compat_sdl_pixelformat_xrgb8888 });
+const rgb565_texture_format = core.pixelFormat(.rgb565, .{ .sdl2 = compat_sdl_pixelformat_rgb565 });
+const rgba4444_texture_format = core.pixelFormat(.rgba4444, .{ .sdl2 = compat_sdl_pixelformat_rgba4444 });
+const i420_texture_format = core.pixelFormat(.i420, .{ .sdl2 = compat_sdl_pixelformat_iyuv });
+const nv12_texture_format = core.pixelFormat(.nv12, .{ .sdl2 = compat_sdl_pixelformat_nv12 });
+const default_blend_mode = core.blendMode(.none, .{ .sdl2 = compat_sdl_blendmode_none });
+const blend_mode_blend = core.blendMode(.blend, .{ .sdl2 = compat_sdl_blendmode_blend });
+const blend_mode_add = core.blendMode(.add, .{ .sdl2 = compat_sdl_blendmode_add });
 
 pub const ExternalFramebufferFormat = enum(u32) {
     rgba8 = 0,
@@ -535,30 +550,6 @@ pub const FrameBuilder = struct {
         };
     }
 
-    pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, surface: ?*sdl.SDL_Surface) void {
-        _ = backend;
-        self.onCreateTextureFromSurfaceBatch(logger, texture, surface);
-    }
-
-    pub fn onCreateTextureFromSurfaceBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, surface: ?*sdl.SDL_Surface) void {
-        const record = self.textures.getPtr(texture) orelse return;
-        if (surface == null) return;
-        const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
-            logger.writeOnceScoped(.warn, .frame_builder, "SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
-            return;
-        };
-        defer real_sdl.SDL_FreeSurface(converted);
-        const surf: *SurfaceView = @ptrCast(@alignCast(converted));
-        record.w = surf.w;
-        record.h = surf.h;
-        record.format = default_texture_format;
-        const src: [*]u8 = @ptrCast(surf.pixels.?);
-        self.captureTexturePixelsIntoRecord(record, src, surf.pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
-            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
-        };
-    }
-
     pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, r: u8, g: u8, b: u8) void {
         _ = logger;
         _ = backend;
@@ -797,7 +788,7 @@ pub const FrameBuilder = struct {
 
     pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect, angle: f64, center: ?*const core.CorePoint, flip: c_int) void {
         _ = center;
-        if (angle != 0 or flip != sdl.SDL_FLIP_NONE) {
+        if (angle != 0 or flip != compat_sdl_flip_none) {
             logger.writeOnceScoped(.warn, .frame_builder, "SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
         }
         self.recordRenderCopy(logger, renderer, texture, src, dst);
@@ -2000,15 +1991,15 @@ pub const FrameBuilder = struct {
             };
         }
         return switch (format.semantic) {
-            .rgba8 => sdl.SDL_PIXELFORMAT_ABGR8888,
-            .argb8888 => sdl.SDL_PIXELFORMAT_ARGB8888,
-            .xrgb8888 => sdl.SDL_PIXELFORMAT_XRGB8888,
-            .rgb565 => sdl.SDL_PIXELFORMAT_RGB565,
-            .rgba4444 => sdl.SDL_PIXELFORMAT_RGBA4444,
-            .i420 => sdl.SDL_PIXELFORMAT_IYUV,
-            .yv12 => sdl.SDL_PIXELFORMAT_YV12,
-            .nv12 => sdl.SDL_PIXELFORMAT_NV12,
-            .nv21 => sdl.SDL_PIXELFORMAT_NV21,
+            .rgba8 => compat_sdl_pixelformat_abgr8888,
+            .argb8888 => compat_sdl_pixelformat_argb8888,
+            .xrgb8888 => compat_sdl_pixelformat_xrgb8888,
+            .rgb565 => compat_sdl_pixelformat_rgb565,
+            .rgba4444 => compat_sdl_pixelformat_rgba4444,
+            .i420 => compat_sdl_pixelformat_iyuv,
+            .yv12 => compat_sdl_pixelformat_yv12,
+            .nv12 => compat_sdl_pixelformat_nv12,
+            .nv21 => compat_sdl_pixelformat_nv21,
             else => 0,
         };
     }
@@ -2021,11 +2012,11 @@ pub const FrameBuilder = struct {
             };
         }
         return switch (blend_mode.semantic) {
-            .none => sdl.SDL_BLENDMODE_NONE,
-            .blend => sdl.SDL_BLENDMODE_BLEND,
-            .add => sdl.SDL_BLENDMODE_ADD,
-            .mod => sdl.SDL_BLENDMODE_MOD,
-            .mul => sdl.SDL_BLENDMODE_MUL,
+            .none => compat_sdl_blendmode_none,
+            .blend => compat_sdl_blendmode_blend,
+            .add => compat_sdl_blendmode_add,
+            .mod => compat_sdl_blendmode_mod,
+            .mul => compat_sdl_blendmode_mul,
             .unknown => 0,
         };
     }
@@ -2960,21 +2951,6 @@ pub const FrameBuilder = struct {
         }
         return true;
     }
-
-    const SurfaceView = extern struct {
-        flags: u32,
-        format: ?*anyopaque,
-        w: i32,
-        h: i32,
-        pitch: i32,
-        pixels: ?*anyopaque,
-        userdata: ?*anyopaque,
-        locked: i32,
-        lock_data: ?*anyopaque,
-        clip_rect: sdl.SDL_Rect,
-        map: ?*anyopaque,
-        refcount: i32,
-    };
 
     fn containedCellRect(window_w: i32, window_h: i32, tty: *const DirectTty) ts_types.CellRect {
         const cols: i32 = @intCast(tty.cols);

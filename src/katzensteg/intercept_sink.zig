@@ -327,6 +327,18 @@ fn textureUpdateDimensions(texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rec
     return .{ .w = w, .h = h };
 }
 
+fn textureMetadataOrFallback(texture: ?*sdl.SDL_Texture) struct { format: u32, w: i32, h: i32 } {
+    var format: u32 = 0;
+    var access: c_int = 0;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) {
+        log.warn("SDL_QueryTexture failed while capturing texture metadata; using fallback metadata", .{});
+        return .{ .format = sdl.SDL_PIXELFORMAT_ABGR8888, .w = 0, .h = 0 };
+    }
+    return .{ .format = format, .w = w, .h = h };
+}
+
 fn copyPlanePayload(rt: *runtime_mod.Runtime, plane: ?[*]const u8, pitch: i32, rows: i32) ?[]u8 {
     const src = plane orelse return null;
     if (pitch <= 0 or rows <= 0) return null;
@@ -356,28 +368,36 @@ pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, h
 pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
     const start_ns = std.time.nanoTimestamp();
     defer rt.noteProducerTime(.create_texture_from_surface, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
-    var format: u32 = 0;
-    var access: c_int = 0;
-    var w: c_int = 0;
-    var h: c_int = 0;
-    if (real_sdl.SDL_QueryTexture(texture, &format, &access, &w, &h) != 0) {
-        log.warn("SDL_QueryTexture failed in enqueueCreateTextureFromSurface; using fallback metadata", .{});
-        format = sdl.SDL_PIXELFORMAT_ABGR8888;
+    const texture_handle = sdl_adapter.handleFromPtr(texture);
+    if (surface == null) {
+        const metadata = textureMetadataOrFallback(texture);
+        rt.enqueueCommand(.{ .create_texture = .{
+            .texture = texture_handle,
+            .format = sdl_adapter.pixelFormatFromSdl2(metadata.format),
+            .w = metadata.w,
+            .h = metadata.h,
+        } });
+        return;
     }
-    rt.enqueueCommand(.{ .create_texture = .{
-        .texture = sdl_adapter.handleFromPtr(texture),
-        .format = sdl_adapter.pixelFormatFromSdl2(format),
-        .w = w,
-        .h = h,
-    } });
-
-    if (surface == null) return;
     const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
         log.warn("SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface", .{});
+        const metadata = textureMetadataOrFallback(texture);
+        rt.enqueueCommand(.{ .create_texture = .{
+            .texture = texture_handle,
+            .format = sdl_adapter.pixelFormatFromSdl2(metadata.format),
+            .w = metadata.w,
+            .h = metadata.h,
+        } });
         return;
     };
     defer real_sdl.SDL_FreeSurface(converted);
     const surf: *SurfaceView = @ptrCast(@alignCast(converted));
+    rt.enqueueCommand(.{ .create_texture = .{
+        .texture = texture_handle,
+        .format = sdl_adapter.pixelFormatFromSdl2(sdl.SDL_PIXELFORMAT_ABGR8888),
+        .w = surf.w,
+        .h = surf.h,
+    } });
     const byte_len: usize = @intCast(surf.pitch * surf.h);
     const copied = rt.acquirePayloadBuffer(byte_len) catch {
         log.warn("alloc failed in enqueueCreateTextureFromSurface", .{});
@@ -385,7 +405,7 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
     };
     @memcpy(copied, @as([*]const u8, @ptrCast(surf.pixels.?))[0..byte_len]);
     rt.enqueueCommand(.{ .update_texture = .{
-        .texture = sdl_adapter.handleFromPtr(texture),
+        .texture = texture_handle,
         .rect = null,
         .pixels = copied,
         .pitch = surf.pitch,
@@ -394,10 +414,26 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
 
 pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
     const texture_handle = sdl_adapter.handleFromPtr(texture);
+    if (surface == null) {
+        const metadata = textureMetadataOrFallback(texture);
+        rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
+        return;
+    }
+    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+        log.warn("SDL_ConvertSurfaceFormat failed in onCreateTextureFromSurface", .{});
+        const metadata = textureMetadataOrFallback(texture);
+        rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
+        return;
+    };
+    defer real_sdl.SDL_FreeSurface(converted);
+    const surf: *SurfaceView = @ptrCast(@alignCast(converted));
+    rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(sdl.SDL_PIXELFORMAT_ABGR8888), surf.w, surf.h);
     if (rt.active and rt.backend != null) {
-        rt.frame_builder.onCreateTextureFromSurface(&rt.logger, &rt.backend.?, texture_handle, surface);
+        const src: [*]u8 = @ptrCast(surf.pixels.?);
+        rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, texture_handle, null, src, surf.pitch);
     } else if (rt.active and rt.batch_sink != null) {
-        rt.frame_builder.onCreateTextureFromSurfaceBatch(&rt.logger, texture_handle, surface);
+        const src: [*]u8 = @ptrCast(surf.pixels.?);
+        rt.frame_builder.onUpdateTextureBatch(&rt.logger, texture_handle, null, src, surf.pitch);
     }
 }
 

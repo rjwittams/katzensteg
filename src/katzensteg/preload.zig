@@ -10,6 +10,11 @@ const window_policy = @import("window_policy.zig");
 const gl_capture = @import("gl_capture.zig");
 const frame_builder_mod = @import("frame_builder.zig");
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
+const core_exports = @import("core_exports.zig");
+
+comptime {
+    _ = core_exports;
+}
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -291,16 +296,6 @@ fn callerSummary(return_addr: usize) struct { image: []const u8, symbol: []const
     };
 }
 
-pub export fn ks_katzensteg_shutdown() callconv(.c) void {
-    runtime.shutdownGlobal();
-}
-
-pub export fn ks_katzensteg_log_c(scope_z: ?[*:0]const u8, message_z: ?[*:0]const u8) callconv(.c) void {
-    const scope = if (scope_z) |value| std.mem.span(value) else "c";
-    const message = if (message_z) |value| std.mem.span(value) else "";
-    log_mod.writeCLog(scope, message);
-}
-
 pub export fn ks_SDL_Init(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
     return real_sdl.SDL_Init(flags);
@@ -456,10 +451,7 @@ pub export fn ks_SDL_CreateTextureFromSurface(renderer: ?*sdl.SDL_Renderer, surf
     const rt = runtime.get();
     if (texture) |tex| {
         switch (rt.intercept_mode) {
-            .sync_compose => {
-                sink.onCreateTexture(rt, tex, sdl.SDL_PIXELFORMAT_ABGR8888, 0, 0);
-                sink.onCreateTextureFromSurface(rt, tex, surface);
-            },
+            .sync_compose => sink.onCreateTextureFromSurface(rt, tex, surface),
             .queued_replay => sink.enqueueCreateTextureFromSurface(rt, tex, surface),
         }
     }
@@ -880,26 +872,6 @@ fn publishExternalFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, for
         .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, pixels),
         .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, pixels),
     }
-}
-
-pub export fn ks_katzensteg_present_external_rgba(width: c_int, height: c_int, pixels: ?[*]const u8, len: usize) callconv(.c) void {
-    ks_katzensteg_present_external_framebuffer(width, height, @intFromEnum(ExternalFramebufferFormat.rgba8), pixels, len);
-}
-
-pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c_int, format_value: c_int, pixels: ?[*]const u8, len: usize) callconv(.c) void {
-    if (width <= 0 or height <= 0) return;
-    const data = pixels orelse return;
-    const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
-    if (len < byte_len) return;
-    const format: ExternalFramebufferFormat = switch (format_value) {
-        @intFromEnum(ExternalFramebufferFormat.rgba8) => .rgba8,
-        @intFromEnum(ExternalFramebufferFormat.bgra8) => .bgra8,
-        @intFromEnum(ExternalFramebufferFormat.a2b10g10r10_unorm_pack32) => .a2b10g10r10_unorm_pack32,
-        else => return,
-    };
-    const rt = runtime.get();
-    if (!rt.shouldCaptureExternalFrame(null)) return;
-    publishExternalFramebuffer(rt, width, height, format, data[0..byte_len]);
 }
 
 fn ensureGlDownscaleTarget(rt: *runtime.Runtime, w: i32, h: i32) bool {
