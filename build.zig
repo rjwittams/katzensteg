@@ -94,10 +94,12 @@ pub fn build(b: *std.Build) void {
     katzensteg_lib.linkSystemLibrary("SDL2");
     if (is_macos) {
         katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
         katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_lib.linkFramework("Accelerate");
         katzensteg_lib.linkFramework("OpenGL");
     } else if (target.result.os.tag == .linux) {
+        katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
         katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
         katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
         katzensteg_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
@@ -125,10 +127,12 @@ pub fn build(b: *std.Build) void {
     katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
     if (is_macos) {
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_unlinked_lib.linkFramework("Accelerate");
         katzensteg_unlinked_lib.linkFramework("OpenGL");
     } else if (target.result.os.tag == .linux) {
+        katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
         katzensteg_unlinked_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
@@ -219,6 +223,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer.c") });
+        katzensteg_vulkan_layer.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
         if (is_macos) katzensteg_vulkan_layer.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
         b.installArtifact(katzensteg_vulkan_layer);
 

@@ -26,6 +26,7 @@ typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height
 enum {
     KS_EXTERNAL_FRAMEBUFFER_RGBA8 = 0,
     KS_EXTERNAL_FRAMEBUFFER_BGRA8 = 1,
+    KS_EXTERNAL_FRAMEBUFFER_A2B10G10R10_UNORM_PACK32 = 2,
 };
 
 typedef struct InstanceRecord {
@@ -105,9 +106,16 @@ typedef struct SwapchainRecord {
     CaptureResources capture;
     bool logged_unsupported_format;
     bool logged_no_transfer_src;
+    bool logged_missing_images;
     bool logged_capture_error;
     bool logged_capture_success;
 } SwapchainRecord;
+
+static bool g_logged_present_missing_real;
+static bool g_logged_present_missing_queue;
+static bool g_logged_present_missing_device;
+static bool g_logged_present_missing_swapchain;
+static bool g_logged_present_unsupported_shape;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static InstanceRecord g_instances[KS_MAX_INSTANCES];
@@ -116,6 +124,10 @@ static DeviceRecord g_devices[KS_MAX_DEVICES];
 static QueueRecord g_queues[KS_MAX_QUEUES];
 static SwapchainRecord g_swapchains[KS_MAX_SWAPCHAINS];
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
+static bool g_capture_enabled;
+static bool g_trace_enabled;
+
+extern void ks_scrub_colon_env_entry(const char *name, const char *entry);
 
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetInstanceProcAddr(VkInstance instance, const char *name);
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetDeviceProcAddr(VkDevice device, const char *name);
@@ -140,12 +152,24 @@ static bool env_enabled(const char *name)
 
 static bool capture_enabled(void)
 {
-    return env_enabled("KATZENSTEG_VULKAN_CAPTURE");
+    return g_capture_enabled;
 }
 
 static bool trace_enabled(void)
 {
-    return env_enabled("KATZENSTEG_TRACE_VULKAN");
+    return g_trace_enabled;
+}
+
+__attribute__((constructor))
+static void katzensteg_vulkan_layer_constructor(void)
+{
+    g_capture_enabled = env_enabled("KATZENSTEG_VULKAN_CAPTURE");
+    g_trace_enabled = env_enabled("KATZENSTEG_TRACE_VULKAN");
+    /* Capture this process only. Children get a scrubbed environment unless
+       their launcher/profile explicitly opts them back into Katzensteg. */
+    ks_scrub_colon_env_entry("VK_INSTANCE_LAYERS", KS_LAYER_NAME);
+    unsetenv("KATZENSTEG_VULKAN_CAPTURE");
+    unsetenv("KATZENSTEG_TRACE_VULKAN");
 }
 
 static void tracef(const char *fmt, ...)
@@ -345,6 +369,7 @@ static void remember_queue(VkDevice device, VkQueue queue, uint32_t family)
         if (g_queues[i].queue == queue) {
             g_queues[i].device = device;
             g_queues[i].family = family;
+            tracef("remembered queue %p device=%p family=%u", (void *)queue, (void *)device, family);
             return;
         }
     }
@@ -353,6 +378,7 @@ static void remember_queue(VkDevice device, VkQueue queue, uint32_t family)
             g_queues[i].queue = queue;
             g_queues[i].device = device;
             g_queues[i].family = family;
+            tracef("remembered queue %p device=%p family=%u", (void *)queue, (void *)device, family);
             return;
         }
     }
@@ -479,6 +505,8 @@ static int external_format_for_vk(VkFormat format)
     case VK_FORMAT_R8G8B8A8_UNORM:
     case VK_FORMAT_R8G8B8A8_SRGB:
         return KS_EXTERNAL_FRAMEBUFFER_RGBA8;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        return KS_EXTERNAL_FRAMEBUFFER_A2B10G10R10_UNORM_PACK32;
     case VK_FORMAT_B8G8R8A8_UNORM:
     case VK_FORMAT_B8G8R8A8_SRGB:
         return KS_EXTERNAL_FRAMEBUFFER_BGRA8;
@@ -492,10 +520,23 @@ static bool format_supported(VkFormat format)
     return external_format_for_vk(format) >= 0;
 }
 
+#if defined(KS_VULKAN_LAYER_TESTING)
+int ks_vulkan_test_capture_enabled(void) { return capture_enabled(); }
+int ks_vulkan_test_trace_enabled(void) { return trace_enabled(); }
+int ks_vulkan_test_external_format_for_vk(int format) { return external_format_for_vk((VkFormat)format); }
+#endif
+
 static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, SwapchainRecord *swapchain, uint32_t image_index, const VkPresentInfoKHR *present_info)
 {
     if (!capture_enabled()) return false;
-    if (!swapchain || image_index >= swapchain->image_count) return false;
+    if (!swapchain) return false;
+    if (image_index >= swapchain->image_count) {
+        if (!swapchain->logged_missing_images) {
+            tracef("swapchain image index unavailable; image_index=%u image_count=%u", image_index, swapchain->image_count);
+            swapchain->logged_missing_images = true;
+        }
+        return false;
+    }
     if (!swapchain->transfer_src) {
         if (!swapchain->logged_no_transfer_src) {
             tracef("swapchain lacks VK_IMAGE_USAGE_TRANSFER_SRC_BIT; skipping capture");
@@ -510,9 +551,18 @@ static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, Swapc
         }
         return false;
     }
-    if (present_info->waitSemaphoreCount > KS_MAX_PRESENT_WAITS) return false;
-    if (!present_fn()) return false;
-    if (!ensure_capture_resources(dev, queue, swapchain)) return false;
+    if (present_info->waitSemaphoreCount > KS_MAX_PRESENT_WAITS) {
+        tracef("present has too many wait semaphores; count=%u", present_info->waitSemaphoreCount);
+        return false;
+    }
+    if (!present_fn()) {
+        tracef("preload framebuffer callback not found; skipping capture");
+        return false;
+    }
+    if (!ensure_capture_resources(dev, queue, swapchain)) {
+        tracef("failed to initialize capture resources");
+        return false;
+    }
 
     CaptureResources *res = &swapchain->capture;
     VkResult rc = dev->ResetFences(dev->device, 1, &res->fence);
@@ -614,7 +664,6 @@ static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, Swapc
         dev->UnmapMemory(dev->device, res->memory);
         return false;
     }
-
     present_fn()((int32_t)swapchain->extent.width, (int32_t)swapchain->extent.height, external_format, (const uint8_t *)mapped, (size_t)res->byte_len);
     dev->UnmapMemory(dev->device, res->memory);
 
@@ -826,6 +875,7 @@ static VkResult VKAPI_CALL ks_vkGetSwapchainImagesKHR(VkDevice device, VkSwapcha
         if (rec) {
             rec->image_count = *count < KS_MAX_SWAPCHAIN_IMAGES ? *count : KS_MAX_SWAPCHAIN_IMAGES;
             for (uint32_t i = 0; i < rec->image_count; i++) rec->images[i] = images[i];
+            tracef("recorded %u swapchain images for %p", rec->image_count, (void *)swapchain);
         }
         pthread_mutex_unlock(&g_lock);
     }
@@ -847,14 +897,38 @@ static VkResult VKAPI_CALL ks_vkQueuePresentKHR(VkQueue queue, const VkPresentIn
     if (present_info && present_info->swapchainCount == 1 && present_info->pSwapchains && present_info->pImageIndices) {
         swapchain = find_swapchain(present_info->pSwapchains[0]);
         image_index = present_info->pImageIndices[0];
+    } else if (!g_logged_present_unsupported_shape) {
+        tracef("present shape unsupported; present_info=%p", (const void *)present_info);
+        g_logged_present_unsupported_shape = true;
     }
     pthread_mutex_unlock(&g_lock);
 
-    if (!real) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!real) {
+        if (!g_logged_present_missing_real) {
+            tracef("present hook missing real vkQueuePresentKHR");
+            g_logged_present_missing_real = true;
+        }
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
 
     bool consumed_waits = false;
-    if (dev && queue_rec && swapchain)
+    if (dev && queue_rec && swapchain) {
         consumed_waits = capture_swapchain_image(dev, queue_rec, swapchain, image_index, present_info);
+    } else {
+        if (!queue_rec && !g_logged_present_missing_queue) {
+            tracef("present queue not remembered; queue=%p", (void *)queue);
+            g_logged_present_missing_queue = true;
+        }
+        if (queue_rec && !dev && !g_logged_present_missing_device) {
+            tracef("present queue device not remembered; queue=%p device=%p", (void *)queue, (void *)queue_rec->device);
+            g_logged_present_missing_device = true;
+        }
+        if (!swapchain && !g_logged_present_missing_swapchain) {
+            const VkSwapchainKHR missing = (present_info && present_info->swapchainCount > 0 && present_info->pSwapchains) ? present_info->pSwapchains[0] : VK_NULL_HANDLE;
+            tracef("present swapchain not remembered; swapchain=%p", (void *)missing);
+            g_logged_present_missing_swapchain = true;
+        }
+    }
 
     if (consumed_waits) {
         VkPresentInfoKHR copy = *present_info;

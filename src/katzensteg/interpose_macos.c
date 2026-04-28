@@ -67,6 +67,12 @@ extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
+extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
+
+__attribute__((constructor))
+static void katzensteg_module_constructor(void) {
+    ks_scrub_preload_env_for_loaded_symbol((const void *)&katzensteg_module_constructor);
+}
 
 static void katzensteg_module_destructor(void) {
     ks_katzensteg_shutdown();

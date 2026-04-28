@@ -6,6 +6,12 @@ pub const EnvVar = struct {
     value: []const u8,
 };
 
+pub const ProfilePlatform = enum {
+    linux,
+    macos,
+    other,
+};
+
 pub const SeedFile = struct {
     path: []const u8,
     source: ?[]const u8 = null,
@@ -75,10 +81,18 @@ pub const ProfileCatalog = struct {
     profiles: []LaunchProfile,
 
     pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !ProfileCatalog {
-        return parseDocuments(allocator, &.{bytes});
+        return parseForPlatform(allocator, bytes, currentProfilePlatform());
+    }
+
+    pub fn parseForPlatform(allocator: std.mem.Allocator, bytes: []const u8, platform: ProfilePlatform) !ProfileCatalog {
+        return parseDocumentsForPlatform(allocator, &.{bytes}, platform);
     }
 
     pub fn parseDocuments(allocator: std.mem.Allocator, documents: []const []const u8) !ProfileCatalog {
+        return parseDocumentsForPlatform(allocator, documents, currentProfilePlatform());
+    }
+
+    pub fn parseDocumentsForPlatform(allocator: std.mem.Allocator, documents: []const []const u8, platform: ProfilePlatform) !ProfileCatalog {
         if (documents.len == 0) return error.MissingProfiles;
 
         var profiles = std.ArrayList(LaunchProfile).empty;
@@ -90,7 +104,7 @@ pub const ProfileCatalog = struct {
         for (documents, 0..) |bytes, index| {
             const document_name = try std.fmt.allocPrint(allocator, "document[{d}]", .{index});
             defer allocator.free(document_name);
-            try parseDocumentInto(allocator, &profiles, bytes, document_name);
+            try parseDocumentInto(allocator, &profiles, bytes, document_name, platform);
         }
         try resolveInheritance(allocator, profiles.items);
 
@@ -101,6 +115,10 @@ pub const ProfileCatalog = struct {
     }
 
     pub fn parseDirectory(allocator: std.mem.Allocator, dir_path: []const u8) !ProfileCatalog {
+        return parseDirectoryForPlatform(allocator, dir_path, currentProfilePlatform());
+    }
+
+    pub fn parseDirectoryForPlatform(allocator: std.mem.Allocator, dir_path: []const u8, platform: ProfilePlatform) !ProfileCatalog {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
 
@@ -116,7 +134,7 @@ pub const ProfileCatalog = struct {
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
             const bytes = try dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
             defer allocator.free(bytes);
-            try parseDocumentInto(allocator, &profiles, bytes, entry.name);
+            try parseDocumentInto(allocator, &profiles, bytes, entry.name, platform);
         }
 
         try resolveInheritance(allocator, profiles.items);
@@ -140,7 +158,15 @@ pub const ProfileCatalog = struct {
     }
 };
 
-fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(LaunchProfile), bytes: []const u8, document_name: []const u8) !void {
+fn currentProfilePlatform() ProfilePlatform {
+    return switch (@import("builtin").os.tag) {
+        .linux => .linux,
+        .macos => .macos,
+        else => .other,
+    };
+}
+
+fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(LaunchProfile), bytes: []const u8, document_name: []const u8, platform: ProfilePlatform) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return err;
         try profiles.append(allocator, try makeBrokenProfile(allocator, document_name, "document parse failed: {s}", .{@errorName(err)}));
@@ -171,7 +197,7 @@ fn parseDocumentInto(allocator: std.mem.Allocator, profiles: *std.ArrayList(Laun
             try profiles.append(allocator, try makeBrokenProfile(allocator, entry.key_ptr.*, "profile body is not an object", .{}));
             continue;
         }
-        const profile = parseProfile(allocator, entry.key_ptr.*, entry.value_ptr.*) catch |err| {
+        const profile = parseProfile(allocator, entry.key_ptr.*, entry.value_ptr.*, platform) catch |err| {
             if (err == error.OutOfMemory) return err;
             try profiles.append(allocator, try makeBrokenProfile(allocator, entry.key_ptr.*, "profile parse failed: {s}", .{@errorName(err)}));
             continue;
@@ -190,7 +216,7 @@ fn makeBrokenProfile(allocator: std.mem.Allocator, name: []const u8, comptime fm
     };
 }
 
-fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.Value) !LaunchProfile {
+fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.Value, platform: ProfilePlatform) !LaunchProfile {
     const object = value.object;
 
     var profile = LaunchProfile{
@@ -204,17 +230,17 @@ fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.
         if (hidden_value != .bool) return error.InvalidHidden;
         profile.hidden = hidden_value.bool;
     }
-    if (object.get("target")) |target_value| profile.target = try dupeOptionalString(allocator, target_value, error.InvalidTarget);
+    if (object.get("target")) |target_value| profile.target = try dupeRequiredPlatformString(allocator, target_value, platform, error.InvalidTarget);
     if (object.get("args")) |args_value| {
-        profile.args = try parseStringArray(allocator, args_value, error.InvalidArgs);
+        profile.args = try parsePlatformStringArray(allocator, args_value, platform, error.InvalidArgs);
     }
-    if (object.get("cwd")) |cwd_value| profile.cwd = try dupeOptionalString(allocator, cwd_value, error.InvalidCwd);
-    if (object.get("stdout")) |stdout_value| profile.stdout = try dupeOptionalString(allocator, stdout_value, error.InvalidStdout);
-    if (object.get("stderr")) |stderr_value| profile.stderr = try dupeOptionalString(allocator, stderr_value, error.InvalidStderr);
-    if (object.get("env")) |env_value| profile.env = try parseEnvMap(allocator, env_value);
-    if (object.get("seed_files")) |seed_files_value| profile.seed_files = try parseSeedFiles(allocator, seed_files_value);
+    if (object.get("cwd")) |cwd_value| profile.cwd = try dupeOptionalPlatformString(allocator, cwd_value, platform, error.InvalidCwd);
+    if (object.get("stdout")) |stdout_value| profile.stdout = try dupeOptionalPlatformString(allocator, stdout_value, platform, error.InvalidStdout);
+    if (object.get("stderr")) |stderr_value| profile.stderr = try dupeOptionalPlatformString(allocator, stderr_value, platform, error.InvalidStderr);
+    if (object.get("env")) |env_value| profile.env = try parseEnvMap(allocator, env_value, platform);
+    if (object.get("seed_files")) |seed_files_value| profile.seed_files = try parseSeedFiles(allocator, seed_files_value, platform);
     if (object.get("runtime")) |runtime_value| {
-        const parsed_runtime = try parseRuntimeObject(runtime_value);
+        const parsed_runtime = try parseRuntimeObject(runtime_value, platform);
         profile.runtime = parsed_runtime.config;
         profile.runtime_fields = parsed_runtime.fields;
     }
@@ -235,12 +261,65 @@ fn parseStringArray(allocator: std.mem.Allocator, value: std.json.Value, err: an
     return items.toOwnedSlice(allocator);
 }
 
-fn dupeOptionalString(allocator: std.mem.Allocator, value: std.json.Value, err: anyerror) ![]const u8 {
-    if (value != .string) return err;
-    return allocator.dupe(u8, value.string);
+fn parsePlatformStringArray(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform, err: anyerror) ![]const []const u8 {
+    if (value != .array) return err;
+    var items = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (items.items) |item| allocator.free(item);
+        items.deinit(allocator);
+    }
+    for (value.array.items) |item_value| {
+        if (try dupeOptionalPlatformString(allocator, item_value, platform, err)) |item| {
+            items.append(allocator, item) catch |append_err| {
+                allocator.free(item);
+                return append_err;
+            };
+        }
+    }
+    return items.toOwnedSlice(allocator);
 }
 
-fn parseEnvMap(allocator: std.mem.Allocator, value: std.json.Value) ![]const EnvVar {
+fn dupeRequiredPlatformString(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform, err: anyerror) ![]const u8 {
+    return try dupeOptionalPlatformString(allocator, value, platform, err) orelse err;
+}
+
+fn dupeOptionalPlatformString(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform, err: anyerror) !?[]const u8 {
+    const selected = try selectedPlatformString(value, platform, err) orelse return null;
+    return try allocator.dupe(u8, selected);
+}
+
+fn selectedPlatformString(value: std.json.Value, platform: ProfilePlatform, err: anyerror) !?[]const u8 {
+    if (value == .string) return value.string;
+    if (value != .object) return err;
+    validatePlatformStringObject(value, err) catch |validate_err| return validate_err;
+    const selected = value.object.get(platformKey(platform)) orelse return null;
+    if (selected != .string) return err;
+    return selected.string;
+}
+
+fn validatePlatformStringObject(value: std.json.Value, err: anyerror) !void {
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        if (!isPlatformKey(entry.key_ptr.*)) return err;
+        if (entry.value_ptr.* != .string) return err;
+    }
+}
+
+fn isPlatformKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "linux") or
+        std.mem.eql(u8, key, "macos") or
+        std.mem.eql(u8, key, "other");
+}
+
+fn platformKey(platform: ProfilePlatform) []const u8 {
+    return switch (platform) {
+        .linux => "linux",
+        .macos => "macos",
+        .other => "other",
+    };
+}
+
+fn parseEnvMap(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform) ![]const EnvVar {
     if (value != .object) return error.InvalidEnv;
     var env = std.ArrayList(EnvVar).empty;
     errdefer {
@@ -252,16 +331,21 @@ fn parseEnvMap(allocator: std.mem.Allocator, value: std.json.Value) ![]const Env
     }
     var it = value.object.iterator();
     while (it.next()) |entry| {
-        if (entry.value_ptr.* != .string) return error.InvalidEnv;
-        try env.append(allocator, .{
-            .name = try allocator.dupe(u8, entry.key_ptr.*),
-            .value = try allocator.dupe(u8, entry.value_ptr.string),
-        });
+        const env_value = try dupeOptionalPlatformString(allocator, entry.value_ptr.*, platform, error.InvalidEnv) orelse continue;
+        const env_name = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(env_name);
+        env.append(allocator, .{
+            .name = env_name,
+            .value = env_value,
+        }) catch |append_err| {
+            allocator.free(env_value);
+            return append_err;
+        };
     }
     return env.toOwnedSlice(allocator);
 }
 
-fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value) ![]const SeedFile {
+fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform) ![]const SeedFile {
     if (value != .array) return error.InvalidSeedFiles;
     var seed_files = std.ArrayList(SeedFile).empty;
     errdefer {
@@ -276,9 +360,9 @@ fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value) ![]const 
     for (value.array.items) |item| {
         if (item != .object) return error.InvalidSeedFiles;
         const path_value = item.object.get("path") orelse return error.InvalidSeedFiles;
-        if (path_value != .string) return error.InvalidSeedFiles;
+        const path = try dupeOptionalPlatformString(allocator, path_value, platform, error.InvalidSeedFiles) orelse continue;
         var seed_file = SeedFile{
-            .path = try allocator.dupe(u8, path_value.string),
+            .path = path,
         };
         errdefer {
             allocator.free(seed_file.path);
@@ -286,12 +370,10 @@ fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value) ![]const 
             if (seed_file.content) |content| allocator.free(content);
         }
         if (item.object.get("source")) |source_value| {
-            if (source_value != .string) return error.InvalidSeedFiles;
-            seed_file.source = try allocator.dupe(u8, source_value.string);
+            seed_file.source = try dupeOptionalPlatformString(allocator, source_value, platform, error.InvalidSeedFiles);
         }
         if (item.object.get("content")) |content_value| {
-            if (content_value != .string) return error.InvalidSeedFiles;
-            seed_file.content = try allocator.dupe(u8, content_value.string);
+            seed_file.content = try dupeOptionalPlatformString(allocator, content_value, platform, error.InvalidSeedFiles);
         }
         if ((seed_file.source == null) == (seed_file.content == null)) return error.InvalidSeedFiles;
         try seed_files.append(allocator, seed_file);
@@ -304,29 +386,37 @@ const ParsedRuntime = struct {
     fields: RuntimeFieldSet,
 };
 
-fn parseRuntimeObject(value: std.json.Value) !ParsedRuntime {
+fn parseRuntimeObject(value: std.json.Value, platform: ProfilePlatform) !ParsedRuntime {
     if (value != .object) return error.InvalidRuntime;
     var runtime = config.RuntimeConfig{};
     var fields = RuntimeFieldSet{};
     if (value.object.get("composite_mode")) |mode| {
-        if (mode != .string) return error.InvalidRuntime;
-        runtime.composite_mode = config.parseCompositeMode(mode.string) orelse return error.InvalidRuntime;
-        fields.composite_mode = true;
+        const selected = try selectedPlatformString(mode, platform, error.InvalidRuntime) orelse null;
+        if (selected) |mode_value| {
+            runtime.composite_mode = config.parseCompositeMode(mode_value) orelse return error.InvalidRuntime;
+            fields.composite_mode = true;
+        }
     }
     if (value.object.get("intercept_mode")) |mode| {
-        if (mode != .string) return error.InvalidRuntime;
-        runtime.intercept_mode = config.parseInterceptMode(mode.string) orelse return error.InvalidRuntime;
-        fields.intercept_mode = true;
+        const selected = try selectedPlatformString(mode, platform, error.InvalidRuntime) orelse null;
+        if (selected) |mode_value| {
+            runtime.intercept_mode = config.parseInterceptMode(mode_value) orelse return error.InvalidRuntime;
+            fields.intercept_mode = true;
+        }
     }
     if (value.object.get("window_policy")) |policy| {
-        if (policy != .string) return error.InvalidRuntime;
-        runtime.window_policy = config.parseWindowPolicyValue(policy.string, runtime.window_policy);
-        fields.window_policy = true;
+        const selected = try selectedPlatformString(policy, platform, error.InvalidRuntime) orelse null;
+        if (selected) |policy_value| {
+            runtime.window_policy = config.parseWindowPolicyValue(policy_value, runtime.window_policy);
+            fields.window_policy = true;
+        }
     }
     if (value.object.get("real_window")) |visibility| {
-        if (visibility != .string) return error.InvalidRuntime;
-        runtime.real_window_visibility = config.parseRealWindowVisibilityValue(visibility.string, runtime.real_window_visibility);
-        fields.real_window = true;
+        const selected = try selectedPlatformString(visibility, platform, error.InvalidRuntime) orelse null;
+        if (selected) |visibility_value| {
+            runtime.real_window_visibility = config.parseRealWindowVisibilityValue(visibility_value, runtime.real_window_visibility);
+            fields.real_window = true;
+        }
     }
     if (value.object.get("present_fps")) |fps| {
         switch (fps) {
@@ -339,40 +429,50 @@ fn parseRuntimeObject(value: std.json.Value) !ParsedRuntime {
         fields.present_fps = true;
     }
     if (value.object.get("input")) |input| {
-        switch (input) {
-            .bool => |b| runtime.input_enabled = b,
-            .string => |s| runtime.input_enabled = config.parseEnabledEnvValue(s),
-            else => return error.InvalidRuntime,
+        if (try selectedRuntimeBool(input, platform)) |input_value| {
+            runtime.input_enabled = input_value;
+            fields.input = true;
         }
-        fields.input = true;
     }
     if (value.object.get("input_claim")) |input_claim| {
-        switch (input_claim) {
-            .bool => |b| runtime.input_claimed = b,
-            .string => |s| runtime.input_claimed = config.parseEnabledEnvValue(s),
-            else => return error.InvalidRuntime,
+        if (try selectedRuntimeBool(input_claim, platform)) |input_claim_value| {
+            runtime.input_claimed = input_claim_value;
+            fields.input_claim = true;
         }
-        fields.input_claim = true;
     }
     if (value.object.get("output_profile")) |profile| {
-        if (profile != .string) return error.InvalidRuntime;
-        runtime.output_profile = config.parseOutputProfile(profile.string) orelse return error.InvalidRuntime;
-        fields.output_profile = true;
+        const selected = try selectedPlatformString(profile, platform, error.InvalidRuntime) orelse null;
+        if (selected) |profile_value| {
+            runtime.output_profile = config.parseOutputProfile(profile_value) orelse return error.InvalidRuntime;
+            fields.output_profile = true;
+        }
     }
     if (value.object.get("gl_capture")) |mode| {
-        if (mode != .string) return error.InvalidRuntime;
-        runtime.gl_capture = config.parseGlCaptureMode(mode.string);
-        fields.gl_capture = true;
+        const selected = try selectedPlatformString(mode, platform, error.InvalidRuntime) orelse null;
+        if (selected) |mode_value| {
+            runtime.gl_capture = config.parseGlCaptureMode(mode_value);
+            fields.gl_capture = true;
+        }
     }
     if (value.object.get("vulkan_capture")) |enabled| {
-        switch (enabled) {
-            .bool => |b| runtime.vulkan_capture = b,
-            .string => |s| runtime.vulkan_capture = config.parseEnabledEnvValue(s),
-            else => return error.InvalidRuntime,
+        if (try selectedRuntimeBool(enabled, platform)) |enabled_value| {
+            runtime.vulkan_capture = enabled_value;
+            fields.vulkan_capture = true;
         }
-        fields.vulkan_capture = true;
     }
     return .{ .config = runtime, .fields = fields };
+}
+
+fn selectedRuntimeBool(value: std.json.Value, platform: ProfilePlatform) !?bool {
+    return switch (value) {
+        .bool => |b| b,
+        .string => |s| config.parseEnabledEnvValue(s),
+        .object => {
+            const selected = try selectedPlatformString(value, platform, error.InvalidRuntime) orelse return null;
+            return config.parseEnabledEnvValue(selected);
+        },
+        else => error.InvalidRuntime,
+    };
 }
 
 fn resolveInheritance(allocator: std.mem.Allocator, profiles: []LaunchProfile) !void {
@@ -658,6 +758,91 @@ test "profile parser supports hidden internal fragments" {
     try std.testing.expectEqualStrings("/usr/bin/env", profile.target);
 }
 
+test "profile parser resolves platform-specific string values" {
+    const json =
+        \\{
+        \\  "profiles": {
+        \\    "example": {
+        \\      "target": {
+        \\        "linux": "/usr/bin/env",
+        \\        "macos": "/bin/env"
+        \\      },
+        \\      "args": [
+        \\        "--common",
+        \\        {
+        \\          "linux": "--linux",
+        \\          "macos": "--macos"
+        \\        },
+        \\        {
+        \\          "macos": "--macos-only"
+        \\        }
+        \\      ],
+        \\      "env": {
+        \\        "COMMON": "1",
+        \\        "VK_LAYER_PATH": {
+        \\          "linux": "{repo}/profiles/vulkan/linux",
+        \\          "macos": "{repo}/profiles/vulkan/macos"
+        \\        },
+        \\        "MACOS_ONLY": {
+        \\          "macos": "1"
+        \\        }
+        \\      },
+        \\      "seed_files": [
+        \\        {
+        \\          "path": {
+        \\            "linux": "/tmp/linux.cfg",
+        \\            "macos": "/tmp/macos.cfg"
+        \\          },
+        \\          "content": {
+        \\            "linux": "linux\n",
+        \\            "macos": "macos\n"
+        \\          }
+        \\        },
+        \\        {
+        \\          "path": {
+        \\            "macos": "/tmp/macos-only.cfg"
+        \\          },
+        \\          "content": "unused on linux\n"
+        \\        }
+        \\      ],
+        \\      "runtime": {
+        \\        "window_policy": {
+        \\          "linux": "terminal_only",
+        \\          "macos": "mirror"
+        \\        },
+        \\        "input": {
+        \\          "linux": "1"
+        \\        },
+        \\        "gl_capture": {
+        \\          "macos": "pbo"
+        \\        }
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var catalog = try ProfileCatalog.parseForPlatform(std.testing.allocator, json, .linux);
+    defer catalog.deinit();
+
+    const profile = catalog.find("example").?;
+    try std.testing.expectEqualStrings("/usr/bin/env", profile.target);
+    try std.testing.expectEqual(@as(usize, 2), profile.args.len);
+    try std.testing.expectEqualStrings("--common", profile.args[0]);
+    try std.testing.expectEqualStrings("--linux", profile.args[1]);
+    try std.testing.expectEqual(@as(usize, 2), profile.env.len);
+    try std.testing.expectEqualStrings("COMMON", profile.env[0].name);
+    try std.testing.expectEqualStrings("1", profile.env[0].value);
+    try std.testing.expectEqualStrings("VK_LAYER_PATH", profile.env[1].name);
+    try std.testing.expectEqualStrings("{repo}/profiles/vulkan/linux", profile.env[1].value);
+    try std.testing.expectEqual(@as(usize, 1), profile.seed_files.len);
+    try std.testing.expectEqualStrings("/tmp/linux.cfg", profile.seed_files[0].path);
+    try std.testing.expectEqualStrings("linux\n", profile.seed_files[0].content.?);
+    try std.testing.expectEqual(.terminal_only, profile.runtime.window_policy);
+    try std.testing.expect(profile.runtime.input_enabled);
+    try std.testing.expect(!profile.runtime_fields.gl_capture);
+}
+
 test "profile inheritance fills missing fields and preserves child overrides" {
     const json =
         \\{
@@ -824,4 +1009,54 @@ test "bundled profiles include Cannonball launch target" {
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/cannonball", profile.target);
     try std.testing.expectEqualStrings("-cfgfile", profile.args[0]);
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/config.xml", profile.args[1]);
+}
+
+test "bundled Vulkan capture profile resolves platform layer paths" {
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    defer linux_catalog.deinit();
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer macos_catalog.deinit();
+
+    const linux_profile = linux_catalog.find("capture.vulkan").?;
+    const macos_profile = macos_catalog.find("capture.vulkan").?;
+
+    try std.testing.expectEqualStrings("{repo}/profiles/vulkan/linux", envValue(linux_profile, "VK_LAYER_PATH").?);
+    try std.testing.expectEqualStrings("{repo}/profiles/vulkan/macos", envValue(macos_profile, "VK_LAYER_PATH").?);
+    try std.testing.expectEqualStrings("VK_LAYER_KATZENSTEG_capture", envValue(linux_profile, "VK_INSTANCE_LAYERS").?);
+    try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
+}
+
+fn envValue(profile: *const LaunchProfile, name: []const u8) ?[]const u8 {
+    for (profile.env) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.value;
+    }
+    return null;
+}
+
+test "bundled profiles include gamescope SDL Vulkan probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.gamescope").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expect(profile.target.len > 0);
+    try std.testing.expect(profile.args.len > 0);
+    try std.testing.expect(profile.runtime.vulkan_capture);
+    try std.testing.expect(profile.runtime.input_enabled);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.seed_files.len > 0);
+}
+
+test "bundled profiles include Tempest Rising gamescope launch target" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("steam.tempest_rising").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expect(profile.target.len > 0);
+    try std.testing.expect(profile.args.len > 0);
+    try std.testing.expect(profile.runtime.vulkan_capture);
+    try std.testing.expect(profile.runtime.input_enabled);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.seed_files.len > 0);
 }

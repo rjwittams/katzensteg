@@ -83,6 +83,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         expected_arch = {
             "cmake": "cmake",
             "ffplay": "ffmpeg",
+            "gamescope": "gamescope",
             "git": "git",
             "gl": "mesa",
             "make": "make",
@@ -98,6 +99,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         expected_debian = {
             "cmake": "cmake",
             "ffplay": "ffmpeg",
+            "gamescope": "gamescope",
             "git": "git",
             "gl": "libgl-dev",
             "make": "make",
@@ -225,7 +227,9 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         cannonball = bootstrap.project_by_name(manifest, "cannonball")
         scummvm = bootstrap.project_by_name(manifest, "scummvm")
 
-        self.assertEqual(["zig", "pkg-config"], repo_doctor["tools"])
+        self.assertIn("zig", repo_doctor["tools"])
+        self.assertIn("pkg-config", repo_doctor["tools"])
+        self.assertIn({"name": "gamescope", "platforms": ["linux"]}, repo_doctor["tools"])
         self.assertIn("sdl2", repo_doctor["pkg_config"])
         self.assertIn({"name": "gl", "platforms": ["linux"]}, repo_doctor["pkg_config"])
         self.assertTrue(

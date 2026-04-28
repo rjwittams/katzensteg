@@ -11,8 +11,10 @@ const Command = enum {
 const ExpansionContext = struct {
     home: []const u8,
     repo: []const u8,
+    path: []const u8 = "",
     owns_home: bool = false,
     owns_repo: bool = false,
+    owns_path: bool = false,
 
     fn init(allocator: std.mem.Allocator) !ExpansionContext {
         const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
@@ -20,13 +22,19 @@ const ExpansionContext = struct {
             else => return err,
         };
         errdefer allocator.free(home);
+        const path = std.process.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
+            else => return err,
+        };
+        errdefer allocator.free(path);
         const repo = try resolveRepoRoot(allocator);
-        return .{ .home = home, .repo = repo, .owns_home = true, .owns_repo = true };
+        return .{ .home = home, .repo = repo, .path = path, .owns_home = true, .owns_repo = true, .owns_path = true };
     }
 
     fn deinit(self: ExpansionContext, allocator: std.mem.Allocator) void {
         if (self.owns_home) allocator.free(self.home);
         if (self.owns_repo) allocator.free(self.repo);
+        if (self.owns_path) allocator.free(self.path);
     }
 };
 
@@ -595,7 +603,7 @@ fn expandProfileSeedFiles(allocator: std.mem.Allocator, seed_files: []const prof
         try out.append(allocator, .{
             .path = try expandLauncherString(allocator, entry.path, expansion),
             .source = if (entry.source) |source| try expandLauncherString(allocator, source, expansion) else null,
-            .content = if (entry.content) |content| try allocator.dupe(u8, content) else null,
+            .content = if (entry.content) |content| try expandLauncherString(allocator, content, expansion) else null,
         });
     }
     return out.toOwnedSlice(allocator);
@@ -916,6 +924,16 @@ fn expandLauncherString(allocator: std.mem.Allocator, input: []const u8, expansi
             i += "$ROOT".len;
             continue;
         }
+        if (std.mem.startsWith(u8, input[i..], "${PATH}")) {
+            try out.appendSlice(allocator, expansion.path);
+            i += "${PATH}".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, input[i..], "$PATH")) {
+            try out.appendSlice(allocator, expansion.path);
+            i += "$PATH".len;
+            continue;
+        }
         if (std.mem.startsWith(u8, input[i..], "${HOME}")) {
             try out.appendSlice(allocator, expansion.home);
             i += "${HOME}".len;
@@ -1136,6 +1154,26 @@ test "launcher resolves and seeds missing files without overwriting existing fil
     try std.testing.expectEqualStrings("keep\n", preserved);
 }
 
+test "launcher expands seed file content placeholders" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "gamescope",
+        .target = "/bin/echo",
+        .seed_files = &.{
+            .{
+                .path = "/tmp/katzensteg-launcher-seed-content-test.json",
+                .content = "{\"library_path\":\"$HOME/dev/gamescope/layer.so\",\"repo\":\"{repo}\"}\n",
+            },
+        },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer plan.deinit();
+
+    try std.testing.expectEqualStrings("{\"library_path\":\"/Users/test/dev/gamescope/layer.so\",\"repo\":\"/repo\"}\n", plan.seed_files[0].content.?);
+}
+
 test "launcher refuses broken profiles before resolving launch plan" {
     var profile = profiles_mod.LaunchProfile{
         .allocator = std.testing.allocator,
@@ -1185,6 +1223,14 @@ test "launcher expands home and repo placeholders" {
     const env_path = try expandLauncherString(std.testing.allocator, "$HOME/dev:$ROOT/bin:${HOME}/x:${ROOT}/y", expansion);
     defer std.testing.allocator.free(env_path);
     try std.testing.expectEqualStrings("/Users/test/dev:/repo/bin:/Users/test/x:/repo/y", env_path);
+}
+
+test "launcher expands path placeholders" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo", .path = "/usr/bin:/bin" };
+    const path = try expandLauncherString(std.testing.allocator, "{repo}/tools:$PATH:${PATH}", expansion);
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings("/repo/tools:/usr/bin:/bin:/usr/bin:/bin", path);
 }
 
 test "launcher derives repo root from zig-out executable path" {
