@@ -1,6 +1,7 @@
 const std = @import("std");
-const Logger = @import("log.zig").Logger;
 const inspect_model = @import("inspect_model.zig");
+
+const log = std.log.scoped(.whiskers);
 
 pub const ProducerHello = struct {
     producer_kind: []const u8,
@@ -93,7 +94,6 @@ const ParseProgress = enum {
 
 pub const WhiskersClient = struct {
     allocator: std.mem.Allocator,
-    logger: *Logger,
     socket_path: []u8,
     producer_id: []u8,
     bearer_token: []u8,
@@ -112,7 +112,7 @@ pub const WhiskersClient = struct {
     next_frame_seq: u64 = 1,
     next_resource_seq: u64 = 1,
 
-    pub fn init(allocator: std.mem.Allocator, logger: *Logger, socket_path: []const u8, hello: ProducerHello) !WhiskersClient {
+    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8, hello: ProducerHello) !WhiskersClient {
         const response_body = try postJsonForBody(allocator, socket_path, null, "/v0/producers/connect", hello);
         defer allocator.free(response_body);
         const parsed = try std.json.parseFromSlice(ProducerHelloResponse, allocator, response_body, .{});
@@ -126,7 +126,6 @@ pub const WhiskersClient = struct {
 
         return .{
             .allocator = allocator,
-            .logger = logger,
             .socket_path = try allocator.dupe(u8, socket_path),
             .producer_id = try allocator.dupe(u8, parsed.value.producer_id),
             .bearer_token = try allocator.dupe(u8, parsed.value.bearer_token),
@@ -140,7 +139,7 @@ pub const WhiskersClient = struct {
     pub fn start(self: *WhiskersClient) void {
         if (self.control_thread != null) return;
         self.control_thread = std.Thread.spawn(.{}, controlMain, .{self}) catch |err| {
-            self.logger.writeFmt("katzensteg: failed to start whiskers control thread: {any}", .{err});
+            log.warn("failed to start whiskers control thread: {any}", .{err});
             return;
         };
     }
@@ -161,7 +160,7 @@ pub const WhiskersClient = struct {
         self.current_segment_id = null;
         self.mutex.unlock();
         if (segment_id_owned) |segment_id| {
-            self.logger.writeFmt("katzensteg: whiskers leaving active segment open during shutdown producer={s}", .{self.producer_id});
+            log.warn("leaving active segment open during shutdown producer={s}", .{self.producer_id});
             self.allocator.free(segment_id);
         }
         if (self.wake_read_fd >= 0) {
@@ -190,7 +189,7 @@ pub const WhiskersClient = struct {
             .output_profile = output_profile,
             .present_fps = present_fps,
         }) catch |err| {
-            self.logger.writeFmt("katzensteg: whiskers runtime info update failed: {any}", .{err});
+            log.warn("runtime info update failed: {any}", .{err});
             return;
         };
         self.runtime_info_sent = true;
@@ -198,7 +197,7 @@ pub const WhiskersClient = struct {
 
     pub fn notePresent(self: *WhiskersClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
         self.pollCaptureState() catch |err| {
-            self.logger.writeFmt("katzensteg: whiskers capture poll failed: {any}", .{err});
+            log.warn("capture poll failed: {any}", .{err});
         };
         if (!self.isCaptureEnabled()) return;
 
@@ -331,20 +330,20 @@ pub const WhiskersClient = struct {
 
         if (maybe_start_segment_id) |sid| {
             postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/segments/start", SegmentStartRequest{ .segment_id = sid }) catch |err| {
-                self.logger.writeFmt("katzensteg: whiskers segment start failed: {any}", .{err});
+                log.warn("segment start failed: {any}", .{err});
             };
         }
         postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/frames/batch", FrameBatchRequest{ .segment_id = segment_id, .frames = frame_records.items }) catch |err| {
-            self.logger.writeFmt("katzensteg: whiskers frame batch failed: {any}", .{err});
+            log.warn("frame batch failed: {any}", .{err});
         };
         if (event_records.items.len > 0) {
             postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/events/batch", EventBatchRequest{ .segment_id = segment_id, .events = event_records.items }) catch |err| {
-                self.logger.writeFmt("katzensteg: whiskers event batch failed: {any}", .{err});
+                log.warn("event batch failed: {any}", .{err});
             };
         }
         if (resource_records.items.len > 0) {
             postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/resources/batch", ResourceBatchRequest{ .segment_id = segment_id, .resources = resource_records.items }) catch |err| {
-                self.logger.writeFmt("katzensteg: whiskers resource batch failed: {any}", .{err});
+                log.warn("resource batch failed: {any}", .{err});
             };
         }
     }
@@ -377,23 +376,23 @@ pub const WhiskersClient = struct {
             self.capture_enabled.store(desired, .release);
             if (!desired) {
                 self.stopActiveSegmentNow() catch |err| {
-                    self.logger.writeFmt("katzensteg: whiskers segment stop on poll failed: {any}", .{err});
+                    log.warn("segment stop on poll failed: {any}", .{err});
                 };
             }
-            self.logger.writeFmt("katzensteg: whiskers capture poll state -> {}", .{desired});
+            log.info("capture poll state -> {}", .{desired});
         }
     }
 
     fn applyControlEvent(self: *WhiskersClient, event_name: []const u8) void {
         if (std.mem.eql(u8, event_name, "capture_start")) {
             self.capture_enabled.store(true, .release);
-            self.logger.writeFmt("katzensteg: whiskers control capture_start producer={s}", .{self.producer_id});
+            log.info("control capture_start producer={s}", .{self.producer_id});
         } else if (std.mem.eql(u8, event_name, "capture_stop")) {
             self.capture_enabled.store(false, .release);
             self.stopActiveSegmentNow() catch |err| {
-                self.logger.writeFmt("katzensteg: whiskers segment stop on capture_stop failed: {any}", .{err});
+                log.warn("segment stop on capture_stop failed: {any}", .{err});
             };
-            self.logger.writeFmt("katzensteg: whiskers control capture_stop producer={s}", .{self.producer_id});
+            log.info("control capture_stop producer={s}", .{self.producer_id});
         }
     }
 
@@ -404,7 +403,7 @@ pub const WhiskersClient = struct {
                 switch (err) {
                     error.EndOfStream, error.ConnectionResetByPeer, error.BrokenPipe => continue,
                     else => {
-                        self.logger.writeFmt("katzensteg: whiskers control loop error: {any}", .{err});
+                        log.warn("control loop error: {any}", .{err});
                         std.Thread.sleep(250 * std.time.ns_per_ms);
                     },
                 }
