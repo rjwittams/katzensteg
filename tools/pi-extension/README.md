@@ -1,0 +1,50 @@
+# Katzensteg Pi Extension
+
+Local Pi package for experimenting with Katzensteg embed integration.
+
+## Install locally into Pi
+
+```bash
+pi install /Users/robert/dev/katzensteg/tools/pi-extension
+```
+
+Or for a one-off run:
+
+```bash
+pi -e /Users/robert/dev/katzensteg/tools/pi-extension
+```
+
+## Current status
+
+This package is the home for the Pi-side Katzensteg integration work:
+
+- top-right non-capturing overlay panel
+- Katzensteg `--embed-jsonl` producer launch
+- attach / viewport / detach protocol wiring
+- simple size controls
+
+The actual extension entrypoint lives in `extensions/katzensteg-panel.ts`.
+
+## Commands
+
+```text
+/katzensteg-panel                  # toggle panel
+/katzensteg-panel open            # open with remembered/default profile
+/katzensteg-panel open sonic
+/katzensteg-panel close
+/katzensteg-panel size small
+/katzensteg-panel size medium
+/katzensteg-panel size large
+/katzensteg-panel profile sonic
+```
+
+## Overrides
+
+- `KATZENSTEG_PANEL_MODE=layout` runs layout-only mode: no Katzensteg process, no raw graphics writes.
+- `KATZENSTEG_PANEL_MODE=live` runs the real Katzensteg embed producer. This is the default.
+- `KATZENSTEG_BIN` overrides the Katzensteg binary path.
+- `KATZENSTEG_PI_PROFILE` sets the default profile used by the panel.
+
+The live panel uses `file_whole` upload transport with a temp upload path under the system temp directory.
+
+Without `KATZENSTEG_BIN`, the extension prefers `zig-out/bin/katzensteg` from this repo and otherwise falls back to `katzensteg` from `$PATH`.
