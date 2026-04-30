@@ -1,5 +1,4 @@
 const runtime = @import("runtime.zig");
-const sink = @import("intercept_sink.zig");
 const frame_builder = @import("frame_builder.zig");
 const log_mod = @import("log.zig");
 
@@ -33,7 +32,19 @@ pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c
     const rt = runtime.get();
     if (!rt.shouldCaptureExternalFrame()) return;
     switch (rt.intercept_mode) {
-        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, data[0..byte_len]),
-        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, data[0..byte_len]),
+        .sync_compose => rt.presentExternalFramebuffer(width, height, format, data[0..byte_len]),
+        .queued_replay => enqueueExternalFramebufferPresent(rt, width, height, format, data[0..byte_len]),
     }
+}
+
+fn enqueueExternalFramebufferPresent(rt: *runtime.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+    const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+    const copied = rt.acquirePayloadBuffer(byte_len) catch return;
+    @memcpy(copied, pixels[0..byte_len]);
+    rt.enqueueCommand(.{ .external_framebuffer_present = .{
+        .width = width,
+        .height = height,
+        .format = format,
+        .pixels = copied,
+    } });
 }

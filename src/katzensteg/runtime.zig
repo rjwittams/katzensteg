@@ -2,10 +2,11 @@ const std = @import("std");
 const termscene = @import("termscene");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
+const core_commands = @import("core_commands.zig");
+const core_dispatch = @import("core_command_dispatch.zig");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
-const intercept_sink = @import("intercept_sink.zig");
 const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
@@ -21,7 +22,7 @@ const ResourceRecord = inspect_model.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
 const CompositeMode = config_mod.CompositeMode;
 const InterceptMode = config_mod.InterceptMode;
-const Command = intercept_sink.Command;
+const Command = core_commands.Command;
 const PixelSize = frame_builder_mod.PixelSize;
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
@@ -920,16 +921,16 @@ test "sync dispatch recycles cloned external framebuffer payload" {
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    runtime.intercept_mode = .sync_compose;
     var pixels = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    intercept_sink.dispatchCommand(&runtime, .{
-        .external_framebuffer_present = .{
-            .width = 1,
-            .height = 2,
-            .format = .rgba8,
-            .pixels = pixels[0..],
-        },
-    });
+    const copied = try runtime.acquirePayloadBuffer(pixels.len);
+    @memcpy(copied, &pixels);
+    var cmd = Command{ .external_framebuffer_present = .{
+        .width = 1,
+        .height = 2,
+        .format = .rgba8,
+        .pixels = copied,
+    } };
+    runtime.recycleCommand(&cmd);
 
     try std.testing.expectEqual(@as(usize, 1), runtime.payload_pool.buffers.items.len);
     try std.testing.expectEqual(@as(usize, pixels.len), runtime.payload_pool.bytes);
@@ -962,7 +963,7 @@ fn workerMain(runtime: *Runtime) void {
         if (isPresentCommand(cmd) and runtime.pending_presents > 0) runtime.pending_presents -= 1;
         runtime.maybeCompactQueue();
         runtime.queue_mutex.unlock();
-        intercept_sink.handleCommand(runtime, cmd);
+        core_dispatch.handleCommand(runtime, cmd);
         runtime.recycleCommand(&cmd);
     }
 }

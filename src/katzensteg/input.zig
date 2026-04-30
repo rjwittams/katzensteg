@@ -1,11 +1,17 @@
 const std = @import("std");
-const sdl = @import("katzensteg_sdl");
 const presentation_layout = @import("presentation_layout.zig");
 
 const max_pending_bytes = 256;
 const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
 
-pub const sdl_num_scancodes = sdl.SDL_NUM_SCANCODES;
+pub const sdl_num_scancodes = 512;
+pub const sdl_event_key_down = 0x300;
+pub const sdl_event_key_up = 0x301;
+pub const sdl_event_text_input = 0x303;
+pub const sdl_event_mouse_motion = 0x400;
+pub const sdl_event_mouse_button_down = 0x401;
+pub const sdl_event_mouse_button_up = 0x402;
+pub const sdl_event_mouse_wheel = 0x403;
 
 pub const Target = struct {
     cols: i32 = 80,
@@ -433,12 +439,12 @@ fn asciiKey(byte: u8) KeyEvent {
 
 fn inputEventSdlType(event: InputEvent) u32 {
     return switch (event) {
-        .key_down => sdl.SDL_KEYDOWN,
-        .key_up => sdl.SDL_KEYUP,
-        .text => sdl.SDL_TEXTINPUT,
-        .mouse_motion => sdl.SDL_MOUSEMOTION,
-        .mouse_button => |button| if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
-        .mouse_wheel => sdl.SDL_MOUSEWHEEL,
+        .key_down => sdl_event_key_down,
+        .key_up => sdl_event_key_up,
+        .text => sdl_event_text_input,
+        .mouse_motion => sdl_event_mouse_motion,
+        .mouse_button => |button| if (button.pressed) sdl_event_mouse_button_down else sdl_event_mouse_button_up,
+        .mouse_wheel => sdl_event_mouse_wheel,
     };
 }
 
@@ -460,8 +466,8 @@ test "terminal input parser can pop events by SDL type range" {
 
     try parser.feed("a");
 
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl.SDL_KEYDOWN, sdl.SDL_KEYUP).?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl.SDL_KEYDOWN, sdl.SDL_KEYUP).?);
+    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
+    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
     try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
 }
 
@@ -471,7 +477,7 @@ test "terminal input parser exposes recent keys through polling state" {
 
     try parser.feed("a");
 
-    var state = [_]u8{0} ** sdl.SDL_NUM_SCANCODES;
+    var state = [_]u8{0} ** sdl_num_scancodes;
     parser.copyKeyboardState(&state, std.time.nanoTimestamp());
     try std.testing.expectEqual(@as(u8, 1), state[4]);
 

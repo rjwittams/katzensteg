@@ -1,5 +1,6 @@
 import pathlib
 import platform
+import json
 import subprocess
 import unittest
 
@@ -95,7 +96,34 @@ def needed_libraries(lib_path):
 
 class LinuxPreloadExportsTests(unittest.TestCase):
     def preload_path(self):
-        return ROOT / "zig-out" / "lib" / "libkatzensteg-unlinked.so"
+        return ROOT / "zig-out" / "lib" / "libkatzensteg-sdl2.so"
+
+    def core_path(self):
+        return ROOT / "zig-out" / "lib" / "libkatzensteg-core.so"
+
+    def test_build_declares_core_and_sdl2_adapter_artifacts(self):
+        build_text = (ROOT / "build.zig").read_text()
+
+        for artifact in (
+            '.name = "katzensteg-core"',
+            '.name = "katzensteg-sdl2"',
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertIn(artifact, build_text)
+
+    def test_sdl2_profile_fragment_points_at_sdl2_adapter_library(self):
+        retroarch = json.loads((ROOT / "profiles" / "retroarch.json").read_text())
+        fragment = retroarch["profiles"]["adapter.sdl2_preload"]
+        env = fragment["env"]
+
+        self.assertEqual(
+            "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib",
+            env["DYLD_INSERT_LIBRARIES"],
+        )
+        self.assertEqual(
+            "{repo}/zig-out/lib/libkatzensteg-sdl2.so",
+            env["LD_PRELOAD"],
+        )
 
     def test_core_exports_are_defined_outside_sdl2_preload_source(self):
         preload_source = ROOT / "src" / "katzensteg" / "preload.zig"
@@ -113,6 +141,23 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertNotIn(f"pub export fn {symbol}", preload_text)
                 self.assertIn(f"pub export fn {symbol}", core_exports_text)
+
+    def test_core_sources_do_not_import_sdl2_or_real_sdl(self):
+        for path in (
+            ROOT / "src" / "katzensteg" / "core_exports.zig",
+            ROOT / "src" / "katzensteg" / "core_commands.zig",
+            ROOT / "src" / "katzensteg" / "core_command_dispatch.zig",
+            ROOT / "src" / "katzensteg" / "runtime.zig",
+            ROOT / "src" / "katzensteg" / "frame_builder.zig",
+            ROOT / "src" / "katzensteg" / "input.zig",
+        ):
+            text = path.read_text()
+            for needle in (
+                '@import("katzensteg_sdl")',
+                '@import("real_sdl.zig")',
+            ):
+                with self.subTest(path=path.relative_to(ROOT), needle=needle):
+                    self.assertNotIn(needle, text)
 
     def test_runtime_policy_and_lock_helpers_do_not_expose_sdl_pointer_types(self):
         runtime_text = (ROOT / "src" / "katzensteg" / "runtime.zig").read_text()

@@ -65,8 +65,8 @@
     "adapter.sdl2_preload": {
       "hidden": true,
       "env": {
-        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-unlinked.dylib",
-        "LD_PRELOAD": "{repo}/zig-out/lib/libkatzensteg-unlinked.so"
+        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib",
+        "LD_PRELOAD": "{repo}/zig-out/lib/libkatzensteg-sdl2.so"
       }
     },
     "retroarch": {
