@@ -1,5 +1,6 @@
 import ctypes
 import pathlib
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "katzensteg" / "image_fastpath_portable.c"
 
 
+@unittest.skipUnless(platform.system() == "Linux", "portable libyuv fast path test requires Linux libyuv")
 class PortableImageFastpathTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

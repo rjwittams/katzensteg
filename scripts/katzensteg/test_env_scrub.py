@@ -13,6 +13,26 @@ ENV_SCRUB_SOURCE = ROOT / "src" / "katzensteg" / "env_scrub.c"
 VULKAN_LAYER_SOURCE = ROOT / "src" / "katzensteg" / "vulkan_layer.c"
 
 
+def vulkan_include_args():
+    candidates = []
+    vulkan_sdk = os.environ.get("VULKAN_SDK")
+    if vulkan_sdk:
+        candidates.append(pathlib.Path(vulkan_sdk) / "include")
+    candidates.extend(
+        [
+            pathlib.Path("/opt/homebrew/opt/vulkan-headers/include"),
+            pathlib.Path("/opt/homebrew/include"),
+            pathlib.Path("/usr/local/include"),
+            pathlib.Path("/usr/include"),
+        ]
+    )
+
+    for candidate in candidates:
+        if (candidate / "vulkan" / "vulkan.h").exists():
+            return [f"-I{candidate}"]
+    raise unittest.SkipTest("Vulkan headers are required to compile Vulkan env scrub tests")
+
+
 class EnvScrubTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -41,6 +61,7 @@ class EnvScrubTests(unittest.TestCase):
         cls.libc.getenv.restype = ctypes.c_char_p
 
         cls.vulkan_lib_path = pathlib.Path(cls.tmpdir.name) / "libvulkan_layer_test.so"
+        vulkan_includes = vulkan_include_args()
         subprocess.check_call(
             [
                 cc,
@@ -48,6 +69,7 @@ class EnvScrubTests(unittest.TestCase):
                 "-fPIC",
                 "-O2",
                 "-DKS_VULKAN_LAYER_TESTING",
+                *vulkan_includes,
                 str(VULKAN_LAYER_SOURCE),
                 str(ENV_SCRUB_SOURCE),
                 "-o",
