@@ -128,6 +128,7 @@ pub const Runtime = struct {
     image_gc: bool = false,
     input_enabled: bool = false,
     input_claimed: bool = false,
+    input_claim_focus: bool = false,
     dump_composites: bool = false,
     debug_composite: bool = false,
     intercept_mode: InterceptMode = .sync_compose,
@@ -179,6 +180,7 @@ pub const Runtime = struct {
         const image_gc = config.image_gc;
         const input_enabled = config.input_enabled;
         const input_claimed = input_enabled and config.input_claimed;
+        const input_claim_focus = input_claimed and config.input_claim_focus;
         const dump_composites = config.dump_composites;
         const debug_composite = config.debug_composite;
         var runtime = Runtime{
@@ -192,6 +194,7 @@ pub const Runtime = struct {
             .image_gc = image_gc,
             .input_enabled = input_enabled,
             .input_claimed = input_claimed,
+            .input_claim_focus = input_claim_focus,
             .dump_composites = dump_composites,
             .debug_composite = debug_composite,
             .intercept_mode = config.intercept_mode,
@@ -332,6 +335,7 @@ pub const Runtime = struct {
             .batch_control_line = .empty,
             .input_enabled = false,
             .input_claimed = false,
+            .input_claim_focus = false,
             .intercept_mode = .sync_compose,
             .window_policy = .mirror,
             .real_window_visibility = .show,
@@ -535,7 +539,7 @@ pub const Runtime = struct {
     }
 
     pub fn claimedWindowFlags(self: *const Runtime, flags: u32) u32 {
-        return applyClaimedInputWindowFlags(self.input_claimed, flags);
+        return applyClaimedInputWindowFlags(self.input_claimed, self.input_claim_focus, flags);
     }
 
     pub fn shouldSuppressSdlEvent(self: *const Runtime, event: *const sdl.SDL_Event) bool {
@@ -1273,8 +1277,8 @@ fn mapGlCaptureMode(mode: config_mod.GlCaptureMode) gl_capture_mod.CaptureMode {
     };
 }
 
-fn applyClaimedInputWindowFlags(claimed: bool, flags: u32) u32 {
-    if (!claimed) return flags;
+fn applyClaimedInputWindowFlags(claimed: bool, claim_focus: bool, flags: u32) u32 {
+    if (!claimed or !claim_focus) return flags;
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
 }
 
@@ -1353,14 +1357,16 @@ test "runtime input target includes latest presentation layout" {
     try std.testing.expectEqual(presentation_layout_mod.Point{ .x = 0, .y = 0 }, target.layout.mapCellToSdl(11, 6).?);
 }
 
-test "claimed input keeps SDL window focused locally" {
+test "claimed input focus can keep SDL window focused locally" {
     try std.testing.expectEqual(
         @as(u32, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS),
-        applyClaimedInputWindowFlags(true, 0),
+        applyClaimedInputWindowFlags(true, true, 0),
     );
-    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(false, 0));
+    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(false, true, 0));
+    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(true, false, 0));
     try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
     try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_LEAVE));
     try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_GAINED));
+    try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_CLOSE));
     try std.testing.expect(!shouldSuppressClaimedWindowEvent(false, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
 }

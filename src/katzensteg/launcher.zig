@@ -387,7 +387,7 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
         }
     }
     std.debug.print(
-        "runtime:\n  intercept_mode={s}\n  composite_mode={s}\n  window_policy={s}\n  real_window={s}\n  present_fps={d}\n  input={}\n  input_claim={}\n  output_profile={s}\n  gl_capture={s}\n  vulkan_capture={}\n",
+        "runtime:\n  intercept_mode={s}\n  composite_mode={s}\n  window_policy={s}\n  real_window={s}\n  present_fps={d}\n  input={}\n  input_claim={}\n  input_claim_focus={}\n  output_profile={s}\n  gl_capture={s}\n  vulkan_capture={}\n",
         .{
             @tagName(plan.runtime.intercept_mode),
             @tagName(plan.runtime.composite_mode),
@@ -396,6 +396,7 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
             plan.runtime.present_fps,
             plan.runtime.input_enabled,
             plan.runtime.input_claimed,
+            plan.runtime.input_claim_focus,
             if (plan.runtime.output_profile) |output_profile| @tagName(output_profile) else "auto",
             @tagName(plan.runtime.gl_capture),
             plan.runtime.vulkan_capture,
@@ -734,6 +735,7 @@ fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) @import("co
     if (fields.present_fps) runtime.present_fps = profile.runtime.present_fps;
     if (fields.input) runtime.input_enabled = profile.runtime.input_enabled;
     if (fields.input_claim) runtime.input_claimed = profile.runtime.input_claimed;
+    if (fields.input_claim_focus) runtime.input_claim_focus = profile.runtime.input_claim_focus;
     if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
     if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
     if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;
@@ -1334,7 +1336,7 @@ fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: @import("config.zig
 
 fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: @import("config.zig").RuntimeConfig) !void {
     try writer.print(
-        "{{\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"output_profile\":",
+        "{{\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"input_claim_focus\":{},\"output_profile\":",
         .{
             @tagName(runtime.composite_mode),
             @tagName(runtime.intercept_mode),
@@ -1343,6 +1345,7 @@ fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: @import("config.zig")
             runtime.present_fps,
             runtime.input_enabled,
             runtime.input_claimed,
+            runtime.input_claim_focus,
         },
     );
     if (runtime.output_profile) |output_profile| {

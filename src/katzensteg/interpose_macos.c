@@ -22,6 +22,7 @@ extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
 extern int ks_SDL_Init(unsigned int);
 extern int ks_SDL_InitSubSystem(unsigned int);
+extern int ks_SDL_SetHint(const char *, const char *);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
 extern void ks_SDL_ShowWindow(struct SDL_Window *);
@@ -125,6 +126,7 @@ extern unsigned int SDL_GetRelativeMouseState(int *, int *);
 extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
+extern int SDL_SetHint(const char *, const char *);
 extern void SDL_QuitSubSystem(unsigned int);
 extern void SDL_Quit(void);
 extern unsigned int SDL_GetWindowFlags(struct SDL_Window *);
@@ -132,6 +134,7 @@ extern void *dlopen(const char *, int);
 
 DYLD_INTERPOSE(ks_SDL_Init, SDL_Init)
 DYLD_INTERPOSE(ks_SDL_InitSubSystem, SDL_InitSubSystem)
+DYLD_INTERPOSE(ks_SDL_SetHint, SDL_SetHint)
 DYLD_INTERPOSE(ks_SDL_QuitSubSystem, SDL_QuitSubSystem)
 DYLD_INTERPOSE(ks_SDL_Quit, SDL_Quit)
 DYLD_INTERPOSE(ks_SDL_CreateWindow, SDL_CreateWindow)

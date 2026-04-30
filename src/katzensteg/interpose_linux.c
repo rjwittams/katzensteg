@@ -14,6 +14,7 @@ extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
 extern int ks_SDL_Init(unsigned int);
 extern int ks_SDL_InitSubSystem(unsigned int);
+extern int ks_SDL_SetHint(const char *, const char *);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
 extern void ks_SDL_ShowWindow(struct SDL_Window *);
@@ -73,6 +74,7 @@ static void katzensteg_module_destructor(void) {
 
 int SDL_Init(unsigned int flags) { return ks_SDL_Init(flags); }
 int SDL_InitSubSystem(unsigned int flags) { return ks_SDL_InitSubSystem(flags); }
+int SDL_SetHint(const char *name, const char *value) { return ks_SDL_SetHint(name, value); }
 void SDL_QuitSubSystem(unsigned int flags) { ks_SDL_QuitSubSystem(flags); }
 void SDL_Quit(void) { ks_SDL_Quit(); }
 struct SDL_Window *SDL_CreateWindow(const char *title, int x, int y, int w, int h, unsigned int flags) { return ks_SDL_CreateWindow(title, x, y, w, h, flags); }

@@ -22,6 +22,7 @@
 #define KS_MAX_PRESENT_WAITS 16
 
 typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len);
+typedef void (*ks_log_c_fn)(const char *scope, const char *message);
 
 enum {
     KS_EXTERNAL_FRAMEBUFFER_RGBA8 = 0,
@@ -124,6 +125,7 @@ static DeviceRecord g_devices[KS_MAX_DEVICES];
 static QueueRecord g_queues[KS_MAX_QUEUES];
 static SwapchainRecord g_swapchains[KS_MAX_SWAPCHAINS];
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
+static ks_log_c_fn g_log_c;
 static bool g_capture_enabled;
 static bool g_trace_enabled;
 
@@ -175,12 +177,18 @@ static void katzensteg_vulkan_layer_constructor(void)
 static void tracef(const char *fmt, ...)
 {
     if (!trace_enabled()) return;
+    char message[1024];
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "katzensteg-vulkan: ");
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
+    vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
+
+    if (!g_log_c)
+        g_log_c = (ks_log_c_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_log_c");
+    if (g_log_c) {
+        g_log_c("vulkan", message);
+        return;
+    }
 }
 
 static ks_present_external_framebuffer_fn present_fn(void)

@@ -26,6 +26,7 @@ pub const RuntimeFieldSet = struct {
     present_fps: bool = false,
     input: bool = false,
     input_claim: bool = false,
+    input_claim_focus: bool = false,
     output_profile: bool = false,
     gl_capture: bool = false,
     vulkan_capture: bool = false,
@@ -450,6 +451,12 @@ fn parseRuntimeObject(value: std.json.Value, platform: ProfilePlatform) !ParsedR
             fields.input_claim = true;
         }
     }
+    if (value.object.get("input_claim_focus")) |input_claim_focus| {
+        if (try selectedRuntimeBool(input_claim_focus, platform)) |input_claim_focus_value| {
+            runtime.input_claim_focus = input_claim_focus_value;
+            fields.input_claim_focus = true;
+        }
+    }
     if (value.object.get("output_profile")) |profile| {
         const selected = try selectedPlatformString(profile, platform, error.InvalidRuntime) orelse null;
         if (selected) |profile_value| {
@@ -694,6 +701,10 @@ fn inheritRuntime(child: *LaunchProfile, parent: *const LaunchProfile) void {
         child.runtime.input_claimed = parent.runtime.input_claimed;
         child.runtime_fields.input_claim = true;
     }
+    if (!child.runtime_fields.input_claim_focus and parent.runtime_fields.input_claim_focus) {
+        child.runtime.input_claim_focus = parent.runtime.input_claim_focus;
+        child.runtime_fields.input_claim_focus = true;
+    }
     if (!child.runtime_fields.output_profile and parent.runtime_fields.output_profile) {
         child.runtime.output_profile = parent.runtime.output_profile;
         child.runtime_fields.output_profile = true;
@@ -753,6 +764,7 @@ test "profile parser reads launch and runtime fields" {
         \\        "real_window": "show",
         \\        "present_fps": 30,
         \\        "input": true,
+        \\        "input_claim_focus": false,
         \\        "output_profile": "file_whole",
         \\        "gl_capture": "pbo",
         \\        "vulkan_capture": true
@@ -781,6 +793,7 @@ test "profile parser reads launch and runtime fields" {
         .intercept_mode = .queued_replay,
         .window_policy = .terminal_only,
         .present_fps = 30,
+        .input_claim_focus = false,
         .output_profile = .file_whole,
         .gl_capture = .pbo,
         .vulkan_capture = true,
