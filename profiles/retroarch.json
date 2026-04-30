@@ -25,6 +25,10 @@
       },
       "env": {
         "KATZENSTEG_VULKAN_CAPTURE": "1",
+        "KATZENSTEG_CORE_LIB": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-core.so",
+          "macos": "{repo}/zig-out/lib/libkatzensteg-core.dylib"
+        },
         "VK_LAYER_PATH": {
           "linux": "{repo}/profiles/vulkan/linux",
           "macos": "{repo}/profiles/vulkan/macos"

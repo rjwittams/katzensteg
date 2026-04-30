@@ -1120,6 +1120,8 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
 
     try std.testing.expectEqualStrings("{repo}/profiles/vulkan/linux", envValue(linux_profile, "VK_LAYER_PATH").?);
     try std.testing.expectEqualStrings("{repo}/profiles/vulkan/macos", envValue(macos_profile, "VK_LAYER_PATH").?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-core.so", envValue(linux_profile, "KATZENSTEG_CORE_LIB").?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-core.dylib", envValue(macos_profile, "KATZENSTEG_CORE_LIB").?);
     try std.testing.expectEqualStrings("VK_LAYER_KATZENSTEG_capture", envValue(linux_profile, "VK_INSTANCE_LAYERS").?);
     try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
 }
