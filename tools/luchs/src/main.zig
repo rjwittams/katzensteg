@@ -9,6 +9,42 @@ const CliOptions = struct {
     html_path: []const u8,
 };
 
+const FrameHeader = struct {
+    format: []const u8,
+    width: u32,
+    height: u32,
+    len: usize,
+
+    fn deinit(self: FrameHeader, allocator: std.mem.Allocator) void {
+        allocator.free(self.format);
+    }
+};
+
+const FrameHeaderPayload = struct {
+    format: []const u8,
+    width: u32,
+    height: u32,
+    len: usize,
+};
+
+fn parseFrameHeader(allocator: std.mem.Allocator, line: []const u8) !FrameHeader {
+    const prefix = "LUCHS_FRAME ";
+    if (!std.mem.startsWith(u8, line, prefix)) return error.InvalidFrameHeader;
+    var parsed = std.json.parseFromSlice(FrameHeaderPayload, allocator, line[prefix.len..], .{
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidFrameHeader;
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.format, "png") and !std.mem.eql(u8, parsed.value.format, "rgba")) {
+        return error.InvalidFrameHeader;
+    }
+    return .{
+        .format = try allocator.dupe(u8, parsed.value.format),
+        .width = parsed.value.width,
+        .height = parsed.value.height,
+        .len = parsed.value.len,
+    };
+}
+
 fn fillTestFrame(buf: []u8, width: usize, height: usize, tick: usize) void {
     var y: usize = 0;
     while (y < height) : (y += 1) {
@@ -41,6 +77,16 @@ test "fillTestFrame writes rgba pixels" {
     try std.testing.expectEqual(@as(u8, 3), buf[0]);
     try std.testing.expectEqual(@as(u8, 3), buf[1]);
     try std.testing.expectEqual(@as(u8, 255), buf[3]);
+}
+
+test "parseFrameHeader parses png envelope" {
+    const header = "LUCHS_FRAME {\"format\":\"png\",\"width\":2,\"height\":1,\"len\":8}";
+    const frame = try parseFrameHeader(std.testing.allocator, header);
+    defer frame.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("png", frame.format);
+    try std.testing.expectEqual(@as(u32, 2), frame.width);
+    try std.testing.expectEqual(@as(u32, 1), frame.height);
+    try std.testing.expectEqual(@as(usize, 8), frame.len);
 }
 
 pub fn main() !void {
