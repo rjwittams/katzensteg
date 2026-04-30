@@ -44,6 +44,9 @@ var trace_gl_capture_error: usize = 0;
 var trace_gl_downscale_target: usize = 0;
 var trace_upper_blit: usize = 0;
 
+const SDL_QUIT_ON_LAST_WINDOW_CLOSE_HINT = "SDL_QUIT_ON_LAST_WINDOW_CLOSE";
+var tracked_sdl_window_count: i32 = 0;
+
 const GL_BACK: c_uint = 0x0405;
 const GL_RGBA: c_uint = 0x1908;
 const GL_UNSIGNED_BYTE: c_uint = 0x1401;
@@ -93,6 +96,95 @@ fn traceLimited(rt: *runtime.Runtime, counter: *usize, comptime fmt: []const u8,
     if (counter.* <= 12 or (counter.* % 300) == 0) {
         sdl_log.debug(fmt, args);
     }
+}
+
+fn traceSdlLifecycle(comptime fmt: []const u8, args: anytype) void {
+    if (std.c.getenv("KATZENSTEG_TRACE_SDL") == null) return;
+    sdl_log.debug(fmt, args);
+}
+
+fn shouldTraceSdlHint(name: ?[]const u8) bool {
+    const value = name orelse return false;
+    return std.mem.eql(u8, value, SDL_QUIT_ON_LAST_WINDOW_CLOSE_HINT);
+}
+
+fn nextTrackedSdlWindowCountAfterCreate(window: ?*sdl.SDL_Window, current: i32) i32 {
+    if (window == null) return current;
+    return current + 1;
+}
+
+fn nextTrackedSdlWindowCountAfterDestroy(window: ?*sdl.SDL_Window, current: i32) i32 {
+    if (window == null or current <= 0) return current;
+    return current - 1;
+}
+
+fn noteTrackedSdlWindowCreate(window: ?*sdl.SDL_Window) i32 {
+    tracked_sdl_window_count = nextTrackedSdlWindowCountAfterCreate(window, tracked_sdl_window_count);
+    return tracked_sdl_window_count;
+}
+
+fn noteTrackedSdlWindowDestroy(window: ?*sdl.SDL_Window) i32 {
+    tracked_sdl_window_count = nextTrackedSdlWindowCountAfterDestroy(window, tracked_sdl_window_count);
+    return tracked_sdl_window_count;
+}
+
+fn windowEventTraceName(event: sdl.Uint8) []const u8 {
+    return switch (event) {
+        sdl.SDL_WINDOWEVENT_ENTER => "window.enter",
+        sdl.SDL_WINDOWEVENT_LEAVE => "window.leave",
+        sdl.SDL_WINDOWEVENT_FOCUS_GAINED => "window.focus_gained",
+        sdl.SDL_WINDOWEVENT_FOCUS_LOST => "window.focus_lost",
+        sdl.SDL_WINDOWEVENT_CLOSE => "window.close",
+        else => "window.other",
+    };
+}
+
+fn shouldTraceSdlEvent(event: *const sdl.SDL_Event) bool {
+    return switch (event.type) {
+        sdl.SDL_QUIT,
+        sdl.SDL_WINDOWEVENT,
+        => true,
+        else => false,
+    };
+}
+
+fn sdlEventTraceName(event: *const sdl.SDL_Event) []const u8 {
+    return switch (event.type) {
+        sdl.SDL_QUIT => "quit",
+        sdl.SDL_WINDOWEVENT => windowEventTraceName(event.window.event),
+        else => "other",
+    };
+}
+
+fn traceSdlEvent(comptime source: []const u8, event: *const sdl.SDL_Event, suppressed: bool) void {
+    if (std.c.getenv("KATZENSTEG_TRACE_SDL") == null) return;
+    if (!shouldTraceSdlEvent(event)) return;
+    if (event.type == sdl.SDL_WINDOWEVENT) {
+        sdl_log.debug(
+            "{s} {s} type=0x{x} window_event={s}({d}) window={d} data={d},{d} suppressed={} tracked_windows={d}",
+            .{
+                source,
+                sdlEventTraceName(event),
+                event.type,
+                windowEventTraceName(event.window.event),
+                event.window.event,
+                event.window.windowID,
+                event.window.data1,
+                event.window.data2,
+                suppressed,
+                tracked_sdl_window_count,
+            },
+        );
+    } else {
+        sdl_log.debug("{s} {s} type=0x{x} suppressed={} tracked_windows={d}", .{ source, sdlEventTraceName(event), event.type, suppressed, tracked_sdl_window_count });
+    }
+}
+
+fn traceSdlEvents(comptime source: []const u8, events: [*]const sdl.SDL_Event, count: c_int) void {
+    if (count <= 0) return;
+    var idx: usize = 0;
+    const n: usize = @intCast(count);
+    while (idx < n) : (idx += 1) traceSdlEvent(source, &events[idx], false);
 }
 
 fn isTextureFormatFilterDisabled() bool {
@@ -202,6 +294,12 @@ pub export fn ks_katzensteg_shutdown() callconv(.c) void {
     runtime.shutdownGlobal();
 }
 
+pub export fn ks_katzensteg_log_c(scope_z: ?[*:0]const u8, message_z: ?[*:0]const u8) callconv(.c) void {
+    const scope = if (scope_z) |value| std.mem.span(value) else "c";
+    const message = if (message_z) |value| std.mem.span(value) else "";
+    log_mod.writeCLog(scope, message);
+}
+
 pub export fn ks_SDL_Init(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
     return real_sdl.SDL_Init(flags);
@@ -212,21 +310,33 @@ pub export fn ks_SDL_InitSubSystem(flags: sdl.Uint32) callconv(.c) c_int {
     return real_sdl.SDL_InitSubSystem(flags);
 }
 
+pub export fn ks_SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) callconv(.c) sdl.SDL_bool {
+    const rc = real_sdl.SDL_SetHint(name, value);
+    const name_slice = std.mem.span(name);
+    if (shouldTraceSdlHint(name_slice)) {
+        traceSdlLifecycle("SDL_SetHint {s}={s} rc={d}", .{ name_slice, std.mem.span(value), rc });
+    }
+    return rc;
+}
+
 pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
+    traceSdlLifecycle("SDL_QuitSubSystem flags=0x{x} video={}", .{ flags, (flags & sdl.SDL_INIT_VIDEO) != 0 });
     if ((flags & sdl.SDL_INIT_VIDEO) != 0) runtime.shutdownGlobal();
     real_sdl.SDL_QuitSubSystem(flags);
 }
 
 pub export fn ks_SDL_Quit() callconv(.c) void {
+    traceSdlLifecycle("SDL_Quit called; shutting down Katzensteg runtime", .{});
     runtime.shutdownGlobal();
     real_sdl.SDL_Quit();
 }
 
 pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Window {
     const window = real_sdl.SDL_CreateWindow(title, x, y, w, h, flags);
+    const tracked_windows = noteTrackedSdlWindowCreate(window);
     const rt = runtime.get();
     rt.noteInputWindowSize(w, h);
-    traceLimited(rt, &trace_create_window, "SDL_CreateWindow window={x} size={d}x{d} flags=0x{x}", .{ if (window) |p| @intFromPtr(p) else 0, w, h, flags });
+    traceLimited(rt, &trace_create_window, "SDL_CreateWindow window={x} size={d}x{d} flags=0x{x} tracked_windows={d}", .{ if (window) |p| @intFromPtr(p) else 0, w, h, flags, tracked_windows });
     switch (rt.intercept_mode) {
         .sync_compose => sink.onCreateWindow(rt, window, w, h),
         .queued_replay => sink.dispatchCommand(rt, .{ .create_window = .{ .window = window, .w = w, .h = h } }),
@@ -288,7 +398,10 @@ pub export fn ks_SDL_RaiseWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
 }
 
 pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    const before = tracked_sdl_window_count;
     real_sdl.SDL_DestroyWindow(window);
+    const after = noteTrackedSdlWindowDestroy(window);
+    traceSdlLifecycle("SDL_DestroyWindow window={x} tracked_windows={d}->{d}", .{ if (window) |p| @intFromPtr(p) else 0, before, after });
 }
 
 pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Renderer {
@@ -872,15 +985,21 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
-    } else if (rt.popSdlInputEvent(event)) return 1;
+    } else if (rt.popSdlInputEvent(event)) {
+        if (event) |out| traceSdlEvent("SDL_PollEvent synthetic", out, false);
+        return 1;
+    }
     const out = event orelse return real_sdl.SDL_PollEvent(event);
     while (true) {
         const rc = real_sdl.SDL_PollEvent(out);
         if (rc == 0) return 0;
-        if (!rt.shouldSuppressSdlEvent(out)) {
-            rt.noteRealSdlEvent(out);
-            return rc;
+        if (rt.shouldSuppressSdlEvent(out)) {
+            traceSdlEvent("SDL_PollEvent suppressed", out, true);
+            continue;
         }
+        traceSdlEvent("SDL_PollEvent delivered", out, false);
+        rt.noteRealSdlEvent(out);
+        return rc;
     }
 }
 
@@ -889,7 +1008,9 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     rt.pollTerminalInput();
 
     if (action != sdl.SDL_GETEVENT or numevents <= 0) {
-        return real_sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+        const rc = real_sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
+        if (events) |out| traceSdlEvents("SDL_PeepEvents observed", out, rc);
+        return rc;
     }
 
     const out = events orelse return real_sdl.SDL_PeepEvents(events, numevents, action, minType, maxType);
@@ -897,12 +1018,14 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     while (emitted < numevents) : (emitted += 1) {
         const idx: usize = @intCast(emitted);
         if (!rt.popSdlInputEventInRange(&out[idx], minType, maxType)) break;
+        traceSdlEvent("SDL_PeepEvents synthetic", &out[idx], false);
     }
 
     if (emitted == numevents) return emitted;
     const rest_ptr = out + @as(usize, @intCast(emitted));
     const real_rc = real_sdl.SDL_PeepEvents(rest_ptr, numevents - emitted, action, minType, maxType);
     if (real_rc < 0) return if (emitted > 0) emitted else real_rc;
+    traceSdlEvents("SDL_PeepEvents delivered", rest_ptr, real_rc);
     return emitted + real_rc;
 }
 
@@ -1062,4 +1185,41 @@ test "Vulkan loader override replaces RetroArch bare dlopen lookup only" {
     try std.testing.expectEqualStrings(versioned, std.mem.span(selectDlopenPath(versioned.ptr, override.ptr).?));
     try std.testing.expectEqualStrings(unrelated, std.mem.span(selectDlopenPath(unrelated.ptr, override.ptr).?));
     try std.testing.expectEqual(@as(?[*:0]const u8, null), selectDlopenPath(null, override.ptr));
+}
+
+test "SDL exit trace helpers name quit and claimed-window events" {
+    var quit_event: sdl.SDL_Event = undefined;
+    quit_event.type = sdl.SDL_QUIT;
+    try std.testing.expect(shouldTraceSdlEvent(&quit_event));
+    try std.testing.expectEqualStrings("quit", sdlEventTraceName(&quit_event));
+
+    var close_event: sdl.SDL_Event = undefined;
+    close_event.window = .{
+        .type = sdl.SDL_WINDOWEVENT,
+        .timestamp = 0,
+        .windowID = 7,
+        .event = sdl.SDL_WINDOWEVENT_CLOSE,
+        .data1 = 0,
+        .data2 = 0,
+    };
+    try std.testing.expect(shouldTraceSdlEvent(&close_event));
+    try std.testing.expectEqualStrings("window.close", sdlEventTraceName(&close_event));
+
+    var key_event: sdl.SDL_Event = undefined;
+    key_event.type = sdl.SDL_KEYDOWN;
+    try std.testing.expect(!shouldTraceSdlEvent(&key_event));
+}
+
+test "SDL close diagnostics identify quit-on-last-window hint" {
+    try std.testing.expect(shouldTraceSdlHint("SDL_QUIT_ON_LAST_WINDOW_CLOSE"));
+    try std.testing.expect(!shouldTraceSdlHint("SDL_RENDER_VSYNC"));
+    try std.testing.expect(!shouldTraceSdlHint(null));
+}
+
+test "SDL close diagnostics track successful window creates and destroys" {
+    try std.testing.expectEqual(@as(i32, 2), nextTrackedSdlWindowCountAfterCreate(@ptrFromInt(0x1000), 1));
+    try std.testing.expectEqual(@as(i32, 1), nextTrackedSdlWindowCountAfterCreate(null, 1));
+    try std.testing.expectEqual(@as(i32, 1), nextTrackedSdlWindowCountAfterDestroy(@ptrFromInt(0x1000), 2));
+    try std.testing.expectEqual(@as(i32, 0), nextTrackedSdlWindowCountAfterDestroy(@ptrFromInt(0x1000), 0));
+    try std.testing.expectEqual(@as(i32, 2), nextTrackedSdlWindowCountAfterDestroy(null, 2));
 }

@@ -70,10 +70,10 @@ For raw bring-up of `basic-sdl-demo` without the launcher, see the README — th
 
 ## Testing
 
-State of play (as of writing): no top-level `zig build test` step and no `tests/` directory. What exists today:
+State of play:
 
-- Python `unittest` scripts under `scripts/katzensteg/` (`test_bootstrap_external_projects.py`, `test_image_fastpath_portable.py`, `test_linux_preload_exports.py`, `test_katzensteg_banner.py`).
-- File-level Zig tests, run ad hoc with `zig test path/to/file.zig -lc` as needed.
+- `zig build test` runs the core file-level Zig unit suites.
+- Python `unittest` scripts live under `scripts/katzensteg/` (`test_bootstrap_external_projects.py`, `test_image_fastpath_portable.py`, `test_linux_preload_exports.py`, `test_katzensteg_banner.py`, and focused smoke/regression tests).
 - External app/bootstrap checks via `scripts/katzensteg/bootstrap_external_projects.py --doctor-only --root ~/dev` plus project-specific build modes.
 
 Test coverage is becoming a focus — agents adding non-trivial logic should add tests rather than rely on real-app iteration.

@@ -6,6 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+extern void ks_katzensteg_log_c(const char *, const char *);
+
+static void ks_log_gl_symbol_failure(const char *name, const char *err) {
+    char message[512];
+    snprintf(message, sizeof(message), "failed to resolve real %s: %s", name, err ? err : "unknown error");
+    ks_katzensteg_log_c("real_gl", message);
+}
+
 static void *ks_gl_symbol(const char *name) {
     dlerror();
     return dlsym(RTLD_NEXT, name);
@@ -15,7 +23,7 @@ static void *ks_required_gl_symbol(const char *name) {
     void *symbol = ks_gl_symbol(name);
     if (!symbol) {
         const char *err = dlerror();
-        fprintf(stderr, "katzensteg: failed to resolve real %s: %s\n", name, err ? err : "unknown error");
+        ks_log_gl_symbol_failure(name, err);
         abort();
     }
     return symbol;

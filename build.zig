@@ -20,6 +20,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
+
     const exe = b.addExecutable(.{
         .name = "ttytris",
         .use_llvm = use_llvm,
@@ -341,4 +343,85 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
+
+    addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-log-test", "src/katzensteg/log.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-render-batch-protocol-test", "src/katzensteg/render_batch_protocol.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-attach-protocol-test", "src/katzensteg/attach_protocol.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+    });
+    addUnitTest(b, test_step, "katzensteg-frame-builder-test", "src/katzensteg/frame_builder.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .link_libc = true,
+    });
+    addUnitTest(b, test_step, "katzensteg-runtime-test", "src/katzensteg/runtime.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .link_libc = true,
+        .link_sdl2 = true,
+    });
+    addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .link_libc = true,
+        .link_sdl2 = true,
+        .link_opengl = true,
+    });
+    addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .link_libc = true,
+    });
+    addUnitTest(b, test_step, "katzensteg-launcher-test", "src/katzensteg/launcher.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+    });
+}
+
+const UnitTestOptions = struct {
+    termscene: ?*std.Build.Module = null,
+    katzensteg_sdl: ?*std.Build.Module = null,
+    link_libc: bool = false,
+    link_sdl2: bool = false,
+    link_opengl: bool = false,
+};
+
+fn addUnitTest(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    name: []const u8,
+    root_source_file: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_llvm: ?bool,
+    options: UnitTestOptions,
+) void {
+    const unit_test = b.addTest(.{
+        .name = name,
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root_source_file),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = options.link_libc,
+        }),
+    });
+    if (options.termscene) |mod| unit_test.root_module.addImport("termscene", mod);
+    if (options.katzensteg_sdl) |mod| unit_test.root_module.addImport("katzensteg_sdl", mod);
+    if (options.link_sdl2) {
+        if (target.result.os.tag == .macos) unit_test.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        unit_test.linkSystemLibrary("SDL2");
+    }
+    if (options.link_opengl) {
+        if (target.result.os.tag == .macos) {
+            unit_test.linkFramework("OpenGL");
+        } else if (target.result.os.tag == .linux) {
+            unit_test.linkSystemLibrary("GL");
+        }
+    }
+    const run_unit_test = b.addRunArtifact(unit_test);
+    test_step.dependOn(&run_unit_test.step);
 }

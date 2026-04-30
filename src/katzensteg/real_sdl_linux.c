@@ -15,12 +15,20 @@ struct SDL_RendererInfo;
 struct SDL_Color;
 union SDL_Event;
 
+extern void ks_katzensteg_log_c(const char *, const char *);
+
+static void ks_log_symbol_failure(const char *name, const char *err) {
+    char message[512];
+    snprintf(message, sizeof(message), "failed to resolve real %s: %s", name, err ? err : "unknown error");
+    ks_katzensteg_log_c("real_sdl", message);
+}
+
 static void *ks_required_symbol(const char *name) {
     dlerror();
     void *symbol = dlsym(RTLD_NEXT, name);
     if (!symbol) {
         const char *err = dlerror();
-        fprintf(stderr, "katzensteg: failed to resolve real %s: %s\n", name, err ? err : "unknown error");
+        ks_log_symbol_failure(name, err);
         abort();
     }
     return symbol;

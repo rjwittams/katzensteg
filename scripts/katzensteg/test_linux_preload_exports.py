@@ -9,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_Init",
     "SDL_InitSubSystem",
+    "SDL_SetHint",
     "SDL_QuitSubSystem",
     "SDL_Quit",
     "SDL_CreateWindow",
@@ -55,6 +56,7 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_GetRelativeMouseState",
     "SDL_UpperBlit",
     "dlopen",
+    "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",
     "ks_katzensteg_present_external_rgba",
 }

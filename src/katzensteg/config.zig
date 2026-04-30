@@ -38,6 +38,7 @@ pub const RuntimeConfig = struct {
     present_fps: u32 = 0,
     input_enabled: bool = true,
     input_claimed: bool = true,
+    input_claim_focus: bool = true,
     gamepad_background: bool = false,
     stats: bool = false,
     image_gc: bool = false,
@@ -75,6 +76,7 @@ pub const runtime_field_metadata = [_]RuntimeFieldMetadata{
     .{ .name = "present_fps", .env_name = "KATZENSTEG_PRESENT_FPS", .mutability = .hot_apply },
     .{ .name = "input", .env_name = "KATZENSTEG_INPUT", .mutability = .hot_apply },
     .{ .name = "input_claim", .env_name = "KATZENSTEG_INPUT_CLAIM", .mutability = .hot_apply },
+    .{ .name = "input_claim_focus", .env_name = "KATZENSTEG_INPUT_CLAIM_FOCUS", .mutability = .hot_apply },
     .{ .name = "gamepad_background", .env_name = "KATZENSTEG_GAMEPAD_BACKGROUND", .mutability = .hot_apply },
     .{ .name = "stats", .env_name = "KATZENSTEG_STATS", .mutability = .hot_apply },
     .{ .name = "image_gc", .env_name = "KATZENSTEG_IMAGE_GC", .mutability = .hot_apply },
@@ -167,6 +169,7 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     }
     applyJsonBool(parsed.value, "input", &config.input_enabled);
     applyJsonBool(parsed.value, "input_claim", &config.input_claimed);
+    applyJsonBool(parsed.value, "input_claim_focus", &config.input_claim_focus);
     applyJsonBool(parsed.value, "gamepad_background", &config.gamepad_background);
     applyJsonBool(parsed.value, "stats", &config.stats);
     applyJsonBool(parsed.value, "image_gc", &config.image_gc);
@@ -254,6 +257,10 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_INPUT_CLAIM")) {
         config.input_claimed = parseEnabledEnvValue(value);
+        return true;
+    }
+    if (std.mem.eql(u8, env_name, "KATZENSTEG_INPUT_CLAIM_FOCUS")) {
+        config.input_claim_focus = parseEnabledEnvValue(value);
         return true;
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_GAMEPAD_BACKGROUND")) {
@@ -445,6 +452,10 @@ test "runtime field metadata describes env names and mutability" {
     try std.testing.expectEqualStrings("KATZENSTEG_PRESENT_FPS", present_fps.env_name.?);
     try std.testing.expectEqual(Mutability.hot_apply, present_fps.mutability);
 
+    const input_claim_focus = getRuntimeFieldMetadata("input_claim_focus").?;
+    try std.testing.expectEqualStrings("KATZENSTEG_INPUT_CLAIM_FOCUS", input_claim_focus.env_name.?);
+    try std.testing.expectEqual(Mutability.hot_apply, input_claim_focus.mutability);
+
     try std.testing.expect(getRuntimeFieldMetadata("missing") == null);
 }
 
@@ -453,6 +464,7 @@ test "runtime config JSON parses extended env-compatible fields" {
         \\{
         \\  "input": false,
         \\  "input_claim": false,
+        \\  "input_claim_focus": false,
         \\  "gamepad_background": true,
         \\  "stats": true,
         \\  "image_gc": true,
@@ -471,6 +483,7 @@ test "runtime config JSON parses extended env-compatible fields" {
 
     try std.testing.expect(!config.input_enabled);
     try std.testing.expect(!config.input_claimed);
+    try std.testing.expect(!config.input_claim_focus);
     try std.testing.expect(config.gamepad_background);
     try std.testing.expect(config.stats);
     try std.testing.expect(config.image_gc);
@@ -504,12 +517,14 @@ test "runtime config env values override extended fields" {
     var config = RuntimeConfig{};
 
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_INPUT", "0"));
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_INPUT_CLAIM_FOCUS", "0"));
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "direct_apc"));
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_FILE_TRANSPORT_MAX_BYTES", "8192"));
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_GL_CAPTURE", "async"));
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_VULKAN_CAPTURE", "1"));
 
     try std.testing.expect(!config.input_enabled);
+    try std.testing.expect(!config.input_claim_focus);
     try std.testing.expectEqual(OutputProfile.direct_apc, config.output_profile.?);
     try std.testing.expectEqual(@as(u64, 8192), config.file_transport_max_bytes);
     try std.testing.expectEqual(GlCaptureMode.pbo, config.gl_capture);
