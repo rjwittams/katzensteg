@@ -58,10 +58,16 @@ pub const DetachMessage = struct {
     window_id: []const u8,
 };
 
+pub const InputMessage = struct {
+    window_id: []const u8,
+    bytes: []const u8,
+};
+
 pub const ControlMessage = union(enum) {
     attach: AttachMessage,
     viewport: ViewportMessage,
     detach: DetachMessage,
+    input: InputMessage,
     shutdown,
 };
 
@@ -128,6 +134,7 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
         .attach => |attach| return attach,
         .viewport => return error.InvalidMessage,
         .detach => return error.InvalidMessage,
+        .input => return error.InvalidMessage,
         .shutdown => return error.InvalidMessage,
     }
 }
@@ -150,6 +157,17 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 
     if (std.mem.eql(u8, type_value.string, "detach")) {
         return .{ .detach = .{ .window_id = "main" } };
+    }
+
+    if (std.mem.eql(u8, type_value.string, "input")) {
+        const event_value = root.get("event") orelse return error.InvalidMessage;
+        if (event_value != .string or !std.mem.eql(u8, event_value.string, "terminal_bytes")) return error.InvalidMessage;
+        const bytes_value = root.get("bytes") orelse return error.InvalidMessage;
+        if (bytes_value != .string) return error.InvalidMessage;
+        return .{ .input = .{
+            .window_id = "main",
+            .bytes = try allocator.dupe(u8, bytes_value.string),
+        } };
     }
 
     const rect = try parseRect(root.get("rect_cells") orelse return error.InvalidMessage);
@@ -191,6 +209,10 @@ pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage)
 pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessage) void {
     switch (control.*) {
         .attach => |*attach| deinitAttachMessage(allocator, attach),
+        .input => |*input| {
+            allocator.free(input.bytes);
+            input.bytes = "";
+        },
         .viewport, .detach => {},
         .shutdown => {},
     }
@@ -349,6 +371,15 @@ test "control message parses viewport geometry without id ranges" {
     try std.testing.expectEqualStrings("main", viewport.window_id);
     try std.testing.expectEqual(PresentationAspect.cover, viewport.aspect);
     try std.testing.expectEqual(PresentationRectCells{ .row = 6, .col = 10, .rows = 20, .cols = 64 }, viewport.rect_cells);
+}
+
+test "control message parses terminal input bytes" {
+    var control = try parseControlMessage(std.testing.allocator, "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":\"\\u001b[<35;11;6M\"}");
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    const input = control.input;
+    try std.testing.expectEqualStrings("main", input.window_id);
+    try std.testing.expectEqualStrings("\x1b[<35;11;6M", input.bytes);
 }
 
 test "control message parses detach" {

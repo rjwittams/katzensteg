@@ -75,6 +75,7 @@ Current constraints:
 - `upload.profile` may be `direct_apc`, `file_whole`, or `file_offset_ring`. `direct_apc` needs no path. File upload modes require `path`, and that path must be visible to both the producer process and the terminal host.
 - Unknown or non-`frame_batch` producer messages should be ignored by a minimal host.
 - After `attach`, send `viewport` to change geometry or aspect without changing id ranges or upload policy. The runtime may emit deletes for old placements before using the new viewport.
+- Send `input` with `event: "terminal_bytes"` to forward host terminal input to the producer. Mouse escape sequences use absolute terminal cell coordinates; the runtime maps them through the presentation layout that produced the current placements.
 - Send `detach` to remove known visible placements and stop receiving future graphics batches while keeping the producer process alive. A later `attach` re-enables presentation. The runtime replies with `detached` when the delete/cleanup work has been emitted.
 - Send `shutdown` to end the producer session. This performs detach-style cleanup first, then the launcher terminates the target process if it does not exit on its own.
 

@@ -2,12 +2,14 @@ const std = @import("std");
 const attach_host = @import("attach_host.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const wm_host = @import("wm_host.zig");
 
 const Command = enum {
     help,
     menu,
     run,
     attach,
+    wm,
     unknown,
 };
 
@@ -15,6 +17,10 @@ const AttachArgs = struct {
     exec_argv: []const []const u8,
     rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null,
     aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit,
+};
+
+const WmArgs = struct {
+    profile_name: []const u8,
 };
 
 const ExpansionContext = struct {
@@ -175,6 +181,14 @@ pub fn main() !void {
             });
             std.process.exit(exit_code);
         },
+        .wm => {
+            const wm = parseWmArgs(args) orelse {
+                std.debug.print("{s}", .{usageText()});
+                std.process.exit(64);
+            };
+            const exit_code = try wm_host.runProfile(allocator, wm.profile_name);
+            std.process.exit(exit_code);
+        },
         .unknown => {
             std.debug.print("{s}", .{usageText()});
             std.process.exit(64);
@@ -188,6 +202,7 @@ fn usageText() []const u8 {
         \\  katzensteg --help
         \\  katzensteg [options] <target>
         \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
+        \\  katzensteg wm <target>
         \\  katzensteg
         \\
         \\Options:
@@ -214,8 +229,16 @@ fn parseCommand(args: []const []const u8) Command {
     if (args.len <= 1) return .menu;
     if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
     if (std.mem.eql(u8, args[1], "attach")) return if (parseAttachArgs(args) != null) .attach else .unknown;
+    if (std.mem.eql(u8, args[1], "wm")) return if (parseWmArgs(args) != null) .wm else .unknown;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
+}
+
+fn parseWmArgs(args: []const []const u8) ?WmArgs {
+    if (args.len != 3) return null;
+    if (!std.mem.eql(u8, args[1], "wm")) return null;
+    if (std.mem.startsWith(u8, args[2], "-")) return null;
+    return .{ .profile_name = args[2] };
 }
 
 fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
@@ -1723,6 +1746,19 @@ test "launcher command parser recognizes embed jsonl before target" {
     try std.testing.expectEqual(Command.run, parseCommand(args));
     try std.testing.expectEqualStrings("probe.embed.basic_sdl", targetArg(args).?);
     try std.testing.expect(launcherEmbedJsonl(args));
+}
+
+test "launcher command parser recognizes wm profile target" {
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }));
+}
+
+test "launcher rejects wm without a profile target" {
+    try std.testing.expectEqual(Command.unknown, parseCommand(&.{ "katzensteg", "wm" }));
+}
+
+test "launcher parses wm target" {
+    const wm = parseWmArgs(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }).?;
+    try std.testing.expectEqualStrings("probe.embed.basic_sdl", wm.profile_name);
 }
 
 test "launcher parses attach exec argv command" {

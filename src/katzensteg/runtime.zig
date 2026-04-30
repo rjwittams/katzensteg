@@ -122,6 +122,7 @@ pub const Runtime = struct {
     batch_control: ?std.fs.File = null,
     batch_control_line: std.ArrayList(u8),
     batch_sink: ?RenderBatchSink = null,
+    batch_presentation_reset_pending: bool = false,
     frame_builder: FrameBuilder,
     cursor_state: cursor_mod.State,
     bg_only: bool = false,
@@ -253,7 +254,6 @@ pub const Runtime = struct {
             runtime.active = true;
             runtime.output_profile_name = "jsonl_fd";
             runtime.file_transport_enabled = false;
-            runtime.input_enabled = false;
             log.info("runtime initialized in JSONL fd presentation mode", .{});
             return runtime;
         }
@@ -428,6 +428,8 @@ pub const Runtime = struct {
         self.batch_control = std.fs.File{ .handle = @intCast(control_fd) };
         setNonblocking(self.batch_control.?.handle);
         self.batch_sink = RenderBatchSink.init(self.allocator, "main");
+        self.input_enabled = true;
+        self.input_parser = input_mod.TerminalInputParser.init(self.allocator);
     }
 
     pub fn noteProducerTime(self: *Runtime, kind: ProducerStatKind, duration_ns: u64) void {
@@ -488,6 +490,7 @@ pub const Runtime = struct {
 
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
+        self.pollBatchControl();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
         return parser.mouseState();
@@ -495,6 +498,7 @@ pub const Runtime = struct {
 
     pub fn terminalRelativeMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
+        self.pollBatchControl();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
         return self.relative_mouse_baseline.snap(parser.mouseState());
@@ -529,6 +533,15 @@ pub const Runtime = struct {
     }
 
     pub fn shouldCaptureExternalFrame(self: *Runtime) bool {
+        if (self.active and self.batch_sink != null and self.batch_writer != null) {
+            self.pollBatchControl();
+            if (!self.batch_sink.?.isAttached()) return false;
+            if (!self.terminalRenderingEnabled()) {
+                self.notePresentationLayout(.{});
+                return false;
+            }
+            return self.shouldPresent();
+        }
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return false;
         if (!self.terminalRenderingEnabled()) {
             self.notePresentationLayout(.{});
@@ -538,6 +551,17 @@ pub const Runtime = struct {
     }
 
     pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+        if (self.active and self.batch_sink != null and self.batch_writer != null) {
+            const start_ns = std.time.nanoTimestamp();
+            self.queuePendingBatchPresentationReset();
+            self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, self.batch_writer.?.deprecatedWriter());
+            var virtual_tty = self.batchVirtualTty();
+            const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
+            self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
+            const duration = std.time.nanoTimestamp() - start_ns;
+            self.notePresentDuration(duration);
+            return;
+        }
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
         const start_ns = std.time.nanoTimestamp();
         self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
@@ -564,7 +588,10 @@ pub const Runtime = struct {
             return;
         };
         defer job.deinit(self.allocator);
+        self.queuePendingBatchPresentationReset();
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
+        const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
+        self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
     }
@@ -580,6 +607,15 @@ pub const Runtime = struct {
     }
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
+        if (self.batch_sink) |*sink| {
+            const rect = sink.presentationRect();
+            var tty: DirectTty = undefined;
+            tty.cols = @intCast(@max(1, rect.cols));
+            tty.rows = @intCast(@max(1, rect.rows));
+            tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
+            tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+            return self.frame_builder.externalFramebufferUploadSize(&tty, source_w, source_h);
+        }
         const tty = &(self.tty orelse return .{ .w = source_w, .h = source_h });
         return self.frame_builder.externalFramebufferUploadSize(tty, source_w, source_h);
     }
@@ -602,7 +638,7 @@ pub const Runtime = struct {
         parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, self.presentation_layout));
     }
 
-    fn pollBatchControl(self: *Runtime) void {
+    pub fn pollBatchControl(self: *Runtime) void {
         const file = &(self.batch_control orelse return);
         var buf: [1024]u8 = undefined;
         while (true) {
@@ -659,6 +695,7 @@ pub const Runtime = struct {
                 self.frame_builder.setImageIdRange(attach.image_ids);
                 self.frame_builder.setCompositePlacementIdRange(attach.placement_ids);
                 const applied = sink.presentationRect();
+                self.updateBatchInputTarget(sink);
                 log.info(
                     "batch attach applied rect=({d},{d} {d}x{d}) aspect={s}",
                     .{ applied.row, applied.col, applied.cols, applied.rows, @tagName(sink.presentationAspect()) },
@@ -690,17 +727,23 @@ pub const Runtime = struct {
                         @tagName(viewport.aspect),
                     },
                 );
-                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect) {
-                    if (self.batch_writer) |writer| {
-                        self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
-                    }
-                }
+                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect) self.batch_presentation_reset_pending = true;
                 sink.viewport(viewport.rect_cells, viewport.aspect);
                 const applied = sink.presentationRect();
+                self.updateBatchInputTarget(sink);
                 log.info(
                     "batch viewport applied rect=({d},{d} {d}x{d}) aspect={s}",
                     .{ applied.row, applied.col, applied.cols, applied.rows, @tagName(sink.presentationAspect()) },
                 );
+            },
+            .input => |input| {
+                if (!self.input_enabled) return;
+                var parser = &(self.input_parser orelse return);
+                parser.feed(input.bytes) catch |err| {
+                    log.warn("batch input parse failed: {any}", .{err});
+                    return;
+                };
+                if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             },
             .detach => {
                 self.detachBatchWindow(sink, "main");
@@ -735,6 +778,52 @@ pub const Runtime = struct {
         tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
         tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
         return tty;
+    }
+
+    fn queuePendingBatchPresentationReset(self: *Runtime) void {
+        if (!self.batch_presentation_reset_pending) return;
+        const sink = &(self.batch_sink orelse return);
+        self.frame_builder.queueBatchDeletesForPresentationReset(&self.logger, sink);
+        self.batch_presentation_reset_pending = false;
+    }
+
+    fn updateBatchInputTarget(self: *Runtime, sink: *const RenderBatchSink) void {
+        var layout = presentation_layout_mod.PresentationLayout{};
+        const rect = sink.presentationRect();
+        layout.setSingleSdlRegion(.{
+            .kind = .sdl_window,
+            .tty_rect = .{ .col = 1, .row = 1, .w = rect.cols, .h = rect.rows },
+            .sdl_rect = .{ .x = 0, .y = 0, .w = self.input_window_w, .h = self.input_window_h },
+            .z = 0,
+        });
+        self.updateBatchInputTargetFromLayout(sink, layout);
+    }
+
+    fn updateBatchInputTargetFromLayout(self: *Runtime, sink: *const RenderBatchSink, relative_layout: presentation_layout_mod.PresentationLayout) void {
+        var parser = &(self.input_parser orelse return);
+        const rect = sink.presentationRect();
+        var layout = presentation_layout_mod.PresentationLayout{};
+        for (relative_layout.regions[0..relative_layout.len]) |region| {
+            var translated = region;
+            translated.tty_rect.col += rect.col - 1;
+            translated.tty_rect.row += rect.row - 1;
+            layout.addRegion(translated);
+        }
+        if (layout.len == 0) {
+            layout.setSingleSdlRegion(.{
+                .kind = .sdl_window,
+                .tty_rect = .{ .col = rect.col, .row = rect.row, .w = rect.cols, .h = rect.rows },
+                .sdl_rect = .{ .x = 0, .y = 0, .w = self.input_window_w, .h = self.input_window_h },
+                .z = 0,
+            });
+        }
+        parser.setTarget(.{
+            .cols = @max(1, rect.col + rect.cols - 1),
+            .rows = @max(1, rect.row + rect.rows - 1),
+            .w = self.input_window_w,
+            .h = self.input_window_h,
+            .layout = layout,
+        });
     }
 
     fn maybeReportProducerStats(self: *Runtime) void {
@@ -963,6 +1052,64 @@ test "sync dispatch recycles cloned external framebuffer payload" {
     try std.testing.expectEqual(@as(usize, pixels.len), runtime.payload_pool.bytes);
 }
 
+test "batch input terminal bytes map through attached rect" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+    runtime.input_window_w = 320;
+    runtime.input_window_h = 240;
+
+    runtime.processBatchControlLine("{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":6,\"col\":11,\"rows\":30,\"cols\":80},\"aspect\":\"fit\",\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}");
+    runtime.processBatchControlLine("{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":\"\\u001b[<35;11;6M\"}");
+
+    try std.testing.expectEqual(@as(usize, 1), runtime.input_parser.?.target.layout.len);
+    try std.testing.expectEqual(presentation_layout_mod.CellRect{ .col = 11, .row = 6, .w = 80, .h = 30 }, runtime.input_parser.?.target.layout.regions[0].tty_rect);
+    try std.testing.expectEqual(@as(usize, 1), runtime.input_parser.?.pendingCount());
+}
+
+test "batch viewport marks presentation reset pending without immediate flush" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+
+    runtime.processBatchControlLine("{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":6,\"col\":11,\"rows\":30,\"cols\":80},\"aspect\":\"fit\",\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}");
+    runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":7,\"col\":12,\"rows\":28,\"cols\":76},\"aspect\":\"fit\"}");
+
+    try std.testing.expect(runtime.batch_presentation_reset_pending);
+    try std.testing.expect(runtime.batch_sink.?.hasPendingBytes() == false);
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 12, .rows = 28, .cols = 76 }, runtime.batch_sink.?.presentationRect());
+}
+
+test "batch input poll drains control pipe before SDL event reads" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    runtime.batch_control = .{ .handle = pipe[0] };
+    setNonblocking(runtime.batch_control.?.handle);
+    const control_writer = std.fs.File{ .handle = pipe[1] };
+    defer control_writer.close();
+
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+    runtime.input_window_w = 320;
+    runtime.input_window_h = 240;
+
+    try control_writer.writeAll(
+        "{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":6,\"col\":11,\"rows\":30,\"cols\":80},\"aspect\":\"fit\",\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}\n" ++
+            "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":\"\\u001b[<35;11;6M\"}\n",
+    );
+
+    runtime.pollBatchControl();
+    try std.testing.expectEqual(@as(usize, 1), runtime.input_parser.?.pendingCount());
+}
 fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_layout_mod.PresentationLayout) input_mod.Target {
     return .{
         .cols = tty.cols,

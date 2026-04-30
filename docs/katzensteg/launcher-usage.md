@@ -72,6 +72,8 @@ In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSO
 
 The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. After attach, the host may send `viewport` to resize or move the presentation rect, or `detach` to remove known placements and suppress future batches while the producer keeps running. `detach` is acknowledged with `{"type":"detached","window_id":"main"}` after cleanup output has been emitted. To close the whole producer session, the host sends `{"type":"shutdown"}` and keeps reading stdout until cleanup/lifecycle output drains or the process exits. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
 
+Hosts may forward input with `{"type":"input","window_id":"main","event":"terminal_bytes","bytes":"..."}`. The first WM implementation forwards non-command terminal bytes directly. Mouse escape sequences keep their absolute terminal cell coordinates; the runtime maps those cells through the current presentation layout back to SDL coordinates.
+
 ## Attach Host Mode
 
 `attach` is the terminal-owning host for a stdio JSONL peer. The peer command is argv-only and starts after `--`:
@@ -84,6 +86,33 @@ The first control message that enables graphics is an `attach` for `window_id: "
 The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. `--rect x,y,w,h` uses 1-based terminal cells and maps to `col,row,cols,rows`; `--aspect` accepts `fit`, `stretch`, or `cover`. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
 
 This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
+
+## WM Host Mode
+
+`wm` is the first interactive host/compositor for the same JSONL embed path:
+
+```sh
+./zig-out/bin/katzensteg wm probe.embed.basic_sdl
+```
+
+The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches the selected profile through `katzensteg --embed-jsonl`, sends `attach` for the inner content rectangle, and applies producer `frame_batch` output inside that rectangle. The producer does not own the title bar, borders, status/debug areas, layout, or window lifecycle policy.
+
+The status band is host-owned and stays outside the producer content rect. It currently shows the selected upload profile, outer window geometry, inner content geometry, and the last WM protocol event such as launch, attach, viewport, shutdown, or producer exit.
+
+Current controls:
+
+- `q`: send `shutdown`, drain producer output, restore the terminal
+- `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`
+- `H` / `J` / `K` / `L`: resize narrower/shorter/taller/wider and send `viewport`
+
+This is intentionally still early. Multi-producer focus, close-vs-detach policy, richer debug UI, and alternate text themes are follow-up work.
+
+Current WM smoke notes:
+
+- `sonic`, `smw`, and `sm64ds` work through the current JSONL SDL renderer path.
+- `mi2` exercises the SDL sprite/scene path rather than only the full-frame path; batch scene placements are expected to be translated into the WM content rect.
+- `jsr` uses the Vulkan/external-framebuffer path. That path now routes through the JSONL batch presenter in `wm`, but still needs real-profile smoke because it depends on the platform Vulkan layer and RetroArch/Flycast behavior.
+- Producer input is wired through `wm` as terminal-byte input for the focused single producer. WM command keys remain host-owned, and mouse input is forwarded only when the terminal event lands inside the producer content rect.
 
 ## Current Smoke Status
 
