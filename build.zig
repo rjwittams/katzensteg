@@ -312,6 +312,22 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_gl_probe);
 
+    const luchs = b.addExecutable(.{
+        .name = "luchs",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/luchs/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    luchs.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    if (is_macos) luchs.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    luchs.linkSystemLibrary("SDL2");
+    const install_luchs = b.addInstallArtifact(luchs, .{});
+    b.getInstallStep().dependOn(&install_luchs.step);
+
     if (enable_vulkan) {
         const katzensteg_vulkan_layer = b.addLibrary(.{
             .linkage = .dynamic,
@@ -465,6 +481,9 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
+
+    const luchs_build_step = b.step("luchs", "Build the SDL-backed web fragment viewer");
+    luchs_build_step.dependOn(&install_luchs.step);
 
     addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});
