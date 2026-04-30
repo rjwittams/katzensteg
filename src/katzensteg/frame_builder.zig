@@ -515,7 +515,7 @@ pub const FrameBuilder = struct {
         }
         if (pixels == null) return;
         self.captureTexturePixelsIntoRecord(record, @ptrCast(@constCast(pixels.?)), pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
             error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
         };
     }
@@ -3465,8 +3465,8 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2000);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+    const renderer: core.CoreHandle = 0x2000;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3495,8 +3495,8 @@ test "frame builder detach flushes known batch placements and suppresses future 
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2100);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+    const renderer: core.CoreHandle = 0x2100;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3533,8 +3533,8 @@ test "frame builder batch placement contains source inside attached rect" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2001);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2001;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3562,8 +3562,8 @@ test "frame builder batch placement stretches source to attached rect" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2002);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2002;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3591,8 +3591,8 @@ test "frame builder batch placement covers attached rect by cropping source" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2003);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2003;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();

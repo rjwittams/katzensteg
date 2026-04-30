@@ -118,6 +118,10 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             rt.frame_builder.onRenderSetClipRect(c.renderer, if (rect) |*r| r else null);
         },
         .render_present => |c| {
+            if (rt.batch_sink != null) {
+                rt.renderBatchPresent(c.renderer);
+                return;
+            }
             if (rt.active and rt.tty != null and rt.engine != null and rt.backend != null and rt.shouldPresent()) {
                 if (!rt.terminalRenderingEnabled()) {
                     rt.notePresentationLayout(.{});

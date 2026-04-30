@@ -1,3 +1,4 @@
+const std = @import("std");
 const runtime = @import("runtime.zig");
 const frame_builder = @import("frame_builder.zig");
 const log_mod = @import("log.zig");

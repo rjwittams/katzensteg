@@ -544,6 +544,7 @@ pub const Runtime = struct {
     pub fn renderBatchPresent(self: *Runtime, renderer: core.CoreHandle) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
         self.pollBatchControl();
+        self.waitForInitialBatchAttach();
         if (!self.shouldPresent()) return;
         if (!self.terminalRenderingEnabled()) {
             self.notePresentationLayout(.{});
@@ -561,6 +562,16 @@ pub const Runtime = struct {
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
+    }
+
+    fn waitForInitialBatchAttach(self: *Runtime) void {
+        if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
+        const deadline = std.time.nanoTimestamp() + 100 * std.time.ns_per_ms;
+        while (std.time.nanoTimestamp() < deadline) {
+            std.Thread.sleep(std.time.ns_per_ms);
+            self.pollBatchControl();
+            if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
+        }
     }
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
