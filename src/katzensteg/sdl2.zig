@@ -154,6 +154,7 @@ pub const SDL_BLENDMODE_MUL: c_int = 0x00000008;
 pub const SDL_FLIP_NONE: c_int = 0x00000000;
 pub const SDL_RELEASED: Uint8 = 0;
 pub const SDL_PRESSED: Uint8 = 1;
+pub const SDL_QUIT: Uint32 = 0x100;
 pub const SDL_KEYDOWN: Uint32 = 0x300;
 pub const SDL_KEYUP: Uint32 = 0x301;
 pub const SDL_TEXTINPUT: Uint32 = 0x303;
@@ -168,6 +169,7 @@ pub const SDL_WINDOWEVENT_ENTER: Uint8 = 10;
 pub const SDL_WINDOWEVENT_LEAVE: Uint8 = 11;
 pub const SDL_WINDOWEVENT_FOCUS_GAINED: Uint8 = 12;
 pub const SDL_WINDOWEVENT_FOCUS_LOST: Uint8 = 13;
+pub const SDL_WINDOWEVENT_CLOSE: Uint8 = 14;
 pub const SDL_WINDOW_INPUT_FOCUS: Uint32 = 0x00000200;
 pub const SDL_WINDOW_MOUSE_FOCUS: Uint32 = 0x00000400;
 

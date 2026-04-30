@@ -18,7 +18,9 @@ fn formatStdLogLineInto(buffer: []u8, comptime level: std.log.Level, comptime sc
 }
 
 pub fn formatStdLogLineForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), message: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "katzensteg: " ++ levelName(level) ++ "(" ++ @tagName(scope) ++ "): {s}", .{message});
+    var line_buf: [1280]u8 = undefined;
+    const line = try formatStdLogLineInto(&line_buf, level, scope, message);
+    return allocator.dupe(u8, line);
 }
 
 pub fn formatStdLogMessageForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime format: []const u8, args: anytype) ![]u8 {
@@ -32,6 +34,19 @@ pub fn stdLogFn(comptime level: std.log.Level, comptime scope: @Type(.enum_liter
     const message = std.fmt.bufPrint(&message_buf, format, args) catch return;
     var line_buf: [1280]u8 = undefined;
     const line = formatStdLogLineInto(&line_buf, level, scope, message) catch return;
+    writeLine(line);
+}
+
+pub fn writeCLog(scope: []const u8, message: []const u8) void {
+    if (std.mem.eql(u8, scope, "real_sdl")) return writeCLogScoped(.real_sdl, message);
+    if (std.mem.eql(u8, scope, "real_gl")) return writeCLogScoped(.real_gl, message);
+    if (std.mem.eql(u8, scope, "vulkan")) return writeCLogScoped(.vulkan, message);
+    writeCLogScoped(.c, message);
+}
+
+fn writeCLogScoped(comptime scope: @Type(.enum_literal), message: []const u8) void {
+    var line_buf: [1280]u8 = undefined;
+    const line = formatStdLogLineInto(&line_buf, .warn, scope, message) catch return;
     writeLine(line);
 }
 
@@ -161,4 +176,18 @@ test "scoped once formatting uses central prefix" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("katzensteg: warn(frame_builder): unsupported geometry", line);
+}
+
+test "C log adapter uses central file prefix" {
+    const line = try formatStdLogLineForTest(std.testing.allocator, .warn, .real_sdl, "failed");
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("katzensteg: warn(real_sdl): failed", line);
+}
+
+test "C log adapter maps unknown scopes to static fallback scope" {
+    const line = try formatStdLogLineForTest(std.testing.allocator, .warn, .c, "failed");
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("katzensteg: warn(c): failed", line);
 }
