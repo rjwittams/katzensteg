@@ -327,6 +327,17 @@ pub fn build(b: *std.Build) void {
     luchs.linkSystemLibrary("SDL2");
     const install_luchs = b.addInstallArtifact(luchs, .{});
     b.getInstallStep().dependOn(&install_luchs.step);
+    var install_luchs_helper_step: ?*std.Build.Step = null;
+    if (is_macos and builtin.os.tag == .macos) {
+        const luchs_helper_cmd = b.addSystemCommand(&.{"swiftc"});
+        luchs_helper_cmd.addArgs(&.{ "-O", "-parse-as-library", "-framework", "Cocoa", "-framework", "WebKit" });
+        luchs_helper_cmd.addFileArg(b.path("tools/luchs/native/macos/LuchsWebviewCapture.swift"));
+        luchs_helper_cmd.addArg("-o");
+        const luchs_helper_bin = luchs_helper_cmd.addOutputFileArg("luchs-webview-capture");
+        const install_luchs_helper = b.addInstallBinFile(luchs_helper_bin, "luchs-webview-capture");
+        install_luchs_helper_step = &install_luchs_helper.step;
+        b.getInstallStep().dependOn(&install_luchs_helper.step);
+    }
 
     if (enable_vulkan) {
         const katzensteg_vulkan_layer = b.addLibrary(.{
@@ -484,6 +495,7 @@ pub fn build(b: *std.Build) void {
 
     const luchs_build_step = b.step("luchs", "Build the SDL-backed web fragment viewer");
     luchs_build_step.dependOn(&install_luchs.step);
+    if (install_luchs_helper_step) |step| luchs_build_step.dependOn(step);
 
     addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});

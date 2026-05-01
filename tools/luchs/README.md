@@ -2,18 +2,25 @@
 
 `luchs` is an SDL-backed local HTML fragment viewer for Katzensteg experiments.
 
-First slice:
+Current slice:
 
 ```bash
 luchs path/to/fragment.html
 ```
 
-The initial implementation presents through SDL so Katzensteg can intercept it like any other SDL workload. Browser/CDP frame capture will be layered in after the SDL presentation skeleton is working.
+The current executable presents a synthetic frame source through SDL so Katzensteg can intercept it like any other SDL workload. This keeps `luchs` useful outside a terminal as a real window while giving Katzensteg an immediate capture path.
 
-The CDP helper lives under `tools/luchs/cdp/`. It uses an installed Chromium-family browser rather than building or bundling Chromium.
+The next renderer backend is native WebView, not Chromium/CDP. On macOS that means a `WKWebView` helper that emits raw BGRA/RGBA frames to the SDL presenter. Linux can follow with WebKitGTK when the dependency is available.
+
+The intended internal split is:
+
+- renderer backend: test pattern now, native WebView next
+- presenter backend: SDL now, direct Katzensteg core later
+
+On macOS:
 
 ```bash
-node tools/luchs/cdp/luchs-cdp.mjs tools/luchs/testdata/static.html > /tmp/luchs-frame.bin
+luchs --renderer=native-webview path/to/fragment.html
 ```
 
-Set `LUCHS_BROWSER=/path/to/chrome` when browser discovery is not enough.
+The helper binary is installed next to `luchs` as `luchs-webview-capture`. It writes a single `LUCHS_RAW_FRAME` header plus raw RGBA bytes to stdout; `luchs` consumes that pipe internally and keeps helper stderr away from the terminal render stream.

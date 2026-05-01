@@ -2,52 +2,77 @@
 
 ## Goal
 
-`luchs` is a small SDL-backed viewer for local web fragments. The first slice loads one HTML file, renders it through an installed Chromium-family browser using the Chrome DevTools Protocol, copies captured frames into an SDL2 texture, and lets Katzensteg intercept and present that SDL output.
+`luchs` is a local visual fragment viewer that can render HTML first, and later broader fragment types, into a surface Katzensteg can display. It should also remain useful outside a terminal by presenting to a normal window when Katzensteg is not involved.
 
-The name is intentionally broader than "webview" so the tool can later become a generic visual viewer for HTML, images, Markdown, SVG, or agent-authored fragments.
+The name is intentionally broader than "webview" so the tool can later become a generic viewer for HTML, images, Markdown, SVG, or agent-authored fragments.
+
+## Direction
+
+`luchs` should be split internally into a renderer backend and a presenter backend.
+
+Renderer backends produce raw frames and input/event hooks:
+
+- `test-pattern`: current bring-up renderer, useful for SDL/Katzensteg smoke tests.
+- `native-webview`: macOS `WKWebView` helper process first, producing raw RGBA frames.
+- Future Linux WebKitGTK renderer when dependencies and snapshot mechanics are settled.
+
+Presenter backends consume raw frames:
+
+- `sdl`: first presenter. It creates a normal SDL window, uploads frames to an SDL texture, and calls `SDL_RenderPresent`. Katzensteg can intercept this today through the SDL adapter, and the tool still works as a real window without Katzensteg.
+- `katzensteg-core`: future presenter. This should call a proper app-facing Katzensteg API once the core can initialize outside preload, select a presentation sink, and batch/embed external framebuffers.
+
+This split lets `luchs` drive the evolution of Katzensteg core without blocking the immediate viewer on that API work.
+
+## Why Not CDP
+
+CDP screenshot and screencast APIs deliver encoded images, usually base64 PNG/JPEG frames. A per-frame PNG loop would force browser encode, helper decode, SDL upload, and terminal encode/composition. That path is useful for one-shot screenshots, but it does not prove the architecture we want for an interactive viewer.
+
+Building or bundling Chromium is also intentionally out of scope. If Chromium becomes interesting later, it should be through a deeper native embedding path, not a JavaScript bridge plus screenshot stream.
 
 ## First Slice
 
-The first command is:
+The first command remains:
 
 ```bash
 luchs path/to/fragment.html
 ```
 
-It should:
+Current behavior presents a synthetic SDL frame source. The next useful slice is:
 
-- resolve a local HTML file path
-- start or connect to a prebuilt/system Chromium-family browser through CDP
-- load the file into a page
-- capture page frames at a conservative fixed size and frame rate
-- decode frame pixels into RGBA/BGRA memory
-- update one SDL2 texture
-- present through SDL2 so Katzensteg can capture it through the existing SDL hook path
+```bash
+luchs --renderer=native-webview path/to/fragment.html
+```
 
-The first slice does not need a manifest, persistent stdio protocol, DOM event forwarding, hot reload, or browser selection UI.
+That should load one local HTML file through the native WebView backend and stream raw frames into the SDL presenter.
 
-## Architecture
-
-`tools/luchs/` owns the viewer. It should be independent of the Katzensteg preload runtime and depend on Katzensteg only by using SDL2 as the presentation boundary.
-
-The first implementation can use a small Node control process for CDP because Glimpse already proves this shape is practical: JSON-ish command/control around native or browser-backed UI without building Chromium. `luchs` should use an installed Chromium-family browser or an explicitly configured executable path. It must not require building Chromium.
-
-The SDL presenter can be implemented in Zig so it fits the repository's build system and existing SDL bindings. A thin CDP helper can stream captured frames to the presenter over stdout or a pipe. If using PNG screenshots first, the presenter decodes PNG into RGBA before uploading to SDL. This is simpler than trying to extract native WebView snapshots cross-platform in the initial proof.
+The first native WebView slice does not need a manifest, persistent stdio protocol, DOM event forwarding, hot reload, browser selection UI, or a direct Katzensteg core presenter.
 
 ## Data Flow
 
 ```text
 HTML file
-  -> luchs CDP helper
-  -> Chromium page
-  -> screenshot/frame capture
-  -> decoded RGBA/BGRA frame
-  -> SDL_UpdateTexture / SDL_RenderPresent
-  -> Katzensteg SDL interposer
-  -> terminal direct-tty or embed presentation
+  -> native WebView helper
+  -> LUCHS_RAW_FRAME header + raw RGBA bytes
+  -> presenter backend
+       -> SDL texture + SDL_RenderPresent now
+       -> Katzensteg core external framebuffer API later
+  -> Katzensteg SDL interposer or future core presenter
+  -> terminal direct-tty / embed / future sinks
 ```
 
-The first slice can tolerate extra copies. Correctness and proof value matter more than frame-rate efficiency. Frame cadence should be capped, for example at 15-30 FPS, so the terminal upload path is not overwhelmed by mostly-static web UI frames.
+## Katzensteg Core Evolution
+
+The merged core split is a useful foundation, but the current exported external framebuffer functions still assume the existing terminal runtime. They require active tty, scene engine, and kitty backend state, and external framebuffer presentation does not yet have the batch/embed path that renderer presents have.
+
+For a direct `luchs -> libkatzensteg-core` presenter, core needs:
+
+- explicit runtime initialization for non-preload tools
+- presentation sink selection, including direct tty and batch/embed sinks
+- external framebuffer presentation through batch/embed
+- lifecycle/shutdown hooks for an owning application
+- input and resize routing that does not assume SDL interposition
+
+Until those exist, SDL is the practical presenter boundary.
 
 ## App Channel
 
@@ -65,48 +90,32 @@ Reserved envelope names:
 
 ## Input And Interactivity
 
-The first slice may be view-only. If input is added early, it should use the existing SDL event path:
+The first native WebView slice may be view-only. If input is added early, it should use the SDL event path:
 
 ```text
 terminal input
   -> Katzensteg input injection
   -> SDL events delivered to luchs
-  -> CDP Input.dispatchMouseEvent / Input.dispatchKeyEvent
+  -> native WebView input injection
   -> web page interaction
 ```
 
-This keeps Katzensteg as the terminal input owner and avoids exposing a new Katzensteg API. Mouse coordinate mapping should use the SDL window dimensions as the browser viewport dimensions.
-
-## Alternatives Considered
-
-### Native WebView snapshots
-
-Using WKWebView/WebKitGTK/WebView2 directly would be lighter than Chromium CDP and closer to Glimpse's native-window model. It is not the best first slice because reliable snapshot-to-RGBA frame streaming is platform-specific and Glimpse does not currently expose that as a frame stream.
-
-### Bundled Chromium
-
-Bundling Chromium through Playwright or a similar mechanism avoids depending on a system browser. It adds a large download/install cost, so it should remain a fallback after the system-CDP proof works.
-
-### Direct Katzensteg API
-
-A future libkatzensteg API could accept external frames directly. That is intentionally not part of this design. SDL remains the hook point because the current runtime already captures and presents SDL workloads well.
+This keeps Katzensteg as the terminal input owner and avoids exposing a premature Katzensteg API. Mouse coordinate mapping should use the SDL window dimensions as the WebView viewport dimensions.
 
 ## Testing
 
-The first implementation should include:
+Focused tests should cover:
 
-- argument parsing tests for required HTML path and optional browser path
-- CDP protocol unit tests around command framing where practical
-- frame decoder tests with a tiny known PNG fixture
-- a Zig unit test for frame header parsing if frames cross a pipe
-- a smoke profile that launches `luchs` with a small HTML fixture through Katzensteg
-- `zig build test`
+- argument parsing and backend selection
+- unsupported backend errors
+- raw frame metadata validation
+- SDL presenter smoke through the existing synthetic renderer
+- native WebView helper tests around file loading and frame metadata once introduced
+- future core presenter tests around external framebuffer batch/embed behavior
 
-End-to-end visual verification can start as a manual smoke because the value is proving the browser-to-SDL-to-Katzensteg path. Once stable, add a script that checks logs or embed JSONL for at least one `frame_batch`.
+End-to-end visual verification can start as a manual smoke because the value is proving the renderer-to-presenter-to-Katzensteg path. Once stable, add a script that checks logs or embed JSONL for at least one frame batch.
 
 ## Open Questions
 
-- Which installed browser discovery order is most useful on macOS and Linux?
-- Should the first CDP helper launch its own browser process or connect to an existing debugging port?
-- Is PNG screenshot capture acceptable for the first proof, or do we need a faster screencast/frame path immediately?
-- When the app-channel envelope lands, should it live in the launcher embed protocol first or in a separate attach/host layer?
+- What is the minimum raw-frame transport that avoids extra copies without overbuilding IPC?
+- Should the direct core presenter be built only after external framebuffer batch/embed exists, or should `luchs` introduce that core work as its next milestone?
