@@ -44,7 +44,7 @@
       "seed_files": [
         {
           "path": "/tmp/retroarch-sdl2.cfg",
-          "content": "video_driver = \"sdl2\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\n"
+          "content": "video_driver = \"sdl2\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\n"
         }
       ]
     },
@@ -53,7 +53,7 @@
       "seed_files": [
         {
           "path": "/tmp/retroarch-input.cfg",
-          "content": "input_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\n"
+          "content": "input_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\n"
         }
       ]
     },
@@ -62,7 +62,7 @@
       "seed_files": [
         {
           "path": "/tmp/retroarch-sdl2-vulkan.cfg",
-          "content": "video_driver = \"vulkan\"\nvideo_context_driver = \"sdl_vk\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\nlog_verbosity = \"true\"\n"
+          "content": "video_driver = \"vulkan\"\nvideo_context_driver = \"sdl_vk\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\nlog_verbosity = \"true\"\n"
         }
       ]
     },

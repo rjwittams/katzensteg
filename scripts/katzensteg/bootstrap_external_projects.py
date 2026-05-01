@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -53,6 +53,7 @@ class DoctorReport:
     missing_configs: list[str]
     missing_assets: list[str]
     summary: str
+    invalid_assets: list[str] = field(default_factory=list)
 
 
 def load_manifest(path: Path) -> dict:
@@ -257,6 +258,26 @@ def missing_asset_label(asset_entry: dict, resolved_paths: list[Path]) -> str:
     return "one of: " + ", ".join(str(path) for path in resolved_paths)
 
 
+def asset_execstack_label(asset_entry: dict, path: Path) -> str:
+    label = asset_entry.get("label", str(path))
+    return f"{label} requests executable stack: {path}"
+
+
+def path_requests_execstack(path: Path) -> bool | None:
+    if shutil.which("patchelf") is None:
+        return None
+    result = subprocess.run(
+        ["patchelf", "--print-execstack", str(path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    return "execstack: X" in result.stdout
+
+
 PkgConfigStatus = Literal["present", "missing_module", "missing_tool"]
 
 
@@ -282,6 +303,7 @@ def format_doctor_summary(report: DoctorReport) -> str:
         ("missing outputs", report.missing_outputs),
         ("missing configs", report.missing_configs),
         ("missing assets", report.missing_assets),
+        ("invalid assets", report.invalid_assets),
     ]
     parts = [f"{label}: {len(items)}" for label, items in categories if items]
     if not parts:
@@ -300,6 +322,7 @@ def run_doctor(
     missing_outputs: list[str] = []
     missing_configs: list[str] = []
     missing_assets: list[str] = []
+    invalid_assets: list[str] = []
 
     doctor_sections: list[tuple[dict, Path, str]] = []
     if repo_doctor := manifest.get("doctor"):
@@ -347,8 +370,16 @@ def run_doctor(
             if not doctor_entry_applies(asset_entry):
                 continue
             resolved_paths = resolve_asset_paths(project_root, asset_entry)
-            if not any(path.exists() for path in resolved_paths):
+            existing_paths = [path for path in resolved_paths if path.exists()]
+            if not existing_paths:
                 missing_assets.append(missing_asset_label(asset_entry, resolved_paths))
+                continue
+            if asset_entry.get("elf_no_execstack"):
+                execstack_statuses = [path_requests_execstack(path) for path in existing_paths]
+                if any(status is None for status in execstack_statuses):
+                    missing_tools.append("patchelf")
+                elif all(execstack_statuses):
+                    invalid_assets.append(asset_execstack_label(asset_entry, existing_paths[0]))
 
     report = DoctorReport(
         missing_tools=list(dict.fromkeys(missing_tools)),
@@ -357,6 +388,7 @@ def run_doctor(
         missing_configs=list(dict.fromkeys(missing_configs)),
         missing_assets=list(dict.fromkeys(missing_assets)),
         summary="",
+        invalid_assets=list(dict.fromkeys(invalid_assets)),
     )
     report.summary = format_doctor_summary(report)
     return report
@@ -386,6 +418,14 @@ def format_doctor_detail_lines(
     if report.missing_assets:
         lines.append("  missing assets:")
         lines.extend(f"    {item}" for item in report.missing_assets)
+    if report.invalid_assets:
+        lines.append("  invalid assets:")
+        lines.extend(f"    {item}" for item in report.invalid_assets)
+        lines.append("  asset repair hints:")
+        for item in report.invalid_assets:
+            if " requests executable stack: " in item:
+                path = item.rsplit(": ", 1)[1]
+                lines.append(f"    patchelf --clear-execstack {path}")
 
     install_capabilities = [*report.missing_tools, *report.missing_packages]
     if install_capabilities:

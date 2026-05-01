@@ -420,7 +420,7 @@ Create a Python `unittest` that runs:
 
 Test constraints:
 
-- require `zig build -Dvulkan=false` first or invoke it in the test
+- require the default `zig build` first or invoke it in the test
 - run with a timeout
 - assert process starts and exits/terminates cleanly
 - assert no raw JSONL appears in the parent stdout if stdout is captured
@@ -472,7 +472,7 @@ zig test src/katzensteg/attach_protocol.zig
 zig test src/katzensteg/terminal_batch_applier.zig
 zig test -lc --dep termscene --dep katzensteg_sdl -Mroot=src/katzensteg/attach_host.zig -Mtermscene=src/termscene/mod.zig -Mkatzensteg_sdl=src/katzensteg/sdl2.zig
 zig test -lc -lSDL2 --dep termscene --dep katzensteg_sdl -Mroot=src/katzensteg/launcher.zig -Mtermscene=src/termscene/mod.zig -Mkatzensteg_sdl=src/katzensteg/sdl2.zig
-zig build -Dvulkan=false
+zig build
 python3 scripts/katzensteg/test_embed_render_batches.py
 python3 scripts/katzensteg/test_attach_exec.py
 ```

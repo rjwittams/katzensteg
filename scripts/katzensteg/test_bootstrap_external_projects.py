@@ -88,6 +88,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "gl": "mesa",
             "make": "make",
             "opus": "opus",
+            "patchelf": "patchelf",
             "pkg-config": "pkgconf",
             "qmake6": "qt6-base",
             "sdl2": "sdl2",
@@ -104,6 +105,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "gl": "libgl-dev",
             "make": "make",
             "opus": "libopus-dev",
+            "patchelf": "patchelf",
             "pkg-config": "pkg-config",
             "qmake6": "qt6-base-dev",
             "sdl2": "libsdl2-dev",
@@ -116,6 +118,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "ffplay": "ffmpeg",
             "git": "git",
             "opus": "opus",
+            "patchelf": "patchelf",
             "pkg-config": "pkgconf",
             "qmake6": "qt",
             "sdl2": "sdl2",
@@ -600,6 +603,57 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
 
         self.assertEqual(["RetroArch bsnes core"], report.missing_assets)
 
+    def test_run_doctor_reports_execstack_libretro_assets(self):
+        bootstrap = load_module()
+
+        manifest = {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "name": "retroarch",
+                    "directory": "retroarch",
+                    "doctor": {
+                        "tools": [],
+                        "pkg_config": [],
+                        "paths": [],
+                        "assets": [
+                            {
+                                "label": "RetroArch melonDS core",
+                                "platforms": ["linux"],
+                                "path": "cores/melonds_libretro.so",
+                                "elf_no_execstack": True,
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "dev"
+            core_path = root / "retroarch" / "cores" / "melonds_libretro.so"
+            core_path.parent.mkdir(parents=True)
+            core_path.write_bytes(b"not a real elf")
+
+            with mock.patch.object(bootstrap, "current_platform", return_value="linux"), \
+                mock.patch.object(bootstrap.shutil, "which", return_value="/usr/bin/patchelf"), \
+                mock.patch.object(
+                    bootstrap.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout="execstack: X\n"),
+                ) as run_mock:
+                report = bootstrap.run_doctor(manifest, root, names=["retroarch"])
+
+        self.assertEqual([f"RetroArch melonDS core requests executable stack: {core_path}"], report.invalid_assets)
+        self.assertIn("invalid assets", report.summary)
+        run_mock.assert_called_once_with(
+            ["patchelf", "--print-execstack", str(core_path)],
+            check=False,
+            stdout=bootstrap.subprocess.PIPE,
+            stderr=bootstrap.subprocess.DEVNULL,
+            text=True,
+        )
+
     def test_format_doctor_detail_lines_includes_missing_items_and_install_hints(self):
         bootstrap = load_module()
 
@@ -611,6 +665,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             missing_configs=["/tmp/config.xml"],
             missing_assets=["RetroArch bsnes core"],
             summary="missing tools: 1",
+            invalid_assets=["RetroArch melonDS core requests executable stack: /tmp/melonds_libretro.so"],
         )
 
         lines = bootstrap.format_doctor_detail_lines(report, manifest, distro_family="arch")
@@ -620,6 +675,8 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         self.assertIn("    sdl2", lines)
         self.assertIn("    /tmp/config.xml", lines)
         self.assertIn("    RetroArch bsnes core", lines)
+        self.assertIn("    RetroArch melonDS core requests executable stack: /tmp/melonds_libretro.so", lines)
+        self.assertIn("    patchelf --clear-execstack /tmp/melonds_libretro.so", lines)
         self.assertIn("    sudo pacman -S --needed zig sdl2", lines)
 
     def test_run_doctor_summary_is_ok_when_nothing_is_missing(self):

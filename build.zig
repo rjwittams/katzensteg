@@ -324,6 +324,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     katzensteg_launcher.root_module.addImport("termscene", termscene_mod);
@@ -335,6 +336,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     katzensteg_proxy.root_module.addImport("termscene", termscene_mod);

@@ -50,6 +50,7 @@ var trace_gl_swap_window: usize = 0;
 var trace_gl_capture_error: usize = 0;
 var trace_gl_downscale_target: usize = 0;
 var trace_upper_blit: usize = 0;
+var trace_get_mouse_state: usize = 0;
 
 const SDL_QUIT_ON_LAST_WINDOW_CLOSE_HINT = "SDL_QUIT_ON_LAST_WINDOW_CLOSE";
 var tracked_sdl_window_count: i32 = 0;
@@ -150,6 +151,10 @@ fn shouldTraceSdlEvent(event: *const sdl.SDL_Event) bool {
     return switch (event.type) {
         sdl.SDL_QUIT,
         sdl.SDL_WINDOWEVENT,
+        sdl.SDL_MOUSEMOTION,
+        sdl.SDL_MOUSEBUTTONDOWN,
+        sdl.SDL_MOUSEBUTTONUP,
+        sdl.SDL_MOUSEWHEEL,
         => true,
         else => false,
     };
@@ -159,6 +164,10 @@ fn sdlEventTraceName(event: *const sdl.SDL_Event) []const u8 {
     return switch (event.type) {
         sdl.SDL_QUIT => "quit",
         sdl.SDL_WINDOWEVENT => windowEventTraceName(event.window.event),
+        sdl.SDL_MOUSEMOTION => "mouse.motion",
+        sdl.SDL_MOUSEBUTTONDOWN => "mouse.button_down",
+        sdl.SDL_MOUSEBUTTONUP => "mouse.button_up",
+        sdl.SDL_MOUSEWHEEL => "mouse.wheel",
         else => "other",
     };
 }
@@ -178,6 +187,61 @@ fn traceSdlEvent(comptime source: []const u8, event: *const sdl.SDL_Event, suppr
                 event.window.windowID,
                 event.window.data1,
                 event.window.data2,
+                suppressed,
+                tracked_sdl_window_count,
+            },
+        );
+    } else if (event.type == sdl.SDL_MOUSEMOTION) {
+        sdl_log.debug(
+            "{s} {s} type=0x{x} window={d} which={d} pos={d},{d} rel={d},{d} buttons=0x{x} suppressed={} tracked_windows={d}",
+            .{
+                source,
+                sdlEventTraceName(event),
+                event.type,
+                event.motion.windowID,
+                event.motion.which,
+                event.motion.x,
+                event.motion.y,
+                event.motion.xrel,
+                event.motion.yrel,
+                event.motion.state,
+                suppressed,
+                tracked_sdl_window_count,
+            },
+        );
+    } else if (event.type == sdl.SDL_MOUSEBUTTONDOWN or event.type == sdl.SDL_MOUSEBUTTONUP) {
+        sdl_log.debug(
+            "{s} {s} type=0x{x} window={d} which={d} button={d} state={d} clicks={d} pos={d},{d} suppressed={} tracked_windows={d}",
+            .{
+                source,
+                sdlEventTraceName(event),
+                event.type,
+                event.button.windowID,
+                event.button.which,
+                event.button.button,
+                event.button.state,
+                event.button.clicks,
+                event.button.x,
+                event.button.y,
+                suppressed,
+                tracked_sdl_window_count,
+            },
+        );
+    } else if (event.type == sdl.SDL_MOUSEWHEEL) {
+        sdl_log.debug(
+            "{s} {s} type=0x{x} window={d} which={d} wheel={d},{d} precise={d},{d} mouse={d},{d} suppressed={} tracked_windows={d}",
+            .{
+                source,
+                sdlEventTraceName(event),
+                event.type,
+                event.wheel.windowID,
+                event.wheel.which,
+                event.wheel.x,
+                event.wheel.y,
+                event.wheel.preciseX,
+                event.wheel.preciseY,
+                event.wheel.mouseX,
+                event.wheel.mouseY,
                 suppressed,
                 tracked_sdl_window_count,
             },
@@ -284,6 +348,27 @@ fn surfaceSummary(surface: ?*sdl.SDL_Surface) struct { ptr: usize, w: i32, h: i3
         .pitch = view.pitch,
         .pixels = if (view.pixels) |p| @intFromPtr(p) else 0,
     };
+}
+
+fn copySurfaceToRgba(allocator: std.mem.Allocator, surface: ?*sdl.SDL_Surface) ?struct { width: i32, height: i32, rgba: []u8 } {
+    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse return null;
+    defer real_sdl.SDL_FreeSurface(converted);
+
+    const view: *const SurfaceTraceView = @ptrCast(@alignCast(converted));
+    if (view.w <= 0 or view.h <= 0 or view.pitch < view.w * 4) return null;
+    const pixels = view.pixels orelse return null;
+    const row_len: usize = @as(usize, @intCast(view.w)) * 4;
+    const out_len: usize = row_len * @as(usize, @intCast(view.h));
+    const out = allocator.alloc(u8, out_len) catch return null;
+    errdefer allocator.free(out);
+
+    const src: [*]const u8 = @ptrCast(pixels);
+    const pitch: usize = @intCast(view.pitch);
+    var y: usize = 0;
+    while (y < @as(usize, @intCast(view.h))) : (y += 1) {
+        @memcpy(out[y * row_len ..][0..row_len], src[y * pitch ..][0..row_len]);
+    }
+    return .{ .width = view.w, .height = view.h, .rgba = out };
 }
 
 fn callerSummary(return_addr: usize) struct { image: []const u8, symbol: []const u8, offset: usize } {
@@ -977,6 +1062,12 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
     }
 }
 
+pub export fn ks_SDL_PumpEvents() callconv(.c) void {
+    const rt = runtime.get();
+    rt.pollTerminalInput();
+    real_sdl.SDL_PumpEvents();
+}
+
 pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, action: c_int, minType: sdl.Uint32, maxType: sdl.Uint32) callconv(.c) c_int {
     const rt = runtime.get();
     rt.pollTerminalInput();
@@ -1000,6 +1091,10 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     const real_rc = real_sdl.SDL_PeepEvents(rest_ptr, numevents - emitted, action, minType, maxType);
     if (real_rc < 0) return if (emitted > 0) emitted else real_rc;
     traceSdlEvents("SDL_PeepEvents delivered", rest_ptr, real_rc);
+    var real_index: c_int = 0;
+    while (real_index < real_rc) : (real_index += 1) {
+        sdl_input.noteRealEvent(rt, &rest_ptr[@intCast(real_index)]);
+    }
     return emitted + real_rc;
 }
 
@@ -1016,15 +1111,25 @@ pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
-        return real_sdl.SDL_GetMouseState(x, y);
+        var real_x: c_int = 0;
+        var real_y: c_int = 0;
+        const out_x = x orelse &real_x;
+        const out_y = y orelse &real_y;
+        const buttons = real_sdl.SDL_GetMouseState(out_x, out_y);
+        rt.dispatchCursorPosition(.{ .x = out_x.*, .y = out_y.* });
+        traceLimited(rt, &trace_get_mouse_state, "SDL_GetMouseState real pos={d},{d} buttons=0x{x}", .{ out_x.*, out_y.*, buttons });
+        return buttons;
     }
     if (rt.terminalMouseState()) |state| {
         if (x) |out_x| out_x.* = state.x;
         if (y) |out_y| out_y.* = state.y;
+        rt.dispatchCursorPosition(.{ .x = state.x, .y = state.y });
+        traceLimited(rt, &trace_get_mouse_state, "SDL_GetMouseState terminal pos={d},{d} buttons=0x{x}", .{ state.x, state.y, state.buttons });
         return state.buttons;
     }
     const buttons = real_sdl.SDL_GetMouseState(x, y);
     if (buttons != 0) rt.claimRealWindowMouse();
+    traceLimited(rt, &trace_get_mouse_state, "SDL_GetMouseState fallback buttons=0x{x}", .{buttons});
     return buttons;
 }
 
@@ -1085,6 +1190,53 @@ pub export fn ks_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_
         }
     }
     return rc;
+}
+
+pub export fn ks_SDL_CreateColorCursor(surface: ?*sdl.SDL_Surface, hot_x: c_int, hot_y: c_int) callconv(.c) ?*sdl.SDL_Cursor {
+    const cursor = real_sdl.SDL_CreateColorCursor(surface, hot_x, hot_y);
+    const handle = if (cursor) |p| @intFromPtr(p) else 0;
+    if (handle != 0) {
+        const rt = runtime.get();
+        if (copySurfaceToRgba(rt.allocator, surface)) |image| {
+            defer rt.allocator.free(image.rgba);
+            sink.dispatchCommand(rt, .{ .create_color_cursor = .{
+                .cursor = handle,
+                .width = image.width,
+                .height = image.height,
+                .hot_x = hot_x,
+                .hot_y = hot_y,
+                .rgba = image.rgba,
+            } });
+            traceSdlLifecycle("SDL_CreateColorCursor cursor={x} surface={x} {d}x{d} hot={d},{d}", .{ handle, if (surface) |s| @intFromPtr(s) else 0, image.width, image.height, hot_x, hot_y });
+        }
+    }
+    return cursor;
+}
+
+pub export fn ks_SDL_SetCursor(cursor: ?*sdl.SDL_Cursor) callconv(.c) void {
+    real_sdl.SDL_SetCursor(cursor);
+    const rt = runtime.get();
+    const handle = if (cursor) |p| @intFromPtr(p) else 0;
+    sink.dispatchCommand(rt, .{ .set_cursor = .{ .cursor = handle } });
+    traceSdlLifecycle("SDL_SetCursor cursor={x}", .{handle});
+}
+
+pub export fn ks_SDL_ShowCursor(toggle: c_int) callconv(.c) c_int {
+    const rc = real_sdl.SDL_ShowCursor(toggle);
+    if (rc >= 0 and toggle != sdl.SDL_QUERY) {
+        const rt = runtime.get();
+        sink.dispatchCommand(rt, .{ .show_cursor = .{ .visible = toggle == sdl.SDL_ENABLE } });
+    }
+    traceSdlLifecycle("SDL_ShowCursor toggle={d} rc={d}", .{ toggle, rc });
+    return rc;
+}
+
+pub export fn ks_SDL_FreeCursor(cursor: ?*sdl.SDL_Cursor) callconv(.c) void {
+    const rt = runtime.get();
+    const handle = if (cursor) |p| @intFromPtr(p) else 0;
+    sink.dispatchCommand(rt, .{ .free_cursor = .{ .cursor = handle } });
+    real_sdl.SDL_FreeCursor(cursor);
+    traceSdlLifecycle("SDL_FreeCursor cursor={x}", .{handle});
 }
 
 test "renderer info texture format filter keeps only capturable formats in renderer order" {

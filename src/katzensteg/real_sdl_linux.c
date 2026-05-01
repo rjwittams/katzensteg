@@ -9,6 +9,7 @@ struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Surface;
+struct SDL_Cursor;
 struct SDL_Rect;
 struct SDL_Point;
 struct SDL_RendererInfo;
@@ -94,6 +95,7 @@ KS_REAL(SDL_GL_MakeCurrent, int, (struct SDL_Window *window, void *context), (wi
 KS_REAL_VOID(SDL_GL_GetDrawableSize, (struct SDL_Window *window, int *w, int *h), (window, w, h))
 KS_REAL_VOID(SDL_GL_SwapWindow, (struct SDL_Window *window), (window))
 KS_REAL(SDL_Vulkan_LoadLibrary, int, (const char *path), (path))
+KS_REAL_VOID(SDL_PumpEvents, (void), ())
 KS_REAL(SDL_PollEvent, int, (union SDL_Event *event), (event))
 KS_REAL(SDL_PeepEvents, int, (union SDL_Event *events, int numevents, int action, unsigned int minType, unsigned int maxType), (events, numevents, action, minType, maxType))
 KS_REAL(SDL_GetKeyboardState, const unsigned char *, (int *numkeys), (numkeys))
@@ -104,6 +106,10 @@ KS_REAL(SDL_GetTicks, unsigned int, (void), ())
 KS_REAL(SDL_ConvertSurfaceFormat, struct SDL_Surface *, (struct SDL_Surface *surface, unsigned int pixel_format, unsigned int flags), (surface, pixel_format, flags))
 KS_REAL_VOID(SDL_FreeSurface, (struct SDL_Surface *surface), (surface))
 KS_REAL(SDL_UpperBlit, int, (struct SDL_Surface *src, const struct SDL_Rect *srcrect, struct SDL_Surface *dst, struct SDL_Rect *dstrect), (src, srcrect, dst, dstrect))
+KS_REAL(SDL_CreateColorCursor, struct SDL_Cursor *, (struct SDL_Surface *surface, int hot_x, int hot_y), (surface, hot_x, hot_y))
+KS_REAL_VOID(SDL_SetCursor, (struct SDL_Cursor *cursor), (cursor))
+KS_REAL(SDL_ShowCursor, int, (int toggle), (toggle))
+KS_REAL_VOID(SDL_FreeCursor, (struct SDL_Cursor *cursor), (cursor))
 KS_REAL(SDL_GetError, const char *, (void), ())
 KS_REAL(dlopen, void *, (const char *path, int mode), (path, mode))
 

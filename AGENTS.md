@@ -33,9 +33,16 @@ docs/katzensteg/    design notes, roadmap, port plans, handoffs
 - Linux currently forces LLVM codegen in `build.zig`. Do not flip this back to non-LLVM/system-linker experiments casually: current Arch/CachyOS toolchains have hit `.sframe` relocation failures on that path.
 
 ```bash
-zig build -Doptimize=Debug          # builds everything
-zig build -Dvulkan=false            # skip the Vulkan capture layer
+zig build -Doptimize=Debug          # default full build, including Vulkan
+zig build test                      # default unit-test gate
 ```
+
+`zig build -Dvulkan=false` is only a narrow diagnostic for hosts that are actively
+missing Vulkan dependencies, or for isolating non-Vulkan failures. Do not use it
+as the main verification command, and do not stop there after build-system,
+profile, launcher, Linux packaging, or Vulkan-adjacent changes. If you use the
+reduced build, state why and follow it with the default Vulkan-enabled
+`zig build` / `zig build test` as soon as dependencies allow.
 
 Artifacts (under `zig-out/`):
 
@@ -91,3 +98,12 @@ A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older 
 - Linux: keep `build.zig`'s LLVM-codegen setting unless you have revalidated the `.sframe`/linker behavior on the target distro.
 - Preload code must not write to stdout/stderr (file logging only).
 - Vulkan capture should pass the original external framebuffer format through to the preload/present layer (`ExternalFramebufferFormat`) instead of normalizing in `vulkan_layer.c`. Format conversion belongs in the present path so queued stale frames can be dropped before conversion and future format-specific fast paths have one owner.
+
+## Architecture boundaries
+
+- Treat input as a source/model/adapter pipeline. Platform input sources read raw input; the canonical Katzensteg input model owns event queue, current state, timestamps, routing state, and future Katzensteg-native bindings; SDL interpose functions only project that model into SDL APIs.
+- Do not use graphics or presentation code as an input side channel. Frame/composite code may render cursor state it is handed, but must not sample terminal mouse position, SDL state, or mutate input state directly.
+- SDL event APIs (`SDL_PollEvent`, `SDL_PeepEvents`, `SDL_PumpEvents`) may refresh input ingestion, but should feed the same canonical input model. Avoid adding parallel event queues or per-API input semantics.
+- SDL state APIs (`SDL_GetMouseState`, `SDL_GetKeyboardState`, relative mouse state, etc.) should read from the same model as event APIs. If a program uses a new SDL input API, cover it as another adapter projection, not as a separate behavior path.
+- Platform-specific input details belong at the source layer. `/dev/tty` is one source, not the input architecture; keep room for Windows/other terminal input sources.
+- Fast paths are acceptable when they preserve ownership boundaries: they may skip work inside a layer, but should not move policy, format conversion, routing, or input semantics into a lower-level layer just because it is convenient.

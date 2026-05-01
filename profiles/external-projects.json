@@ -10,6 +10,7 @@
       "gl": "mesa",
       "make": "make",
       "opus": "opus",
+      "patchelf": "patchelf",
       "pkg-config": "pkgconf",
       "qmake6": "qt6-base",
       "sdl2": "sdl2",
@@ -26,6 +27,7 @@
       "gl": "libgl-dev",
       "make": "make",
       "opus": "libopus-dev",
+      "patchelf": "patchelf",
       "pkg-config": "pkg-config",
       "qmake6": "qt6-base-dev",
       "sdl2": "libsdl2-dev",
@@ -38,6 +40,7 @@
       "ffplay": "ffmpeg",
       "git": "git",
       "opus": "opus",
+      "patchelf": "patchelf",
       "pkg-config": "pkgconf",
       "qmake6": "qt",
       "sdl2": "sdl2",
@@ -160,6 +163,7 @@
             "platforms": [
               "linux"
             ],
+            "elf_no_execstack": true,
             "any_of": [
               "$HOME/.config/retroarch/cores/melonds_libretro.so",
               "$HOME/.local/share/libretro/cores/melonds_libretro.so",
