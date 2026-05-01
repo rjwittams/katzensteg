@@ -311,7 +311,6 @@ pub fn runProfile(allocator: std.mem.Allocator, profile_name: []const u8) !u8 {
 }
 
 pub fn runProfiles(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
-    if (profile_names.len == 0) return 64;
     return runMultiProfile(allocator, profile_names);
 }
 
@@ -382,12 +381,13 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
     var shutdown_sent = false;
+    const keep_alive_when_empty = profile_names.len == 0;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
     var prompt_active = false;
-    while (!allSessionsDone(sessions[0..initialized])) {
+    while (!shutdown_sent and (keep_alive_when_empty or !allSessionsDone(sessions[0..initialized]))) {
         const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
         if (lifecycle.changed) {
             if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
@@ -435,9 +435,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         }
         if (!shutdown_sent) {
             const input = readInputForSessions(&tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
-            const focused = &sessions[focused_index];
             if (input.focus_changed) {
-                try event_log.record(.focus_changed, focused.profile_name);
+                try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
             }
@@ -460,6 +459,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     }
                 },
                 .close_focused => {
+                    if (initialized == 0) continue;
+                    const focused = &sessions[focused_index];
                     try shutdownSession(focused, &event_log, &logger);
                     if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
                         focused_index = next_index;
@@ -470,13 +471,18 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     }
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                 },
-                .forward => try forwardInputToSession(focused, input.bytes, &event_log, &logger),
+                .forward => {
+                    if (initialized == 0) continue;
+                    try forwardInputToSession(&sessions[focused_index], input.bytes, &event_log, &logger);
+                },
                 .quit => {
                     shutdown_sent = true;
                     for (sessions[0..initialized]) |*session| try shutdownSession(session, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                 },
                 .window => |action| {
+                    if (initialized == 0) continue;
+                    const focused = &sessions[focused_index];
                     if (applyWindowAction(&focused.window, action, terminal)) {
                         try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
@@ -490,6 +496,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     }
                 },
                 .mouse_drag => |outer| {
+                    if (initialized == 0) continue;
+                    const focused = &sessions[focused_index];
                     if (!std.meta.eql(focused.window.outer, outer)) {
                         focused.window.outer = outer;
                         try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
@@ -1627,6 +1635,8 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
         const focused = sessions[status_index];
         try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, events);
+    } else {
+        try renderEmptyStatusAndReturn(writer, terminal, events);
     }
 }
 
@@ -1649,6 +1659,27 @@ fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWind
     });
     const content = contentRectForOuter(window.outer);
     try moveCursor(writer, content.row, content.col);
+}
+
+fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *const ProtocolEventLog) !void {
+    if (terminal.rows < 1 or terminal.cols < 1) return;
+    try moveCursor(writer, terminal.rows, 1);
+    try writer.writeAll("\x1b[2K\x1b[7m");
+
+    var remaining: usize = @intCast(terminal.cols);
+    try writeStatusPart(writer, &remaining, " wm windows=0");
+    if (events.last()) |event| {
+        var scratch: [256]u8 = undefined;
+        const event_prefix = try std.fmt.bufPrint(&scratch, " last={s} ", .{@tagName(event.kind)});
+        try writeStatusPart(writer, &remaining, event_prefix);
+        try writeStatusPart(writer, &remaining, event.detail);
+    } else {
+        try writeStatusPart(writer, &remaining, " last=none");
+    }
+
+    if (remaining > 0) try writer.writeByteNTimes(' ', remaining);
+    try writer.writeAll("\x1b[0m");
+    try moveCursor(writer, @max(1, terminal.rows - 1), 1);
 }
 
 fn renderStatusAndReturnLocked(tty_lock: *std.Thread.Mutex, writer: anytype, terminal: TerminalSize, window: WmWindowState, upload_profile: render_batch_protocol.UploadProfile, events: *const ProtocolEventLog) !void {
@@ -1777,6 +1808,22 @@ test "wm status band renders host geometry and last event outside content" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "outer=1,1 80x20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "content=4,2 78x16") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "last=attach_sent main") != null);
+}
+
+test "wm desktop can render with no producer sessions" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var log = ProtocolEventLog.init(std.testing.allocator, 1);
+    defer log.deinit();
+    try log.record(.launch_prompt, "launch:");
+    var tty_lock = std.Thread.Mutex{};
+    const sessions = [_]WmProducerSession{};
+    const z_order = [_]usize{};
+
+    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "windows=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "last=launch_prompt launch:") != null);
 }
 
 test "wm initial control advertises file upload policy" {

@@ -197,29 +197,31 @@ pub fn main() !void {
 }
 
 fn usageText() []const u8 {
-    return
-        \\Usage:
-        \\  katzensteg --help
-        \\  katzensteg [options] <target>
-        \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
-        \\  katzensteg wm <target> [target...]
-        \\  katzensteg
-        \\
-        \\Options:
-        \\  --dry-run      Resolve the target and print what would run.
-        \\  --embed-jsonl  Quiet launcher mode; stdout is Katzensteg JSONL batches.
-        \\
-        \\Targets:
-        \\  A target can be a named profile or, later, a command/path/URL matched by the launcher.
-        \\  With no target, Katzensteg lists available profiles.
-        \\
-        \\Environment:
-        \\  KATZENSTEG_PROFILE_DIR  Override the profile directory.
-        \\  KATZENSTEG_REPO         Override {repo}/$ROOT expansion.
-        \\  KATZENSTEG_PROXY_PROFILE  Child profile used by katzensteg-proxy.
-        \\
-    ;
+    return usage_text;
 }
+
+const usage_text =
+    \\Usage:
+    \\  katzensteg --help
+    \\  katzensteg [options] <target>
+    \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
+    \\  katzensteg wm [target...]
+    \\  katzensteg
+    \\
+    \\Options:
+    \\  --dry-run      Resolve the target and print what would run.
+    \\  --embed-jsonl  Quiet launcher mode; stdout is Katzensteg JSONL batches.
+    \\
+    \\Targets:
+    \\  A target can be a named profile or, later, a command/path/URL matched by the launcher.
+    \\  With no target, Katzensteg lists available profiles.
+    \\
+    \\Environment:
+    \\  KATZENSTEG_PROFILE_DIR  Override the profile directory.
+    \\  KATZENSTEG_REPO         Override {repo}/$ROOT expansion.
+    \\  KATZENSTEG_PROXY_PROFILE  Child profile used by katzensteg-proxy.
+    \\
+;
 
 fn isProxyExecutablePath(path: []const u8) bool {
     return std.mem.eql(u8, std.fs.path.basename(path), "katzensteg-proxy");
@@ -235,7 +237,7 @@ fn parseCommand(args: []const []const u8) Command {
 }
 
 fn parseWmArgs(args: []const []const u8) ?WmArgs {
-    if (args.len < 3) return null;
+    if (args.len < 2) return null;
     if (!std.mem.eql(u8, args[1], "wm")) return null;
     for (args[2..]) |arg| {
         if (std.mem.startsWith(u8, arg, "-")) return null;
@@ -1754,8 +1756,10 @@ test "launcher command parser recognizes wm profile target" {
     try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }));
 }
 
-test "launcher rejects wm without a profile target" {
-    try std.testing.expectEqual(Command.unknown, parseCommand(&.{ "katzensteg", "wm" }));
+test "launcher command parser recognizes wm without initial target" {
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm" }));
+    const wm = parseWmArgs(&.{ "katzensteg", "wm" }).?;
+    try std.testing.expectEqual(@as(usize, 0), wm.profile_names.len);
 }
 
 test "launcher parses wm target" {

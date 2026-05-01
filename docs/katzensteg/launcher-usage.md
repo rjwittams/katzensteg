@@ -92,11 +92,12 @@ This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode co
 `wm` is the first interactive host/compositor for the same JSONL embed path:
 
 ```sh
+./zig-out/bin/katzensteg wm
 ./zig-out/bin/katzensteg wm probe.embed.basic_sdl
 ./zig-out/bin/katzensteg wm sonic mi2
 ```
 
-The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches each selected profile through `katzensteg --embed-jsonl`, sends `attach` for each inner content rectangle, and applies producer `frame_batch` output inside that rectangle. The producers do not own title bars, borders, status/debug areas, layout, or window lifecycle policy.
+The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches each selected profile through `katzensteg --embed-jsonl`, sends `attach` for each inner content rectangle, and applies producer `frame_batch` output inside that rectangle. It can also start with no producer; use the internal launch prompt to add the first one. The producers do not own title bars, borders, status/debug areas, layout, or window lifecycle policy.
 
 The status band is host-owned and stays outside the producer content rect. It currently shows the selected upload profile, outer window geometry, inner content geometry, and the last WM protocol event such as launch, attach, viewport, shutdown, or producer exit.
 
