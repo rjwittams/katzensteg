@@ -52,7 +52,7 @@ The first native WebView slice does not need a manifest, persistent stdio protoc
 ```text
 HTML file
   -> native WebView helper
-  -> LUCHS_RAW_FRAME header + raw RGBA bytes
+  -> repeated LUCHS_RAW_FRAME headers + raw RGBA bytes
   -> presenter backend
        -> SDL texture + SDL_RenderPresent now
        -> Katzensteg core external framebuffer API later

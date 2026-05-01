@@ -3,6 +3,8 @@ import WebKit
 
 private let defaultWidth = 800
 private let defaultHeight = 600
+private let defaultFrameCount = 1
+private let defaultFps = 15
 
 private func fail(_ message: String) -> Never {
     fputs("luchs-webview-capture: \(message)\n", stderr)
@@ -13,14 +15,19 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
     private let fileURL: URL
     private let width: Int
     private let height: Int
+    private let frameCount: Int
+    private let frameInterval: TimeInterval
     private var window: NSWindow?
     private var webView: WKWebView?
-    private var completed = false
+    private var loaded = false
+    private var emittedFrames = 0
 
-    init(fileURL: URL, width: Int, height: Int) {
+    init(fileURL: URL, width: Int, height: Int, frameCount: Int, fps: Int) {
         self.fileURL = fileURL
         self.width = width
         self.height = height
+        self.frameCount = frameCount
+        self.frameInterval = 1.0 / Double(fps)
     }
 
     func run() -> Never {
@@ -45,7 +52,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
 
         view.loadFileURL(fileURL, allowingReadAccessTo: fileURL.deletingLastPathComponent())
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            if self?.completed == false {
+            if self?.loaded == false {
                 fail("timed out loading \(self?.fileURL.path ?? "html")")
             }
         }
@@ -54,6 +61,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        loaded = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.capture(webView)
         }
@@ -112,9 +120,15 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
         pixels.withUnsafeBufferPointer { buffer in
             FileHandle.standardOutput.write(Data(buffer: buffer))
         }
-        completed = true
-        NSApplication.shared.terminate(nil)
-        exit(0)
+        emittedFrames += 1
+        if emittedFrames >= frameCount {
+            NSApplication.shared.terminate(nil)
+            exit(0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + frameInterval) { [weak self] in
+            guard let self, let webView = self.webView else { return }
+            self.capture(webView)
+        }
     }
 }
 
@@ -123,12 +137,14 @@ private enum LuchsWebviewCapture {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            fail("usage: luchs-webview-capture path/to/fragment.html [width height]")
+            fail("usage: luchs-webview-capture path/to/fragment.html [width height [frame_count fps]]")
         }
         let width = args.count >= 3 ? (Int(args[2]) ?? defaultWidth) : defaultWidth
         let height = args.count >= 4 ? (Int(args[3]) ?? defaultHeight) : defaultHeight
-        guard width > 0 && height > 0 else {
-            fail("width and height must be positive")
+        let frameCount = args.count >= 5 ? (Int(args[4]) ?? defaultFrameCount) : defaultFrameCount
+        let fps = args.count >= 6 ? (Int(args[5]) ?? defaultFps) : defaultFps
+        guard width > 0 && height > 0 && frameCount > 0 && fps > 0 else {
+            fail("width, height, frame_count, and fps must be positive")
         }
 
         let url = URL(fileURLWithPath: args[1])
@@ -136,7 +152,7 @@ private enum LuchsWebviewCapture {
             fail("file not found: \(url.path)")
         }
 
-        let controller = CaptureController(fileURL: url, width: width, height: height)
+        let controller = CaptureController(fileURL: url, width: width, height: height, frameCount: frameCount, fps: fps)
         controller.run()
     }
 }

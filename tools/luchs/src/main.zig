@@ -5,6 +5,7 @@ const sdl = @import("katzensteg_sdl");
 const frame_width = 800;
 const frame_height = 600;
 const run_frames = 180;
+const native_webview_fps = 15;
 
 const RendererBackend = enum {
     test_pattern,
@@ -124,35 +125,70 @@ fn readRawFrameFromFile(allocator: std.mem.Allocator, file: std.fs.File) !RawFra
     return .{ .header = header, .pixels = pixels };
 }
 
-fn captureNativeWebviewFrame(allocator: std.mem.Allocator, html_path: []const u8) !RawFrame {
-    const helper_path = try nativeWebviewHelperPath(allocator);
-    defer allocator.free(helper_path);
-
-    var argv = [_][]const u8{ helper_path, html_path };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-    var waited = false;
-    errdefer {
-        if (!waited) _ = child.kill() catch {};
-    }
-
-    const stdout_file = child.stdout orelse return error.NativeWebviewCaptureFailed;
-    child.stdout = null;
-    defer stdout_file.close();
-
-    const frame = try readRawFrameFromFile(allocator, stdout_file);
-    const term = try child.wait();
-    waited = true;
-    switch (term) {
-        .Exited => |code| if (code != 0) return error.NativeWebviewCaptureFailed,
-        else => return error.NativeWebviewCaptureFailed,
-    }
-    return frame;
+fn freeRawFrame(allocator: std.mem.Allocator, frame: RawFrame) void {
+    allocator.free(frame.pixels);
 }
+
+const NativeWebviewStream = struct {
+    allocator: std.mem.Allocator,
+    child: std.process.Child,
+    stdout_file: std.fs.File,
+    waited: bool = false,
+
+    fn init(allocator: std.mem.Allocator, html_path: []const u8) !NativeWebviewStream {
+        const helper_path = try nativeWebviewHelperPath(allocator);
+        defer allocator.free(helper_path);
+
+        var width_buf: [16]u8 = undefined;
+        var height_buf: [16]u8 = undefined;
+        var frames_buf: [16]u8 = undefined;
+        var fps_buf: [16]u8 = undefined;
+        const width_arg = try std.fmt.bufPrint(&width_buf, "{d}", .{frame_width});
+        const height_arg = try std.fmt.bufPrint(&height_buf, "{d}", .{frame_height});
+        const frames_arg = try std.fmt.bufPrint(&frames_buf, "{d}", .{run_frames});
+        const fps_arg = try std.fmt.bufPrint(&fps_buf, "{d}", .{native_webview_fps});
+
+        var argv = [_][]const u8{ helper_path, html_path, width_arg, height_arg, frames_arg, fps_arg };
+        var child = std.process.Child.init(&argv, allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+        errdefer _ = child.kill() catch {};
+
+        const stdout_file = child.stdout orelse return error.NativeWebviewCaptureFailed;
+        child.stdout = null;
+
+        return .{
+            .allocator = allocator,
+            .child = child,
+            .stdout_file = stdout_file,
+        };
+    }
+
+    fn deinit(self: *NativeWebviewStream) void {
+        self.stdout_file.close();
+        if (!self.waited) {
+            _ = self.child.kill() catch {};
+            self.waited = true;
+        }
+    }
+
+    fn nextFrame(self: *NativeWebviewStream) !?RawFrame {
+        return readRawFrameFromFile(self.allocator, self.stdout_file) catch |err| switch (err) {
+            error.EndOfStream => {
+                const term = try self.child.wait();
+                self.waited = true;
+                switch (term) {
+                    .Exited => |code| if (code == 0) return null else return error.NativeWebviewCaptureFailed,
+                    else => return error.NativeWebviewCaptureFailed,
+                }
+            },
+            else => return err,
+        };
+    }
+};
 
 fn fillTestFrame(buf: []u8, width: usize, height: usize, tick: usize) void {
     var y: usize = 0;
@@ -242,6 +278,11 @@ test "helperPathFromExePath resolves sibling helper" {
     try std.testing.expectEqualStrings("/tmp/zig-out/bin/luchs-webview-capture", path);
 }
 
+test "native webview stream uses bounded frame cadence" {
+    try std.testing.expect(run_frames > 1);
+    try std.testing.expect(native_webview_fps > 0);
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -249,13 +290,21 @@ pub fn main() !void {
     const options = try parseArgs(args);
     try ensureRendererBackendAvailable(options.renderer_backend);
 
-    const native_frame: ?RawFrame = switch (options.renderer_backend) {
+    const frame_allocator = std.heap.page_allocator;
+    var native_stream: ?NativeWebviewStream = switch (options.renderer_backend) {
         .test_pattern => null,
-        .native_webview => try captureNativeWebviewFrame(arena.allocator(), options.html_path),
+        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path),
     };
+    defer if (native_stream) |*stream| stream.deinit();
 
-    const window_width: u32 = if (native_frame) |frame| frame.header.width else frame_width;
-    const window_height: u32 = if (native_frame) |frame| frame.header.height else frame_height;
+    var pending_native_frame: ?RawFrame = if (native_stream) |*stream|
+        try stream.nextFrame() orelse return error.NativeWebviewCaptureFailed
+    else
+        null;
+    defer if (pending_native_frame) |frame| freeRawFrame(frame_allocator, frame);
+
+    const window_width: u32 = if (pending_native_frame) |frame| frame.header.width else frame_width;
+    const window_height: u32 = if (pending_native_frame) |frame| frame.header.height else frame_height;
 
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) return error.SDLInitFailed;
     defer sdl.SDL_Quit();
@@ -297,9 +346,16 @@ pub fn main() !void {
             if (event.type == sdl.SDL_QUIT) quit = true;
         }
 
-        const present_pixels, const present_pitch = if (native_frame) |captured| .{
-            captured.pixels,
-            captured.header.stride,
+        var frame_to_free: ?RawFrame = null;
+        defer if (frame_to_free) |captured| freeRawFrame(frame_allocator, captured);
+        const present_pixels, const present_pitch = if (native_stream) |*stream| native: {
+            const captured = pending_native_frame orelse (try stream.nextFrame() orelse break);
+            pending_native_frame = null;
+            frame_to_free = captured;
+            break :native .{
+                captured.pixels,
+                captured.header.stride,
+            };
         } else .{
             blk: {
                 fillTestFrame(pixels, window_width, window_height, frame);

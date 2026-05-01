@@ -23,4 +23,4 @@ On macOS:
 luchs --renderer=native-webview path/to/fragment.html
 ```
 
-The helper binary is installed next to `luchs` as `luchs-webview-capture`. It writes a single `LUCHS_RAW_FRAME` header plus raw RGBA bytes to stdout; `luchs` consumes that pipe internally and keeps helper stderr away from the terminal render stream.
+The helper binary is installed next to `luchs` as `luchs-webview-capture`. Direct helper invocation emits one frame by default; `luchs` invokes it with a bounded frame count and FPS so it streams repeated `LUCHS_RAW_FRAME` headers plus raw RGBA bytes. `luchs` consumes that pipe internally and keeps helper stderr away from the terminal render stream.

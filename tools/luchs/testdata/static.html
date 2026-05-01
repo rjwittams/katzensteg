@@ -17,6 +17,20 @@
         padding: 32px;
         border: 1px solid #4aa3df;
       }
+      main::after {
+        content: "";
+        display: block;
+        width: 100%;
+        height: 4px;
+        margin-top: 18px;
+        background: #4aa3df;
+        animation: pulse 1s linear infinite;
+        transform-origin: left center;
+      }
+      @keyframes pulse {
+        from { transform: scaleX(0.15); }
+        to { transform: scaleX(1); }
+      }
     </style>
   </head>
   <body>
