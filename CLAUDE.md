@@ -98,6 +98,7 @@ A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older 
 - Linux: keep `build.zig`'s LLVM-codegen setting unless you have revalidated the `.sframe`/linker behavior on the target distro.
 - Preload code must not write to stdout/stderr (file logging only).
 - Vulkan capture should pass the original external framebuffer format through to the preload/present layer (`ExternalFramebufferFormat`) instead of normalizing in `vulkan_layer.c`. Format conversion belongs in the present path so queued stale frames can be dropped before conversion and future format-specific fast paths have one owner.
+- For GitHub publishing, use normal `git` and `gh` commands with work-focused branch names, commit messages, and PR titles. Do not prefix PRs or branches with the coding agent name, and do not use workflows that encode agent-specific naming conventions such as `github:yeet`.
 
 ## Architecture boundaries
 
