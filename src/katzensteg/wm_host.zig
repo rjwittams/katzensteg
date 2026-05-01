@@ -127,6 +127,81 @@ pub const WindowAction = enum {
     resize_wider,
 };
 
+pub const Cell = struct {
+    row: i32,
+    col: i32,
+};
+
+pub const WmMouseHit = enum {
+    desktop,
+    content,
+    title,
+    resize_right,
+    resize_bottom,
+    resize_bottom_right,
+};
+
+pub const WmMouseDrag = struct {
+    hit: WmMouseHit,
+    start_cell: Cell,
+    start_outer: Rect,
+
+    pub fn start(hit: WmMouseHit, cell: Cell, outer: Rect) WmMouseDrag {
+        return .{ .hit = hit, .start_cell = cell, .start_outer = outer };
+    }
+
+    pub fn update(self: WmMouseDrag, cell: Cell, terminal: TerminalSize) Rect {
+        const drow = cell.row - self.start_cell.row;
+        const dcol = cell.col - self.start_cell.col;
+        var next = self.start_outer;
+        switch (self.hit) {
+            .title => {
+                next.row += drow;
+                next.col += dcol;
+            },
+            .resize_right => next.cols += dcol,
+            .resize_bottom => next.rows += drow,
+            .resize_bottom_right => {
+                next.rows += drow;
+                next.cols += dcol;
+            },
+            .desktop, .content => {},
+        }
+        next.rows = @max(min_outer_rows, next.rows);
+        next.cols = @max(min_outer_cols, next.cols);
+        return clampOuterRect(next, terminal);
+    }
+};
+
+pub const WmMouseInputState = struct {
+    drag: ?WmMouseDrag = null,
+
+    pub fn readMouseInput(self: *WmMouseInputState, bytes: []u8, outer: Rect, content: Rect, terminal: TerminalSize) InputRead {
+        const mouse = parseSgrMouseAt(bytes, 0) orelse return .{ .action = .none };
+        const cell = Cell{ .row = mouse.row, .col = mouse.col };
+        if (!mouse.pressed) {
+            const had_drag = self.drag != null;
+            self.drag = null;
+            return .{ .action = if (had_drag) .consume else .none };
+        }
+        if (self.drag) |drag| return .{ .action = .{ .mouse_drag = drag.update(cell, terminal) } };
+        if ((mouse.button & 3) != 0) return .{ .action = .none };
+
+        const hit = mouseHitTest(outer, cell);
+        switch (hit) {
+            .title, .resize_right, .resize_bottom, .resize_bottom_right => {
+                self.drag = WmMouseDrag.start(hit, cell, outer);
+                return .{ .action = .{ .mouse_drag = outer } };
+            },
+            .content => {
+                if (rectContainsCell(content, cell.row, cell.col)) return .{ .action = .forward, .bytes = bytes[0..mouse.len] };
+                return .{ .action = .none };
+            },
+            .desktop => return .{ .action = .none },
+        }
+    }
+};
+
 pub const ChromeOptions = struct {
     outer: Rect,
     title: []const u8,
@@ -561,11 +636,13 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
     var stdin_closed = false;
     var control_open = true;
     var input_buf: [256]u8 = undefined;
+    var mouse_state = WmMouseInputState{};
     while (!wait_state.done.load(.seq_cst)) {
         if (!shutdown_sent) {
-            const input = readInput(tty, &input_buf, contentRectForOuter(window.outer));
+            const input = readInput(tty, &input_buf, &mouse_state, window.outer, options.terminal);
             switch (input.action) {
                 .none => {},
+                .consume => {},
                 .forward => {
                     if (control_open) {
                         if (tryWriteInputControl(child_stdin.deprecatedWriter(), input.bytes)) {
@@ -591,6 +668,25 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
                 },
                 .window => |action| {
                     if (applyWindowAction(&window, action, options.terminal)) {
+                        const content = contentRectForOuter(window.outer);
+                        if (control_open) {
+                            if (tryWriteViewportControl(child_stdin.deprecatedWriter(), .{
+                                .rect_cells = content.toPresentationRectCells(),
+                                .aspect = options.aspect,
+                            })) {
+                                try event_log.record(.viewport_sent, window.window_id);
+                                logger.writeFmtScoped(.info, .wm, "viewport sent rect=({d},{d} {d}x{d})", .{ content.row, content.col, content.cols, content.rows });
+                            } else {
+                                logger.writeScoped(.warn, .wm, "viewport control write failed; producer control pipe is closed");
+                                control_open = false;
+                            }
+                        }
+                        try redrawDesktopLocked(&tty_lock, writer, options.terminal, window, options.title, options.upload.profile, &event_log);
+                    }
+                },
+                .mouse_drag => |outer| {
+                    if (!std.meta.eql(window.outer, outer)) {
+                        window.outer = outer;
                         const content = contentRectForOuter(window.outer);
                         if (control_open) {
                             if (tryWriteViewportControl(child_stdin.deprecatedWriter(), .{
@@ -657,9 +753,11 @@ fn waitChildThread(child: *std.process.Child, state: *ChildWaitState) void {
 
 const InputAction = union(enum) {
     none,
+    consume,
     forward,
     quit,
     window: WindowAction,
+    mouse_drag: Rect,
 };
 
 const InputRead = struct {
@@ -667,12 +765,15 @@ const InputRead = struct {
     bytes: []const u8 = "",
 };
 
-fn readInput(tty: *DirectTty, buf: []u8, content: Rect) InputRead {
+fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect, terminal: TerminalSize) InputRead {
     const n = std.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
     if (n == 0) return .{ .action = .none };
     const bytes = buf[0..n];
     const action = inputActionFromBytes(bytes);
     if (action != .none) return .{ .action = action };
+    const content = contentRectForOuter(outer);
+    const mouse_input = mouse.readMouseInput(bytes, outer, content, terminal);
+    if (mouse_input.action != .none) return mouse_input;
     const filtered = filterForwardedInputBytes(bytes, content);
     if (filtered.len > 0) return .{ .action = .forward, .bytes = filtered };
     return .{ .action = .none };
@@ -726,10 +827,24 @@ fn rectContainsCell(rect: Rect, row: i32, col: i32) bool {
     return true;
 }
 
+fn mouseHitTest(outer: Rect, cell: Cell) WmMouseHit {
+    if (!rectContainsCell(outer, cell.row, cell.col)) return .desktop;
+    const right = outer.col + outer.cols - 1;
+    const bottom = outer.row + outer.rows - 1;
+    if (cell.row == bottom and cell.col == right) return .resize_bottom_right;
+    if (cell.row == bottom and cell.col > outer.col and cell.col < right) return .resize_bottom;
+    if (cell.col == right and cell.row > outer.row and cell.row < bottom) return .resize_right;
+    if (rectContainsCell(contentRectForOuter(outer), cell.row, cell.col)) return .content;
+    if (cell.row == outer.row + 1 and cell.col > outer.col and cell.col < right) return .title;
+    return .desktop;
+}
+
 const ParsedSgrMouse = struct {
     row: i32,
     col: i32,
     len: usize,
+    button: i32,
+    pressed: bool,
 };
 
 fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
@@ -745,10 +860,10 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
     }
     const final = end orelse return null;
     var fields = std.mem.splitScalar(u8, bytes[start + 3 .. final], ';');
-    _ = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
+    const button = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     const col = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     const row = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
-    return .{ .row = row, .col = col, .len = final - start + 1 };
+    return .{ .row = row, .col = col, .len = final - start + 1, .button = button, .pressed = bytes[final] == 'M' };
 }
 
 fn redrawDesktop(writer: anytype, terminal: TerminalSize, window: WmWindowState, title: []const u8, upload_profile: render_batch_protocol.UploadProfile, events: *const ProtocolEventLog) !void {
@@ -1035,4 +1150,48 @@ test "wm viewport control can be sent best-effort after producer exit" {
 test "wm input parser prioritizes quit in coalesced input" {
     try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("lq"));
     try std.testing.expectEqual(InputAction{ .window = .move_right }, inputActionFromBytes("l"));
+}
+
+test "wm mouse hit test separates title border and content" {
+    const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
+
+    try std.testing.expectEqual(WmMouseHit.title, mouseHitTest(outer, .{ .row = 3, .col = 10 }));
+    try std.testing.expectEqual(WmMouseHit.resize_right, mouseHitTest(outer, .{ .row = 6, .col = 42 }));
+    try std.testing.expectEqual(WmMouseHit.resize_bottom_right, mouseHitTest(outer, .{ .row = 13, .col = 42 }));
+    try std.testing.expectEqual(WmMouseHit.content, mouseHitTest(outer, .{ .row = 5, .col = 10 }));
+    try std.testing.expectEqual(WmMouseHit.desktop, mouseHitTest(outer, .{ .row = 20, .col = 10 }));
+}
+
+test "wm mouse drag moves from title bar cell delta" {
+    var drag = WmMouseDrag.start(.title, .{ .row = 3, .col = 10 }, .{ .row = 2, .col = 3, .rows = 12, .cols = 40 });
+
+    const next = drag.update(.{ .row = 5, .col = 14 }, .{ .rows = 24, .cols = 80 });
+
+    try std.testing.expectEqual(Rect{ .row = 4, .col = 7, .rows = 12, .cols = 40 }, next);
+}
+
+test "wm mouse drag resizes from right and bottom borders" {
+    var right = WmMouseDrag.start(.resize_right, .{ .row = 6, .col = 42 }, .{ .row = 2, .col = 3, .rows = 12, .cols = 40 });
+    try std.testing.expectEqual(Rect{ .row = 2, .col = 3, .rows = 12, .cols = 45 }, right.update(.{ .row = 6, .col = 47 }, .{ .rows = 24, .cols = 80 }));
+
+    var corner = WmMouseDrag.start(.resize_bottom_right, .{ .row = 13, .col = 42 }, .{ .row = 2, .col = 3, .rows = 12, .cols = 40 });
+    try std.testing.expectEqual(Rect{ .row = 2, .col = 3, .rows = 15, .cols = 44 }, corner.update(.{ .row = 16, .col = 46 }, .{ .rows = 24, .cols = 80 }));
+}
+
+test "wm chrome drag consumes mouse packets until release" {
+    var state = WmMouseInputState{};
+    var title_down = [_]u8{ 0x1b, '[', '<', '0', ';', '1', '0', ';', '3', 'M' };
+    const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
+    const content = contentRectForOuter(outer);
+
+    try std.testing.expectEqual(InputAction{ .mouse_drag = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 } }, state.readMouseInput(&title_down, outer, content, .{ .rows = 24, .cols = 80 }).action);
+
+    var motion = [_]u8{ 0x1b, '[', '<', '3', '5', ';', '1', '2', ';', '5', 'M' };
+    try std.testing.expectEqual(InputAction{ .mouse_drag = Rect{ .row = 4, .col = 5, .rows = 12, .cols = 40 } }, state.readMouseInput(&motion, outer, content, .{ .rows = 24, .cols = 80 }).action);
+
+    var release = [_]u8{ 0x1b, '[', '<', '0', ';', '1', '2', ';', '5', 'm' };
+    try std.testing.expectEqual(InputAction.consume, state.readMouseInput(&release, outer, content, .{ .rows = 24, .cols = 80 }).action);
+
+    var content_click = [_]u8{ 0x1b, '[', '<', '0', ';', '1', '0', ';', '5', 'M' };
+    try std.testing.expectEqual(InputAction.forward, state.readMouseInput(&content_click, outer, content, .{ .rows = 24, .cols = 80 }).action);
 }

@@ -104,6 +104,8 @@ Current controls:
 - `q`: send `shutdown`, drain producer output, restore the terminal
 - `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`
 - `H` / `J` / `K` / `L`: resize narrower/shorter/taller/wider and send `viewport`
+- drag the title bar with mouse button 1: move the window and send `viewport`
+- drag the right, bottom, or bottom-right border with mouse button 1: resize the window and send `viewport`
 
 This is intentionally still early. Multi-producer focus, close-vs-detach policy, richer debug UI, and alternate text themes are follow-up work.
 
@@ -112,7 +114,7 @@ Current WM smoke notes:
 - `sonic`, `smw`, and `sm64ds` work through the current JSONL SDL renderer path.
 - `mi2` exercises the SDL sprite/scene path rather than only the full-frame path; batch scene placements are expected to be translated into the WM content rect.
 - `jsr` uses the Vulkan/external-framebuffer path. That path now routes through the JSONL batch presenter in `wm`, but still needs real-profile smoke because it depends on the platform Vulkan layer and RetroArch/Flycast behavior.
-- Producer input is wired through `wm` as terminal-byte input for the focused single producer. WM command keys remain host-owned, and mouse input is forwarded only when the terminal event lands inside the producer content rect.
+- Producer input is wired through `wm` as terminal-byte input for the focused single producer. WM command keys and chrome drags remain host-owned, and mouse input is forwarded only when the terminal event lands inside the producer content rect.
 
 ## Current Smoke Status
 
