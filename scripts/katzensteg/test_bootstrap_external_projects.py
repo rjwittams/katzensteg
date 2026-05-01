@@ -644,7 +644,20 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
                 ) as run_mock:
                 report = bootstrap.run_doctor(manifest, root, names=["retroarch"])
 
-        self.assertEqual([f"RetroArch melonDS core requests executable stack: {core_path}"], report.invalid_assets)
+        self.assertEqual(
+            [
+                bootstrap.InvalidAsset(
+                    label="RetroArch melonDS core",
+                    path=core_path,
+                    repair_command=("patchelf", "--clear-execstack", str(core_path)),
+                )
+            ],
+            report.invalid_assets,
+        )
+        self.assertEqual(
+            [f"RetroArch melonDS core requests executable stack: {core_path}"],
+            [str(item) for item in report.invalid_assets],
+        )
         self.assertIn("invalid assets", report.summary)
         run_mock.assert_called_once_with(
             ["patchelf", "--print-execstack", str(core_path)],
@@ -665,7 +678,13 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             missing_configs=["/tmp/config.xml"],
             missing_assets=["RetroArch bsnes core"],
             summary="missing tools: 1",
-            invalid_assets=["RetroArch melonDS core requests executable stack: /tmp/melonds_libretro.so"],
+            invalid_assets=[
+                bootstrap.InvalidAsset(
+                    label="RetroArch melonDS core",
+                    path=Path("/tmp/melonds_libretro.so"),
+                    repair_command=("patchelf", "--clear-execstack", "/tmp/melonds_libretro.so"),
+                )
+            ],
         )
 
         lines = bootstrap.format_doctor_detail_lines(report, manifest, distro_family="arch")

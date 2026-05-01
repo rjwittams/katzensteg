@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Deeper tracked context lives in `docs/katzensteg/`, especially the roadmap, launcher, external-project, and Linux readiness notes.
 

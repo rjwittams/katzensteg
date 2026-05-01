@@ -13,6 +13,7 @@ struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Surface;
+struct SDL_Cursor;
 struct SDL_Rect;
 struct SDL_Point;
 struct SDL_RendererInfo;
@@ -67,6 +68,10 @@ extern const unsigned char *ks_SDL_GetKeyboardState(int *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern struct SDL_Cursor *ks_SDL_CreateColorCursor(struct SDL_Surface *, int, int);
+extern void ks_SDL_SetCursor(struct SDL_Cursor *);
+extern int ks_SDL_ShowCursor(int);
+extern void ks_SDL_FreeCursor(struct SDL_Cursor *);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -182,6 +187,10 @@ DYLD_INTERPOSE(ks_SDL_GetKeyboardState, SDL_GetKeyboardState)
 DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
 DYLD_INTERPOSE(ks_SDL_GetRelativeMouseState, SDL_GetRelativeMouseState)
 DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)
+DYLD_INTERPOSE(ks_SDL_CreateColorCursor, SDL_CreateColorCursor)
+DYLD_INTERPOSE(ks_SDL_SetCursor, SDL_SetCursor)
+DYLD_INTERPOSE(ks_SDL_ShowCursor, SDL_ShowCursor)
+DYLD_INTERPOSE(ks_SDL_FreeCursor, SDL_FreeCursor)
 DYLD_INTERPOSE(ks_dlopen, dlopen)
 
 #endif

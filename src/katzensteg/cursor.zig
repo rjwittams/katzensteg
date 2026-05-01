@@ -19,6 +19,8 @@ pub const Position = struct {
 };
 
 pub const Snapshot = struct {
+    /// Borrowed from State.cursors. Consume synchronously before mutating State,
+    /// because cursor creation/freeing can invalidate AutoHashMap pointers.
     image: *const Image,
     position: Position,
 };

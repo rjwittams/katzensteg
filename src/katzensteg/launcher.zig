@@ -1080,7 +1080,9 @@ fn drainPipeToSink(args: DrainArgs) void {
 
 fn setNonBlocking(fd: std.posix.fd_t) void {
     const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, flags | (1 << @bitOffsetOf(std.posix.O, "NONBLOCK"))) catch {};
+    var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+    typed_flags.NONBLOCK = true;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
 fn openStdoutSink(spec: OutputSpec) !?FileSink {

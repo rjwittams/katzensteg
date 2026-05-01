@@ -45,6 +45,16 @@ class ProjectExecutionResult:
     build: CommandPhaseResult
 
 
+@dataclass(frozen=True)
+class InvalidAsset:
+    label: str
+    path: Path
+    repair_command: tuple[str, ...]
+
+    def __str__(self) -> str:
+        return f"{self.label} requests executable stack: {self.path}"
+
+
 @dataclass
 class DoctorReport:
     missing_tools: list[str]
@@ -53,7 +63,7 @@ class DoctorReport:
     missing_configs: list[str]
     missing_assets: list[str]
     summary: str
-    invalid_assets: list[str] = field(default_factory=list)
+    invalid_assets: list[InvalidAsset] = field(default_factory=list)
 
 
 def load_manifest(path: Path) -> dict:
@@ -258,9 +268,9 @@ def missing_asset_label(asset_entry: dict, resolved_paths: list[Path]) -> str:
     return "one of: " + ", ".join(str(path) for path in resolved_paths)
 
 
-def asset_execstack_label(asset_entry: dict, path: Path) -> str:
+def asset_execstack(asset_entry: dict, path: Path) -> InvalidAsset:
     label = asset_entry.get("label", str(path))
-    return f"{label} requests executable stack: {path}"
+    return InvalidAsset(label=label, path=path, repair_command=("patchelf", "--clear-execstack", str(path)))
 
 
 def path_requests_execstack(path: Path) -> bool | None:
@@ -322,7 +332,7 @@ def run_doctor(
     missing_outputs: list[str] = []
     missing_configs: list[str] = []
     missing_assets: list[str] = []
-    invalid_assets: list[str] = []
+    invalid_assets: list[InvalidAsset] = []
 
     doctor_sections: list[tuple[dict, Path, str]] = []
     if repo_doctor := manifest.get("doctor"):
@@ -379,7 +389,7 @@ def run_doctor(
                 if any(status is None for status in execstack_statuses):
                     missing_tools.append("patchelf")
                 elif all(execstack_statuses):
-                    invalid_assets.append(asset_execstack_label(asset_entry, existing_paths[0]))
+                    invalid_assets.append(asset_execstack(asset_entry, existing_paths[0]))
 
     report = DoctorReport(
         missing_tools=list(dict.fromkeys(missing_tools)),
@@ -423,9 +433,7 @@ def format_doctor_detail_lines(
         lines.extend(f"    {item}" for item in report.invalid_assets)
         lines.append("  asset repair hints:")
         for item in report.invalid_assets:
-            if " requests executable stack: " in item:
-                path = item.rsplit(": ", 1)[1]
-                lines.append(f"    patchelf --clear-execstack {path}")
+            lines.append(f"    {' '.join(item.repair_command)}")
 
     install_capabilities = [*report.missing_tools, *report.missing_packages]
     if install_capabilities:
