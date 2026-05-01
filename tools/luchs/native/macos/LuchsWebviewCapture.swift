@@ -76,6 +76,31 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
     }
 
     private func capture(_ webView: WKWebView) {
+        let tickMilliseconds = Int(Double(emittedFrames) * frameInterval * 1000.0)
+        let script = """
+        (() => {
+          const tick = \(tickMilliseconds);
+          const animations = document.getAnimations ? document.getAnimations({ subtree: true }) : [];
+          for (const animation of animations) {
+            try {
+              const timing = animation.effect && animation.effect.getTiming ? animation.effect.getTiming() : {};
+              const duration = Number.isFinite(timing.duration) && timing.duration > 0 ? timing.duration : 1000;
+              animation.pause();
+              animation.currentTime = tick % duration;
+            } catch (_) {}
+          }
+          document.documentElement.style.setProperty("--luchs-capture-tick", String(tick));
+          document.documentElement.style.setProperty("--luchs-capture-scale", String(0.15 + 0.85 * ((tick % 1000) / 1000)));
+          if (document.body) { void document.body.offsetWidth; }
+          return animations.length;
+        })()
+        """
+        webView.evaluateJavaScript(script) { [weak self] _, _ in
+            self?.snapshot(webView)
+        }
+    }
+
+    private func snapshot(_ webView: WKWebView) {
         let snapshot = WKSnapshotConfiguration()
         snapshot.rect = CGRect(x: 0, y: 0, width: width, height: height)
         webView.takeSnapshot(with: snapshot) { [weak self] image, error in

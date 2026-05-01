@@ -21,17 +21,20 @@
         content: "";
         display: block;
         width: 100%;
-        height: 4px;
+        height: 18px;
         margin-top: 18px;
         background: #4aa3df;
-        animation: pulse 1s linear infinite;
+        box-shadow: 0 0 18px rgba(74, 163, 223, 0.55);
+        transform: scaleX(var(--luchs-capture-scale, 0.15));
         transform-origin: left center;
       }
-      @keyframes pulse {
-        from { transform: scaleX(0.15); }
-        to { transform: scaleX(1); }
-      }
     </style>
+    <script>
+      setInterval(() => {
+        const phase = (Date.now() % 1000) / 1000;
+        document.documentElement.style.setProperty("--luchs-capture-scale", String(0.15 + 0.85 * phase));
+      }, 33);
+    </script>
   </head>
   <body>
     <main>Luchs static HTML fixture</main>
