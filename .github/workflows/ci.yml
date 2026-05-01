@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  linux:
+    name: Linux build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            libvulkan-dev \
+            libyuv-dev \
+            libsdl2-dev \
+            pkg-config \
+            python3
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build
+
+      - name: Zig tests
+        run: zig build test
+
+      - name: Python tests
+        run: |
+          python3 scripts/katzensteg/test_attach_exec.py
+          python3 scripts/katzensteg/test_bootstrap_external_projects.py
+          python3 scripts/katzensteg/test_env_scrub.py
+          python3 scripts/katzensteg/test_image_fastpath_portable.py
+          python3 scripts/katzensteg/test_katzensteg_banner.py
+          python3 scripts/katzensteg/test_linux_preload_exports.py
+          python3 scripts/katzensteg/test_no_preload_stderr.py
+          python3 scripts/katzensteg/test_vulkan_linux_wiring.py
