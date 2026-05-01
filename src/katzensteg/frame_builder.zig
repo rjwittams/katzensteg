@@ -1,8 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
-const sdl = @import("katzensteg_sdl");
-const real_sdl = @import("real_sdl.zig");
+const core = @import("core_types.zig");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
@@ -33,6 +32,34 @@ const primitive_composite_threshold: usize = 128;
 const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 const fullscreen_retained_placement_count: usize = 2;
 const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
+
+const compat_sdl_pixelformat_rgb565: u32 = 353701890;
+const compat_sdl_pixelformat_rgba4444: u32 = 356651010;
+const compat_sdl_pixelformat_xrgb8888: u32 = 370546692;
+const compat_sdl_pixelformat_argb8888: u32 = 372645892;
+const compat_sdl_pixelformat_abgr8888: u32 = 376840196;
+const compat_sdl_pixelformat_yv12: u32 = 842094169;
+const compat_sdl_pixelformat_iyuv: u32 = 1448433993;
+const compat_sdl_pixelformat_nv12: u32 = 842094158;
+const compat_sdl_pixelformat_nv21: u32 = 825382478;
+
+const compat_sdl_blendmode_none: i32 = 0x00000000;
+const compat_sdl_blendmode_blend: i32 = 0x00000001;
+const compat_sdl_blendmode_add: i32 = 0x00000002;
+const compat_sdl_blendmode_mod: i32 = 0x00000004;
+const compat_sdl_blendmode_mul: i32 = 0x00000008;
+const compat_sdl_flip_none: c_int = 0x00000000;
+
+const default_texture_format = core.pixelFormat(.rgba8, .{ .sdl2 = compat_sdl_pixelformat_abgr8888 });
+const argb8888_texture_format = core.pixelFormat(.argb8888, .{ .sdl2 = compat_sdl_pixelformat_argb8888 });
+const xrgb8888_texture_format = core.pixelFormat(.xrgb8888, .{ .sdl2 = compat_sdl_pixelformat_xrgb8888 });
+const rgb565_texture_format = core.pixelFormat(.rgb565, .{ .sdl2 = compat_sdl_pixelformat_rgb565 });
+const rgba4444_texture_format = core.pixelFormat(.rgba4444, .{ .sdl2 = compat_sdl_pixelformat_rgba4444 });
+const i420_texture_format = core.pixelFormat(.i420, .{ .sdl2 = compat_sdl_pixelformat_iyuv });
+const nv12_texture_format = core.pixelFormat(.nv12, .{ .sdl2 = compat_sdl_pixelformat_nv12 });
+const default_blend_mode = core.blendMode(.none, .{ .sdl2 = compat_sdl_blendmode_none });
+const blend_mode_blend = core.blendMode(.blend, .{ .sdl2 = compat_sdl_blendmode_blend });
+const blend_mode_add = core.blendMode(.add, .{ .sdl2 = compat_sdl_blendmode_add });
 
 pub const ExternalFramebufferFormat = enum(u32) {
     rgba8 = 0,
@@ -112,7 +139,7 @@ const CompositeStripEntry = struct {
 };
 
 const CompositeTileState = struct {
-    src_rect: sdl.SDL_Rect,
+    src_rect: core.CoreRect,
     dest_rect: ts_types.CellRect,
     image_id: u32 = 0,
     placement_id: u32 = 0,
@@ -133,16 +160,16 @@ const PresentDebugSignature = struct {
     scaled_copies: usize = 0,
     missing_textures: usize = 0,
     first_copy_texture_key: usize = 0,
-    first_copy_blend_mode: i32 = 0,
-    first_copy_src: sdl.SDL_Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    first_copy_dst: sdl.SDL_Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    first_copy_blend_mode: core.BlendMode = default_blend_mode,
+    first_copy_src: core.CoreRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    first_copy_dst: core.CoreRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 };
 
 const RendererState = struct {
     window_w: i32,
     window_h: i32,
-    viewport: sdl.SDL_Rect,
-    clip_rect: ?sdl.SDL_Rect = null,
+    viewport: core.CoreRect,
+    clip_rect: ?core.CoreRect = null,
     draw_color: [4]u8 = .{ 0, 0, 0, 255 },
     clear_color: [4]u8 = .{ 0, 0, 0, 255 },
     had_clear: bool = false,
@@ -204,7 +231,7 @@ const RendererState = struct {
 const TextureRecord = struct {
     w: i32,
     h: i32,
-    format: sdl.Uint32,
+    format: core.PixelFormat,
     image_id: u32,
     asset_id: u64 = 0,
     update_count: u64 = 0,
@@ -216,7 +243,7 @@ const TextureRecord = struct {
     locked_pitch: i32 = 0,
     color_mod: [3]u8 = .{ 255, 255, 255 },
     alpha_mod: u8 = 255,
-    blend_mode: i32 = sdl.SDL_BLENDMODE_NONE,
+    blend_mode: core.BlendMode = default_blend_mode,
 };
 
 fn setTextureColorMod(record: *TextureRecord, r: u8, g: u8, b: u8) bool {
@@ -239,9 +266,9 @@ const WindowRecord = struct {
 
 const RenderCopyOp = struct {
     texture_key: usize,
-    src: sdl.SDL_Rect,
-    dst: sdl.SDL_Rect,
-    blend_mode: i32 = sdl.SDL_BLENDMODE_NONE,
+    src: core.CoreRect,
+    dst: core.CoreRect,
+    blend_mode: core.BlendMode = default_blend_mode,
     color_mod: [3]u8 = .{ 255, 255, 255 },
     alpha_mod: u8 = 255,
     base_opaque: bool = false,
@@ -249,7 +276,7 @@ const RenderCopyOp = struct {
 };
 
 const FillRectOp = struct {
-    rect: sdl.SDL_Rect,
+    rect: core.CoreRect,
     color: [4]u8,
 };
 
@@ -387,23 +414,19 @@ pub const FrameBuilder = struct {
         self.next_composite_placement_id = start;
     }
 
-    pub fn onCreateWindow(self: *FrameBuilder, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
-        const key = ptrKey(window);
-        if (key == 0) return;
-        self.windows.put(key, .{ .w = w, .h = h }) catch {};
+    pub fn onCreateWindow(self: *FrameBuilder, window: core.CoreHandle, w: i32, h: i32) void {
+        if (window == 0) return;
+        self.windows.put(window, .{ .w = w, .h = h }) catch {};
     }
 
-    pub fn onCreateRenderer(self: *FrameBuilder, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) void {
-        const renderer_key = ptrKey(renderer);
-        const window_key = ptrKey(window);
-        if (renderer_key == 0) return;
-        const dims = self.windows.get(window_key) orelse WindowRecord{ .w = 640, .h = 480 };
-        self.renderers.put(renderer_key, RendererState.init(self.allocator, dims.w, dims.h)) catch {};
+    pub fn onCreateRenderer(self: *FrameBuilder, window: core.CoreHandle, renderer: core.CoreHandle) void {
+        if (renderer == 0) return;
+        const dims = self.windows.get(window) orelse WindowRecord{ .w = 640, .h = 480 };
+        self.renderers.put(renderer, RendererState.init(self.allocator, dims.w, dims.h)) catch {};
     }
 
-    pub fn onDestroyRenderer(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer) void {
-        const key = ptrKey(renderer);
-        if (self.renderers.fetchRemove(key)) |entry| {
+    pub fn onDestroyRenderer(self: *FrameBuilder, renderer: core.CoreHandle) void {
+        if (self.renderers.fetchRemove(renderer)) |entry| {
             var state = entry.value;
             state.deinit(self.allocator);
         }
@@ -463,15 +486,13 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onCreateTexture(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32) void {
-        const key = ptrKey(texture);
-        if (key == 0) return;
-        self.textures.put(key, .{ .w = w, .h = h, .format = format, .image_id = 0 }) catch {};
+    pub fn onCreateTexture(self: *FrameBuilder, texture: core.CoreHandle, format: core.PixelFormat, w: i32, h: i32) void {
+        if (texture == 0) return;
+        self.textures.put(texture, .{ .w = w, .h = h, .format = format, .image_id = 0 }) catch {};
     }
 
-    pub fn onDestroyTexture(self: *FrameBuilder, texture: ?*sdl.SDL_Texture) void {
-        const key = ptrKey(texture);
-        if (self.textures.fetchRemove(key)) |entry| {
+    pub fn onDestroyTexture(self: *FrameBuilder, texture: core.CoreHandle) void {
+        if (self.textures.fetchRemove(texture)) |entry| {
             if (entry.value.base_rgba) |buf| self.allocator.free(buf);
             if (entry.value.publish_rgba_owned) {
                 if (entry.value.publish_rgba) |buf| self.allocator.free(buf);
@@ -481,115 +502,89 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
+    pub fn onUpdateTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
         _ = backend;
         self.onUpdateTextureBatch(logger, texture, rect, pixels, pitch);
     }
 
-    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
-        const key = ptrKey(texture);
-        const record = self.textures.getPtr(key) orelse return;
+    pub fn onUpdateTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*const anyopaque, pitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (rect != null) {
             logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateTexture rects are not supported in this slice");
             return;
         }
         if (pixels == null) return;
         self.captureTexturePixelsIntoRecord(record, @ptrCast(@constCast(pixels.?)), pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
             error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
         };
     }
 
-    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+    pub fn onUpdateYuvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
         _ = backend;
         self.onUpdateYuvTextureBatch(logger, texture, rect, yplane, ypitch, uplane, upitch, vplane, vpitch);
     }
 
-    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUpdateYuvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uplane: ?[*]const u8, upitch: i32, vplane: ?[*]const u8, vpitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (yplane == null or uplane == null or vplane == null) return;
         self.captureYuvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uplane.?, upitch, vplane.?, vpitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported YUV texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported YUV texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
             error.UnsupportedTextureRect => logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateYUVTexture rects are not supported yet"),
             error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate YUV texture pixel storage"),
         };
     }
 
-    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+    pub fn onUpdateNvTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
         _ = backend;
         self.onUpdateNvTextureBatch(logger, texture, rect, yplane, ypitch, uvplane, uvpitch);
     }
 
-    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUpdateNvTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, yplane: ?[*]const u8, ypitch: i32, uvplane: ?[*]const u8, uvpitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (yplane == null or uvplane == null) return;
         self.captureNvTexturePlanesIntoRecord(record, rect, yplane.?, ypitch, uvplane.?, uvpitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported NV texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported NV texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
             error.UnsupportedTextureRect => logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_UpdateNVTexture rects are not supported yet"),
             error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate NV texture pixel storage"),
         };
     }
 
-    pub fn onCreateTextureFromSurface(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-        _ = backend;
-        self.onCreateTextureFromSurfaceBatch(logger, texture, surface);
-    }
-
-    pub fn onCreateTextureFromSurfaceBatch(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-        const key = ptrKey(texture);
-        const record = self.textures.getPtr(key) orelse return;
-        if (surface == null) return;
-        const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
-            logger.writeOnceScoped(.warn, .frame_builder, "SDL_ConvertSurfaceFormat failed for CreateTextureFromSurface");
-            return;
-        };
-        defer real_sdl.SDL_FreeSurface(converted);
-        const surf: *SurfaceView = @ptrCast(@alignCast(converted));
-        record.w = surf.w;
-        record.h = surf.h;
-        record.format = sdl.SDL_PIXELFORMAT_ABGR8888;
-        const src: [*]u8 = @ptrCast(surf.pixels.?);
-        self.captureTexturePixelsIntoRecord(record, src, surf.pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
-            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
-        };
-    }
-
-    pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
+    pub fn onSetTextureColorMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, r: u8, g: u8, b: u8) void {
         _ = logger;
         _ = backend;
         self.onSetTextureColorModBatch(texture, r, g, b);
     }
 
-    pub fn onSetTextureColorModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, r: u8, g: u8, b: u8) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureColorModBatch(self: *FrameBuilder, texture: core.CoreHandle, r: u8, g: u8, b: u8) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (!setTextureColorMod(record, r, g, b)) return;
         self.invalidateTexturePublication(record);
     }
 
-    pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture, a: u8) void {
+    pub fn onSetTextureAlphaMod(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle, a: u8) void {
         _ = logger;
         _ = backend;
         self.onSetTextureAlphaModBatch(texture, a);
     }
 
-    pub fn onSetTextureAlphaModBatch(self: *FrameBuilder, texture: ?*sdl.SDL_Texture, a: u8) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureAlphaModBatch(self: *FrameBuilder, texture: core.CoreHandle, a: u8) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (!setTextureAlphaMod(record, a)) return;
         self.invalidateTexturePublication(record);
     }
 
-    pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, blend_mode: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onSetTextureBlendMode(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, blend_mode: core.BlendMode) void {
+        const record = self.textures.getPtr(texture) orelse return;
         record.blend_mode = blend_mode;
-        logger.writeFmtScoped(.info, .frame_builder, "SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ ptrKey(texture), blendModeName(blend_mode), blend_mode });
-        if (blend_mode != sdl.SDL_BLENDMODE_NONE and blend_mode != sdl.SDL_BLENDMODE_BLEND) {
-            logger.writeFmtScoped(.info, .frame_builder, "unsupported SDL texture blend mode {s} ({d}); some compositions may require framebuffer-side compositing before terminal upload", .{ blendModeName(blend_mode), blend_mode });
+        logger.writeFmtScoped(.info, .frame_builder, "SDL_SetTextureBlendMode texture={x} mode={s} ({d})", .{ texture, blendModeName(blend_mode), blendModeRawSdl2(blend_mode) });
+        if (!isBlendMode(blend_mode, .none) and !isBlendMode(blend_mode, .blend)) {
+            logger.writeFmtScoped(.info, .frame_builder, "unsupported SDL texture blend mode {s} ({d}); some compositions may require framebuffer-side compositing before terminal upload", .{ blendModeName(blend_mode), blendModeRawSdl2(blend_mode) });
         }
     }
 
-    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onLockTexture(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle, rect: ?*const core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
+        const record = self.textures.getPtr(texture) orelse return;
         if (rect != null) {
             logger.writeOnceScoped(.warn, .frame_builder, "partial SDL_LockTexture rects are not supported yet");
             record.locked_pixels = null;
@@ -601,8 +596,8 @@ pub const FrameBuilder = struct {
         record.locked_pitch = pitch;
     }
 
-    pub fn onUnlockTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: ?*sdl.SDL_Texture) void {
-        const record = self.textures.getPtr(ptrKey(texture)) orelse return;
+    pub fn onUnlockTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle) void {
+        const record = self.textures.getPtr(texture) orelse return;
         const pixels = record.locked_pixels orelse return;
         const pitch = record.locked_pitch;
         record.locked_pixels = null;
@@ -646,7 +641,7 @@ pub const FrameBuilder = struct {
     fn captureTexturePixels(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord, src: [*]u8, pitch: i32) void {
         _ = backend;
         self.captureTexturePixelsIntoRecord(record, src, pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {d}", .{record.format}),
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
             error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
         };
     }
@@ -676,8 +671,8 @@ pub const FrameBuilder = struct {
         self.invalidateTexturePublication(record);
     }
 
-    fn captureYuvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const sdl.SDL_Rect, yplane: [*]const u8, ypitch: i32, uplane: [*]const u8, upitch: i32, vplane: [*]const u8, vpitch: i32) !void {
-        if (record.format != sdl.SDL_PIXELFORMAT_IYUV and record.format != sdl.SDL_PIXELFORMAT_YV12) return error.UnsupportedTextureFormat;
+    fn captureYuvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const core.CoreRect, yplane: [*]const u8, ypitch: i32, uplane: [*]const u8, upitch: i32, vplane: [*]const u8, vpitch: i32) !void {
+        if (record.format.semantic != .i420 and record.format.semantic != .yv12) return error.UnsupportedTextureFormat;
         if (rect != null) return error.UnsupportedTextureRect;
         if (record.w <= 0 or record.h <= 0 or ypitch <= 0 or upitch <= 0 or vpitch <= 0) return error.UnsupportedTextureFormat;
 
@@ -695,20 +690,20 @@ pub const FrameBuilder = struct {
         self.invalidateTexturePublication(record);
     }
 
-    fn captureNvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const sdl.SDL_Rect, yplane: [*]const u8, ypitch: i32, uvplane: [*]const u8, uvpitch: i32) !void {
-        if (record.format != sdl.SDL_PIXELFORMAT_NV12 and record.format != sdl.SDL_PIXELFORMAT_NV21) return error.UnsupportedTextureFormat;
+    fn captureNvTexturePlanesIntoRecord(self: *FrameBuilder, record: *TextureRecord, rect: ?*const core.CoreRect, yplane: [*]const u8, ypitch: i32, uvplane: [*]const u8, uvpitch: i32) !void {
+        if (record.format.semantic != .nv12 and record.format.semantic != .nv21) return error.UnsupportedTextureFormat;
         if (rect != null) return error.UnsupportedTextureRect;
         if (record.w <= 0 or record.h <= 0 or ypitch <= 0 or uvpitch <= 0) return error.UnsupportedTextureFormat;
 
         const len: usize = @intCast(record.w * record.h * 4);
         const rgba = try self.ensureWritableTextureRgba(record, len);
-        if (record.format == sdl.SDL_PIXELFORMAT_NV12 and tryFastNv12PlanesToRgba(rgba, record.w, record.h, yplane, ypitch, uvplane, uvpitch)) {
+        if (record.format.semantic == .nv12 and tryFastNv12PlanesToRgba(rgba, record.w, record.h, yplane, ypitch, uvplane, uvpitch)) {
             record.base_opaque = true;
             record.update_count += 1;
             self.invalidateTexturePublication(record);
             return;
         }
-        convertNv12PlanesToRgba(rgba, record.w, record.h, yplane, ypitch, uvplane, uvpitch, record.format == sdl.SDL_PIXELFORMAT_NV21);
+        convertNv12PlanesToRgba(rgba, record.w, record.h, yplane, ypitch, uvplane, uvpitch, record.format.semantic == .nv21);
         record.base_opaque = true;
         record.update_count += 1;
         self.invalidateTexturePublication(record);
@@ -725,23 +720,23 @@ pub const FrameBuilder = struct {
         return replacement;
     }
 
-    pub fn onSetRenderDrawColor(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, r: u8, g: u8, b: u8, a: u8) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onSetRenderDrawColor(self: *FrameBuilder, renderer: core.CoreHandle, r: u8, g: u8, b: u8, a: u8) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.draw_color = .{ r, g, b, a };
     }
 
-    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        state.viewport = if (rect) |r| r.* else sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
+    pub fn onRenderSetViewport(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        state.viewport = if (rect) |r| r.* else core.CoreRect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
     }
 
-    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.clip_rect = if (rect) |r| applyViewportRect(r.*, state.viewport) else null;
     }
 
-    pub fn onRenderClear(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderClear(self: *FrameBuilder, renderer: core.CoreHandle) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         state.had_clear = true;
         state.clear_color = state.draw_color;
         state.copies.clearRetainingCapacity();
@@ -749,23 +744,23 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
-    pub fn onRenderFillRect(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        const fill = rect orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = state.viewport.w, .h = state.viewport.h };
+    pub fn onRenderFillRect(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        const fill = rect orelse &core.CoreRect{ .x = 0, .y = 0, .w = state.viewport.w, .h = state.viewport.h };
         const mapped = applyViewportRect(fill.*, state.viewport);
         const clipped = clipRect(mapped, state.clip_rect) orelse return;
         state.fills.append(self.allocator, .{ .rect = clipped, .color = state.draw_color }) catch {};
     }
 
-    pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: ?*sdl.SDL_Renderer, x: i32, y: i32) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderDrawPoint(self: *FrameBuilder, renderer: core.CoreHandle, x: i32, y: i32) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         const mapped = applyViewportRect(.{ .x = x, .y = y, .w = 1, .h = 1 }, state.viewport);
         const clipped = clipRect(mapped, state.clip_rect) orelse return;
         state.fills.append(self.allocator, .{ .rect = clipped, .color = state.draw_color }) catch {};
     }
 
-    pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, x1: i32, y1: i32, x2: i32, y2: i32) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn onRenderDrawLine(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, x1: i32, y1: i32, x2: i32, y2: i32) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         if (x1 != x2 and y1 != y2) {
             logger.writeOnceScoped(.warn, .frame_builder, "diagonal SDL_RenderDrawLine mirroring not implemented yet; skipping line");
             return;
@@ -777,7 +772,7 @@ pub const FrameBuilder = struct {
             .y2 = y2 + state.viewport.y,
             .color = state.draw_color,
         };
-        const line_rect = sdl.SDL_Rect{
+        const line_rect = core.CoreRect{
             .x = @min(mapped.x1, mapped.x2),
             .y = @min(mapped.y1, mapped.y2),
             .w = @max(1, @max(mapped.x1, mapped.x2) - @min(mapped.x1, mapped.x2) + 1),
@@ -787,26 +782,26 @@ pub const FrameBuilder = struct {
         state.lines.append(self.allocator, mapped) catch {};
     }
 
-    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
+    pub fn onRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
         self.recordRenderCopy(logger, renderer, texture, src, dst);
     }
 
-    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect, angle: f64, center: ?*const sdl.SDL_Point, flip: c_int) void {
+    pub fn onRenderCopyEx(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect, angle: f64, center: ?*const core.CorePoint, flip: c_int) void {
         _ = center;
-        if (angle != 0 or flip != sdl.SDL_FLIP_NONE) {
+        if (angle != 0 or flip != compat_sdl_flip_none) {
             logger.writeOnceScoped(.warn, .frame_builder, "SDL_RenderCopyEx rotation/flip not implemented; approximating as SDL_RenderCopy");
         }
         self.recordRenderCopy(logger, renderer, texture, src, dst);
     }
 
     pub const GeometryCopy = struct {
-        src: sdl.SDL_Rect,
-        dst: sdl.SDL_Rect,
+        src: core.CoreRect,
+        dst: core.CoreRect,
     };
 
-    pub fn onRenderGeometryRaw(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
+    pub fn onRenderGeometryRaw(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, xy: ?[*]const f32, xy_stride: c_int, uv: ?[*]const f32, uv_stride: c_int, num_vertices: c_int, indices: ?*const anyopaque, num_indices: c_int, size_indices: c_int) void {
         if (xy_stride <= 0 or uv_stride <= 0 or num_vertices <= 0 or num_indices < 0) return;
-        const record = self.textures.get(ptrKey(texture)) orelse return;
+        const record = self.textures.get(texture) orelse return;
         const copy = geometryRawAsCopy(xy, @intCast(xy_stride), uv, @intCast(uv_stride), @intCast(num_vertices), indices, @intCast(num_indices), @intCast(size_indices), record.w, record.h) orelse {
             logger.writeOnceScoped(.warn, .frame_builder, "unsupported SDL_RenderGeometryRaw shape; skipping geometry");
             return;
@@ -874,19 +869,19 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, src: ?*const sdl.SDL_Rect, dst: ?*const sdl.SDL_Rect) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
-        const texture_key = ptrKey(texture);
+    fn recordRenderCopy(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, texture: core.CoreHandle, src: ?*const core.CoreRect, dst: ?*const core.CoreRect) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        const texture_key = texture;
         const record = self.textures.get(texture_key) orelse return;
-        if (record.blend_mode != sdl.SDL_BLENDMODE_NONE and record.blend_mode != sdl.SDL_BLENDMODE_BLEND) {
+        if (!isBlendMode(record.blend_mode, .none) and !isBlendMode(record.blend_mode, .blend)) {
             logger.writeFmtScoped(
                 .info,
                 .frame_builder,
                 "SDL_RenderCopy using unsupported texture blend mode {s} ({d}) tex={x} alpha_mod={d} color_mod=({d},{d},{d})",
-                .{ blendModeName(record.blend_mode), record.blend_mode, texture_key, record.alpha_mod, record.color_mod[0], record.color_mod[1], record.color_mod[2] },
+                .{ blendModeName(record.blend_mode), blendModeRawSdl2(record.blend_mode), texture_key, record.alpha_mod, record.color_mod[0], record.color_mod[1], record.color_mod[2] },
             );
         }
-        const dst_rect = dst orelse &sdl.SDL_Rect{
+        const dst_rect = dst orelse &core.CoreRect{
             .x = 0,
             .y = 0,
             .w = if (state.viewport.w > 0) state.viewport.w else state.window_w,
@@ -895,7 +890,7 @@ pub const FrameBuilder = struct {
         if (dst == null) {
             logger.writeOnceScoped(.warn, .frame_builder, "null destination rect approximated to full viewport");
         }
-        const src_rect = src orelse &sdl.SDL_Rect{ .x = 0, .y = 0, .w = record.w, .h = record.h };
+        const src_rect = src orelse &core.CoreRect{ .x = 0, .y = 0, .w = record.w, .h = record.h };
         const mapped_dst = applyViewportRect(dst_rect.*, state.viewport);
         if (clipCopyRect(src_rect.*, mapped_dst, state.clip_rect, record.w, record.h)) |clipped| {
             state.copies.append(self.allocator, .{
@@ -911,10 +906,10 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
+    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
         var job = self.buildPresentJob(logger, tty, renderer, bg_only) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "buildPresentJob failed: {any}", .{err});
-            const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+            const state = self.renderers.getPtr(renderer) orelse return;
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
             state.lines.clearRetainingCapacity();
@@ -924,8 +919,8 @@ pub const FrameBuilder = struct {
         self.renderPresentJob(logger, tty, engine, backend, renderer, &job, debug_protocol_replies, image_gc);
     }
 
-    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer, bg_only: bool) !PresentJob {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return error.UnknownRenderer;
+    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool) !PresentJob {
+        const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
         const use_composite = !bg_only and self.needsFramebufferComposite(state);
         if (self.debug_composite) {
             if (self.changedPresentDebugSignature(state, use_composite)) |signature| {
@@ -998,8 +993,8 @@ pub const FrameBuilder = struct {
         return .{ .scene = .{ .had_clear = state.had_clear, .clear_color = state.clear_color, .publications = try self.allocator.dupe(AssetPublication, publications_list.items), .sprites = try self.allocator.dupe(SceneSprite, sprites_list.items), .solids = try self.allocator.dupe(SolidSprite, solids_list.items) } };
     }
 
-    pub fn renderPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: ?*sdl.SDL_Renderer, job: *PresentJob, debug_protocol_replies: bool, image_gc: bool) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn renderPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, job: *PresentJob, debug_protocol_replies: bool, image_gc: bool) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         switch (job.*) {
             .framebuffer => |fb| {
                 engine.beginScene();
@@ -1100,8 +1095,8 @@ pub const FrameBuilder = struct {
         state.lines.clearRetainingCapacity();
     }
 
-    pub fn renderPresentJobBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: ?*sdl.SDL_Renderer, job: *PresentJob, writer: anytype) void {
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return;
+    pub fn renderPresentJobBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle, job: *PresentJob, writer: anytype) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
         if (!sink.isAttached()) {
             state.copies.clearRetainingCapacity();
             state.fills.clearRetainingCapacity();
@@ -1205,9 +1200,9 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: ?*sdl.SDL_Renderer) presentation_layout.PresentationLayout {
+    pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: core.CoreHandle) presentation_layout.PresentationLayout {
         var layout = presentation_layout.PresentationLayout{};
-        const state = self.renderers.getPtr(ptrKey(renderer)) orelse return layout;
+        const state = self.renderers.getPtr(renderer) orelse return layout;
         switch (self.composite_mode) {
             .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
         }
@@ -1249,8 +1244,8 @@ pub const FrameBuilder = struct {
                 .texture_key = key,
                 .w = tex.w,
                 .h = tex.h,
-                .format = tex.format,
-                .blend_mode = tex.blend_mode,
+                .format = pixelFormatRawSdl2(tex.format),
+                .blend_mode = blendModeRawSdl2(tex.blend_mode),
                 .update_count = tex.update_count,
                 .image_id = tex.image_id,
             });
@@ -1263,8 +1258,8 @@ pub const FrameBuilder = struct {
                     .kind = .image,
                     .w = state.window_w,
                     .h = state.window_h,
-                    .format = sdl.SDL_PIXELFORMAT_ABGR8888,
-                    .blend_mode = sdl.SDL_BLENDMODE_NONE,
+                    .format = pixelFormatRawSdl2(default_texture_format),
+                    .blend_mode = blendModeRawSdl2(default_blend_mode),
                     .update_count = 1,
                     .image_id = state.composite_image_id,
                 });
@@ -1275,8 +1270,8 @@ pub const FrameBuilder = struct {
                     .placement_id = state.composite_placement_id,
                     .w = state.window_w,
                     .h = state.window_h,
-                    .format = sdl.SDL_PIXELFORMAT_ABGR8888,
-                    .blend_mode = sdl.SDL_BLENDMODE_NONE,
+                    .format = pixelFormatRawSdl2(default_texture_format),
+                    .blend_mode = blendModeRawSdl2(default_blend_mode),
                     .update_count = 1,
                     .image_id = state.composite_image_id,
                 });
@@ -1287,8 +1282,8 @@ pub const FrameBuilder = struct {
                         .kind = .image,
                         .w = tile.src_rect.w,
                         .h = tile.src_rect.h,
-                        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
-                        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+                        .format = pixelFormatRawSdl2(default_texture_format),
+                        .blend_mode = blendModeRawSdl2(default_blend_mode),
                         .update_count = 1,
                         .image_id = tile.image_id,
                     });
@@ -1299,8 +1294,8 @@ pub const FrameBuilder = struct {
                         .placement_id = tile.placement_id,
                         .w = tile.src_rect.w,
                         .h = tile.src_rect.h,
-                        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
-                        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+                        .format = pixelFormatRawSdl2(default_texture_format),
+                        .blend_mode = blendModeRawSdl2(default_blend_mode),
                         .update_count = 1,
                         .image_id = tile.image_id,
                     });
@@ -1339,7 +1334,7 @@ pub const FrameBuilder = struct {
             },
         }
         for (state.copies.items) |copy| {
-            if (copy.blend_mode != sdl.SDL_BLENDMODE_NONE and copy.blend_mode != sdl.SDL_BLENDMODE_BLEND) {
+            if (!isBlendMode(copy.blend_mode, .none) and !isBlendMode(copy.blend_mode, .blend)) {
                 summary.fallback_texture_key = copy.texture_key;
                 summary.fallback_reason = "unsupported_blend_mode";
                 break;
@@ -1740,7 +1735,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn tileDiffers(current: []const u8, previous: []const u8, window_w: i32, rect: sdl.SDL_Rect) bool {
+    fn tileDiffers(current: []const u8, previous: []const u8, window_w: i32, rect: core.CoreRect) bool {
         var row: i32 = 0;
         while (row < rect.h) : (row += 1) {
             const x: usize = @intCast(rect.x);
@@ -1752,7 +1747,7 @@ pub const FrameBuilder = struct {
         return false;
     }
 
-    fn extractTileRgba(dst: []u8, src: []const u8, window_w: i32, rect: sdl.SDL_Rect) void {
+    fn extractTileRgba(dst: []u8, src: []const u8, window_w: i32, rect: core.CoreRect) void {
         const src_w: usize = @intCast(window_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
@@ -1765,7 +1760,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn blitTileIntoStrip(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, rect: sdl.SDL_Rect, dst_x: i32, dst_y: i32) void {
+    fn blitTileIntoStrip(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, rect: core.CoreRect, dst_x: i32, dst_y: i32) void {
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
         const row_bytes: usize = @intCast(rect.w * 4);
@@ -1781,7 +1776,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn copyTileToLast(dst: []u8, window_w: i32, src: []const u8, rect: sdl.SDL_Rect) void {
+    fn copyTileToLast(dst: []u8, window_w: i32, src: []const u8, rect: core.CoreRect) void {
         const dst_w: usize = @intCast(window_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
@@ -1797,7 +1792,7 @@ pub const FrameBuilder = struct {
         if (state.fills.items.len + state.lines.items.len > primitive_composite_threshold) return true;
         for (state.copies.items) |copy| {
             const texture = self.textures.get(copy.texture_key) orelse continue;
-            if (copy.blend_mode != sdl.SDL_BLENDMODE_NONE and copy.blend_mode != sdl.SDL_BLENDMODE_BLEND) return true;
+            if (!isBlendMode(copy.blend_mode, .none) and !isBlendMode(copy.blend_mode, .blend)) return true;
             if (!std.meta.eql(copy.color_mod, texture.color_mod) or copy.alpha_mod != texture.alpha_mod) return true;
             if (copy.src.w != copy.dst.w or copy.src.h != copy.dst.h) return true;
         }
@@ -1823,7 +1818,7 @@ pub const FrameBuilder = struct {
                 signature.missing_textures += 1;
                 continue;
             };
-            if (copy.blend_mode != sdl.SDL_BLENDMODE_NONE and copy.blend_mode != sdl.SDL_BLENDMODE_BLEND) signature.unsupported_copies += 1;
+            if (!isBlendMode(copy.blend_mode, .none) and !isBlendMode(copy.blend_mode, .blend)) signature.unsupported_copies += 1;
             if (!std.meta.eql(copy.color_mod, texture.color_mod) or copy.alpha_mod != texture.alpha_mod) signature.mod_mismatch_copies += 1;
             if (copy.src.w != copy.dst.w or copy.src.h != copy.dst.h) signature.scaled_copies += 1;
         }
@@ -1857,7 +1852,7 @@ pub const FrameBuilder = struct {
                 .info,
                 .frame_builder,
                 "present copy[{d}] tex={x} blend={s}({d}) mod=({d},{d},{d}) alpha={d} src={d},{d} {d}x{d} dst={d},{d} {d}x{d}",
-                .{ i, copy.texture_key, blendModeName(copy.blend_mode), copy.blend_mode, copy.color_mod[0], copy.color_mod[1], copy.color_mod[2], copy.alpha_mod, copy.src.x, copy.src.y, copy.src.w, copy.src.h, copy.dst.x, copy.dst.y, copy.dst.w, copy.dst.h },
+                .{ i, copy.texture_key, blendModeName(copy.blend_mode), blendModeRawSdl2(copy.blend_mode), copy.color_mod[0], copy.color_mod[1], copy.color_mod[2], copy.alpha_mod, copy.src.x, copy.src.y, copy.src.w, copy.src.h, copy.dst.x, copy.dst.y, copy.dst.w, copy.dst.h },
             );
         }
     }
@@ -1873,7 +1868,7 @@ pub const FrameBuilder = struct {
             @call(.never_inline, clearFramebuffer, .{ buf, state.window_w, state.window_h, state.clear_color });
             for (state.fills.items) |fill| @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, fill.rect, fill.color });
             for (state.lines.items) |line| {
-                const rect = sdl.SDL_Rect{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) };
+                const rect = core.CoreRect{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) };
                 @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, rect, line.color });
             }
             break :blk 0;
@@ -1933,9 +1928,9 @@ pub const FrameBuilder = struct {
         const src_rect = copy.src;
         if (src_rect.x < 0 or src_rect.y < 0) return false;
         if (src_rect.x + src_rect.w > texture.w or src_rect.y + src_rect.h > texture.h) return false;
-        return switch (copy.blend_mode) {
-            sdl.SDL_BLENDMODE_NONE => true,
-            sdl.SDL_BLENDMODE_BLEND => copy.base_opaque and copy.alpha_mod == 255,
+        return switch (copy.blend_mode.semantic) {
+            .none => true,
+            .blend => copy.base_opaque and copy.alpha_mod == 255,
             else => false,
         };
     }
@@ -1980,14 +1975,49 @@ pub const FrameBuilder = struct {
         logger.writeFmtScoped(.info, .frame_builder, "wrote composite dump to {s}", .{path});
     }
 
-    fn blendModeName(blend_mode: i32) []const u8 {
-        return switch (blend_mode) {
-            sdl.SDL_BLENDMODE_NONE => "none",
-            sdl.SDL_BLENDMODE_BLEND => "blend",
-            sdl.SDL_BLENDMODE_ADD => "add",
-            sdl.SDL_BLENDMODE_MOD => "mod",
-            sdl.SDL_BLENDMODE_MUL => "mul",
-            else => "unknown",
+    fn blendModeName(blend_mode: core.BlendMode) []const u8 {
+        return @tagName(blend_mode.semantic);
+    }
+
+    fn isBlendMode(blend_mode: core.BlendMode, semantic: core.BlendSemanticMode) bool {
+        return blend_mode.semantic == semantic;
+    }
+
+    fn pixelFormatRawSdl2(format: core.PixelFormat) u32 {
+        if (comptime core.keep_producer_tokens) {
+            if (format.source) |source| switch (source) {
+                .sdl2 => |raw| return raw,
+                else => {},
+            };
+        }
+        return switch (format.semantic) {
+            .rgba8 => compat_sdl_pixelformat_abgr8888,
+            .argb8888 => compat_sdl_pixelformat_argb8888,
+            .xrgb8888 => compat_sdl_pixelformat_xrgb8888,
+            .rgb565 => compat_sdl_pixelformat_rgb565,
+            .rgba4444 => compat_sdl_pixelformat_rgba4444,
+            .i420 => compat_sdl_pixelformat_iyuv,
+            .yv12 => compat_sdl_pixelformat_yv12,
+            .nv12 => compat_sdl_pixelformat_nv12,
+            .nv21 => compat_sdl_pixelformat_nv21,
+            else => 0,
+        };
+    }
+
+    fn blendModeRawSdl2(blend_mode: core.BlendMode) i32 {
+        if (comptime core.keep_producer_tokens) {
+            if (blend_mode.source) |source| switch (source) {
+                .sdl2 => |raw| return raw,
+                else => {},
+            };
+        }
+        return switch (blend_mode.semantic) {
+            .none => compat_sdl_blendmode_none,
+            .blend => compat_sdl_blendmode_blend,
+            .add => compat_sdl_blendmode_add,
+            .mod => compat_sdl_blendmode_mod,
+            .mul => compat_sdl_blendmode_mul,
+            .unknown => 0,
         };
     }
 
@@ -2179,7 +2209,7 @@ pub const FrameBuilder = struct {
         return @max(low, @min(high, value));
     }
 
-    fn convertTextureToRgba(dst: []u8, src: [*]u8, pitch: i32, w: i32, h: i32, format: sdl.Uint32) bool {
+    fn convertTextureToRgba(dst: []u8, src: [*]u8, pitch: i32, w: i32, h: i32, format: core.PixelFormat) bool {
         if (w <= 0 or h <= 0 or pitch <= 0) return false;
         const src_bpp = textureFormatBytesPerPixel(format) orelse return false;
         const src_row_bytes: usize = @as(usize, @intCast(w)) * src_bpp;
@@ -2190,12 +2220,12 @@ pub const FrameBuilder = struct {
         while (y < h) : (y += 1) {
             const src_row = src[@as(usize, @intCast(y * pitch))..][0..src_row_bytes];
             const dst_row = dst[@as(usize, @intCast(y * w * 4))..][0..dst_row_bytes];
-            switch (format) {
-                sdl.SDL_PIXELFORMAT_ABGR8888 => {
+            switch (format.semantic) {
+                .rgba8 => {
                     // On little-endian systems this is already byte-wise RGBA.
                     std.mem.copyForwards(u8, dst_row, src_row);
                 },
-                sdl.SDL_PIXELFORMAT_ARGB8888 => {
+                .argb8888 => {
                     var i: usize = 0;
                     while (i < dst_row_bytes) : (i += 4) {
                         dst_row[i + 0] = src_row[i + 2];
@@ -2204,7 +2234,7 @@ pub const FrameBuilder = struct {
                         dst_row[i + 3] = src_row[i + 3];
                     }
                 },
-                sdl.SDL_PIXELFORMAT_XRGB8888 => {
+                .xrgb8888 => {
                     var i: usize = 0;
                     while (i < dst_row_bytes) : (i += 4) {
                         dst_row[i + 0] = src_row[i + 2];
@@ -2213,7 +2243,7 @@ pub const FrameBuilder = struct {
                         dst_row[i + 3] = 255;
                     }
                 },
-                sdl.SDL_PIXELFORMAT_RGB565 => {
+                .rgb565 => {
                     var x: usize = 0;
                     while (x < @as(usize, @intCast(w))) : (x += 1) {
                         const si = x * 2;
@@ -2228,7 +2258,7 @@ pub const FrameBuilder = struct {
                         dst_row[di + 3] = 255;
                     }
                 },
-                sdl.SDL_PIXELFORMAT_RGBA4444 => {
+                .rgba4444 => {
                     var x: usize = 0;
                     while (x < @as(usize, @intCast(w))) : (x += 1) {
                         const si = x * 2;
@@ -2361,26 +2391,26 @@ pub const FrameBuilder = struct {
         return @intCast(@max(0, @min(255, value)));
     }
 
-    fn isSupportedTextureFormat(format: sdl.Uint32) bool {
-        return switch (format) {
-            sdl.SDL_PIXELFORMAT_ABGR8888,
-            sdl.SDL_PIXELFORMAT_ARGB8888,
-            sdl.SDL_PIXELFORMAT_XRGB8888,
-            sdl.SDL_PIXELFORMAT_RGB565,
-            sdl.SDL_PIXELFORMAT_RGBA4444,
+    fn isSupportedTextureFormat(format: core.PixelFormat) bool {
+        return switch (format.semantic) {
+            .rgba8,
+            .argb8888,
+            .xrgb8888,
+            .rgb565,
+            .rgba4444,
             => true,
             else => false,
         };
     }
 
-    fn textureFormatBytesPerPixel(format: sdl.Uint32) ?usize {
-        return switch (format) {
-            sdl.SDL_PIXELFORMAT_ABGR8888,
-            sdl.SDL_PIXELFORMAT_ARGB8888,
-            sdl.SDL_PIXELFORMAT_XRGB8888,
+    fn textureFormatBytesPerPixel(format: core.PixelFormat) ?usize {
+        return switch (format.semantic) {
+            .rgba8,
+            .argb8888,
+            .xrgb8888,
             => 4,
-            sdl.SDL_PIXELFORMAT_RGB565,
-            sdl.SDL_PIXELFORMAT_RGBA4444,
+            .rgb565,
+            .rgba4444,
             => 2,
             else => null,
         };
@@ -2398,7 +2428,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeFill(dst: []u8, dst_w: i32, dst_h: i32, rect: sdl.SDL_Rect, color: [4]u8) void {
+    fn compositeFill(dst: []u8, dst_w: i32, dst_h: i32, rect: core.CoreRect, color: [4]u8) void {
         const clipped = clipRect(rect, .{ .x = 0, .y = 0, .w = dst_w, .h = dst_h }) orelse return;
         var y = clipped.y;
         while (y < clipped.y + clipped.h) : (y += 1) {
@@ -2517,7 +2547,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopy(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
+    fn compositeCopy(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, blend_mode: core.BlendMode, color_mod: [3]u8, alpha_mod: u8) void {
         if (dst_rect.w <= 0 or dst_rect.h <= 0 or src_rect.w <= 0 or src_rect.h <= 0) return;
         const x_start = @max(0, -dst_rect.x);
         const y_start = @max(0, -dst_rect.y);
@@ -2526,7 +2556,7 @@ pub const FrameBuilder = struct {
         if (x_start >= x_end or y_start >= y_end) return;
 
         const identity_mod = isIdentityMod(color_mod, alpha_mod);
-        const effective_overwrite = blend_mode == sdl.SDL_BLENDMODE_NONE or (blend_mode == sdl.SDL_BLENDMODE_BLEND and src_opaque and alpha_mod == 255);
+        const effective_overwrite = isBlendMode(blend_mode, .none) or (isBlendMode(blend_mode, .blend) and src_opaque and alpha_mod == 255);
         if (identity_mod and effective_overwrite and src_rect.w == dst_rect.w and src_rect.h == dst_rect.h) {
             @call(.never_inline, compositeCopySameSizeNone, .{ dst, dst_w, src, src_w, src_h, src_opaque, src_rect, dst_rect, x_start, y_start, x_end, y_end });
             return;
@@ -2552,8 +2582,8 @@ pub const FrameBuilder = struct {
                 if (sx < 0 or sx >= src_w) continue;
                 const si: usize = @intCast((sy * src_w + sx) * 4);
                 const di: usize = @intCast((dy * dst_w + dx) * 4);
-                switch (blend_mode) {
-                    sdl.SDL_BLENDMODE_NONE => {
+                switch (blend_mode.semantic) {
+                    .none => {
                         if (identity_mod) {
                             dst[di + 0] = src[si + 0];
                             dst[di + 1] = src[si + 1];
@@ -2565,7 +2595,7 @@ pub const FrameBuilder = struct {
                         }
                         dst[di + 3] = 255;
                     },
-                    sdl.SDL_BLENDMODE_BLEND => {
+                    .blend => {
                         if (identity_mod) {
                             blendPixelOpaque(dst[di .. di + 4], src[si .. si + 4]);
                         } else {
@@ -2578,7 +2608,7 @@ pub const FrameBuilder = struct {
                             );
                         }
                     },
-                    sdl.SDL_BLENDMODE_ADD => {
+                    .add => {
                         if (identity_mod) {
                             addPixelOpaque(dst[di .. di + 4], src[si .. si + 4]);
                         } else {
@@ -2609,7 +2639,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopyScaledNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
+    fn compositeCopyScaledNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
         _ = src_opaque;
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
@@ -2697,7 +2727,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn precomputeScaledRuns(runs: []ScaledRun, run_count: *usize, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, x_end: i32) bool {
+    fn precomputeScaledRuns(runs: []ScaledRun, run_count: *usize, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, x_end: i32) bool {
         var stepper = ScaledRunStepper.init(src_rect.w, dst_rect.w, x_start);
         var x = x_start;
         var count: usize = 0;
@@ -2755,7 +2785,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn compositeCopyReference(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, blend_mode: i32, color_mod: [3]u8, alpha_mod: u8) void {
+    fn compositeCopyReference(dst: []u8, dst_w: i32, dst_h: i32, src: []const u8, src_w: i32, src_h: i32, src_rect: core.CoreRect, dst_rect: core.CoreRect, blend_mode: core.BlendMode, color_mod: [3]u8, alpha_mod: u8) void {
         if (dst_rect.w <= 0 or dst_rect.h <= 0 or src_rect.w <= 0 or src_rect.h <= 0) return;
         const x_start = @max(0, -dst_rect.x);
         const y_start = @max(0, -dst_rect.y);
@@ -2776,8 +2806,8 @@ pub const FrameBuilder = struct {
                 if (sx < 0 or sx >= src_w) continue;
                 const si: usize = @intCast((sy * src_w + sx) * 4);
                 const di: usize = @intCast((dy * dst_w + dx) * 4);
-                switch (blend_mode) {
-                    sdl.SDL_BLENDMODE_NONE => {
+                switch (blend_mode.semantic) {
+                    .none => {
                         if (identity_mod) {
                             dst[di + 0] = src[si + 0];
                             dst[di + 1] = src[si + 1];
@@ -2789,7 +2819,7 @@ pub const FrameBuilder = struct {
                         }
                         dst[di + 3] = 255;
                     },
-                    sdl.SDL_BLENDMODE_BLEND => {
+                    .blend => {
                         if (identity_mod) {
                             blendPixelOpaque(dst[di .. di + 4], src[si .. si + 4]);
                         } else {
@@ -2802,7 +2832,7 @@ pub const FrameBuilder = struct {
                             );
                         }
                     },
-                    sdl.SDL_BLENDMODE_ADD => {
+                    .add => {
                         if (identity_mod) {
                             addPixelOpaque(dst[di .. di + 4], src[si .. si + 4]);
                         } else {
@@ -2846,7 +2876,7 @@ pub const FrameBuilder = struct {
         return color_mod[0] == 255 and color_mod[1] == 255 and color_mod[2] == 255 and alpha_mod == 255;
     }
 
-    fn compositeCopySameSizeNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: sdl.SDL_Rect, dst_rect: sdl.SDL_Rect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
+    fn compositeCopySameSizeNone(dst: []u8, dst_w: i32, src: []const u8, src_w: i32, src_h: i32, src_opaque: bool, src_rect: core.CoreRect, dst_rect: core.CoreRect, x_start: i32, y_start: i32, x_end: i32, y_end: i32) void {
         const dst_w_usize: usize = @intCast(dst_w);
         const src_w_usize: usize = @intCast(src_w);
         const row_pixels: usize = @intCast(x_end - x_start);
@@ -2922,21 +2952,6 @@ pub const FrameBuilder = struct {
         return true;
     }
 
-    const SurfaceView = extern struct {
-        flags: u32,
-        format: ?*anyopaque,
-        w: i32,
-        h: i32,
-        pitch: i32,
-        pixels: ?*anyopaque,
-        userdata: ?*anyopaque,
-        locked: i32,
-        lock_data: ?*anyopaque,
-        clip_rect: sdl.SDL_Rect,
-        map: ?*anyopaque,
-        refcount: i32,
-    };
-
     fn containedCellRect(window_w: i32, window_h: i32, tty: *const DirectTty) ts_types.CellRect {
         const cols: i32 = @intCast(tty.cols);
         const rows: i32 = @intCast(tty.rows);
@@ -2989,7 +3004,7 @@ pub const FrameBuilder = struct {
         return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
     }
 
-    fn mapRectToCells(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
+    fn mapRectToCells(dst: core.CoreRect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const cols: i32 = @intCast(tty_cols);
         const rows: i32 = @intCast(tty_rows);
         const col = 1 + @divTrunc(dst.x * cols, @max(window_w, 1));
@@ -2999,7 +3014,7 @@ pub const FrameBuilder = struct {
         return .{ .col = col, .row = row, .w = w, .h = h };
     }
 
-    fn mapRectToCellsInRegion(dst: sdl.SDL_Rect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+    fn mapRectToCellsInRegion(dst: core.CoreRect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
         const col = region.col + @divTrunc(dst.x * region.w, @max(window_w, 1));
         const row = region.row + @divTrunc(dst.y * region.h, @max(window_h, 1));
         const w = @max(1, @divTrunc(dst.w * region.w, @max(window_w, 1)));
@@ -3023,11 +3038,11 @@ pub const FrameBuilder = struct {
         return mapRectToCellsInRegion(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, region);
     }
 
-    fn applyViewportRect(rect: sdl.SDL_Rect, viewport: sdl.SDL_Rect) sdl.SDL_Rect {
+    fn applyViewportRect(rect: core.CoreRect, viewport: core.CoreRect) core.CoreRect {
         return .{ .x = rect.x + viewport.x, .y = rect.y + viewport.y, .w = rect.w, .h = rect.h };
     }
 
-    fn clipRect(rect: sdl.SDL_Rect, clip: ?sdl.SDL_Rect) ?sdl.SDL_Rect {
+    fn clipRect(rect: core.CoreRect, clip: ?core.CoreRect) ?core.CoreRect {
         const c = clip orelse return rect;
         const x1 = @max(rect.x, c.x);
         const y1 = @max(rect.y, c.y);
@@ -3037,7 +3052,7 @@ pub const FrameBuilder = struct {
         return .{ .x = x1, .y = y1, .w = x2 - x1, .h = y2 - y1 };
     }
 
-    fn clipCopyRect(src: sdl.SDL_Rect, dst: sdl.SDL_Rect, clip: ?sdl.SDL_Rect, tex_w: i32, tex_h: i32) ?struct { src: sdl.SDL_Rect, dst: sdl.SDL_Rect } {
+    fn clipCopyRect(src: core.CoreRect, dst: core.CoreRect, clip: ?core.CoreRect, tex_w: i32, tex_h: i32) ?struct { src: core.CoreRect, dst: core.CoreRect } {
         const clipped_dst = clipRect(dst, clip) orelse return null;
         if (clipped_dst.x == dst.x and clipped_dst.y == dst.y and clipped_dst.w == dst.w and clipped_dst.h == dst.h) {
             return .{ .src = src, .dst = dst };
@@ -3069,7 +3084,7 @@ test "texture mod state reports only real changes" {
     var record = TextureRecord{
         .w = 16,
         .h = 16,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
     };
 
@@ -3095,7 +3110,7 @@ test "identity texture publication borrows base rgba without modulation copy" {
     var record = TextureRecord{
         .w = 2,
         .h = 1,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
         .base_rgba = base,
         .base_opaque = true,
@@ -3123,7 +3138,7 @@ test "modded texture publication owns modulated rgba copy" {
     var record = TextureRecord{
         .w = 1,
         .h = 1,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
         .base_rgba = base,
         .color_mod = .{ 128, 255, 64 },
@@ -3154,7 +3169,7 @@ test "composite framebuffer writes final opaque alpha inline" {
     const src = [_]u8{
         100, 110, 120, 9,
     };
-    FrameBuilder.compositeCopy(&dst, 2, 2, &src, 1, 1, false, .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .{ .x = 0, .y = 1, .w = 1, .h = 1 }, sdl.SDL_BLENDMODE_NONE, .{ 255, 255, 255 }, 255);
+    FrameBuilder.compositeCopy(&dst, 2, 2, &src, 1, 1, false, .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .{ .x = 0, .y = 1, .w = 1, .h = 1 }, default_blend_mode, .{ 255, 255, 255 }, 255);
     try std.testing.expectEqualSlices(u8, &.{ 100, 110, 120, 255 }, dst[8..12]);
 }
 
@@ -3165,7 +3180,7 @@ test "scaled composite copy preserves nearest-neighbor mapping" {
         30, 0, 0, 255, 40, 0, 0, 255,
     };
 
-    FrameBuilder.compositeCopy(&dst, 4, 2, &src, 2, 2, true, .{ .x = 0, .y = 0, .w = 2, .h = 2 }, .{ .x = 0, .y = 0, .w = 4, .h = 2 }, sdl.SDL_BLENDMODE_NONE, .{ 255, 255, 255 }, 255);
+    FrameBuilder.compositeCopy(&dst, 4, 2, &src, 2, 2, true, .{ .x = 0, .y = 0, .w = 2, .h = 2 }, .{ .x = 0, .y = 0, .w = 4, .h = 2 }, default_blend_mode, .{ 255, 255, 255 }, 255);
 
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 255 }, dst[0..4]);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 255 }, dst[4..8]);
@@ -3215,19 +3230,19 @@ test "fixed-point scaled composite matches reference division loop" {
     var base_dst_b: [dst_w * dst_h * 4]u8 = undefined;
     for (&base_dst_a, 0..) |*byte, i| byte.* = @intCast((i * 19 + 3) % 251);
 
-    const src_rects = [_]sdl.SDL_Rect{
+    const src_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 5, .h = 4 },
         .{ .x = -1, .y = 0, .w = 5, .h = 4 },
         .{ .x = 1, .y = -1, .w = 3, .h = 4 },
         .{ .x = 2, .y = 1, .w = 2, .h = 2 },
     };
-    const dst_rects = [_]sdl.SDL_Rect{
+    const dst_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 7, .h = 6 },
         .{ .x = -2, .y = 1, .w = 8, .h = 4 },
         .{ .x = 2, .y = -1, .w = 4, .h = 8 },
         .{ .x = 1, .y = 2, .w = 3, .h = 2 },
     };
-    const modes = [_]i32{ sdl.SDL_BLENDMODE_NONE, sdl.SDL_BLENDMODE_BLEND, sdl.SDL_BLENDMODE_ADD };
+    const modes = [_]core.BlendMode{ default_blend_mode, blend_mode_blend, blend_mode_add };
     const mods = [_]struct { color: [3]u8, alpha: u8 }{
         .{ .color = .{ 255, 255, 255 }, .alpha = 255 },
         .{ .color = .{ 200, 180, 160 }, .alpha = 127 },
@@ -3267,10 +3282,10 @@ test "opaque blend scaled composite matches overwrite semantics" {
     for (&expected, 0..) |*byte, i| byte.* = @intCast((i * 29 + 13) % 251);
     actual = expected;
 
-    const src_rect = sdl.SDL_Rect{ .x = 0, .y = 0, .w = src_w, .h = src_h };
-    const dst_rect = sdl.SDL_Rect{ .x = 0, .y = 0, .w = dst_w, .h = dst_h };
-    FrameBuilder.compositeCopyReference(&expected, dst_w, dst_h, &src, src_w, src_h, src_rect, dst_rect, sdl.SDL_BLENDMODE_BLEND, .{ 255, 255, 255 }, 255);
-    FrameBuilder.compositeCopy(&actual, dst_w, dst_h, &src, src_w, src_h, true, src_rect, dst_rect, sdl.SDL_BLENDMODE_BLEND, .{ 255, 255, 255 }, 255);
+    const src_rect = core.CoreRect{ .x = 0, .y = 0, .w = src_w, .h = src_h };
+    const dst_rect = core.CoreRect{ .x = 0, .y = 0, .w = dst_w, .h = dst_h };
+    FrameBuilder.compositeCopyReference(&expected, dst_w, dst_h, &src, src_w, src_h, src_rect, dst_rect, blend_mode_blend, .{ 255, 255, 255 }, 255);
+    FrameBuilder.compositeCopy(&actual, dst_w, dst_h, &src, src_w, src_h, true, src_rect, dst_rect, blend_mode_blend, .{ 255, 255, 255 }, 255);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
@@ -3291,19 +3306,19 @@ test "effective overwrite fast paths match reference across clipped scaled copie
     var base: [dst_w * dst_h * 4]u8 = undefined;
     for (&base, 0..) |*byte, idx| byte.* = @intCast((idx * 43 + 9) % 251);
 
-    const src_rects = [_]sdl.SDL_Rect{
+    const src_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 6, .h = 5 },
         .{ .x = 1, .y = 1, .w = 4, .h = 3 },
         .{ .x = -1, .y = 0, .w = 5, .h = 4 },
         .{ .x = 2, .y = -1, .w = 4, .h = 5 },
     };
-    const dst_rects = [_]sdl.SDL_Rect{
+    const dst_rects = [_]core.CoreRect{
         .{ .x = 0, .y = 0, .w = 8, .h = 7 },
         .{ .x = -2, .y = 1, .w = 9, .h = 4 },
         .{ .x = 2, .y = -2, .w = 5, .h = 9 },
         .{ .x = 1, .y = 2, .w = 3, .h = 3 },
     };
-    const modes = [_]i32{ sdl.SDL_BLENDMODE_NONE, sdl.SDL_BLENDMODE_BLEND };
+    const modes = [_]core.BlendMode{ default_blend_mode, blend_mode_blend };
 
     for (src_rects) |src_rect| {
         for (dst_rects) |dst_rect| {
@@ -3386,7 +3401,7 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
     try builder.textures.put(texture_key, .{
         .w = 640,
         .h = 480,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
         .base_rgba = pixels,
         .base_opaque = true,
@@ -3397,11 +3412,11 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
         .texture_key = texture_key,
         .src = .{ .x = 0, .y = 0, .w = 640, .h = 480 },
         .dst = .{ .x = 0, .y = 0, .w = 640, .h = 480 },
-        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+        .blend_mode = default_blend_mode,
         .base_opaque = true,
     });
 
-    var job = try builder.buildPresentJob(&logger, &tty, @ptrFromInt(renderer_key), false);
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false);
     defer job.deinit(std.testing.allocator);
 
     const scene_job = job.scene;
@@ -3450,8 +3465,8 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2000);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+    const renderer: core.CoreHandle = 0x2000;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3480,8 +3495,8 @@ test "frame builder detach flushes known batch placements and suppresses future 
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2100);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+    const renderer: core.CoreHandle = 0x2100;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3518,8 +3533,8 @@ test "frame builder batch placement contains source inside attached rect" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2001);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2001;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3547,8 +3562,8 @@ test "frame builder batch placement stretches source to attached rect" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2002);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2002;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3576,8 +3591,8 @@ test "frame builder batch placement covers attached rect by cropping source" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2003);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2003;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3605,15 +3620,15 @@ test "composite builder can start at last full framebuffer overwrite" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
-    try builder.textures.put(1, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_BLEND });
-    try builder.textures.put(2, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_NONE });
-    try builder.textures.put(3, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_NONE });
-    try builder.textures.put(4, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_BLEND, .base_opaque = true });
+    try builder.textures.put(1, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = blend_mode_blend });
+    try builder.textures.put(2, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = default_blend_mode });
+    try builder.textures.put(3, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = default_blend_mode });
+    try builder.textures.put(4, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = blend_mode_blend, .base_opaque = true });
 
     var state = RendererState.init(std.testing.allocator, 16, 16);
     defer state.deinit(std.testing.allocator);
 
-    try state.copies.append(std.testing.allocator, .{ .texture_key = 1, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 }, .blend_mode = sdl.SDL_BLENDMODE_BLEND });
+    try state.copies.append(std.testing.allocator, .{ .texture_key = 1, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 }, .blend_mode = blend_mode_blend });
     try std.testing.expectEqual(@as(?usize, null), builder.findLastFramebufferOverwriteCopy(&state));
 
     try state.copies.append(std.testing.allocator, .{ .texture_key = 2, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 1, .y = 0, .w = 15, .h = 16 } });
@@ -3622,7 +3637,7 @@ test "composite builder can start at last full framebuffer overwrite" {
     try state.copies.append(std.testing.allocator, .{ .texture_key = 3, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 } });
     try std.testing.expectEqual(@as(?usize, 2), builder.findLastFramebufferOverwriteCopy(&state));
 
-    try state.copies.append(std.testing.allocator, .{ .texture_key = 4, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 }, .blend_mode = sdl.SDL_BLENDMODE_BLEND, .base_opaque = true });
+    try state.copies.append(std.testing.allocator, .{ .texture_key = 4, .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 }, .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 }, .blend_mode = blend_mode_blend, .base_opaque = true });
     try std.testing.expectEqual(@as(?usize, 3), builder.findLastFramebufferOverwriteCopy(&state));
 }
 
@@ -3631,8 +3646,8 @@ test "framebuffer composite requirement is based on copy-time render state" {
     defer builder.deinit();
 
     try builder.renderers.put(1, RendererState.init(std.testing.allocator, 8, 8));
-    try builder.textures.put(10, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_ADD });
-    try builder.textures.put(20, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0, .blend_mode = sdl.SDL_BLENDMODE_BLEND });
+    try builder.textures.put(10, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = blend_mode_add });
+    try builder.textures.put(20, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = blend_mode_blend });
 
     const state = builder.renderers.getPtr(1).?;
     try std.testing.expect(!builder.needsFramebufferComposite(state));
@@ -3641,7 +3656,7 @@ test "framebuffer composite requirement is based on copy-time render state" {
         .texture_key = 20,
         .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
         .dst = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
-        .blend_mode = sdl.SDL_BLENDMODE_BLEND,
+        .blend_mode = blend_mode_blend,
     });
     try std.testing.expect(!builder.needsFramebufferComposite(state));
 
@@ -3650,9 +3665,9 @@ test "framebuffer composite requirement is based on copy-time render state" {
         .texture_key = 10,
         .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
         .dst = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
-        .blend_mode = sdl.SDL_BLENDMODE_ADD,
+        .blend_mode = blend_mode_add,
     });
-    builder.textures.getPtr(10).?.blend_mode = sdl.SDL_BLENDMODE_BLEND;
+    builder.textures.getPtr(10).?.blend_mode = blend_mode_blend;
     try std.testing.expect(builder.needsFramebufferComposite(state));
 
     state.copies.clearRetainingCapacity();
@@ -3660,7 +3675,7 @@ test "framebuffer composite requirement is based on copy-time render state" {
         .texture_key = 20,
         .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
         .dst = .{ .x = 0, .y = 0, .w = 16, .h = 16 },
-        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+        .blend_mode = default_blend_mode,
     });
     try std.testing.expect(builder.needsFramebufferComposite(state));
 
@@ -3735,7 +3750,7 @@ test "present decision debug logging is change-driven" {
     defer builder.deinit();
 
     try builder.renderers.put(1, RendererState.init(std.testing.allocator, 8, 8));
-    try builder.textures.put(10, .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0 });
+    try builder.textures.put(10, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0 });
 
     const state = builder.renderers.getPtr(1).?;
     try std.testing.expect(builder.shouldLogPresentDecision(state, false));
@@ -3745,7 +3760,7 @@ test "present decision debug logging is change-driven" {
         .texture_key = 10,
         .src = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
         .dst = .{ .x = 0, .y = 0, .w = 8, .h = 8 },
-        .blend_mode = sdl.SDL_BLENDMODE_NONE,
+        .blend_mode = default_blend_mode,
     });
     try std.testing.expect(builder.shouldLogPresentDecision(state, false));
     try std.testing.expect(!builder.shouldLogPresentDecision(state, false));
@@ -3759,23 +3774,23 @@ test "recorded copy snapshots unsupported blend mode without sticking renderer" 
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
-    const texture: ?*sdl.SDL_Texture = @ptrFromInt(0x1000);
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2000);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 8, 8));
-    try builder.textures.put(FrameBuilder.ptrKey(texture), .{ .w = 8, .h = 8, .format = sdl.SDL_PIXELFORMAT_ABGR8888, .image_id = 0 });
+    const texture: core.CoreHandle = 0x1000;
+    const renderer: core.CoreHandle = 0x2000;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 8, 8));
+    try builder.textures.put(texture, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0 });
 
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.onSetTextureBlendMode(&logger, texture, sdl.SDL_BLENDMODE_ADD);
-    const state = builder.renderers.getPtr(FrameBuilder.ptrKey(renderer)).?;
+    builder.onSetTextureBlendMode(&logger, texture, blend_mode_add);
+    const state = builder.renderers.getPtr(renderer).?;
     try std.testing.expect(!builder.needsFramebufferComposite(state));
 
     builder.recordRenderCopy(&logger, renderer, texture, null, null);
-    builder.onSetTextureBlendMode(&logger, texture, sdl.SDL_BLENDMODE_BLEND);
+    builder.onSetTextureBlendMode(&logger, texture, blend_mode_blend);
 
     try std.testing.expectEqual(@as(usize, 1), state.copies.items.len);
-    try std.testing.expectEqual(sdl.SDL_BLENDMODE_ADD, state.copies.items[0].blend_mode);
+    try std.testing.expectEqual(blend_mode_add, state.copies.items[0].blend_mode);
     try std.testing.expect(builder.needsFramebufferComposite(state));
 }
 
@@ -3791,13 +3806,13 @@ test "texture conversion sizes source rows by pixel format" {
     };
     var dst = [_]u8{0} ** (2 * 2 * 4);
 
-    try std.testing.expect(FrameBuilder.convertTextureToRgba(&dst, &rgb565, 4, 2, 2, sdl.SDL_PIXELFORMAT_RGB565));
+    try std.testing.expect(FrameBuilder.convertTextureToRgba(&dst, &rgb565, 4, 2, 2, rgb565_texture_format));
     try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, dst[0..4]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, dst[4..8]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, dst[8..12]);
     try std.testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, dst[12..16]);
 
-    try std.testing.expect(!FrameBuilder.convertTextureToRgba(&dst, &rgb565, 3, 2, 2, sdl.SDL_PIXELFORMAT_RGB565));
+    try std.testing.expect(!FrameBuilder.convertTextureToRgba(&dst, &rgb565, 3, 2, 2, rgb565_texture_format));
 }
 
 test "xrgb8888 texture conversion produces opaque rgba" {
@@ -3807,7 +3822,7 @@ test "xrgb8888 texture conversion produces opaque rgba" {
     };
     var dst = [_]u8{0} ** (2 * 4);
 
-    try std.testing.expect(FrameBuilder.convertTextureToRgba(&dst, &xrgb, 8, 2, 1, sdl.SDL_PIXELFORMAT_XRGB8888));
+    try std.testing.expect(FrameBuilder.convertTextureToRgba(&dst, &xrgb, 8, 2, 1, xrgb8888_texture_format));
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 255, 10, 20, 30, 255 }, &dst);
 }
 
@@ -3818,7 +3833,7 @@ test "texture capture reuses same-sized base storage and swaps on resize" {
     var record = TextureRecord{
         .w = 2,
         .h = 1,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
     };
     defer if (record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -3853,7 +3868,7 @@ test "unsupported texture capture preserves previous base storage" {
     var record = TextureRecord{
         .w = 1,
         .h = 1,
-        .format = sdl.SDL_PIXELFORMAT_ABGR8888,
+        .format = default_texture_format,
         .image_id = 0,
     };
     defer if (record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -3863,7 +3878,7 @@ test "unsupported texture capture preserves previous base storage" {
     const ptr = record.base_rgba.?.ptr;
     const updates = record.update_count;
 
-    record.format = 0;
+    record.format = core.pixelFormat(.unknown, .{ .sdl2 = 0 });
     var unsupported_src = [_]u8{ 9, 9, 9, 9 };
     try std.testing.expectError(error.UnsupportedTextureFormat, builder.captureTexturePixelsIntoRecord(&record, &unsupported_src, 4));
     try std.testing.expectEqual(ptr, record.base_rgba.?.ptr);
@@ -3878,7 +3893,7 @@ test "IYUV texture planes convert to RGBA texture storage" {
     var record = TextureRecord{
         .w = 2,
         .h = 2,
-        .format = sdl.SDL_PIXELFORMAT_IYUV,
+        .format = i420_texture_format,
         .image_id = 0,
     };
     defer if (record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -3905,7 +3920,7 @@ test "NV12 texture planes convert to RGBA texture storage" {
     var record = TextureRecord{
         .w = 2,
         .h = 2,
-        .format = sdl.SDL_PIXELFORMAT_NV12,
+        .format = nv12_texture_format,
         .image_id = 0,
     };
     defer if (record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -3931,7 +3946,7 @@ test "YUV converters preserve output for padded odd-sized neutral chroma frames"
     var yuv_record = TextureRecord{
         .w = 3,
         .h = 3,
-        .format = sdl.SDL_PIXELFORMAT_IYUV,
+        .format = i420_texture_format,
         .image_id = 0,
     };
     defer if (yuv_record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -3939,7 +3954,7 @@ test "YUV converters preserve output for padded odd-sized neutral chroma frames"
     var nv_record = TextureRecord{
         .w = 3,
         .h = 3,
-        .format = sdl.SDL_PIXELFORMAT_NV12,
+        .format = nv12_texture_format,
         .image_id = 0,
     };
     defer if (nv_record.base_rgba) |buf| std.testing.allocator.free(buf);
@@ -4042,6 +4057,6 @@ test "axis-aligned render geometry raw maps textured quad to copy rect" {
         64,
     ) orelse return error.ExpectedGeometryCopy;
 
-    try std.testing.expectEqual(sdl.SDL_Rect{ .x = 0, .y = 0, .w = 64, .h = 64 }, copy.src);
-    try std.testing.expectEqual(sdl.SDL_Rect{ .x = 10, .y = 20, .w = 32, .h = 32 }, copy.dst);
+    try std.testing.expectEqual(core.CoreRect{ .x = 0, .y = 0, .w = 64, .h = 64 }, copy.src);
+    try std.testing.expectEqual(core.CoreRect{ .x = 10, .y = 20, .w = 32, .h = 32 }, copy.dst);
 }

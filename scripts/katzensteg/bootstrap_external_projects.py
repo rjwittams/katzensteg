@@ -92,6 +92,23 @@ def read_os_release(path: Path = OS_RELEASE_PATH) -> str | None:
 
 def detect_distro_family(os_release_text: str | None = None, platform: str | None = None) -> str:
     normalized_platform = platform or sys.platform
+    if os_release_text is not None:
+        os_release = parse_os_release(os_release_text)
+        identities = {
+            value.lower()
+            for value in (
+                os_release.get("ID", ""),
+                *os_release.get("ID_LIKE", "").split(),
+                os_release.get("NAME", ""),
+            )
+            if value
+        }
+        if "arch" in identities or "archlinux" in identities:
+            return "arch"
+        if {"debian", "ubuntu"} & identities:
+            return "debian"
+        return "unknown"
+
     if normalized_platform == "darwin":
         return "brew"
     if not normalized_platform.startswith("linux"):

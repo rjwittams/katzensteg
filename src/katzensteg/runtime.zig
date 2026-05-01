@@ -1,10 +1,12 @@
 const std = @import("std");
 const termscene = @import("termscene");
 const config_mod = @import("config.zig");
+const core = @import("core_types.zig");
+const core_commands = @import("core_commands.zig");
+const core_dispatch = @import("core_command_dispatch.zig");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
-const intercept_sink = @import("intercept_sink.zig");
 const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
@@ -14,15 +16,13 @@ const render_batch_sink_mod = @import("render_batch_sink.zig");
 const upload_path_mod = @import("upload_path.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
-const sdl = @import("katzensteg_sdl");
-const real_sdl = @import("real_sdl.zig");
 const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
 const CompositeMode = config_mod.CompositeMode;
 const InterceptMode = config_mod.InterceptMode;
-const Command = intercept_sink.Command;
+const Command = core_commands.Command;
 const PixelSize = frame_builder_mod.PixelSize;
 const ExternalFramebufferFormat = frame_builder_mod.ExternalFramebufferFormat;
 const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
@@ -34,7 +34,7 @@ const payload_pool_max_buffers = 64;
 const payload_pool_max_bytes = 64 * 1024 * 1024;
 
 const QueuedLockCapture = struct {
-    rect: ?@import("katzensteg_sdl").SDL_Rect,
+    rect: ?core.CoreRect,
     pixels: ?*anyopaque,
     pitch: i32,
 };
@@ -155,7 +155,7 @@ pub const Runtime = struct {
     mouse_ownership: input_mod.MouseOwnership = .{},
     input_window_w: i32 = 640,
     input_window_h: i32 = 480,
-    keyboard_state: [sdl.SDL_NUM_SCANCODES]u8 = [_]u8{0} ** sdl.SDL_NUM_SCANCODES,
+    keyboard_state: [input_mod.sdl_num_scancodes]u8 = [_]u8{0} ** input_mod.sdl_num_scancodes,
     presentation_layout: presentation_layout_mod.PresentationLayout = .{},
     present_interval_ns: i128 = 0,
     adaptive_present_target_ns: i128 = std.time.ns_per_s / 60,
@@ -481,26 +481,6 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn popSdlInputEvent(self: *Runtime, event: ?*sdl.SDL_Event) bool {
-        if (!self.input_enabled) return false;
-        var parser = &(self.input_parser orelse return false);
-        const input_event = parser.pop() orelse return false;
-        if (inputEventIsMouse(input_event)) self.mouse_ownership.claimTerminal();
-        const out = event orelse return true;
-        fillSdlEvent(out, input_event);
-        return true;
-    }
-
-    pub fn popSdlInputEventInRange(self: *Runtime, event: ?*sdl.SDL_Event, min_type: u32, max_type: u32) bool {
-        if (!self.input_enabled) return false;
-        var parser = &(self.input_parser orelse return false);
-        const input_event = parser.popSdlRange(min_type, max_type) orelse return false;
-        if (inputEventIsMouse(input_event)) self.mouse_ownership.claimTerminal();
-        const out = event orelse return true;
-        fillSdlEvent(out, input_event);
-        return true;
-    }
-
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
         if (!self.mouse_ownership.terminalOwns()) return null;
@@ -515,74 +495,37 @@ pub const Runtime = struct {
         return self.relative_mouse_baseline.snap(parser.mouseState());
     }
 
-    pub fn noteRealSdlEvent(self: *Runtime, event: *const sdl.SDL_Event) void {
-        if (eventIsMouse(event.*)) self.mouse_ownership.claimRealWindow();
-    }
-
     pub fn claimRealWindowMouse(self: *Runtime) void {
         self.mouse_ownership.claimRealWindow();
     }
 
-    pub fn mergedKeyboardState(self: *Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
-        if (!self.input_enabled) return real_state;
-        var parser = &(self.input_parser orelse return real_state);
-        @memset(&self.keyboard_state, 0);
-        if (real_state) |keys| {
-            const n: usize = @min(self.keyboard_state.len, @as(usize, @intCast(@max(0, real_count))));
-            @memcpy(self.keyboard_state[0..n], keys[0..n]);
-        }
-        var terminal_state = [_]u8{0} ** sdl.SDL_NUM_SCANCODES;
-        parser.copyKeyboardState(&terminal_state, std.time.nanoTimestamp());
-        for (&self.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
-        if (numkeys) |out| out.* = @intCast(self.keyboard_state.len);
-        return &self.keyboard_state;
-    }
-
-    pub fn claimedWindowFlags(self: *const Runtime, flags: u32) u32 {
-        return applyClaimedInputWindowFlags(self.input_claimed, self.input_claim_focus, flags);
-    }
-
-    pub fn shouldSuppressSdlEvent(self: *const Runtime, event: *const sdl.SDL_Event) bool {
-        if (!self.input_claimed) return false;
-        if (event.type != sdl.SDL_WINDOWEVENT) return false;
-        return shouldSuppressClaimedWindowEvent(true, event.type, event.window.event);
-    }
-
-    pub fn terminalRenderingEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
-        _ = window;
-        _ = renderer;
+    pub fn terminalRenderingEnabled(self: *const Runtime) bool {
         return routeTerminalRendering(self.window_policy);
     }
 
-    pub fn realRenderEnabled(self: *const Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) bool {
-        _ = window;
-        _ = renderer;
+    pub fn realRenderEnabled(self: *const Runtime) bool {
         return routeRealRendering(self.window_policy);
     }
 
-    pub fn realWindowEnabled(self: *const Runtime, window: ?*sdl.SDL_Window) bool {
-        _ = window;
+    pub fn realWindowEnabled(self: *const Runtime) bool {
         return self.window_policy.realWindowEnabled();
     }
 
-    pub fn realWindowCreateAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowCreateAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.createAction();
     }
 
-    pub fn realWindowShowAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowShowAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.showAction();
     }
 
-    pub fn realWindowRestoreAction(self: *const Runtime, window: ?*sdl.SDL_Window) window_policy_mod.RealWindowAction {
-        _ = window;
+    pub fn realWindowRestoreAction(self: *const Runtime) window_policy_mod.RealWindowAction {
         return self.real_window_visibility.restoreAction();
     }
 
-    pub fn shouldCaptureExternalFrame(self: *Runtime, window: ?*sdl.SDL_Window) bool {
+    pub fn shouldCaptureExternalFrame(self: *Runtime) bool {
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return false;
-        if (!self.terminalRenderingEnabled(window, null)) {
+        if (!self.terminalRenderingEnabled()) {
             self.notePresentationLayout(.{});
             return false;
         }
@@ -598,11 +541,12 @@ pub const Runtime = struct {
         self.notePresentDuration(duration);
     }
 
-    pub fn renderBatchPresent(self: *Runtime, renderer: ?*sdl.SDL_Renderer) void {
+    pub fn renderBatchPresent(self: *Runtime, renderer: core.CoreHandle) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
         self.pollBatchControl();
+        self.waitForInitialBatchAttach();
         if (!self.shouldPresent()) return;
-        if (!self.terminalRenderingEnabled(null, renderer)) {
+        if (!self.terminalRenderingEnabled()) {
             self.notePresentationLayout(.{});
             return;
         }
@@ -618,6 +562,16 @@ pub const Runtime = struct {
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
+    }
+
+    fn waitForInitialBatchAttach(self: *Runtime) void {
+        if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
+        const deadline = std.time.nanoTimestamp() + 100 * std.time.ns_per_ms;
+        while (std.time.nanoTimestamp() < deadline) {
+            std.Thread.sleep(std.time.ns_per_ms);
+            self.pollBatchControl();
+            if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
+        }
     }
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
@@ -825,20 +779,20 @@ pub const Runtime = struct {
         self.next_present_ns = std.time.nanoTimestamp() + extra;
     }
 
-    pub fn rememberQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture, rect: ?*const @import("katzensteg_sdl").SDL_Rect, pixels: ?*anyopaque, pitch: i32) void {
-        const key = if (texture) |t| @intFromPtr(t) else return;
+    pub fn rememberQueuedLock(self: *Runtime, texture: core.CoreHandle, rect: ?core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
+        if (texture == 0) return;
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
-        self.queued_lock_captures.put(key, .{ .rect = if (rect) |r| r.* else null, .pixels = pixels, .pitch = pitch }) catch |err| {
+        self.queued_lock_captures.put(texture, .{ .rect = rect, .pixels = pixels, .pitch = pitch }) catch |err| {
             log.warn("failed to remember queued lock capture: {any}", .{err});
         };
     }
 
-    pub fn takeQueuedLock(self: *Runtime, texture: ?*@import("katzensteg_sdl").SDL_Texture) ?QueuedLockCapture {
-        const key = if (texture) |t| @intFromPtr(t) else return null;
+    pub fn takeQueuedLock(self: *Runtime, texture: core.CoreHandle) ?QueuedLockCapture {
+        if (texture == 0) return null;
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
-        if (self.queued_lock_captures.fetchRemove(key)) |entry| return entry.value;
+        if (self.queued_lock_captures.fetchRemove(texture)) |entry| return entry.value;
         return null;
     }
 
@@ -968,27 +922,6 @@ fn isFrameLocalCommand(cmd: Command) bool {
     };
 }
 
-fn inputEventIsMouse(event: input_mod.InputEvent) bool {
-    return switch (event) {
-        .mouse_motion,
-        .mouse_button,
-        .mouse_wheel,
-        => true,
-        else => false,
-    };
-}
-
-fn eventIsMouse(event: sdl.SDL_Event) bool {
-    return switch (event.type) {
-        sdl.SDL_MOUSEMOTION,
-        sdl.SDL_MOUSEBUTTONDOWN,
-        sdl.SDL_MOUSEBUTTONUP,
-        sdl.SDL_MOUSEWHEEL,
-        => true,
-        else => false,
-    };
-}
-
 test "external framebuffer present is a frame-local present command" {
     const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
     try std.testing.expect(isFrameLocalCommand(cmd));
@@ -999,88 +932,19 @@ test "sync dispatch recycles cloned external framebuffer payload" {
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    runtime.intercept_mode = .sync_compose;
     var pixels = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    intercept_sink.dispatchCommand(&runtime, .{
-        .external_framebuffer_present = .{
-            .width = 1,
-            .height = 2,
-            .format = .rgba8,
-            .pixels = pixels[0..],
-        },
-    });
+    const copied = try runtime.acquirePayloadBuffer(pixels.len);
+    @memcpy(copied, &pixels);
+    var cmd = Command{ .external_framebuffer_present = .{
+        .width = 1,
+        .height = 2,
+        .format = .rgba8,
+        .pixels = copied,
+    } };
+    runtime.recycleCommand(&cmd);
 
     try std.testing.expectEqual(@as(usize, 1), runtime.payload_pool.buffers.items.len);
     try std.testing.expectEqual(@as(usize, pixels.len), runtime.payload_pool.bytes);
-}
-
-test "SDL mouse events are recognized for ownership handoff" {
-    var event: sdl.SDL_Event = undefined;
-    event.type = sdl.SDL_MOUSEMOTION;
-    try std.testing.expect(eventIsMouse(event));
-    event.type = sdl.SDL_KEYDOWN;
-    try std.testing.expect(!eventIsMouse(event));
-}
-
-fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input_mod.InputEvent) void {
-    @memset(&event.padding, 0);
-    const now = real_sdl.SDL_GetTicks();
-    switch (input_event) {
-        .key_down => |key| event.key = .{
-            .type = sdl.SDL_KEYDOWN,
-            .timestamp = now,
-            .windowID = 0,
-            .state = sdl.SDL_PRESSED,
-            .repeat = 0,
-            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
-        },
-        .key_up => |key| event.key = .{
-            .type = sdl.SDL_KEYUP,
-            .timestamp = now,
-            .windowID = 0,
-            .state = sdl.SDL_RELEASED,
-            .repeat = 0,
-            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
-        },
-        .text => |text| {
-            event.text = .{ .type = sdl.SDL_TEXTINPUT, .timestamp = now, .windowID = 0, .text = text.buf };
-        },
-        .mouse_motion => |motion| event.motion = .{
-            .type = sdl.SDL_MOUSEMOTION,
-            .timestamp = now,
-            .windowID = 0,
-            .which = 0,
-            .state = motion.buttons,
-            .x = motion.x,
-            .y = motion.y,
-            .xrel = motion.xrel,
-            .yrel = motion.yrel,
-        },
-        .mouse_button => |button| event.button = .{
-            .type = if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
-            .timestamp = now,
-            .windowID = 0,
-            .which = 0,
-            .button = button.button,
-            .state = if (button.pressed) sdl.SDL_PRESSED else sdl.SDL_RELEASED,
-            .clicks = button.clicks,
-            .x = button.x,
-            .y = button.y,
-        },
-        .mouse_wheel => |wheel| event.wheel = .{
-            .type = sdl.SDL_MOUSEWHEEL,
-            .timestamp = now,
-            .windowID = 0,
-            .which = 0,
-            .x = wheel.x,
-            .y = wheel.y,
-            .direction = sdl.SDL_MOUSEWHEEL_NORMAL,
-            .preciseX = @floatFromInt(wheel.x),
-            .preciseY = @floatFromInt(wheel.y),
-            .mouseX = wheel.mouse_x,
-            .mouseY = wheel.mouse_y,
-        },
-    }
 }
 
 fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_layout_mod.PresentationLayout) input_mod.Target {
@@ -1110,7 +974,7 @@ fn workerMain(runtime: *Runtime) void {
         if (isPresentCommand(cmd) and runtime.pending_presents > 0) runtime.pending_presents -= 1;
         runtime.maybeCompactQueue();
         runtime.queue_mutex.unlock();
-        intercept_sink.handleCommand(runtime, cmd);
+        core_dispatch.handleCommand(runtime, cmd);
         runtime.recycleCommand(&cmd);
     }
 }
@@ -1277,21 +1141,6 @@ fn mapGlCaptureMode(mode: config_mod.GlCaptureMode) gl_capture_mod.CaptureMode {
     };
 }
 
-fn applyClaimedInputWindowFlags(claimed: bool, claim_focus: bool, flags: u32) u32 {
-    if (!claimed or !claim_focus) return flags;
-    return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
-}
-
-fn shouldSuppressClaimedWindowEvent(claimed: bool, event_type: u32, window_event: u8) bool {
-    if (!claimed or event_type != sdl.SDL_WINDOWEVENT) return false;
-    return switch (window_event) {
-        sdl.SDL_WINDOWEVENT_FOCUS_LOST,
-        sdl.SDL_WINDOWEVENT_LEAVE,
-        => true,
-        else => false,
-    };
-}
-
 test "payload buffer pool reuses exact-sized buffers" {
     var pool = PayloadBufferPool{};
     defer pool.deinit(std.testing.allocator);
@@ -1355,18 +1204,4 @@ test "runtime input target includes latest presentation layout" {
     try std.testing.expectEqual(@as(i32, 320), target.w);
     try std.testing.expectEqual(@as(i32, 240), target.h);
     try std.testing.expectEqual(presentation_layout_mod.Point{ .x = 0, .y = 0 }, target.layout.mapCellToSdl(11, 6).?);
-}
-
-test "claimed input focus can keep SDL window focused locally" {
-    try std.testing.expectEqual(
-        @as(u32, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS),
-        applyClaimedInputWindowFlags(true, true, 0),
-    );
-    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(false, true, 0));
-    try std.testing.expectEqual(@as(u32, 0), applyClaimedInputWindowFlags(true, false, 0));
-    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
-    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_LEAVE));
-    try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_GAINED));
-    try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_CLOSE));
-    try std.testing.expect(!shouldSuppressClaimedWindowEvent(false, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
 }

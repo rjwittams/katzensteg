@@ -1,8 +1,13 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
 #include <dlfcn.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -20,6 +25,16 @@
 #define KS_MAX_SWAPCHAINS 64
 #define KS_MAX_SWAPCHAIN_IMAGES 16
 #define KS_MAX_PRESENT_WAITS 16
+
+#if defined(__APPLE__)
+#define KS_CORE_LIB_BASENAME "libkatzensteg-core.dylib"
+#else
+#define KS_CORE_LIB_BASENAME "libkatzensteg-core.so"
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len);
 typedef void (*ks_log_c_fn)(const char *scope, const char *message);
@@ -124,6 +139,8 @@ static PhysicalDeviceRecord g_physical_devices[KS_MAX_PHYSICAL_DEVICES];
 static DeviceRecord g_devices[KS_MAX_DEVICES];
 static QueueRecord g_queues[KS_MAX_QUEUES];
 static SwapchainRecord g_swapchains[KS_MAX_SWAPCHAINS];
+static void *g_core_handle;
+static bool g_core_lookup_attempted;
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
 static ks_log_c_fn g_log_c;
 static bool g_capture_enabled;
@@ -191,8 +208,50 @@ static void tracef(const char *fmt, ...)
     }
 }
 
+static void *open_core_library_from_layer_dir(void)
+{
+    Dl_info info;
+    if (dladdr((const void *)&open_core_library_from_layer_dir, &info) == 0 || !info.dli_fname) return NULL;
+
+    const char *slash = strrchr(info.dli_fname, '/');
+    if (!slash) return dlopen(KS_CORE_LIB_BASENAME, RTLD_NOW | RTLD_LOCAL);
+
+    char path[PATH_MAX];
+    const size_t dir_len = (size_t)(slash - info.dli_fname);
+    const int written = snprintf(path, sizeof(path), "%.*s/%s", (int)dir_len, info.dli_fname, KS_CORE_LIB_BASENAME);
+    if (written <= 0 || (size_t)written >= sizeof(path)) return NULL;
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static void *open_core_library(void)
+{
+    const char *override = getenv("KATZENSTEG_CORE_LIB");
+    if (override && *override) {
+        void *handle = dlopen(override, RTLD_NOW | RTLD_LOCAL);
+        if (handle) return handle;
+        tracef("failed to load KATZENSTEG_CORE_LIB=%s: %s", override, dlerror());
+    }
+
+    void *handle = open_core_library_from_layer_dir();
+    if (handle) return handle;
+
+    handle = dlopen(KS_CORE_LIB_BASENAME, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) tracef("failed to load " KS_CORE_LIB_BASENAME ": %s", dlerror());
+    return handle;
+}
+
 static ks_present_external_framebuffer_fn present_fn(void)
 {
+    if (g_present_external_framebuffer) return g_present_external_framebuffer;
+    if (g_core_lookup_attempted) return NULL;
+    g_core_lookup_attempted = true;
+
+    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_present_external_framebuffer");
+    if (g_present_external_framebuffer) return g_present_external_framebuffer;
+
+    g_core_handle = open_core_library();
+    if (g_core_handle)
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(g_core_handle, "ks_katzensteg_present_external_framebuffer");
     if (!g_present_external_framebuffer)
         g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_present_external_framebuffer");
     return g_present_external_framebuffer;
@@ -564,7 +623,7 @@ static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, Swapc
         return false;
     }
     if (!present_fn()) {
-        tracef("preload framebuffer callback not found; skipping capture");
+        tracef("core framebuffer callback not found; skipping capture");
         return false;
     }
     if (!ensure_capture_resources(dev, queue, swapchain)) {
