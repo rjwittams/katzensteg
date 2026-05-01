@@ -14,6 +14,17 @@
         "runtime.fullscreen_file"
       ]
     },
+    "probe.input.cursor": {
+      "extends": [
+        "app.input_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--log-events",
+        "--custom-cursor"
+      ]
+    },
     "probe.embed.basic_sdl": {
       "hidden": true,
       "extends": [
@@ -49,15 +60,15 @@
         "PATH": "$HOME/dev/gamescope/build-sdl/src:$PATH",
         "ENABLE_GAMESCOPE_WSI": "1",
         "VK_LAYER_PATH": {
-          "linux": "{repo}/profiles/vulkan/linux:/tmp",
-          "macos": "{repo}/profiles/vulkan/macos:/tmp"
+          "linux": "{repo}/profiles/vulkan/linux:/tmp/katzensteg-vulkan-layers",
+          "macos": "{repo}/profiles/vulkan/macos:/tmp/katzensteg-vulkan-layers"
         },
         "KATZENSTEG_TRACE_VULKAN": "1",
         "KATZENSTEG_TRACE_SDL": "1"
       },
       "seed_files": [
         {
-          "path": "/tmp/katzensteg-gamescope-wsi-layer.json",
+          "path": "/tmp/katzensteg-vulkan-layers/katzensteg-gamescope-wsi-layer.json",
           "content": "{\n  \"file_format_version\": \"1.0.0\",\n  \"layer\": {\n    \"name\": \"VK_LAYER_FROG_gamescope_wsi_x86_64\",\n    \"type\": \"GLOBAL\",\n    \"api_version\": \"1.3.221\",\n    \"library_path\": \"$HOME/dev/gamescope/build-sdl/layer/libVkLayer_FROG_gamescope_wsi_x86_64.so\",\n    \"implementation_version\": \"1\",\n    \"description\": \"Gamescope WSI (XWayland Bypass) Layer (x86_64)\",\n    \"functions\": {\n      \"vkNegotiateLoaderLayerInterfaceVersion\": \"vkNegotiateLoaderLayerInterfaceVersion\"\n    },\n    \"enable_environment\": {\n      \"ENABLE_GAMESCOPE_WSI\": \"1\"\n    },\n    \"disable_environment\": {\n      \"DISABLE_GAMESCOPE_WSI\": \"1\"\n    }\n  }\n}\n"
         }
       ]

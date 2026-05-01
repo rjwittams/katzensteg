@@ -13,6 +13,7 @@ struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Surface;
+struct SDL_Cursor;
 struct SDL_Rect;
 struct SDL_Point;
 struct SDL_RendererInfo;
@@ -60,12 +61,17 @@ extern void *ks_SDL_GL_CreateContext(struct SDL_Window *);
 extern int ks_SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
 extern int ks_SDL_Vulkan_LoadLibrary(const char *);
+extern void ks_SDL_PumpEvents(void);
 extern int ks_SDL_PollEvent(union SDL_Event *);
 extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern const unsigned char *ks_SDL_GetKeyboardState(int *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern struct SDL_Cursor *ks_SDL_CreateColorCursor(struct SDL_Surface *, int, int);
+extern void ks_SDL_SetCursor(struct SDL_Cursor *);
+extern int ks_SDL_ShowCursor(int);
+extern void ks_SDL_FreeCursor(struct SDL_Cursor *);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -174,12 +180,17 @@ DYLD_INTERPOSE(ks_SDL_GL_CreateContext, SDL_GL_CreateContext)
 DYLD_INTERPOSE(ks_SDL_GL_MakeCurrent, SDL_GL_MakeCurrent)
 DYLD_INTERPOSE(ks_SDL_GL_SwapWindow, SDL_GL_SwapWindow)
 DYLD_INTERPOSE(ks_SDL_Vulkan_LoadLibrary, SDL_Vulkan_LoadLibrary)
+DYLD_INTERPOSE(ks_SDL_PumpEvents, SDL_PumpEvents)
 DYLD_INTERPOSE(ks_SDL_PollEvent, SDL_PollEvent)
 DYLD_INTERPOSE(ks_SDL_PeepEvents, SDL_PeepEvents)
 DYLD_INTERPOSE(ks_SDL_GetKeyboardState, SDL_GetKeyboardState)
 DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
 DYLD_INTERPOSE(ks_SDL_GetRelativeMouseState, SDL_GetRelativeMouseState)
 DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)
+DYLD_INTERPOSE(ks_SDL_CreateColorCursor, SDL_CreateColorCursor)
+DYLD_INTERPOSE(ks_SDL_SetCursor, SDL_SetCursor)
+DYLD_INTERPOSE(ks_SDL_ShowCursor, SDL_ShowCursor)
+DYLD_INTERPOSE(ks_SDL_FreeCursor, SDL_FreeCursor)
 DYLD_INTERPOSE(ks_dlopen, dlopen)
 
 #endif

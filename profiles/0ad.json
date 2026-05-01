@@ -1,0 +1,29 @@
+{
+  "profiles": {
+    "app.0ad": {
+      "hidden": true,
+      "target": "/usr/bin/0ad",
+      "env": {
+        "SDL_VIDEODRIVER": {
+          "linux": "x11"
+        }
+      }
+    },
+    "0ad": {
+      "extends": [
+        "app.0ad",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "capture.gl_pbo"
+      ],
+      "args": [
+        "-conf=windowed:true",
+        "-conf=xres:1280",
+        "-conf=yres:720"
+      ],
+      "runtime": {
+        "real_window": "show"
+      }
+    }
+  }
+}

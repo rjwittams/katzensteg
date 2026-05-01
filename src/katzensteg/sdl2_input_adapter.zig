@@ -11,6 +11,7 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
     if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
     const out = event orelse return true;
     fillSdlEvent(out, input_event);
+    noteCursorPositionFromSdlEvent(rt, out);
     return true;
 }
 
@@ -21,11 +22,13 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
     if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
     const out = event orelse return true;
     fillSdlEvent(out, input_event);
+    noteCursorPositionFromSdlEvent(rt, out);
     return true;
 }
 
 pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void {
     if (eventIsMouse(event.*)) rt.mouse_ownership.claimRealWindow();
+    noteCursorPositionFromSdlEvent(rt, event);
 }
 
 pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
@@ -73,6 +76,23 @@ fn eventIsMouse(event: sdl.SDL_Event) bool {
         => true,
         else => false,
     };
+}
+
+fn noteCursorPositionFromSdlEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void {
+    switch (event.type) {
+        sdl.SDL_MOUSEMOTION => rt.dispatchCursorPosition(.{ .x = event.motion.x, .y = event.motion.y }),
+        sdl.SDL_MOUSEBUTTONDOWN,
+        sdl.SDL_MOUSEBUTTONUP,
+        => rt.dispatchCursorPosition(.{ .x = event.button.x, .y = event.button.y }),
+        sdl.SDL_MOUSEWHEEL => rt.dispatchCursorPosition(.{ .x = event.wheel.mouseX, .y = event.wheel.mouseY }),
+        sdl.SDL_WINDOWEVENT => switch (event.window.event) {
+            sdl.SDL_WINDOWEVENT_LEAVE,
+            sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+            => rt.dispatchCursorPosition(null),
+            else => {},
+        },
+        else => {},
+    }
 }
 
 fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {

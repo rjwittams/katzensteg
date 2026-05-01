@@ -211,7 +211,7 @@ git commit -m "feat: add render batch JSONL protocol helpers"
 
 **Files:**
 - Modify: `src/termscene/kitty/protocol.zig`
-- Test: existing examples compile through `zig build -Dvulkan=false`
+- Test: existing examples compile through the default `zig build`
 
 - [ ] **Step 1: Write memory-writer protocol test**
 
@@ -265,7 +265,7 @@ Run:
 
 ```bash
 zig test src/termscene/kitty/protocol.zig
-zig build -Dvulkan=false
+zig build
 ```
 
 Expected: both PASS.
@@ -747,7 +747,7 @@ zig test src/katzensteg/launcher_profiles.zig
 zig test src/katzensteg/launcher.zig
 zig test src/katzensteg/frame_builder.zig -lc
 zig test src/katzensteg/runtime.zig -lc
-zig build -Dvulkan=false
+zig build
 python3 scripts/katzensteg/test_embed_render_batches.py
 ```
 
@@ -784,7 +784,7 @@ zig test src/katzensteg/launcher_profiles.zig
 zig test src/katzensteg/launcher.zig
 zig test src/katzensteg/frame_builder.zig -lc
 zig test src/katzensteg/runtime.zig -lc
-zig build -Dvulkan=false
+zig build
 python3 scripts/katzensteg/test_embed_render_batches.py
 ```
 

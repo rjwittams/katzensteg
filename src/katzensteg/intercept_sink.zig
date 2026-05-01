@@ -134,6 +134,18 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
             .format = c.format,
             .pixels = try cloneBytesToPayloadBuffer(rt, c.pixels),
         } },
+        .create_color_cursor => |c| .{ .create_color_cursor = .{
+            .cursor = c.cursor,
+            .width = c.width,
+            .height = c.height,
+            .hot_x = c.hot_x,
+            .hot_y = c.hot_y,
+            .rgba = try cloneBytesToPayloadBuffer(rt, c.rgba),
+        } },
+        .set_cursor => |c| .{ .set_cursor = c },
+        .show_cursor => |c| .{ .show_cursor = c },
+        .free_cursor => |c| .{ .free_cursor = c },
+        .set_cursor_position => |c| .{ .set_cursor_position = c },
     };
 }
 
@@ -562,7 +574,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
 }
 
 fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns: i128) void {
-    rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.debug_protocol_replies, rt.image_gc);
+    rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
     const duration = std.time.nanoTimestamp() - start_ns;
     rt.notePresentDuration(duration);
@@ -684,5 +696,10 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             }
         },
         .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),
+        .create_color_cursor => |c| if (c.rgba) |rgba| rt.cursor_state.createColorCursor(c.cursor, c.width, c.height, c.hot_x, c.hot_y, rgba),
+        .set_cursor => |c| rt.cursor_state.setCursor(c.cursor),
+        .show_cursor => |c| rt.cursor_state.showCursor(c.visible),
+        .free_cursor => |c| rt.cursor_state.freeCursor(c.cursor),
+        .set_cursor_position => |c| rt.cursor_state.setPosition(if (c.position) |p| .{ .x = p.x, .y = p.y } else null),
     }
 }
