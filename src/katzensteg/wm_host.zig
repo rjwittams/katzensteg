@@ -167,6 +167,7 @@ pub const Cell = struct {
 pub const WmMouseHit = enum {
     desktop,
     content,
+    close,
     title,
     resize_right,
     resize_bottom,
@@ -197,7 +198,7 @@ pub const WmMouseDrag = struct {
                 next.rows += drow;
                 next.cols += dcol;
             },
-            .desktop, .content => {},
+            .desktop, .content, .close => {},
         }
         next.rows = @max(min_outer_rows, next.rows);
         next.cols = @max(min_outer_cols, next.cols);
@@ -221,6 +222,7 @@ pub const WmMouseInputState = struct {
 
         const hit = mouseHitTest(outer, cell);
         switch (hit) {
+            .close => return .{ .action = .close_focused },
             .title, .resize_right, .resize_bottom, .resize_bottom_right => {
                 self.drag = WmMouseDrag.start(hit, cell, outer);
                 return .{ .action = .{ .mouse_drag = outer } };
@@ -436,6 +438,10 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                 },
+                .close_focused => {
+                    try shutdownSession(focused, &event_log, &logger);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                },
                 .forward => try forwardInputToSession(focused, input.bytes, &event_log, &logger),
                 .quit => {
                     shutdown_sent = true;
@@ -577,9 +583,10 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
 
     try moveCursor(writer, options.outer.row + 1, options.outer.col);
     try writer.writeAll(text_box.vertical);
-    const label_prefix = if (options.focused) "* katzensteg wm: " else "  katzensteg wm: ";
+    try writer.writeAll("x ");
+    const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
-    var written: usize = 0;
+    var written: usize = @min(2, title_space);
     written += try writeTruncated(writer, label_prefix, title_space -| written);
     written += try writeTruncated(writer, options.title, title_space -| written);
     if (written < title_space) try writer.writeByteNTimes(' ', title_space - written);
@@ -996,7 +1003,7 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
                         }
                     }
                 },
-                .quit => {
+                .quit, .close_focused => {
                     if (control_open and !tryWriteShutdownControl(child_stdin.deprecatedWriter())) {
                         logger.writeScoped(.warn, .wm, "shutdown control write failed; producer control pipe is closed");
                         control_open = false;
@@ -1105,6 +1112,7 @@ const InputAction = union(enum) {
     none,
     consume,
     focus_next,
+    close_focused,
     forward,
     quit,
     window: WindowAction,
@@ -1216,6 +1224,7 @@ fn mouseHitTest(outer: Rect, cell: Cell) WmMouseHit {
     if (cell.row == bottom and cell.col > outer.col and cell.col < right) return .resize_bottom;
     if (cell.col == right and cell.row > outer.row and cell.row < bottom) return .resize_right;
     if (rectContainsCell(contentRectForOuter(outer), cell.row, cell.col)) return .content;
+    if (cell.row == outer.row + 1 and cell.col >= outer.col + 1 and cell.col <= outer.col + 2) return .close;
     if (cell.row == outer.row + 1 and cell.col > outer.col and cell.col < right) return .title;
     return .desktop;
 }
@@ -1453,7 +1462,8 @@ test "wm exec path renders chrome and applies fake peer frame batch" {
     });
 
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm: fake") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fake") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "DUPA") != null);
 }
 
@@ -1575,11 +1585,21 @@ test "wm input parser prioritizes quit in coalesced input" {
 test "wm mouse hit test separates title border and content" {
     const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
 
+    try std.testing.expectEqual(WmMouseHit.close, mouseHitTest(outer, .{ .row = 3, .col = 5 }));
     try std.testing.expectEqual(WmMouseHit.title, mouseHitTest(outer, .{ .row = 3, .col = 10 }));
     try std.testing.expectEqual(WmMouseHit.resize_right, mouseHitTest(outer, .{ .row = 6, .col = 42 }));
     try std.testing.expectEqual(WmMouseHit.resize_bottom_right, mouseHitTest(outer, .{ .row = 13, .col = 42 }));
     try std.testing.expectEqual(WmMouseHit.content, mouseHitTest(outer, .{ .row = 5, .col = 10 }));
     try std.testing.expectEqual(WmMouseHit.desktop, mouseHitTest(outer, .{ .row = 20, .col = 10 }));
+}
+
+test "wm close hit consumes mouse and requests close" {
+    var state = WmMouseInputState{};
+    var close_down = [_]u8{ 0x1b, '[', '<', '0', ';', '5', ';', '3', 'M' };
+    const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
+    const content = contentRectForOuter(outer);
+
+    try std.testing.expectEqual(InputAction.close_focused, state.readMouseInput(&close_down, outer, content, .{ .rows = 24, .cols = 80 }).action);
 }
 
 test "wm mouse drag moves from title bar cell delta" {

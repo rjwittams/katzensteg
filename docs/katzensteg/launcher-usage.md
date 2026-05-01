@@ -105,12 +105,13 @@ Current controls:
 - `q`: send `shutdown`, drain producer output, restore the terminal
 - `Tab`: cycle focus when multiple producers are launched
 - click a window: focus it and raise its host chrome
+- click `x` in the title bar: send `shutdown` for that producer and drain its output
 - `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`
 - `H` / `J` / `K` / `L`: resize narrower/shorter/taller/wider and send `viewport`
 - drag the title bar with mouse button 1: move the window and send `viewport`
 - drag the right, bottom, or bottom-right border with mouse button 1: resize the window and send `viewport`
 
-This is intentionally still early. Multi-producer focus, close-vs-detach policy, richer debug UI, and alternate text themes are follow-up work.
+This is intentionally still early. Detach/minimize policy, richer debug UI, and alternate text themes are follow-up work.
 
 Current WM smoke notes:
 
