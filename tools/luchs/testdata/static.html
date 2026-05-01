@@ -17,6 +17,16 @@
         padding: 32px;
         border: 1px solid #4aa3df;
       }
+      main.active {
+        border-color: #f6c343;
+        color: #f6c343;
+      }
+      #input-state {
+        display: block;
+        margin-top: 12px;
+        font-size: 14px;
+        color: #9fb3bf;
+      }
       main::after {
         content: "";
         display: block;
@@ -34,9 +44,31 @@
         const phase = (Date.now() % 1000) / 1000;
         document.documentElement.style.setProperty("--luchs-capture-scale", String(0.15 + 0.85 * phase));
       }, 33);
+      addEventListener("DOMContentLoaded", () => {
+        const main = document.querySelector("main");
+        const state = document.querySelector("#input-state");
+        let clicks = 0;
+        let keys = 0;
+        const render = () => {
+          state.textContent = `clicks ${clicks} keys ${keys}`;
+          main.classList.toggle("active", (clicks + keys) % 2 === 1);
+        };
+        main.addEventListener("click", () => {
+          clicks += 1;
+          render();
+        });
+        document.addEventListener("keydown", () => {
+          keys += 1;
+          render();
+        });
+        render();
+      });
     </script>
   </head>
   <body>
-    <main>Luchs static HTML fixture</main>
+    <main>
+      Luchs static HTML fixture
+      <span id="input-state"></span>
+    </main>
   </body>
 </html>

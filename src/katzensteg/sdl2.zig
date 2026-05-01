@@ -237,6 +237,8 @@ pub extern fn SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) c_int;
 pub extern fn SDL_PumpEvents() void;
 pub extern fn SDL_PollEvent(event: ?*SDL_Event) c_int;
 pub extern fn SDL_PeepEvents(events: ?[*]SDL_Event, numevents: c_int, action: c_int, minType: Uint32, maxType: Uint32) c_int;
+pub extern fn SDL_StartTextInput() void;
+pub extern fn SDL_StopTextInput() void;
 pub extern fn SDL_GetKeyboardState(numkeys: ?*c_int) ?[*]const Uint8;
 pub extern fn SDL_GetMouseFocus() ?*SDL_Window;
 pub extern fn SDL_GetMouseState(x: ?*c_int, y: ?*c_int) Uint32;

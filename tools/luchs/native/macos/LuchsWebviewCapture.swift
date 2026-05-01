@@ -50,6 +50,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
         self.webView = view
         self.window = captureWindow
 
+        startInputReader()
         view.loadFileURL(fileURL, allowingReadAccessTo: fileURL.deletingLastPathComponent())
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             if self?.loaded == false {
@@ -73,6 +74,71 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         fail("navigation failed: \(error.localizedDescription)")
+    }
+
+    private func startInputReader() {
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            while let line = readLine() {
+                guard !line.isEmpty else { continue }
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleInputLine(line)
+                }
+            }
+        }
+    }
+
+    private func handleInputLine(_ line: String) {
+        guard let webView else { return }
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let message = object as? [String: Any],
+              let type = message["type"] as? String,
+              !type.isEmpty else {
+            return
+        }
+        let jsonData = (try? JSONSerialization.data(withJSONObject: message)) ?? Data("{}".utf8)
+        let json = String(data: jsonData, encoding: .utf8) ?? "{}"
+        let script = """
+        (() => {
+          const event = \(json);
+          const x = Number.isFinite(event.x) ? event.x : 0;
+          const y = Number.isFinite(event.y) ? event.y : 0;
+          const target = document.elementFromPoint(x, y) || document.body || document.documentElement;
+          const common = { bubbles: true, cancelable: true, view: window };
+          if (event.type === "mouse_move") {
+            target.dispatchEvent(new MouseEvent("mousemove", { ...common, clientX: x, clientY: y }));
+          } else if (event.type === "mouse_down" || event.type === "mouse_up") {
+            const button = Math.max(0, Number(event.button || 1) - 1);
+            const name = event.type === "mouse_down" ? "mousedown" : "mouseup";
+            if (event.type === "mouse_down" && target.focus) { target.focus(); }
+            target.dispatchEvent(new MouseEvent(name, { ...common, clientX: x, clientY: y, button }));
+            if (event.type === "mouse_up") {
+              target.dispatchEvent(new MouseEvent("click", { ...common, clientX: x, clientY: y, button }));
+            }
+          } else if (event.type === "wheel") {
+            target.dispatchEvent(new WheelEvent("wheel", { ...common, clientX: x, clientY: y, deltaX: -Number(event.dx || 0) * 40, deltaY: -Number(event.dy || 0) * 40 }));
+          } else if (event.type === "key_down" || event.type === "key_up") {
+            const name = event.type === "key_down" ? "keydown" : "keyup";
+            document.dispatchEvent(new KeyboardEvent(name, { ...common, keyCode: Number(event.keycode || 0), which: Number(event.keycode || 0), repeat: !!event.repeat }));
+          } else if (event.type === "text") {
+            const text = String(event.text || "");
+            const active = document.activeElement;
+            if (active && typeof active.value === "string") {
+              const start = active.selectionStart ?? active.value.length;
+              const end = active.selectionEnd ?? start;
+              active.value = active.value.slice(0, start) + text + active.value.slice(end);
+              if (active.setSelectionRange) {
+                active.setSelectionRange(start + text.length, start + text.length);
+              }
+              active.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+            } else {
+              document.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+              document.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+            }
+          }
+        })()
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
     private func capture(_ webView: WKWebView) {

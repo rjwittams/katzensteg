@@ -37,6 +37,16 @@ const RawFrameHeaderPayload = struct {
     len: usize,
 };
 
+const WebInputEvent = union(enum) {
+    mouse_move: struct { x: i32, y: i32 },
+    mouse_down: struct { x: i32, y: i32, button: u8 },
+    mouse_up: struct { x: i32, y: i32, button: u8 },
+    wheel: struct { x: i32, y: i32, dx: i32, dy: i32 },
+    key_down: struct { keycode: i32, repeat: bool },
+    key_up: struct { keycode: i32 },
+    text: []const u8,
+};
+
 const CliOptions = struct {
     html_path: []const u8,
     renderer_backend: RendererBackend = .test_pattern,
@@ -129,9 +139,26 @@ fn freeRawFrame(allocator: std.mem.Allocator, frame: RawFrame) void {
     allocator.free(frame.pixels);
 }
 
+fn writeJsonLine(writer: anytype, value: anytype) !void {
+    try writer.print("{f}\n", .{std.json.fmt(value, .{})});
+}
+
+fn writeWebInputEventJson(writer: anytype, event: WebInputEvent) !void {
+    switch (event) {
+        .mouse_move => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_move", .x = e.x, .y = e.y }),
+        .mouse_down => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_down", .x = e.x, .y = e.y, .button = e.button }),
+        .mouse_up => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_up", .x = e.x, .y = e.y, .button = e.button }),
+        .wheel => |e| try writeJsonLine(writer, .{ .@"type" = "wheel", .x = e.x, .y = e.y, .dx = e.dx, .dy = e.dy }),
+        .key_down => |e| try writeJsonLine(writer, .{ .@"type" = "key_down", .keycode = e.keycode, .repeat = e.repeat }),
+        .key_up => |e| try writeJsonLine(writer, .{ .@"type" = "key_up", .keycode = e.keycode }),
+        .text => |text| try writeJsonLine(writer, .{ .@"type" = "text", .text = text }),
+    }
+}
+
 const NativeWebviewStream = struct {
     allocator: std.mem.Allocator,
     child: std.process.Child,
+    stdin_file: std.fs.File,
     stdout_file: std.fs.File,
     waited: bool = false,
 
@@ -150,24 +177,28 @@ const NativeWebviewStream = struct {
 
         var argv = [_][]const u8{ helper_path, html_path, width_arg, height_arg, frames_arg, fps_arg };
         var child = std.process.Child.init(&argv, allocator);
-        child.stdin_behavior = .Ignore;
+        child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
 
         try child.spawn();
         errdefer _ = child.kill() catch {};
 
+        const stdin_file = child.stdin orelse return error.NativeWebviewCaptureFailed;
+        child.stdin = null;
         const stdout_file = child.stdout orelse return error.NativeWebviewCaptureFailed;
         child.stdout = null;
 
         return .{
             .allocator = allocator,
             .child = child,
+            .stdin_file = stdin_file,
             .stdout_file = stdout_file,
         };
     }
 
     fn deinit(self: *NativeWebviewStream) void {
+        self.stdin_file.close();
         self.stdout_file.close();
         if (!self.waited) {
             _ = self.child.kill() catch {};
@@ -188,7 +219,32 @@ const NativeWebviewStream = struct {
             else => return err,
         };
     }
+
+    fn sendInput(self: *NativeWebviewStream, event: WebInputEvent) void {
+        writeWebInputEventJson(self.stdin_file.deprecatedWriter(), event) catch {};
+    }
 };
+
+fn sdlTextInputSlice(text: *const [32]u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, text, 0) orelse text.len;
+    return text[0..end];
+}
+
+fn forwardSdlEventToWebview(stream: *NativeWebviewStream, event: *const sdl.SDL_Event) void {
+    switch (event.type) {
+        sdl.SDL_MOUSEMOTION => stream.sendInput(.{ .mouse_move = .{ .x = event.motion.x, .y = event.motion.y } }),
+        sdl.SDL_MOUSEBUTTONDOWN => stream.sendInput(.{ .mouse_down = .{ .x = event.button.x, .y = event.button.y, .button = event.button.button } }),
+        sdl.SDL_MOUSEBUTTONUP => stream.sendInput(.{ .mouse_up = .{ .x = event.button.x, .y = event.button.y, .button = event.button.button } }),
+        sdl.SDL_MOUSEWHEEL => stream.sendInput(.{ .wheel = .{ .x = event.wheel.mouseX, .y = event.wheel.mouseY, .dx = event.wheel.x, .dy = event.wheel.y } }),
+        sdl.SDL_KEYDOWN => stream.sendInput(.{ .key_down = .{ .keycode = event.key.keysym.sym, .repeat = event.key.repeat != 0 } }),
+        sdl.SDL_KEYUP => stream.sendInput(.{ .key_up = .{ .keycode = event.key.keysym.sym } }),
+        sdl.SDL_TEXTINPUT => {
+            const text = sdlTextInputSlice(&event.text.text);
+            if (text.len > 0) stream.sendInput(.{ .text = text });
+        },
+        else => {},
+    }
+}
 
 fn fillTestFrame(buf: []u8, width: usize, height: usize, tick: usize) void {
     var y: usize = 0;
@@ -283,6 +339,20 @@ test "native webview stream uses bounded frame cadence" {
     try std.testing.expect(native_webview_fps > 0);
 }
 
+test "writeWebInputEventJson writes mouse input jsonl" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try writeWebInputEventJson(fbs.writer(), .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
+    try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.getWritten());
+}
+
+test "writeWebInputEventJson escapes text input jsonl" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try writeWebInputEventJson(fbs.writer(), .{ .text = "a\"b" });
+    try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":\"a\\\"b\"}\n", fbs.getWritten());
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -320,6 +390,8 @@ pub fn main() !void {
     defer sdl.SDL_DestroyWindow(window);
     sdl.SDL_ShowWindow(window);
     sdl.SDL_RaiseWindow(window);
+    sdl.SDL_StartTextInput();
+    defer sdl.SDL_StopTextInput();
 
     const renderer = sdl.SDL_CreateRenderer(
         window,
@@ -344,6 +416,7 @@ pub fn main() !void {
         var event: sdl.SDL_Event = undefined;
         while (sdl.SDL_PollEvent(&event) != 0) {
             if (event.type == sdl.SDL_QUIT) quit = true;
+            if (native_stream) |*stream| forwardSdlEventToWebview(stream, &event);
         }
 
         var frame_to_free: ?RawFrame = null;

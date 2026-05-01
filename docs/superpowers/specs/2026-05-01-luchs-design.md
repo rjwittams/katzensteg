@@ -96,7 +96,8 @@ The first native WebView slice may be view-only. If input is added early, it sho
 terminal input
   -> Katzensteg input injection
   -> SDL events delivered to luchs
-  -> native WebView input injection
+  -> helper stdin JSONL input messages
+  -> DOM mouse/key/wheel/text events in WKWebView
   -> web page interaction
 ```
 
