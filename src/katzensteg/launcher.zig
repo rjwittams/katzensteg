@@ -138,6 +138,7 @@ const FileSink = struct {
 const DrainArgs = struct {
     source: std.fs.File,
     sink: *FileSink,
+    stop: *std.atomic.Value(bool),
 };
 
 pub fn main() !void {
@@ -788,11 +789,12 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdou
 
     try child.spawn();
 
+    var drain_stop = std.atomic.Value(bool).init(false);
     var stdout_thread: ?std.Thread = null;
     if (child.stdout) |stdout_file| {
         child.stdout = null;
         const sink = if (stdout_sink) |*sink| sink else unreachable;
-        stdout_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stdout_file, .sink = sink }});
+        stdout_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stdout_file, .sink = sink, .stop = &drain_stop }});
     }
 
     var stderr_thread: ?std.Thread = null;
@@ -803,10 +805,11 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdou
             .file => if (stderr_sink) |*sink| sink else unreachable,
             else => unreachable,
         };
-        stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink }});
+        stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink, .stop = &drain_stop }});
     }
 
     const term = try child.wait();
+    drain_stop.store(true, .seq_cst);
     if (stdout_thread) |thread| thread.join();
     if (stderr_thread) |thread| thread.join();
     return term;
@@ -887,11 +890,12 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
     var signal_handlers = installEmbedSignalHandlers(child.id);
     defer signal_handlers.restore();
 
+    var drain_stop = std.atomic.Value(bool).init(false);
     var stdout_thread: ?std.Thread = null;
     if (child.stdout) |stdout_file| {
         child.stdout = null;
         const sink = if (stdout_sink) |*sink| sink else unreachable;
-        stdout_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stdout_file, .sink = sink }});
+        stdout_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stdout_file, .sink = sink, .stop = &drain_stop }});
     }
 
     var stderr_thread: ?std.Thread = null;
@@ -902,7 +906,7 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
             .file => if (stderr_sink) |*sink| sink else unreachable,
             else => unreachable,
         };
-        stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink }});
+        stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink, .stop = &drain_stop }});
     }
 
     const render_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
@@ -919,6 +923,7 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
     control_thread.detach();
 
     const term = try child.wait();
+    drain_stop.store(true, .seq_cst);
     if (stdout_thread) |thread| thread.join();
     if (stderr_thread) |thread| thread.join();
     render_thread.join();
@@ -1057,12 +1062,27 @@ fn destroyRawPipe(pipe: [2]std.posix.fd_t) void {
 
 fn drainPipeToSink(args: DrainArgs) void {
     defer args.source.close();
+    setNonBlocking(args.source.handle);
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = args.source.read(&buf) catch return;
+        const n = args.source.read(&buf) catch |err| switch (err) {
+            error.WouldBlock => {
+                if (args.stop.load(.seq_cst)) return;
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return,
+        };
         if (n == 0) return;
         args.sink.writeAll(buf[0..n]);
     }
+}
+
+fn setNonBlocking(fd: std.posix.fd_t) void {
+    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+    typed_flags.NONBLOCK = true;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
 fn openStdoutSink(spec: OutputSpec) !?FileSink {
@@ -1082,6 +1102,9 @@ fn openStderrSink(stdout_spec: OutputSpec, stderr_spec: OutputSpec, stdout_sink:
 }
 
 fn createOutputFile(path: []const u8) !std.fs.File {
+    if (std.fs.path.dirname(path)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
     if (std.fs.path.isAbsolute(path)) return std.fs.createFileAbsolute(path, .{ .truncate = true, .read = false });
     return std.fs.cwd().createFile(path, .{ .truncate = true, .read = false });
 }
@@ -1536,6 +1559,50 @@ test "launcher resolves and seeds missing files without overwriting existing fil
     const preserved = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
     defer std.testing.allocator.free(preserved);
     try std.testing.expectEqualStrings("keep\n", preserved);
+}
+
+test "launcher creates seed file parent directories" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "gamescope",
+        .target = "/bin/echo",
+        .seed_files = &.{
+            .{ .path = "/tmp/katzensteg-launcher-seed-parent-test/layer.json", .content = "{}\n" },
+        },
+    };
+
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer plan.deinit();
+
+    std.fs.deleteFileAbsolute("/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
+    std.fs.deleteDirAbsolute("/tmp/katzensteg-launcher-seed-parent-test") catch {};
+    defer std.fs.deleteFileAbsolute("/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
+    defer std.fs.deleteDirAbsolute("/tmp/katzensteg-launcher-seed-parent-test") catch {};
+
+    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
+    const seeded = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    defer std.testing.allocator.free(seeded);
+    try std.testing.expectEqualStrings("{}\n", seeded);
+}
+
+test "launcher output drain does not wait for orphaned descendants" {
+    const output_path = "/tmp/katzensteg-launcher-orphan-output-test.out";
+    std.fs.deleteFileAbsolute(output_path) catch {};
+    defer std.fs.deleteFileAbsolute(output_path) catch {};
+
+    const argv = [_][]const u8{ "/bin/sh", "-c", "sleep 2 & exit 0" };
+    var child = std.process.Child.init(&argv, std.testing.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    const start = try std.time.Instant.now();
+    const term = try spawnAndWaitWithOutput(std.testing.allocator, &child, .{ .file = output_path }, .stdout);
+    const elapsed = (try std.time.Instant.now()).since(start);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
+    try std.testing.expect(elapsed < 1500 * std.time.ns_per_ms);
 }
 
 test "launcher expands seed file content placeholders" {

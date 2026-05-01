@@ -31,4 +31,9 @@ pub const Command = union(enum) {
     render_set_clip_rect: struct { renderer: CoreHandle, rect: ?CoreRect },
     render_present: struct { renderer: CoreHandle },
     external_framebuffer_present: struct { width: i32, height: i32, format: ExternalFramebufferFormat, pixels: ?[]u8 },
+    create_color_cursor: struct { cursor: CoreHandle, width: i32, height: i32, hot_x: i32, hot_y: i32, rgba: ?[]u8 },
+    set_cursor: struct { cursor: CoreHandle },
+    show_cursor: struct { visible: bool },
+    free_cursor: struct { cursor: CoreHandle },
+    set_cursor_position: struct { position: ?CorePoint },
 };

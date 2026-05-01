@@ -4,6 +4,7 @@ const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
 const core_commands = @import("core_commands.zig");
 const core_dispatch = @import("core_command_dispatch.zig");
+const cursor_mod = @import("cursor.zig");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
@@ -122,6 +123,7 @@ pub const Runtime = struct {
     batch_control_line: std.ArrayList(u8),
     batch_sink: ?RenderBatchSink = null,
     frame_builder: FrameBuilder,
+    cursor_state: cursor_mod.State,
     bg_only: bool = false,
     stats: bool = false,
     debug_protocol_replies: bool = false,
@@ -187,6 +189,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .logger = logger,
             .frame_builder = FrameBuilder.init(allocator, stats, config.composite_mode, dump_composites, debug_composite),
+            .cursor_state = cursor_mod.State.init(allocator),
             .batch_control_line = .empty,
             .bg_only = bg_only,
             .stats = stats,
@@ -332,6 +335,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .logger = Logger.init(allocator),
             .frame_builder = FrameBuilder.init(allocator, false, .fullscreen, false, false),
+            .cursor_state = cursor_mod.State.init(allocator),
             .batch_control_line = .empty,
             .input_enabled = false,
             .input_claimed = false,
@@ -410,6 +414,7 @@ pub const Runtime = struct {
         }
         if (self.input_parser) |*parser| parser.deinit();
         self.frame_builder.deinit();
+        self.cursor_state.deinit();
         if (self.backend) |*backend| backend.deinit();
         if (self.engine) |*engine| engine.deinit();
         if (self.tty) |*tty| tty.deinit();
@@ -535,7 +540,7 @@ pub const Runtime = struct {
     pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
         const start_ns = std.time.nanoTimestamp();
-        self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.debug_protocol_replies, self.image_gc);
+        self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
@@ -554,7 +559,7 @@ pub const Runtime = struct {
 
         const start_ns = std.time.nanoTimestamp();
         var virtual_tty = self.batchVirtualTty();
-        var job = self.frame_builder.buildPresentJob(&self.logger, &virtual_tty, renderer, self.bg_only) catch |err| {
+        var job = self.frame_builder.buildPresentJob(&self.logger, &virtual_tty, renderer, self.bg_only, self.cursor_state.snapshot()) catch |err| {
             self.logger.writeFmtScoped(.info, .runtime, "batch buildPresentJob failed: {any}", .{err});
             return;
         };
@@ -819,6 +824,14 @@ pub const Runtime = struct {
         self.queue_cond.signal();
     }
 
+    pub fn dispatchCursorPosition(self: *Runtime, position: ?core.CorePoint) void {
+        const cmd = Command{ .set_cursor_position = .{ .position = position } };
+        switch (self.intercept_mode) {
+            .sync_compose => core_dispatch.handleCommand(self, cmd),
+            .queued_replay => self.enqueueCommand(cmd),
+        }
+    }
+
     pub fn acquirePayloadBuffer(self: *Runtime, len: usize) ![]u8 {
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
@@ -847,6 +860,9 @@ pub const Runtime = struct {
             },
             .external_framebuffer_present => |*c| {
                 if (c.pixels) |buf| self.payload_pool.release(self.allocator, buf);
+            },
+            .create_color_cursor => |*c| {
+                if (c.rgba) |buf| self.payload_pool.release(self.allocator, buf);
             },
             else => {},
         }

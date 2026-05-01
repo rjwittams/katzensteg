@@ -136,7 +136,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Run build**
 
-Run: `zig build -Doptimize=Debug -Dvulkan=false`
+Run: `zig build -Doptimize=Debug`
 
 Expected: exit 0.
 
@@ -173,7 +173,7 @@ Run:
 
 ```bash
 zig test --dep termscene --dep katzensteg_sdl -Mroot=src/katzensteg/frame_builder.zig -Mtermscene=src/termscene/mod.zig -Mkatzensteg_sdl=src/katzensteg/sdl2.zig -lc
-zig build -Doptimize=Debug -Dvulkan=false
+zig build -Doptimize=Debug
 ```
 
 Expected: both commands pass.

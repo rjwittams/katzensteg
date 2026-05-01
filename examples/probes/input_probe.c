@@ -17,6 +17,7 @@ enum {
 typedef struct ProbeState {
     bool running;
     bool focused;
+    bool custom_cursor;
     bool background_gamepad_hint_requested;
     bool log_events;
     int window_w;
@@ -33,6 +34,9 @@ typedef struct ProbeState {
     SDL_GameController *controller;
     SDL_Joystick *joystick;
     SDL_JoystickID input_instance_id;
+    SDL_Surface *cursor_surface;
+    SDL_Cursor *cursor;
+    uint32_t cursor_pixels[32 * 32];
     char input_device_name[96];
     int controller_count;
     int joystick_count;
@@ -44,6 +48,93 @@ typedef struct ProbeState {
     int summary_count;
     uint64_t event_count;
 } ProbeState;
+
+static void push_summary(ProbeState *state, const char *summary);
+
+static void fill_cursor_pixels(uint32_t pixels[32 * 32])
+{
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 32; x++) {
+            uint8_t r = 0;
+            uint8_t g = 0;
+            uint8_t b = 0;
+            uint8_t a = 0;
+
+            if (x <= 3 && y <= 22 && y >= x - 1) {
+                r = 255;
+                g = 255;
+                b = 255;
+                a = 255;
+            }
+            if ((x == 0 || y == 0 || x == 4 || y == 23) && x <= 5 && y <= 24) {
+                r = 20;
+                g = 20;
+                b = 20;
+                a = 255;
+            }
+            if (x >= 10 && x <= 25 && y >= 10 && y <= 25 && (x == 10 || x == 25 || y == 10 || y == 25)) {
+                r = 255;
+                g = 32;
+                b = 120;
+                a = 255;
+            }
+            if (x >= 14 && x <= 21 && y >= 14 && y <= 21) {
+                r = 64;
+                g = 220;
+                b = 255;
+                a = 180;
+            }
+
+            pixels[y * 32 + x] =
+                ((uint32_t)a << 24) |
+                ((uint32_t)b << 16) |
+                ((uint32_t)g << 8) |
+                (uint32_t)r;
+        }
+    }
+}
+
+static bool install_custom_cursor(ProbeState *state)
+{
+    fill_cursor_pixels(state->cursor_pixels);
+
+    state->cursor_surface = SDL_CreateRGBSurfaceWithFormatFrom(
+        state->cursor_pixels,
+        32,
+        32,
+        32,
+        32 * 4,
+        SDL_PIXELFORMAT_RGBA32);
+    if (state->cursor_surface == NULL) {
+        fprintf(stderr, "SDL_CreateRGBSurfaceWithFormatFrom cursor failed: %s\n", SDL_GetError());
+        return false;
+    }
+
+    state->cursor = SDL_CreateColorCursor(state->cursor_surface, 1, 1);
+    if (state->cursor == NULL) {
+        fprintf(stderr, "SDL_CreateColorCursor failed: %s\n", SDL_GetError());
+        SDL_FreeSurface(state->cursor_surface);
+        state->cursor_surface = NULL;
+        return false;
+    }
+
+    SDL_SetCursor(state->cursor);
+    SDL_ShowCursor(SDL_ENABLE);
+    push_summary(state, "custom SDL color cursor installed");
+    return true;
+}
+
+static void clear_custom_cursor(ProbeState *state)
+{
+    if (state->cursor != NULL) {
+        SDL_FreeCursor(state->cursor);
+        state->cursor = NULL;
+    }
+    if (state->cursor_surface != NULL) {
+        SDL_FreeSurface(state->cursor_surface);
+        state->cursor_surface = NULL;
+    }
+}
 
 static const char *window_event_name(uint8_t event)
 {
@@ -507,6 +598,9 @@ static void render_probe(SDL_Renderer *renderer, const ProbeState *state, uint32
                state->mouse_x, state->mouse_y, state->mouse_buttons, state->wheel_x, state->wheel_y);
     draw_textf(renderer, 44, 90, 2, 210, 230, 245, "TEXT \"%s\"  EVENTS %llu",
                state->last_text[0] ? state->last_text : "", (unsigned long long)state->event_count);
+    if (state->custom_cursor) {
+        draw_text(renderer, state->window_w - 238, 90, 2, "SDL COLOR CURSOR", 255, 110, 180);
+    }
 
     draw_bar(renderer, 12, 124, state->window_w - 24, 76, 21, 25, 34);
     draw_bar(renderer, 20, 132, 16, 16, state->input_device_name[0] ? 80 : 70, state->input_device_name[0] ? 210 : 70, 150);
@@ -556,8 +650,11 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--log-events") == 0) {
             state.log_events = true;
         }
+        else if (strcmp(argv[i], "--custom-cursor") == 0) {
+            state.custom_cursor = true;
+        }
         else {
-            fprintf(stderr, "usage: %s [--background-gamepad] [--log-events]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--background-gamepad] [--log-events] [--custom-cursor]\n", argv[0]);
             return 2;
         }
     }
@@ -611,6 +708,10 @@ int main(int argc, char **argv)
     refresh_input_device(&state);
 
     push_summary(&state, "started; press Escape or q to quit");
+    if (state.custom_cursor && !install_custom_cursor(&state)) {
+        state.custom_cursor = false;
+        push_summary(&state, "custom SDL color cursor unavailable");
+    }
     if (state.log_events) {
         fprintf(stderr,
                 "background_gamepad_hint=%s active_device=%s controllers=%d joysticks=%d\n",
@@ -633,6 +734,7 @@ int main(int argc, char **argv)
     }
 
     SDL_StopTextInput();
+    clear_custom_cursor(&state);
     close_input_device(&state);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

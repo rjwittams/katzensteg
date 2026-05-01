@@ -4,6 +4,7 @@ struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Surface;
+struct SDL_Cursor;
 struct SDL_Rect;
 struct SDL_Point;
 struct SDL_RendererInfo;
@@ -52,12 +53,17 @@ extern void *ks_SDL_GL_CreateContext(struct SDL_Window *);
 extern int ks_SDL_GL_MakeCurrent(struct SDL_Window *, void *);
 extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
 extern int ks_SDL_Vulkan_LoadLibrary(const char *);
+extern void ks_SDL_PumpEvents(void);
 extern int ks_SDL_PollEvent(union SDL_Event *);
 extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern const unsigned char *ks_SDL_GetKeyboardState(int *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
+extern struct SDL_Cursor *ks_SDL_CreateColorCursor(struct SDL_Surface *, int, int);
+extern void ks_SDL_SetCursor(struct SDL_Cursor *);
+extern int ks_SDL_ShowCursor(int);
+extern void ks_SDL_FreeCursor(struct SDL_Cursor *);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -114,12 +120,17 @@ void *SDL_GL_CreateContext(struct SDL_Window *window) { return ks_SDL_GL_CreateC
 int SDL_GL_MakeCurrent(struct SDL_Window *window, void *context) { return ks_SDL_GL_MakeCurrent(window, context); }
 void SDL_GL_SwapWindow(struct SDL_Window *window) { ks_SDL_GL_SwapWindow(window); }
 int SDL_Vulkan_LoadLibrary(const char *path) { return ks_SDL_Vulkan_LoadLibrary(path); }
+void SDL_PumpEvents(void) { ks_SDL_PumpEvents(); }
 int SDL_PollEvent(union SDL_Event *event) { return ks_SDL_PollEvent(event); }
 int SDL_PeepEvents(union SDL_Event *events, int numevents, int action, unsigned int minType, unsigned int maxType) { return ks_SDL_PeepEvents(events, numevents, action, minType, maxType); }
 const unsigned char *SDL_GetKeyboardState(int *numkeys) { return ks_SDL_GetKeyboardState(numkeys); }
 unsigned int SDL_GetMouseState(int *x, int *y) { return ks_SDL_GetMouseState(x, y); }
 unsigned int SDL_GetRelativeMouseState(int *x, int *y) { return ks_SDL_GetRelativeMouseState(x, y); }
 int SDL_UpperBlit(struct SDL_Surface *src, const struct SDL_Rect *srcrect, struct SDL_Surface *dst, struct SDL_Rect *dstrect) { return ks_SDL_UpperBlit(src, srcrect, dst, dstrect); }
+struct SDL_Cursor *SDL_CreateColorCursor(struct SDL_Surface *surface, int hot_x, int hot_y) { return ks_SDL_CreateColorCursor(surface, hot_x, hot_y); }
+void SDL_SetCursor(struct SDL_Cursor *cursor) { ks_SDL_SetCursor(cursor); }
+int SDL_ShowCursor(int toggle) { return ks_SDL_ShowCursor(toggle); }
+void SDL_FreeCursor(struct SDL_Cursor *cursor) { ks_SDL_FreeCursor(cursor); }
 void *dlopen(const char *path, int mode) { return ks_dlopen(path, mode); }
 
 #endif

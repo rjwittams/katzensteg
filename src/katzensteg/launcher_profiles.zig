@@ -1126,6 +1126,22 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
     try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
 }
 
+test "bundled RetroArch profiles disable pause when inactive" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    for ([_][]const u8{ "smw", "jsr", "spyro" }) |name| {
+        const profile = catalog.find(name).?;
+        var found = false;
+        for (profile.seed_files) |seed| {
+            if (seed.content) |content| {
+                if (std.mem.indexOf(u8, content, "pause_nonactive = \"false\"\n") != null) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 fn envValue(profile: *const LaunchProfile, name: []const u8) ?[]const u8 {
     for (profile.env) |entry| {
         if (std.mem.eql(u8, entry.name, name)) return entry.value;
@@ -1163,6 +1179,25 @@ test "bundled profiles include Tempest Rising gamescope launch target" {
     defer catalog.deinit();
 
     const profile = catalog.find("steam.tempest_rising").?;
+    try expectSteamGamescopeProfile(profile);
+    try std.testing.expectEqualStrings("1486920", envValue(profile, "SteamAppId").?);
+    try std.testing.expect(std.mem.indexOf(u8, profile.args[profile.args.len - 1], "Tempest-Win64-Shipping.exe") != null);
+}
+
+test "bundled profiles include Space Marine 2 gamescope launch target" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("steam.space_marine_2").?;
+    try expectSteamGamescopeProfile(profile);
+    try std.testing.expectEqualStrings("2183900", envValue(profile, "SteamAppId").?);
+    try std.testing.expectEqualStrings("$HOME/.local/share/Steam/steamapps/common/Space Marine 2", profile.cwd.?);
+    try std.testing.expect(std.mem.indexOf(u8, profile.args[profile.args.len - 3], "Warhammer 40000 Space Marine 2.exe") != null);
+    try std.testing.expectEqualStrings("--cwd", profile.args[profile.args.len - 2]);
+    try std.testing.expectEqualStrings("client_pc\\root\\bin\\pc", profile.args[profile.args.len - 1]);
+}
+
+fn expectSteamGamescopeProfile(profile: *const LaunchProfile) !void {
     try std.testing.expect(!profile.isBroken());
     try std.testing.expect(profile.target.len > 0);
     try std.testing.expect(profile.args.len > 0);
@@ -1170,4 +1205,42 @@ test "bundled profiles include Tempest Rising gamescope launch target" {
     try std.testing.expect(profile.runtime.input_enabled);
     try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
     try std.testing.expect(profile.seed_files.len > 0);
+    var child_boundary: ?usize = null;
+    for (profile.args, 0..) |arg, index| {
+        if (std.mem.eql(u8, arg, "--")) {
+            child_boundary = index;
+            break;
+        }
+    }
+    try std.testing.expect(child_boundary != null);
+    try std.testing.expectEqualStrings("/usr/bin/env", profile.args[child_boundary.? + 1]);
+    var child_vk_layer_path_scoped = false;
+    for (profile.args[child_boundary.? + 1 ..]) |arg| {
+        if (std.mem.eql(u8, arg, "VK_LAYER_PATH=/tmp/katzensteg-vulkan-layers")) {
+            child_vk_layer_path_scoped = true;
+        }
+    }
+    try std.testing.expect(child_vk_layer_path_scoped);
+    try std.testing.expect(!colonEnvContains(envValue(profile, "VK_LAYER_PATH").?, "/tmp"));
+    var found_wsi_seed = false;
+    for (profile.seed_files) |seed| {
+        if (std.mem.indexOf(u8, seed.path, "/tmp/katzensteg-vulkan-layers/") != null) {
+            found_wsi_seed = true;
+        }
+    }
+    try std.testing.expect(found_wsi_seed);
+}
+
+fn colonEnvContains(value: []const u8, needle: []const u8) bool {
+    var rest = value;
+    while (true) {
+        const next = std.mem.indexOfScalar(u8, rest, ':');
+        const segment = if (next) |index| rest[0..index] else rest;
+        if (std.mem.eql(u8, segment, needle)) return true;
+        if (next) |index| {
+            rest = rest[index + 1 ..];
+        } else {
+            return false;
+        }
+    }
 }

@@ -9,6 +9,7 @@ pub const SDL_Window = opaque {};
 pub const SDL_Renderer = opaque {};
 pub const SDL_Texture = opaque {};
 pub const SDL_Surface = opaque {};
+pub const SDL_Cursor = opaque {};
 pub const SDL_GLContext = ?*anyopaque;
 
 pub const SDL_Rect = extern struct {
@@ -172,6 +173,9 @@ pub const SDL_WINDOWEVENT_FOCUS_LOST: Uint8 = 13;
 pub const SDL_WINDOWEVENT_CLOSE: Uint8 = 14;
 pub const SDL_WINDOW_INPUT_FOCUS: Uint32 = 0x00000200;
 pub const SDL_WINDOW_MOUSE_FOCUS: Uint32 = 0x00000400;
+pub const SDL_DISABLE: c_int = 0;
+pub const SDL_ENABLE: c_int = 1;
+pub const SDL_QUERY: c_int = -1;
 
 pub extern fn SDL_Init(flags: Uint32) c_int;
 pub extern fn SDL_InitSubSystem(flags: Uint32) c_int;
@@ -201,6 +205,10 @@ pub extern fn SDL_CreateRGBSurfaceWithFormatFrom(pixels: ?*anyopaque, width: c_i
 pub extern fn SDL_ConvertSurfaceFormat(surface: ?*SDL_Surface, pixel_format: Uint32, flags: Uint32) ?*SDL_Surface;
 pub extern fn SDL_FreeSurface(surface: ?*SDL_Surface) void;
 pub extern fn SDL_UpperBlit(src: ?*SDL_Surface, srcrect: ?*const SDL_Rect, dst: ?*SDL_Surface, dstrect: ?*SDL_Rect) c_int;
+pub extern fn SDL_CreateColorCursor(surface: ?*SDL_Surface, hot_x: c_int, hot_y: c_int) ?*SDL_Cursor;
+pub extern fn SDL_SetCursor(cursor: ?*SDL_Cursor) void;
+pub extern fn SDL_ShowCursor(toggle: c_int) c_int;
+pub extern fn SDL_FreeCursor(cursor: ?*SDL_Cursor) void;
 pub extern fn SDL_SetRenderDrawColor(renderer: ?*SDL_Renderer, r: Uint8, g: Uint8, b: Uint8, a: Uint8) c_int;
 pub extern fn SDL_SetTextureColorMod(texture: ?*SDL_Texture, r: Uint8, g: Uint8, b: Uint8) c_int;
 pub extern fn SDL_SetTextureAlphaMod(texture: ?*SDL_Texture, a: Uint8) c_int;

@@ -50,13 +50,26 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_GL_MakeCurrent",
     "SDL_GL_SwapWindow",
     "SDL_Vulkan_LoadLibrary",
+    "SDL_PumpEvents",
     "SDL_PollEvent",
     "SDL_PeepEvents",
     "SDL_GetKeyboardState",
     "SDL_GetMouseState",
     "SDL_GetRelativeMouseState",
     "SDL_UpperBlit",
+    "SDL_CreateColorCursor",
+    "SDL_SetCursor",
+    "SDL_ShowCursor",
+    "SDL_FreeCursor",
     "dlopen",
+    "ks_katzensteg_shutdown",
+    "ks_katzensteg_log_c",
+    "ks_katzensteg_present_external_framebuffer",
+    "ks_katzensteg_present_external_rgba",
+}
+
+EXPECTED_CORE_EXPORTED_DEFINITIONS = {
+    "ks_katzensteg_shutdown",
     "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",
     "ks_katzensteg_present_external_rgba",
@@ -208,12 +221,32 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertIn(symbol, adapter_text)
 
+    @unittest.skipUnless(platform.system() == "Linux", "Linux ELF core export test")
+    def test_core_library_exports_core_abi_symbols(self):
+        lib_path = self.core_path()
+        self.assertTrue(
+            lib_path.exists(),
+            f"{lib_path} does not exist; run `zig build` first",
+        )
+
+        output = subprocess.check_output(
+            ["readelf", "-Ws", str(lib_path)],
+            text=True,
+        )
+
+        exported_definitions = {
+            symbol_name(line)
+            for line in dynsym_lines(output)
+            if " UND " not in line and " GLOBAL " in line
+        }
+        self.assertEqual(EXPECTED_CORE_EXPORTED_DEFINITIONS, exported_definitions)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF preload export test")
     def test_unlinked_preload_exports_linux_sdl_interpose_symbols(self):
         lib_path = self.preload_path()
         self.assertTrue(
             lib_path.exists(),
-            f"{lib_path} does not exist; run `zig build -Dvulkan=false` first",
+            f"{lib_path} does not exist; run `zig build` first",
         )
 
         output = subprocess.check_output(
@@ -261,7 +294,7 @@ class LinuxPreloadExportsTests(unittest.TestCase):
         lib_path = self.preload_path()
         self.assertTrue(
             lib_path.exists(),
-            f"{lib_path} does not exist; run `zig build -Dvulkan=false` first",
+            f"{lib_path} does not exist; run `zig build` first",
         )
 
         needed = needed_libraries(lib_path)
@@ -272,7 +305,7 @@ class LinuxPreloadExportsTests(unittest.TestCase):
         lib_path = self.preload_path()
         self.assertTrue(
             lib_path.exists(),
-            f"{lib_path} does not exist; run `zig build -Dvulkan=false` first",
+            f"{lib_path} does not exist; run `zig build` first",
         )
 
         needed = needed_libraries(lib_path)

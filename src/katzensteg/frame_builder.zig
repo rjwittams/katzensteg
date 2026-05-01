@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
+const cursor_mod = @import("cursor.zig");
 const termscene = @import("termscene");
 const Logger = @import("log.zig").Logger;
 const DirectTty = @import("direct_tty.zig").DirectTty;
@@ -432,7 +433,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, debug_protocol_replies: bool, image_gc: bool) void {
+    pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, cursor: ?cursor_mod.Snapshot, debug_protocol_replies: bool, image_gc: bool) void {
         if (width <= 0 or height <= 0) return;
         const expected_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
         if (pixels.len < expected_len) return;
@@ -467,6 +468,7 @@ pub const FrameBuilder = struct {
             };
         }
         if (!convertExternalFramebufferToRgba(state.composite_rgba.?[0..expected_len], pixels[0..expected_len], width, height, format)) return;
+        compositeCursor(state.composite_rgba.?[0..expected_len], width, height, cursor);
         state.composite_mode_active = true;
 
         self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
@@ -906,8 +908,8 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, bg_only: bool, debug_protocol_replies: bool, image_gc: bool) void {
-        var job = self.buildPresentJob(logger, tty, renderer, bg_only) catch |err| {
+    pub fn onRenderPresent(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, bg_only: bool, cursor: ?cursor_mod.Snapshot, debug_protocol_replies: bool, image_gc: bool) void {
+        var job = self.buildPresentJob(logger, tty, renderer, bg_only, cursor) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "buildPresentJob failed: {any}", .{err});
             const state = self.renderers.getPtr(renderer) orelse return;
             state.copies.clearRetainingCapacity();
@@ -919,9 +921,9 @@ pub const FrameBuilder = struct {
         self.renderPresentJob(logger, tty, engine, backend, renderer, &job, debug_protocol_replies, image_gc);
     }
 
-    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool) !PresentJob {
+    pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool, cursor: ?cursor_mod.Snapshot) !PresentJob {
         const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
-        const use_composite = !bg_only and self.needsFramebufferComposite(state);
+        const use_composite = !bg_only and (self.needsFramebufferComposite(state) or cursor != null);
         if (self.debug_composite) {
             if (self.changedPresentDebugSignature(state, use_composite)) |signature| {
                 self.logPresentDecision(logger, state, signature);
@@ -931,6 +933,7 @@ pub const FrameBuilder = struct {
         if (use_composite) {
             try @call(.never_inline, FrameBuilder.buildCompositeFrame, .{ self, logger, state });
             const buf = state.composite_rgba orelse return error.MissingCompositeBuffer;
+            compositeCursor(buf, state.window_w, state.window_h, cursor);
             return .{ .framebuffer = .{ .width = state.window_w, .height = state.window_h, .rgba = buf, .owns_rgba = false } };
         }
 
@@ -1797,6 +1800,25 @@ pub const FrameBuilder = struct {
             if (copy.src.w != copy.dst.w or copy.src.h != copy.dst.h) return true;
         }
         return false;
+    }
+
+    fn compositeCursor(rgba: []u8, width: i32, height: i32, cursor: ?cursor_mod.Snapshot) void {
+        const snapshot = cursor orelse return;
+        const image = snapshot.image;
+        const position = snapshot.position;
+        cursor_mod.blendRgba(
+            rgba,
+            width,
+            height,
+            image.rgba,
+            image.width,
+            image.height,
+            image.width * 4,
+            position.x,
+            position.y,
+            image.hot_x,
+            image.hot_y,
+        );
     }
 
     fn presentDebugSignature(self: *FrameBuilder, state: *const RendererState, use_composite: bool) PresentDebugSignature {
@@ -3416,7 +3438,7 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
         .base_opaque = true,
     });
 
-    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false);
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false, null);
     defer job.deinit(std.testing.allocator);
 
     const scene_job = job.scene;
@@ -3699,6 +3721,47 @@ test "primitive-heavy frames force framebuffer composition" {
         });
     }
     try std.testing.expect(builder.needsFramebufferComposite(state));
+}
+
+test "active SDL color cursor forces final framebuffer composition" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    const renderer: core.CoreHandle = 1;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var cursor_rgba = [_]u8{ 255, 0, 0, 255 };
+    const cursor_image = cursor_mod.Image{
+        .width = 1,
+        .height = 1,
+        .hot_x = 0,
+        .hot_y = 0,
+        .rgba = &cursor_rgba,
+    };
+    const cursor_snapshot = cursor_mod.Snapshot{
+        .image = &cursor_image,
+        .position = .{ .x = 0, .y = 0 },
+    };
+
+    var tty: DirectTty = undefined;
+    tty.cols = 80;
+    tty.rows = 24;
+    tty.pixel_width = 800;
+    tty.pixel_height = 480;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, cursor_snapshot);
+    defer job.deinit(std.testing.allocator);
+
+    switch (job) {
+        .framebuffer => |fb| {
+            try std.testing.expectEqual(@as(i32, 4), fb.width);
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, fb.rgba[0..4]);
+        },
+        .scene => return error.ExpectedFramebufferJob,
+    }
 }
 
 test "composite tile strip images retire only after all placements stop referencing them" {

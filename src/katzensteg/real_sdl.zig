@@ -47,6 +47,7 @@ extern fn ks_real_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_
 extern fn ks_real_SDL_GL_GetDrawableSize(window: ?*sdl.SDL_Window, w: *c_int, h: *c_int) void;
 extern fn ks_real_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) void;
 extern fn ks_real_SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) c_int;
+extern fn ks_real_SDL_PumpEvents() void;
 extern fn ks_real_SDL_PollEvent(event: ?*sdl.SDL_Event) c_int;
 extern fn ks_real_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, action: c_int, minType: sdl.Uint32, maxType: sdl.Uint32) c_int;
 extern fn ks_real_SDL_GetKeyboardState(numkeys: ?*c_int) ?[*]const sdl.Uint8;
@@ -57,6 +58,10 @@ extern fn ks_real_SDL_GetTicks() sdl.Uint32;
 extern fn ks_real_SDL_ConvertSurfaceFormat(surface: ?*sdl.SDL_Surface, pixel_format: sdl.Uint32, flags: sdl.Uint32) ?*sdl.SDL_Surface;
 extern fn ks_real_SDL_FreeSurface(surface: ?*sdl.SDL_Surface) void;
 extern fn ks_real_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*sdl.SDL_Rect) c_int;
+extern fn ks_real_SDL_CreateColorCursor(surface: ?*sdl.SDL_Surface, hot_x: c_int, hot_y: c_int) ?*sdl.SDL_Cursor;
+extern fn ks_real_SDL_SetCursor(cursor: ?*sdl.SDL_Cursor) void;
+extern fn ks_real_SDL_ShowCursor(toggle: c_int) c_int;
+extern fn ks_real_SDL_FreeCursor(cursor: ?*sdl.SDL_Cursor) void;
 extern fn ks_real_SDL_GetError() [*:0]const u8;
 extern fn ks_real_dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
 extern fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
@@ -105,6 +110,7 @@ pub const SDL_GL_MakeCurrent = if (use_linux_real) ks_real_SDL_GL_MakeCurrent el
 pub const SDL_GL_GetDrawableSize = if (use_linux_real) ks_real_SDL_GL_GetDrawableSize else sdl.SDL_GL_GetDrawableSize;
 pub const SDL_GL_SwapWindow = if (use_linux_real) ks_real_SDL_GL_SwapWindow else sdl.SDL_GL_SwapWindow;
 pub const SDL_Vulkan_LoadLibrary = if (use_linux_real) ks_real_SDL_Vulkan_LoadLibrary else sdl.SDL_Vulkan_LoadLibrary;
+pub const SDL_PumpEvents = if (use_linux_real) ks_real_SDL_PumpEvents else sdl.SDL_PumpEvents;
 pub const SDL_PollEvent = if (use_linux_real) ks_real_SDL_PollEvent else sdl.SDL_PollEvent;
 pub const SDL_PeepEvents = if (use_linux_real) ks_real_SDL_PeepEvents else sdl.SDL_PeepEvents;
 pub const SDL_GetKeyboardState = if (use_linux_real) ks_real_SDL_GetKeyboardState else sdl.SDL_GetKeyboardState;
@@ -115,6 +121,10 @@ pub const SDL_GetTicks = if (use_linux_real) ks_real_SDL_GetTicks else sdl.SDL_G
 pub const SDL_ConvertSurfaceFormat = if (use_linux_real) ks_real_SDL_ConvertSurfaceFormat else sdl.SDL_ConvertSurfaceFormat;
 pub const SDL_FreeSurface = if (use_linux_real) ks_real_SDL_FreeSurface else sdl.SDL_FreeSurface;
 pub const SDL_UpperBlit = if (use_linux_real) ks_real_SDL_UpperBlit else sdl.SDL_UpperBlit;
+pub const SDL_CreateColorCursor = if (use_linux_real) ks_real_SDL_CreateColorCursor else sdl.SDL_CreateColorCursor;
+pub const SDL_SetCursor = if (use_linux_real) ks_real_SDL_SetCursor else sdl.SDL_SetCursor;
+pub const SDL_ShowCursor = if (use_linux_real) ks_real_SDL_ShowCursor else sdl.SDL_ShowCursor;
+pub const SDL_FreeCursor = if (use_linux_real) ks_real_SDL_FreeCursor else sdl.SDL_FreeCursor;
 pub const SDL_GetError = if (use_linux_real) ks_real_SDL_GetError else sdl.SDL_GetError;
 
 pub fn realDlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque {
