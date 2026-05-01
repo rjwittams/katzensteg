@@ -685,10 +685,13 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
 
     try moveCursor(writer, options.outer.row + 1, options.outer.col);
     try writer.writeAll(text_box.vertical);
-    try writer.writeAll("x ");
+    try writer.writeAll(text_box.tee_left);
+    try writer.writeAll("╳");
+    try writer.writeAll(text_box.tee_right);
+    try writer.writeAll(" ");
     const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
-    var written: usize = @min(2, title_space);
+    var written: usize = @min(4, title_space);
     written += try writeTruncated(writer, label_prefix, title_space -| written);
     written += try writeTruncated(writer, options.title, title_space -| written);
     if (written < title_space) try writer.writeByteNTimes(' ', title_space - written);
@@ -1350,7 +1353,7 @@ fn mouseHitTest(outer: Rect, cell: Cell) WmMouseHit {
     if (cell.row == bottom and cell.col > outer.col and cell.col < right) return .resize_bottom;
     if (cell.col == right and cell.row > outer.row and cell.row < bottom) return .resize_right;
     if (rectContainsCell(contentRectForOuter(outer), cell.row, cell.col)) return .content;
-    if (cell.row == outer.row + 1 and cell.col >= outer.col + 1 and cell.col <= outer.col + 2) return .close;
+    if (cell.row == outer.row + 1 and cell.col >= outer.col + 1 and cell.col <= outer.col + 3) return .close;
     if (cell.row == outer.row + 1 and cell.col > outer.col and cell.col < right) return .title;
     return .desktop;
 }
@@ -1520,13 +1523,14 @@ test "wm chrome renders title and reserves content rect" {
     defer out.deinit(std.testing.allocator);
 
     try renderChrome(out.writer(std.testing.allocator), .{
-        .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 24 },
+        .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 32 },
         .title = "probe",
         .focused = true,
     });
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "probe") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "├╳┤") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "┌") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "─") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "│") != null);
@@ -1723,6 +1727,7 @@ test "wm mouse hit test separates title border and content" {
     const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
 
     try std.testing.expectEqual(WmMouseHit.close, mouseHitTest(outer, .{ .row = 3, .col = 5 }));
+    try std.testing.expectEqual(WmMouseHit.close, mouseHitTest(outer, .{ .row = 3, .col = 6 }));
     try std.testing.expectEqual(WmMouseHit.title, mouseHitTest(outer, .{ .row = 3, .col = 10 }));
     try std.testing.expectEqual(WmMouseHit.resize_right, mouseHitTest(outer, .{ .row = 6, .col = 42 }));
     try std.testing.expectEqual(WmMouseHit.resize_bottom_right, mouseHitTest(outer, .{ .row = 13, .col = 42 }));
