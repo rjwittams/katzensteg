@@ -77,6 +77,63 @@ pub fn build(b: *std.Build) void {
     kitty_show_ppm.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(kitty_show_ppm);
 
+    const katzensteg_core_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "katzensteg-core",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/katzensteg/core_exports.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_core_lib.root_module.addImport("termscene", termscene_mod);
+    katzensteg_core_lib.root_module.strip = false;
+    katzensteg_core_lib.root_module.omit_frame_pointer = false;
+    if (is_macos) {
+        katzensteg_core_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+        katzensteg_core_lib.linkFramework("Accelerate");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_core_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_core_lib.version_script = b.path("src/katzensteg/katzensteg_core_linux.map");
+        katzensteg_core_lib.linkSystemLibrary("yuv");
+    }
+    b.installArtifact(katzensteg_core_lib);
+
+    const katzensteg_sdl2_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "katzensteg-sdl2",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/katzensteg/preload.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_sdl2_lib.root_module.addImport("termscene", termscene_mod);
+    katzensteg_sdl2_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_sdl2_lib.root_module.strip = false;
+    katzensteg_sdl2_lib.root_module.omit_frame_pointer = false;
+    katzensteg_sdl2_lib.linker_allow_shlib_undefined = true;
+    if (is_macos) {
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_macos.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+        katzensteg_sdl2_lib.linkFramework("Accelerate");
+        katzensteg_sdl2_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_linux.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_sdl2_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
+        katzensteg_sdl2_lib.version_script = b.path("src/katzensteg/katzensteg_sdl2_linux.map");
+        katzensteg_sdl2_lib.linkSystemLibrary("yuv");
+    }
+    b.installArtifact(katzensteg_sdl2_lib);
+
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",

@@ -1,5 +1,6 @@
 import pathlib
 import platform
+import json
 import subprocess
 import unittest
 
@@ -95,7 +96,117 @@ def needed_libraries(lib_path):
 
 class LinuxPreloadExportsTests(unittest.TestCase):
     def preload_path(self):
-        return ROOT / "zig-out" / "lib" / "libkatzensteg-unlinked.so"
+        return ROOT / "zig-out" / "lib" / "libkatzensteg-sdl2.so"
+
+    def core_path(self):
+        return ROOT / "zig-out" / "lib" / "libkatzensteg-core.so"
+
+    def test_build_declares_core_and_sdl2_adapter_artifacts(self):
+        build_text = (ROOT / "build.zig").read_text()
+
+        for artifact in (
+            '.name = "katzensteg-core"',
+            '.name = "katzensteg-sdl2"',
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertIn(artifact, build_text)
+
+    def test_sdl2_profile_fragment_points_at_sdl2_adapter_library(self):
+        retroarch = json.loads((ROOT / "profiles" / "retroarch.json").read_text())
+        fragment = retroarch["profiles"]["adapter.sdl2_preload"]
+        env = fragment["env"]
+
+        self.assertEqual(
+            "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib",
+            env["DYLD_INSERT_LIBRARIES"],
+        )
+        self.assertEqual(
+            "{repo}/zig-out/lib/libkatzensteg-sdl2.so",
+            env["LD_PRELOAD"],
+        )
+
+    def test_core_exports_are_defined_outside_sdl2_preload_source(self):
+        preload_source = ROOT / "src" / "katzensteg" / "preload.zig"
+        core_exports_source = ROOT / "src" / "katzensteg" / "core_exports.zig"
+
+        self.assertTrue(core_exports_source.exists())
+        preload_text = preload_source.read_text()
+        core_exports_text = core_exports_source.read_text()
+
+        for symbol in (
+            "ks_katzensteg_shutdown",
+            "ks_katzensteg_present_external_rgba",
+            "ks_katzensteg_present_external_framebuffer",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertNotIn(f"pub export fn {symbol}", preload_text)
+                self.assertIn(f"pub export fn {symbol}", core_exports_text)
+
+    def test_core_sources_do_not_import_sdl2_or_real_sdl(self):
+        for path in (
+            ROOT / "src" / "katzensteg" / "core_exports.zig",
+            ROOT / "src" / "katzensteg" / "core_commands.zig",
+            ROOT / "src" / "katzensteg" / "core_command_dispatch.zig",
+            ROOT / "src" / "katzensteg" / "runtime.zig",
+            ROOT / "src" / "katzensteg" / "frame_builder.zig",
+            ROOT / "src" / "katzensteg" / "input.zig",
+        ):
+            text = path.read_text()
+            for needle in (
+                '@import("katzensteg_sdl")',
+                '@import("real_sdl.zig")',
+            ):
+                with self.subTest(path=path.relative_to(ROOT), needle=needle):
+                    self.assertNotIn(needle, text)
+
+    def test_runtime_policy_and_lock_helpers_do_not_expose_sdl_pointer_types(self):
+        runtime_text = (ROOT / "src" / "katzensteg" / "runtime.zig").read_text()
+
+        forbidden = (
+            "terminalRenderingEnabled(self: *const Runtime, window:",
+            "realRenderEnabled(self: *const Runtime, window:",
+            "realWindowEnabled(self: *const Runtime, window:",
+            "realWindowCreateAction(self: *const Runtime, window:",
+            "realWindowShowAction(self: *const Runtime, window:",
+            "realWindowRestoreAction(self: *const Runtime, window:",
+            "shouldCaptureExternalFrame(self: *Runtime, window:",
+            "rememberQueuedLock(self: *Runtime, texture: ?*@import(\"katzensteg_sdl\").SDL_Texture",
+            "takeQueuedLock(self: *Runtime, texture: ?*@import(\"katzensteg_sdl\").SDL_Texture",
+        )
+        for needle in forbidden:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, runtime_text)
+
+    def test_runtime_does_not_own_sdl_event_adapter_functions(self):
+        runtime_text = (ROOT / "src" / "katzensteg" / "runtime.zig").read_text()
+        adapter_text = (ROOT / "src" / "katzensteg" / "sdl2_input_adapter.zig").read_text()
+
+        runtime_forbidden = (
+            "popSdlInputEvent",
+            "popSdlInputEventInRange",
+            "noteRealSdlEvent",
+            "mergedKeyboardState",
+            "claimedWindowFlags",
+            "shouldSuppressSdlEvent",
+            "fillSdlEvent",
+            "eventIsMouse",
+            "applyClaimedInputWindowFlags",
+            "shouldSuppressClaimedWindowEvent",
+        )
+        for needle in runtime_forbidden:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, runtime_text)
+
+        for symbol in (
+            "popInputEvent",
+            "popInputEventInRange",
+            "noteRealEvent",
+            "mergedKeyboardState",
+            "claimedWindowFlags",
+            "shouldSuppressEvent",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, adapter_text)
 
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF preload export test")
     def test_unlinked_preload_exports_linux_sdl_interpose_symbols(self):

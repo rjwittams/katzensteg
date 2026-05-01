@@ -1,0 +1,175 @@
+const std = @import("std");
+const input = @import("input.zig");
+const runtime_mod = @import("runtime.zig");
+const sdl = @import("katzensteg_sdl");
+const real_sdl = @import("real_sdl.zig");
+
+pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
+    if (!rt.input_enabled) return false;
+    var parser = &(rt.input_parser orelse return false);
+    const input_event = parser.pop() orelse return false;
+    if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
+    const out = event orelse return true;
+    fillSdlEvent(out, input_event);
+    return true;
+}
+
+pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, min_type: u32, max_type: u32) bool {
+    if (!rt.input_enabled) return false;
+    var parser = &(rt.input_parser orelse return false);
+    const input_event = parser.popSdlRange(min_type, max_type) orelse return false;
+    if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
+    const out = event orelse return true;
+    fillSdlEvent(out, input_event);
+    return true;
+}
+
+pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void {
+    if (eventIsMouse(event.*)) rt.mouse_ownership.claimRealWindow();
+}
+
+pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
+    if (!rt.input_enabled) return real_state;
+    var parser = &(rt.input_parser orelse return real_state);
+    @memset(&rt.keyboard_state, 0);
+    if (real_state) |keys| {
+        const n: usize = @min(rt.keyboard_state.len, @as(usize, @intCast(@max(0, real_count))));
+        @memcpy(rt.keyboard_state[0..n], keys[0..n]);
+    }
+    var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
+    parser.copyKeyboardState(&terminal_state, std.time.nanoTimestamp());
+    for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
+    if (numkeys) |out| out.* = @intCast(rt.keyboard_state.len);
+    return &rt.keyboard_state;
+}
+
+pub fn claimedWindowFlags(rt: *const runtime_mod.Runtime, flags: u32) u32 {
+    if (!rt.input_claimed or !rt.input_claim_focus) return flags;
+    return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
+}
+
+pub fn shouldSuppressEvent(rt: *const runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+    if (!rt.input_claimed) return false;
+    if (event.type != sdl.SDL_WINDOWEVENT) return false;
+    return shouldSuppressClaimedWindowEvent(true, event.type, event.window.event);
+}
+
+fn inputEventIsMouse(event: input.InputEvent) bool {
+    return switch (event) {
+        .mouse_motion,
+        .mouse_button,
+        .mouse_wheel,
+        => true,
+        else => false,
+    };
+}
+
+fn eventIsMouse(event: sdl.SDL_Event) bool {
+    return switch (event.type) {
+        sdl.SDL_MOUSEMOTION,
+        sdl.SDL_MOUSEBUTTONDOWN,
+        sdl.SDL_MOUSEBUTTONUP,
+        sdl.SDL_MOUSEWHEEL,
+        => true,
+        else => false,
+    };
+}
+
+fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
+    @memset(&event.padding, 0);
+    const now = real_sdl.SDL_GetTicks();
+    switch (input_event) {
+        .key_down => |key| event.key = .{
+            .type = sdl.SDL_KEYDOWN,
+            .timestamp = now,
+            .windowID = 0,
+            .state = sdl.SDL_PRESSED,
+            .repeat = 0,
+            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
+        },
+        .key_up => |key| event.key = .{
+            .type = sdl.SDL_KEYUP,
+            .timestamp = now,
+            .windowID = 0,
+            .state = sdl.SDL_RELEASED,
+            .repeat = 0,
+            .keysym = .{ .scancode = key.scancode, .sym = key.keycode, .mod = key.mods, .unused = 0 },
+        },
+        .text => |text| {
+            event.text = .{ .type = sdl.SDL_TEXTINPUT, .timestamp = now, .windowID = 0, .text = text.buf };
+        },
+        .mouse_motion => |motion| event.motion = .{
+            .type = sdl.SDL_MOUSEMOTION,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .state = motion.buttons,
+            .x = motion.x,
+            .y = motion.y,
+            .xrel = motion.xrel,
+            .yrel = motion.yrel,
+        },
+        .mouse_button => |button| event.button = .{
+            .type = if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .button = button.button,
+            .state = if (button.pressed) sdl.SDL_PRESSED else sdl.SDL_RELEASED,
+            .clicks = button.clicks,
+            .x = button.x,
+            .y = button.y,
+        },
+        .mouse_wheel => |wheel| event.wheel = .{
+            .type = sdl.SDL_MOUSEWHEEL,
+            .timestamp = now,
+            .windowID = 0,
+            .which = 0,
+            .x = wheel.x,
+            .y = wheel.y,
+            .direction = sdl.SDL_MOUSEWHEEL_NORMAL,
+            .preciseX = @floatFromInt(wheel.x),
+            .preciseY = @floatFromInt(wheel.y),
+            .mouseX = wheel.mouse_x,
+            .mouseY = wheel.mouse_y,
+        },
+    }
+}
+
+fn shouldSuppressClaimedWindowEvent(claimed: bool, event_type: u32, window_event: u8) bool {
+    if (!claimed or event_type != sdl.SDL_WINDOWEVENT) return false;
+    return switch (window_event) {
+        sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+        sdl.SDL_WINDOWEVENT_LEAVE,
+        => true,
+        else => false,
+    };
+}
+
+test "SDL mouse events are recognized for ownership handoff" {
+    var event: sdl.SDL_Event = undefined;
+    event.type = sdl.SDL_MOUSEMOTION;
+    try std.testing.expect(eventIsMouse(event));
+    event.type = sdl.SDL_KEYDOWN;
+    try std.testing.expect(!eventIsMouse(event));
+}
+
+test "claimed input keeps SDL window focused locally" {
+    var rt: runtime_mod.Runtime = undefined;
+    rt.input_claimed = true;
+    rt.input_claim_focus = true;
+
+    try std.testing.expectEqual(
+        @as(u32, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS),
+        claimedWindowFlags(&rt, 0),
+    );
+    rt.input_claimed = false;
+    try std.testing.expectEqual(@as(u32, 0), claimedWindowFlags(&rt, 0));
+    rt.input_claimed = true;
+    rt.input_claim_focus = false;
+    try std.testing.expectEqual(@as(u32, 0), claimedWindowFlags(&rt, 0));
+    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
+    try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_LEAVE));
+    try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_GAINED));
+    try std.testing.expect(!shouldSuppressClaimedWindowEvent(false, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
+}

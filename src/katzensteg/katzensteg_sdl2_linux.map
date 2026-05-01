@@ -1,0 +1,10 @@
+KATZENSTEG_SDL2_1.0 {
+    global:
+        SDL_*;
+        dlopen;
+        ks_katzensteg_shutdown;
+        ks_katzensteg_present_external_framebuffer;
+        ks_katzensteg_present_external_rgba;
+    local:
+        *;
+};

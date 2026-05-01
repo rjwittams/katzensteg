@@ -52,6 +52,16 @@ def needed_libraries(lib_path):
 
 
 class VulkanLinuxWiringTests(unittest.TestCase):
+    def test_vulkan_layer_resolves_present_callback_from_core_library(self):
+        source = (ROOT / "src" / "katzensteg" / "vulkan_layer.c").read_text()
+
+        self.assertIn("KATZENSTEG_CORE_LIB", source)
+        self.assertIn("libkatzensteg-core.so", source)
+        self.assertIn("libkatzensteg-core.dylib", source)
+        self.assertIn("dladdr", source)
+        self.assertIn("dlopen", source)
+        self.assertIn("dlsym(g_core_handle", source)
+
     def test_layer_manifest_points_to_linux_shared_object_on_linux(self):
         if platform.system() != "Linux":
             self.skipTest("Linux Vulkan manifest path test")
