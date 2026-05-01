@@ -30,6 +30,7 @@ pub const Rect = struct {
 
 pub const EventKind = enum {
     launch_started,
+    launch_prompt,
     attach_sent,
     viewport_sent,
     input_sent,
@@ -164,6 +165,13 @@ pub const LayoutAction = enum {
     tile,
 };
 
+pub const LaunchPromptAction = union(enum) {
+    none,
+    changed,
+    cancel,
+    submit,
+};
+
 pub const Cell = struct {
     row: i32,
     col: i32,
@@ -263,6 +271,8 @@ pub const RunExecOptions = struct {
 
 const min_outer_rows: i32 = 6;
 const min_outer_cols: i32 = 20;
+const default_wm_session_capacity: usize = 32;
+const max_launch_prompt_len: usize = 96;
 
 const text_box = struct {
     const top_left = "┌";
@@ -302,21 +312,7 @@ pub fn runProfile(allocator: std.mem.Allocator, profile_name: []const u8) !u8 {
 
 pub fn runProfiles(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
     if (profile_names.len == 0) return 64;
-    if (profile_names.len != 1) return runMultiProfile(allocator, profile_names);
-    const profile_name = profile_names[0];
-    const exe = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(exe);
-
-    var tty = try DirectTty.init();
-    defer tty.deinit();
-    var upload = try selectUploadPolicy(allocator, tty.file);
-    defer deinitUploadPolicy(allocator, &upload);
-
-    return runInteractiveExec(allocator, &.{ exe, "--embed-jsonl", profile_name }, &tty, .{
-        .title = profile_name,
-        .terminal = .{ .rows = tty.rows, .cols = tty.cols },
-        .upload = upload,
-    });
+    return runMultiProfile(allocator, profile_names);
 }
 
 const WmProducerSession = struct {
@@ -352,61 +348,28 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     var tty_lock = std.Thread.Mutex{};
 
     const terminal = TerminalSize{ .rows = tty.rows, .cols = tty.cols };
-    var sessions = try allocator.alloc(WmProducerSession, profile_names.len);
+    const session_capacity = @max(profile_names.len, default_wm_session_capacity);
+    var sessions = try allocator.alloc(WmProducerSession, session_capacity);
     defer allocator.free(sessions);
-    var z_order = try allocator.alloc(usize, profile_names.len);
+    var z_order = try allocator.alloc(usize, session_capacity);
     defer allocator.free(z_order);
     var initialized: usize = 0;
     defer {
         for (sessions[0..initialized]) |*session| {
-            if (!session.stdin_closed) {
-                if (session.child_stdin) |file| file.close();
-                session.stdin_closed = true;
-            }
+            closeSessionControl(session);
             if (session.stdout_file) |file| file.close();
             if (session.wait_thread) |thread| thread.join();
             if (session.stdout_thread) |thread| thread.join();
             deinitUploadPolicy(allocator, &session.upload);
+            allocator.free(session.profile_name);
         }
     }
 
     try tty.enableInputCapture();
     for (profile_names, 0..) |profile_name, i| {
         z_order[i] = i;
-        var upload = try uploadPolicyForSession(allocator, tty.file, i);
-        errdefer deinitUploadPolicy(allocator, &upload);
-
-        var child = std.process.Child.init(&.{ exe, "--embed-jsonl", profile_name }, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
-
-        sessions[i] = .{
-            .profile_name = profile_name,
-            .window = WmWindowState.init("main", cascadedOuterRect(terminal, i)),
-            .upload = upload,
-            .child = child,
-        };
+        sessions[i] = try launchProducerSession(allocator, exe, tty.file, terminal, profile_name, i, &event_log);
         initialized += 1;
-
-        sessions[i].child_stdin = sessions[i].child.stdin.?;
-        sessions[i].child.stdin = null;
-        const ranges = idRangesForSession(i);
-        try writeInitialControl(sessions[i].child_stdin.?.deprecatedWriter(), .{
-            .rect_cells = sessions[i].focusedContent().toPresentationRectCells(),
-            .aspect = .fit,
-            .z_base = zBaseForSlot(i),
-            .image_ids = ranges.image,
-            .placement_ids = ranges.placement,
-            .upload = sessions[i].upload,
-        });
-        sessions[i].window.markAttached();
-        sessions[i].state = .running;
-        try event_log.record(.attach_sent, profile_name);
-
-        sessions[i].stdout_file = sessions[i].child.stdout.?;
-        sessions[i].child.stdout = null;
         sessions[i].wait_thread = try std.Thread.spawn(.{}, waitChildThread, .{ &sessions[i].child, &sessions[i].wait_state });
     }
 
@@ -414,25 +377,61 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     const writer = tty.file.deprecatedWriter();
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
     for (sessions[0..initialized]) |*session| {
-        const stdout_file = session.stdout_file.?;
-        session.stdout_file = null;
-        session.stdout_thread = try std.Thread.spawn(.{}, applyPeerStdoutThread, .{ThreadApplyArgs{
-            .allocator = allocator,
-            .stdout_file = stdout_file,
-            .tty_file = tty.file,
-            .tty_lock = &tty_lock,
-        }});
+        try startSessionStdoutThread(allocator, session, tty.file, &tty_lock);
     }
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
     var shutdown_sent = false;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
+    var launch_prompt = std.ArrayList(u8).empty;
+    defer launch_prompt.deinit(allocator);
+    var prompt_active = false;
     while (!allSessionsDone(sessions[0..initialized])) {
         const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
         if (lifecycle.changed) {
             if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+        }
+        if (prompt_active) {
+            const prompt = try readLaunchPromptInput(&tty, &input_buf, &launch_prompt, allocator);
+            switch (prompt) {
+                .none => {},
+                .changed => {
+                    try recordLaunchPrompt(&event_log, launch_prompt.items);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                },
+                .cancel => {
+                    prompt_active = false;
+                    launch_prompt.clearRetainingCapacity();
+                    try event_log.record(.launch_prompt, "cancelled");
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                },
+                .submit => {
+                    prompt_active = false;
+                    if (launch_prompt.items.len == 0) {
+                        try event_log.record(.launch_prompt, "empty");
+                    } else if (initialized >= session_capacity) {
+                        try event_log.record(.parse_error, "session limit reached");
+                    } else {
+                        const new_index = initialized;
+                        z_order[new_index] = new_index;
+                        sessions[new_index] = try launchProducerSession(allocator, exe, tty.file, terminal, launch_prompt.items, new_index, &event_log);
+                        initialized += 1;
+                        sessions[new_index].wait_thread = try std.Thread.spawn(.{}, waitChildThread, .{ &sessions[new_index].child, &sessions[new_index].wait_state });
+                        focused_index = new_index;
+                        bringWindowToFront(z_order[0..initialized], focused_index);
+                        mouse_state = .{};
+                        try startSessionStdoutThread(allocator, &sessions[new_index], tty.file, &tty_lock);
+                        try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
+                    }
+                    launch_prompt.clearRetainingCapacity();
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                },
+            }
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            continue;
         }
         if (!shutdown_sent) {
             const input = readInputForSessions(&tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
@@ -444,6 +443,12 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             }
             switch (input.action) {
                 .none, .consume => {},
+                .start_launch => {
+                    prompt_active = true;
+                    launch_prompt.clearRetainingCapacity();
+                    try recordLaunchPrompt(&event_log, launch_prompt.items);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                },
                 .focus_next => {
                     if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
                         focused_index = next_index;
@@ -519,6 +524,59 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         if (code != 0) return code;
     }
     return 0;
+}
+
+fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, profile_name: []const u8, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
+    var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
+    errdefer deinitUploadPolicy(allocator, &upload);
+
+    const owned_profile_name = try allocator.dupe(u8, profile_name);
+    errdefer allocator.free(owned_profile_name);
+
+    var child = std.process.Child.init(&.{ exe, "--embed-jsonl", owned_profile_name }, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+
+    var session = WmProducerSession{
+        .profile_name = owned_profile_name,
+        .window = WmWindowState.init("main", cascadedOuterRect(terminal, session_index)),
+        .upload = upload,
+        .child = child,
+    };
+    errdefer closeSessionControl(&session);
+
+    session.child_stdin = session.child.stdin.?;
+    session.child.stdin = null;
+    const ranges = idRangesForSession(session_index);
+    try writeInitialControl(session.child_stdin.?.deprecatedWriter(), .{
+        .rect_cells = session.focusedContent().toPresentationRectCells(),
+        .aspect = .fit,
+        .z_base = zBaseForSlot(session_index),
+        .image_ids = ranges.image,
+        .placement_ids = ranges.placement,
+        .upload = session.upload,
+    });
+    session.window.markAttached();
+    session.state = .running;
+    try events.record(.attach_sent, owned_profile_name);
+
+    session.stdout_file = session.child.stdout.?;
+    session.child.stdout = null;
+    return session;
+}
+
+fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSession, tty_file: std.fs.File, tty_lock: *std.Thread.Mutex) !void {
+    if (session.stdout_thread != null) return;
+    const stdout_file = session.stdout_file orelse return;
+    session.stdout_file = null;
+    session.stdout_thread = try std.Thread.spawn(.{}, applyPeerStdoutThread, .{ThreadApplyArgs{
+        .allocator = allocator,
+        .stdout_file = stdout_file,
+        .tty_file = tty_file,
+        .tty_lock = tty_lock,
+    }});
 }
 
 pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: anytype, options: RunExecOptions) !u8 {
@@ -1212,6 +1270,7 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
             switch (input.action) {
                 .none => {},
                 .consume => {},
+                .start_launch => {},
                 .focus_next => {},
                 .forward => {
                     if (control_open) {
@@ -1332,6 +1391,7 @@ fn waitChildThread(child: *std.process.Child, state: *ChildWaitState) void {
 const InputAction = union(enum) {
     none,
     consume,
+    start_launch,
     focus_next,
     close_focused,
     forward,
@@ -1359,7 +1419,7 @@ fn readInputForSessions(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, s
     const bytes = buf[0..n];
     const action = inputActionFromBytes(bytes);
     switch (action) {
-        .quit, .focus_next => return .{ .action = action },
+        .quit, .focus_next, .start_launch => return .{ .action = action },
         .none => {},
         else => {},
     }
@@ -1403,6 +1463,7 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
     for (bytes) |byte| {
         switch (byte) {
             'q', 'Q' => return .quit,
+            'n' => return .start_launch,
             '\t' => return .focus_next,
             else => {},
         }
@@ -1423,6 +1484,53 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
         }
     }
     return .none;
+}
+
+fn readLaunchPromptInput(tty: *DirectTty, buf: []u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
+    const n = std.posix.read(tty.file.handle, buf) catch return .none;
+    if (n == 0) return .none;
+    return applyLaunchPromptBytes(buf[0..n], prompt, allocator);
+}
+
+fn applyLaunchPromptBytes(bytes: []const u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
+    var changed = false;
+    for (bytes) |byte| {
+        switch (byte) {
+            0x1b => return .cancel,
+            '\r', '\n' => return .submit,
+            0x7f, 0x08 => {
+                if (prompt.items.len > 0) {
+                    _ = prompt.pop();
+                    changed = true;
+                }
+            },
+            else => {
+                if (isProfileNameByte(byte)) {
+                    if (prompt.items.len < max_launch_prompt_len) {
+                        try prompt.append(allocator, byte);
+                        changed = true;
+                    }
+                }
+            },
+        }
+    }
+    return if (changed) .changed else .none;
+}
+
+fn isProfileNameByte(byte: u8) bool {
+    return switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => true,
+        else => false,
+    };
+}
+
+fn recordLaunchPrompt(events: *ProtocolEventLog, prompt: []const u8) !void {
+    var scratch: [128]u8 = undefined;
+    const detail = if (prompt.len == 0)
+        "launch:"
+    else
+        try std.fmt.bufPrint(&scratch, "launch: {s}", .{prompt});
+    try events.record(.launch_prompt, detail);
 }
 
 fn filterForwardedInputBytes(bytes: []u8, content: Rect) []const u8 {
@@ -1826,10 +1934,25 @@ test "wm viewport control can be sent best-effort after producer exit" {
 
 test "wm input parser prioritizes quit in coalesced input" {
     try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("lq"));
+    try std.testing.expectEqual(InputAction.start_launch, inputActionFromBytes("n"));
     try std.testing.expectEqual(InputAction{ .window = .move_right }, inputActionFromBytes("l"));
     try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\t"));
     try std.testing.expectEqual(InputAction{ .layout = .tile }, inputActionFromBytes("t"));
     try std.testing.expectEqual(InputAction{ .layout = .cascade }, inputActionFromBytes("c"));
+}
+
+test "wm launch prompt edits profile names" {
+    var prompt = std.ArrayList(u8).empty;
+    defer prompt.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptBytes("sonic!", &prompt, std.testing.allocator));
+    try std.testing.expectEqualStrings("sonic", prompt.items);
+
+    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptBytes(&.{0x7f}, &prompt, std.testing.allocator));
+    try std.testing.expectEqualStrings("soni", prompt.items);
+
+    try std.testing.expectEqual(LaunchPromptAction.cancel, try applyLaunchPromptBytes(&.{0x1b}, &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.submit, try applyLaunchPromptBytes("\r", &prompt, std.testing.allocator));
 }
 
 test "wm mouse hit test separates title border and content" {
