@@ -159,6 +159,11 @@ pub const WindowAction = enum {
     resize_wider,
 };
 
+pub const LayoutAction = enum {
+    cascade,
+    tile,
+};
+
 pub const Cell = struct {
     row: i32,
     col: i32,
@@ -472,6 +477,13 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                     }
                 },
+                .layout => |action| {
+                    if (applyLayoutAction(sessions[0..initialized], action, terminal)) {
+                        mouse_state = .{};
+                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    }
+                },
                 .mouse_drag => |outer| {
                     if (!std.meta.eql(focused.window.outer, outer)) {
                         focused.window.outer = outer;
@@ -671,6 +683,82 @@ fn bringWindowToFront(z_order: []usize, window_index: usize) void {
     var index = pos;
     while (index + 1 < z_order.len) : (index += 1) z_order[index] = z_order[index + 1];
     z_order[z_order.len - 1] = window_index;
+}
+
+fn applyLayoutAction(sessions: []WmProducerSession, action: LayoutAction, terminal: TerminalSize) bool {
+    return switch (action) {
+        .cascade => applyCascadeLayout(sessions, terminal),
+        .tile => applyTileLayout(sessions, terminal),
+    };
+}
+
+fn applyCascadeLayout(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+    var changed = false;
+    var visible_index: usize = 0;
+    for (sessions) |*session| {
+        if (!sessionIsVisible(session)) continue;
+        const next = cascadedOuterRect(terminal, visible_index);
+        if (!std.meta.eql(session.window.outer, next)) {
+            session.window.outer = next;
+            changed = true;
+        }
+        visible_index += 1;
+    }
+    return changed;
+}
+
+fn applyTileLayout(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+    const visible_count = countVisibleSessions(sessions);
+    if (visible_count == 0) return false;
+
+    const columns = ceilSqrt(visible_count);
+    const rows = ceilDiv(visible_count, columns);
+    const usable_rows: i32 = @max(min_outer_rows, terminal.rows - 1);
+    const cell_rows: i32 = @max(min_outer_rows, @divFloor(usable_rows, @as(i32, @intCast(rows))));
+    const cell_cols: i32 = @max(min_outer_cols, @divFloor(terminal.cols, @as(i32, @intCast(columns))));
+
+    var changed = false;
+    var visible_index: usize = 0;
+    for (sessions) |*session| {
+        if (!sessionIsVisible(session)) continue;
+
+        const tile_row: i32 = @intCast(visible_index / columns);
+        const tile_col: i32 = @intCast(visible_index % columns);
+        const row = 1 + tile_row * cell_rows;
+        const col = 1 + tile_col * cell_cols;
+        const rect_rows = if (@as(usize, @intCast(tile_row + 1)) == rows) usable_rows - tile_row * cell_rows else cell_rows;
+        const rect_cols = if (@as(usize, @intCast(tile_col + 1)) == columns) terminal.cols - tile_col * cell_cols else cell_cols;
+        const next = clampOuterRect(.{
+            .row = row,
+            .col = col,
+            .rows = @max(min_outer_rows, rect_rows),
+            .cols = @max(min_outer_cols, rect_cols),
+        }, terminal);
+        if (!std.meta.eql(session.window.outer, next)) {
+            session.window.outer = next;
+            changed = true;
+        }
+        visible_index += 1;
+    }
+    return changed;
+}
+
+fn countVisibleSessions(sessions: []const WmProducerSession) usize {
+    var count: usize = 0;
+    for (sessions) |*session| {
+        if (sessionIsVisible(session)) count += 1;
+    }
+    return count;
+}
+
+fn ceilSqrt(value: usize) usize {
+    var out: usize = 1;
+    while (out * out < value) : (out += 1) {}
+    return out;
+}
+
+fn ceilDiv(numerator: usize, denominator: usize) usize {
+    return (numerator + denominator - 1) / denominator;
 }
 
 pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
@@ -1166,6 +1254,7 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
                         try redrawDesktopLocked(&tty_lock, writer, options.terminal, window, options.title, options.upload.profile, &event_log);
                     }
                 },
+                .layout => {},
                 .mouse_drag => |outer| {
                     if (!std.meta.eql(window.outer, outer)) {
                         window.outer = outer;
@@ -1248,6 +1337,7 @@ const InputAction = union(enum) {
     forward,
     quit,
     window: WindowAction,
+    layout: LayoutAction,
     mouse_drag: Rect,
 };
 
@@ -1327,6 +1417,8 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
             'J' => return .{ .window = .resize_shorter },
             'K' => return .{ .window = .resize_taller },
             'L' => return .{ .window = .resize_wider },
+            'c' => return .{ .layout = .cascade },
+            't' => return .{ .layout = .tile },
             else => {},
         }
     }
@@ -1736,6 +1828,8 @@ test "wm input parser prioritizes quit in coalesced input" {
     try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("lq"));
     try std.testing.expectEqual(InputAction{ .window = .move_right }, inputActionFromBytes("l"));
     try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\t"));
+    try std.testing.expectEqual(InputAction{ .layout = .tile }, inputActionFromBytes("t"));
+    try std.testing.expectEqual(InputAction{ .layout = .cascade }, inputActionFromBytes("c"));
 }
 
 test "wm mouse hit test separates title border and content" {
@@ -1944,6 +2038,62 @@ test "wm z order compacts exited sessions behind visible sessions" {
     try std.testing.expect(compactVisibleZOrder(sessions[0..], z_order[0..]));
 
     try std.testing.expectEqualSlices(usize, &.{ 1, 0, 2 }, z_order[0..]);
+}
+
+test "wm tile layout arranges visible producers without overlap" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "one",
+            .window = WmWindowState.init("main", .{ .row = 5, .col = 5, .rows = 8, .cols = 30 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+        .{
+            .profile_name = "two",
+            .window = WmWindowState.init("main", .{ .row = 7, .col = 9, .rows = 8, .cols = 30 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+    };
+
+    try std.testing.expect(applyLayoutAction(sessions[0..], .tile, .{ .rows = 24, .cols = 80 }));
+
+    try std.testing.expectEqual(Rect{ .row = 1, .col = 1, .rows = 23, .cols = 40 }, sessions[0].window.outer);
+    try std.testing.expectEqual(Rect{ .row = 1, .col = 41, .rows = 23, .cols = 40 }, sessions[1].window.outer);
+}
+
+test "wm cascade layout skips non-visible producers" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "visible-a",
+            .window = WmWindowState.init("main", .{ .row = 9, .col = 9, .rows = 8, .cols = 30 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+        .{
+            .profile_name = "closed",
+            .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .exited,
+        },
+        .{
+            .profile_name = "visible-b",
+            .window = WmWindowState.init("main", .{ .row = 11, .col = 13, .rows = 8, .cols = 30 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+    };
+
+    try std.testing.expect(applyLayoutAction(sessions[0..], .cascade, .{ .rows = 24, .cols = 80 }));
+
+    try std.testing.expectEqual(Rect{ .row = 1, .col = 1, .rows = 22, .cols = 76 }, sessions[0].window.outer);
+    try std.testing.expectEqual(Rect{ .row = 3, .col = 5, .rows = 12, .cols = 40 }, sessions[1].window.outer);
+    try std.testing.expectEqual(Rect{ .row = 2, .col = 3, .rows = 22, .cols = 76 }, sessions[2].window.outer);
 }
 
 test "wm focus bring to front mutates z order without moving sessions" {
