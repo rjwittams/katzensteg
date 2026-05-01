@@ -4,6 +4,7 @@ const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const Logger = @import("log.zig").Logger;
+const config_mod = @import("config.zig");
 const upload_path_mod = @import("upload_path.zig");
 const ts_kitty = @import("termscene").kitty;
 
@@ -1183,10 +1184,28 @@ fn selectUploadPolicy(allocator: std.mem.Allocator, tty: std.fs.File) !render_ba
         defer probe_file.close();
         try probe_file.writeAll(&[_]u8{ 0, 0, 0, 255 });
     }
-    const profile = if (ts_kitty.capabilities.probe(allocator, tty, path)) |caps|
-        ts_kitty.profile.choose(caps)
+    const profile = forcedWmOutputProfile(allocator) orelse if (ts_kitty.capabilities.probe(allocator, tty, path)) |caps|
+        mapKittyOutputProfile(ts_kitty.profile.choose(caps))
     else |_|
         .file_whole;
+    return uploadPolicyForOutputProfile(path, profile);
+}
+
+fn forcedWmOutputProfile(allocator: std.mem.Allocator) ?config_mod.OutputProfile {
+    const value = std.process.getEnvVarOwned(allocator, "KATZENSTEG_OUTPUT_PROFILE") catch return null;
+    defer allocator.free(value);
+    return config_mod.parseOutputProfile(value);
+}
+
+fn mapKittyOutputProfile(profile: ts_kitty.profile.OutputProfile) config_mod.OutputProfile {
+    return switch (profile) {
+        .direct_apc => .direct_apc,
+        .file_whole => .file_whole,
+        .file_offset_ring => .file_offset_ring,
+    };
+}
+
+fn uploadPolicyForOutputProfile(path: []const u8, profile: config_mod.OutputProfile) render_batch_protocol.UploadPolicy {
     return switch (profile) {
         .direct_apc => .{ .profile = .file_whole, .path = path },
         .file_whole => .{ .profile = .file_whole, .path = path },
@@ -1838,6 +1857,12 @@ test "wm initial control advertises file upload policy" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"file_whole\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"path\":\"/tmp/katzensteg-wm-upload\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"direct_apc\"") == null);
+}
+
+test "wm upload policy honors file profile choices without direct apc" {
+    try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_whole, uploadPolicyForOutputProfile("/tmp/wm-upload", .file_whole).profile);
+    try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_offset_ring, uploadPolicyForOutputProfile("/tmp/wm-upload", .file_offset_ring).profile);
+    try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_whole, uploadPolicyForOutputProfile("/tmp/wm-upload", .direct_apc).profile);
 }
 
 test "wm exec path renders chrome and applies fake peer frame batch" {
