@@ -20,7 +20,7 @@ const AttachArgs = struct {
 };
 
 const WmArgs = struct {
-    profile_name: []const u8,
+    profile_names: []const []const u8,
 };
 
 const ExpansionContext = struct {
@@ -186,7 +186,7 @@ pub fn main() !void {
                 std.debug.print("{s}", .{usageText()});
                 std.process.exit(64);
             };
-            const exit_code = try wm_host.runProfile(allocator, wm.profile_name);
+            const exit_code = try wm_host.runProfiles(allocator, wm.profile_names);
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -202,7 +202,7 @@ fn usageText() []const u8 {
         \\  katzensteg --help
         \\  katzensteg [options] <target>
         \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
-        \\  katzensteg wm <target>
+        \\  katzensteg wm <target> [target...]
         \\  katzensteg
         \\
         \\Options:
@@ -235,10 +235,12 @@ fn parseCommand(args: []const []const u8) Command {
 }
 
 fn parseWmArgs(args: []const []const u8) ?WmArgs {
-    if (args.len != 3) return null;
+    if (args.len < 3) return null;
     if (!std.mem.eql(u8, args[1], "wm")) return null;
-    if (std.mem.startsWith(u8, args[2], "-")) return null;
-    return .{ .profile_name = args[2] };
+    for (args[2..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "-")) return null;
+    }
+    return .{ .profile_names = args[2..] };
 }
 
 fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
@@ -1758,7 +1760,14 @@ test "launcher rejects wm without a profile target" {
 
 test "launcher parses wm target" {
     const wm = parseWmArgs(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }).?;
-    try std.testing.expectEqualStrings("probe.embed.basic_sdl", wm.profile_name);
+    try std.testing.expectEqualStrings("probe.embed.basic_sdl", wm.profile_names[0]);
+}
+
+test "launcher parses multiple wm targets" {
+    const wm = parseWmArgs(&.{ "katzensteg", "wm", "sonic", "mi2" }).?;
+    try std.testing.expectEqual(@as(usize, 2), wm.profile_names.len);
+    try std.testing.expectEqualStrings("sonic", wm.profile_names[0]);
+    try std.testing.expectEqualStrings("mi2", wm.profile_names[1]);
 }
 
 test "launcher parses attach exec argv command" {

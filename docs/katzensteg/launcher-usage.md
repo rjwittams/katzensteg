@@ -93,15 +93,18 @@ This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode co
 
 ```sh
 ./zig-out/bin/katzensteg wm probe.embed.basic_sdl
+./zig-out/bin/katzensteg wm sonic mi2
 ```
 
-The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches the selected profile through `katzensteg --embed-jsonl`, sends `attach` for the inner content rectangle, and applies producer `frame_batch` output inside that rectangle. The producer does not own the title bar, borders, status/debug areas, layout, or window lifecycle policy.
+The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches each selected profile through `katzensteg --embed-jsonl`, sends `attach` for each inner content rectangle, and applies producer `frame_batch` output inside that rectangle. The producers do not own title bars, borders, status/debug areas, layout, or window lifecycle policy.
 
 The status band is host-owned and stays outside the producer content rect. It currently shows the selected upload profile, outer window geometry, inner content geometry, and the last WM protocol event such as launch, attach, viewport, shutdown, or producer exit.
 
 Current controls:
 
 - `q`: send `shutdown`, drain producer output, restore the terminal
+- `Tab`: cycle focus when multiple producers are launched
+- click a window: focus it and raise its host chrome
 - `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`
 - `H` / `J` / `K` / `L`: resize narrower/shorter/taller/wider and send `viewport`
 - drag the title bar with mouse button 1: move the window and send `viewport`
@@ -114,7 +117,7 @@ Current WM smoke notes:
 - `sonic`, `smw`, and `sm64ds` work through the current JSONL SDL renderer path.
 - `mi2` exercises the SDL sprite/scene path rather than only the full-frame path; batch scene placements are expected to be translated into the WM content rect.
 - `jsr` uses the Vulkan/external-framebuffer path. That path now routes through the JSONL batch presenter in `wm`, but still needs real-profile smoke because it depends on the platform Vulkan layer and RetroArch/Flycast behavior.
-- Producer input is wired through `wm` as terminal-byte input for the focused single producer. WM command keys and chrome drags remain host-owned, and mouse input is forwarded only when the terminal event lands inside the producer content rect.
+- Producer input is wired through `wm` as terminal-byte input for the focused producer. WM command keys and chrome drags remain host-owned, and mouse input is forwarded only when the terminal event lands inside the focused producer content rect. Multi-producer sessions use disjoint image/placement id ranges and per-session file upload paths.
 
 ## Current Smoke Status
 
