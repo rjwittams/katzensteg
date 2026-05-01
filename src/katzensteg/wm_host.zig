@@ -386,6 +386,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         try writeInitialControl(sessions[i].child_stdin.?.deprecatedWriter(), .{
             .rect_cells = sessions[i].focusedContent().toPresentationRectCells(),
             .aspect = .fit,
+            .z_base = zBaseForSlot(i),
             .image_ids = ranges.image,
             .placement_ids = ranges.placement,
             .upload = sessions[i].upload,
@@ -422,6 +423,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             const focused = &sessions[focused_index];
             if (input.focus_changed) {
                 try event_log.record(.focus_changed, focused.profile_name);
+                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
             }
             switch (input.action) {
@@ -431,6 +433,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     bringWindowToFront(z_order[0..initialized], focused_index);
                     mouse_state = .{};
                     try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                    try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                 },
                 .forward => try forwardInputToSession(focused, input.bytes, &event_log, &logger),
@@ -441,14 +444,14 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 },
                 .window => |action| {
                     if (applyWindowAction(&focused.window, action, terminal)) {
-                        try sendViewportForSession(focused, .fit, &event_log, &logger);
+                        try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                     }
                 },
                 .mouse_drag => |outer| {
                     if (!std.meta.eql(focused.window.outer, outer)) {
                         focused.window.outer = outer;
-                        try sendViewportForSession(focused, .fit, &event_log, &logger);
+                        try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
                     }
                 },
@@ -739,6 +742,7 @@ const AttachOptions = struct {
     window_id: []const u8 = "main",
     rect_cells: render_batch_protocol.PresentationRectCells,
     aspect: render_batch_protocol.PresentationAspect = .fit,
+    z_base: i32 = 0,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
     upload: render_batch_protocol.UploadPolicy,
@@ -752,6 +756,7 @@ fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
     try writer.writeAll("},\"aspect\":");
     try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
+    if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writer.writeAll(",\"id_ranges\":{\"image\":[[");
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
@@ -770,6 +775,7 @@ const ViewportOptions = struct {
     window_id: []const u8 = "main",
     rect_cells: render_batch_protocol.PresentationRectCells,
     aspect: render_batch_protocol.PresentationAspect = .fit,
+    z_base: i32 = 0,
 };
 
 fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
@@ -779,6 +785,7 @@ fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
     try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
     try writer.writeAll("},\"aspect\":");
     try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
+    if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writer.writeAll("}\n");
 }
 
@@ -820,15 +827,31 @@ fn idRangesForSession(index: usize) SessionIdRanges {
     };
 }
 
-fn sendViewportForSession(session: *WmProducerSession, aspect: render_batch_protocol.PresentationAspect, events: *ProtocolEventLog, logger: *Logger) !void {
+fn zBaseForSlot(slot: usize) i32 {
+    return @as(i32, @intCast(@min(slot, @as(usize, 1000)))) * 1000;
+}
+
+fn zBaseForSessionIndex(z_order: []const usize, session_index: usize) i32 {
+    const slot = std.mem.indexOfScalar(usize, z_order, session_index) orelse 0;
+    return zBaseForSlot(slot);
+}
+
+fn sendViewportZOrderForSessions(sessions: []WmProducerSession, z_order: []const usize, aspect: render_batch_protocol.PresentationAspect, events: *ProtocolEventLog, logger: *Logger) !void {
+    for (sessions, 0..) |*session, session_index| {
+        try sendViewportForSession(session, aspect, zBaseForSessionIndex(z_order, session_index), events, logger);
+    }
+}
+
+fn sendViewportForSession(session: *WmProducerSession, aspect: render_batch_protocol.PresentationAspect, z_base: i32, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!session.control_open) return;
     const content = session.focusedContent();
     if (tryWriteViewportControl(session.child_stdin.?.deprecatedWriter(), .{
         .rect_cells = content.toPresentationRectCells(),
         .aspect = aspect,
+        .z_base = z_base,
     })) {
         try events.record(.viewport_sent, session.profile_name);
-        logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d})", .{ session.profile_name, content.row, content.col, content.cols, content.rows });
+        logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d}) z_base={d}", .{ session.profile_name, content.row, content.col, content.cols, content.rows, z_base });
     } else {
         logger.writeFmtScoped(.warn, .wm, "viewport control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
         session.control_open = false;
@@ -1464,6 +1487,25 @@ test "wm viewport control writes content rect" {
         "{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":4,\"col\":2,\"rows\":18,\"cols\":78},\"aspect\":\"fit\"}\n",
         out.items,
     );
+}
+
+test "wm attach and viewport controls can carry z base" {
+    var attach = std.ArrayList(u8).empty;
+    defer attach.deinit(std.testing.allocator);
+    try writeInitialControl(attach.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 78 },
+        .z_base = 2000,
+        .upload = .{ .profile = .direct_apc },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, attach.items, "\"z_base\":2000") != null);
+
+    var viewport = std.ArrayList(u8).empty;
+    defer viewport.deinit(std.testing.allocator);
+    try writeViewportControl(viewport.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 78 },
+        .z_base = 3000,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, viewport.items, "\"z_base\":3000") != null);
 }
 
 test "wm input control writes terminal bytes" {

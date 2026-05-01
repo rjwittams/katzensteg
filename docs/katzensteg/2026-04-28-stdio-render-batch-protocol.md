@@ -38,7 +38,7 @@ Launch Katzensteg in producer mode:
 In this mode, Katzensteg stdout is JSONL protocol output and Katzensteg stdin is JSONL protocol input. The first required host message is `attach`, written as one JSON object plus `\n`:
 
 ```json
-{"type":"attach","window_id":"main","rect_cells":{"row":1,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"direct_apc","high_water":10485760}}
+{"type":"attach","window_id":"main","rect_cells":{"row":1,"col":1,"rows":24,"cols":80},"aspect":"fit","z_base":0,"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]},"upload":{"profile":"direct_apc","high_water":10485760}}
 ```
 
 The host may send `hello` before `attach`, but the current producer does not require it. `attach` is the gate that allows graphics batches. Until `attach` is processed, the producer must not write terminal graphics bytes to stdout.
@@ -74,7 +74,7 @@ Current constraints:
 - `id_ranges.image` and `id_ranges.placement` are required. Ranges are inclusive; the first range in each list is the only range used today.
 - `upload.profile` may be `direct_apc`, `file_whole`, or `file_offset_ring`. `direct_apc` needs no path. File upload modes require `path`, and that path must be visible to both the producer process and the terminal host.
 - Unknown or non-`frame_batch` producer messages should be ignored by a minimal host.
-- After `attach`, send `viewport` to change geometry or aspect without changing id ranges or upload policy. The runtime may emit deletes for old placements before using the new viewport.
+- After `attach`, send `viewport` to change geometry, aspect, or `z_base` without changing id ranges or upload policy. The runtime may emit deletes for old placements before using the new viewport.
 - Send `input` with `event: "terminal_bytes"` to forward host terminal input to the producer. Mouse escape sequences use absolute terminal cell coordinates; the runtime maps them through the presentation layout that produced the current placements.
 - Send `detach` to remove known visible placements and stop receiving future graphics batches while keeping the producer process alive. A later `attach` re-enables presentation. The runtime replies with `detached` when the delete/cleanup work has been emitted.
 - Send `shutdown` to end the producer session. This performs detach-style cleanup first, then the launcher terminates the target process if it does not exit on its own.
@@ -138,10 +138,10 @@ The first cut only needs one window, `main`, but the protocol should still frame
 After attach, the runtime may emit `frame_batch` messages for that window. If the host later changes layout, it should send `viewport` for the same `window_id`:
 
 ```json
-{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit"}
+{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit","z_base":1000}
 ```
 
-`viewport` updates only destination geometry and aspect. It does not grant new id ranges, change upload policy, or attach a detached window. If the current window has visible placements, the runtime emits a delete batch for those placements before presenting future frames at the new viewport.
+`viewport` updates only destination geometry, aspect, and optional host z band. It does not grant new id ranges, change upload policy, or attach a detached window. If the current window has visible placements, the runtime emits a delete batch for those placements before presenting future frames at the new viewport.
 
 If the host wants to hide or dispose the surface while leaving the target process alive, it should send `detach`:
 
@@ -233,13 +233,13 @@ Do not make double-base64 the default path.
 
 The protocol includes a `window_id` from the start, even though the first implementation may only support one window. This leaves room for multiple panes, attached views, or future host-managed surfaces without changing every message shape.
 
-The host sends `viewport` whenever the destination placement changes:
+The host sends `viewport` whenever the destination placement or host stacking band changes:
 
 ```json
-{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit"}
+{"type":"viewport","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","z_base":1000}
 ```
 
-The runtime treats `viewport` as the current destination policy for that logical render window, provided the window is already attached. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, or terminal size changes. A viewport change may produce a delete-only batch so old placements do not remain visible at the previous location.
+The runtime treats `viewport` as the current destination policy for that logical render window, provided the window is already attached. Geometry is not assumed to be fullscreen. The host may update it over time as the conversation layout, pane size, terminal size, or focus stacking changes. A viewport change may produce a delete-only batch so old placements do not remain visible at the previous location or z band.
 
 This geometry model should not be treated as embed-only. Direct `/dev/tty` mode also needs the same concept over time: terminal menus may shrink a captured window, chrome may reserve space, multiple captured windows may share one terminal, and a user may later break one window out into a different view. The first cut only uses host-provided geometry for stdio embed mode, but the data model should not preclude direct-tty presentation layouts using the same window/viewport concepts.
 

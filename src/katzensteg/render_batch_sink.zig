@@ -35,6 +35,7 @@ pub const RenderBatchSink = struct {
     attached: bool = false,
     rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
     aspect: render_batch_protocol.PresentationAspect = .fit,
+    z_base: i32 = 0,
     upload: UploadState = .direct_apc,
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
@@ -61,14 +62,24 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn attachWithAspect(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) void {
+        self.attachWithPresentation(rect_cells, aspect, self.z_base);
+    }
+
+    pub fn attachWithPresentation(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect, z_base: i32) void {
         self.rect_cells = rect_cells;
         self.aspect = aspect;
+        self.z_base = z_base;
         self.attached = true;
     }
 
     pub fn viewport(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) void {
+        self.viewportWithPresentation(rect_cells, aspect, self.z_base);
+    }
+
+    pub fn viewportWithPresentation(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect, z_base: i32) void {
         self.rect_cells = rect_cells;
         self.aspect = aspect;
+        self.z_base = z_base;
     }
 
     pub fn detach(self: *RenderBatchSink) void {
@@ -91,6 +102,10 @@ pub const RenderBatchSink = struct {
 
     pub fn presentationAspect(self: *const RenderBatchSink) render_batch_protocol.PresentationAspect {
         return self.aspect;
+    }
+
+    pub fn presentationZBase(self: *const RenderBatchSink) i32 {
+        return self.z_base;
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
@@ -125,7 +140,9 @@ pub const RenderBatchSink = struct {
     pub fn place(self: *RenderBatchSink, row: i32, col: i32, placement: kitty_protocol.Placement) !void {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
-        try kitty_protocol.writePlace(out.writer(self.allocator), row, col, placement);
+        var adjusted = placement;
+        adjusted.z += self.z_base;
+        try kitty_protocol.writePlace(out.writer(self.allocator), row, col, adjusted);
         try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
     }
 
@@ -294,6 +311,26 @@ test "batch sink viewport updates geometry without changing attach state" {
     try std.testing.expect(sink.isAttached());
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 3, .col = 5, .rows = 12, .cols = 40 }, sink.presentationRect());
     try std.testing.expectEqual(render_batch_protocol.PresentationAspect.stretch, sink.presentationAspect());
+}
+
+test "batch sink applies presentation z base to placements" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    sink.attachWithPresentation(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 }, .fit, 2000);
+    try sink.place(4, 1, .{
+        .image_id = 100000,
+        .placement_id = 200000,
+        .cols = 1,
+        .rows = 1,
+        .src_x = 0,
+        .src_y = 0,
+        .src_w = 1,
+        .src_h = 1,
+        .z = 100,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, sink.placements.items[0], "z=2100") != null);
 }
 
 test "batch sink detach suppresses attachment without clearing pending deletes" {

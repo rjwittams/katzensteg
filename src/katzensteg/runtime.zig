@@ -672,7 +672,7 @@ pub const Runtime = struct {
         switch (control) {
             .attach => |attach| {
                 log.info(
-                    "batch attach window={s} rect=({d},{d} {d}x{d}) aspect={s} image_ids={d}..{d} placement_ids={d}..{d} upload={s}",
+                    "batch attach window={s} rect=({d},{d} {d}x{d}) aspect={s} z_base={d} image_ids={d}..{d} placement_ids={d}..{d} upload={s}",
                     .{
                         attach.window_id,
                         attach.rect_cells.row,
@@ -680,6 +680,7 @@ pub const Runtime = struct {
                         attach.rect_cells.cols,
                         attach.rect_cells.rows,
                         @tagName(attach.aspect),
+                        attach.z_base,
                         attach.image_ids.start,
                         attach.image_ids.end,
                         attach.placement_ids.start,
@@ -687,7 +688,7 @@ pub const Runtime = struct {
                         @tagName(attach.upload.profile),
                     },
                 );
-                sink.attachWithAspect(attach.rect_cells, attach.aspect);
+                sink.attachWithPresentation(attach.rect_cells, attach.aspect, attach.z_base);
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
                     return;
@@ -711,8 +712,9 @@ pub const Runtime = struct {
                 }
                 const previous = sink.presentationRect();
                 const previous_aspect = sink.presentationAspect();
+                const previous_z_base = sink.presentationZBase();
                 log.info(
-                    "batch viewport window={s} from=({d},{d} {d}x{d})/{s} to=({d},{d} {d}x{d})/{s}",
+                    "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
                         viewport.window_id,
                         previous.row,
@@ -720,15 +722,17 @@ pub const Runtime = struct {
                         previous.cols,
                         previous.rows,
                         @tagName(previous_aspect),
+                        previous_z_base,
                         viewport.rect_cells.row,
                         viewport.rect_cells.col,
                         viewport.rect_cells.cols,
                         viewport.rect_cells.rows,
                         @tagName(viewport.aspect),
+                        viewport.z_base,
                     },
                 );
-                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect) self.batch_presentation_reset_pending = true;
-                sink.viewport(viewport.rect_cells, viewport.aspect);
+                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base) self.batch_presentation_reset_pending = true;
+                sink.viewportWithPresentation(viewport.rect_cells, viewport.aspect, viewport.z_base);
                 const applied = sink.presentationRect();
                 self.updateBatchInputTarget(sink);
                 log.info(

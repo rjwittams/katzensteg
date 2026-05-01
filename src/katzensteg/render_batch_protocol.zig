@@ -43,6 +43,7 @@ pub const AttachMessage = struct {
     window_id: []const u8,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
+    z_base: i32 = 0,
     image_ids: IdRange,
     placement_ids: IdRange,
     upload: UploadPolicy,
@@ -52,6 +53,7 @@ pub const ViewportMessage = struct {
     window_id: []const u8,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
+    z_base: i32 = 0,
 };
 
 pub const DetachMessage = struct {
@@ -174,12 +176,14 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
     const aspect_value = root.get("aspect") orelse return error.InvalidMessage;
     if (aspect_value != .string) return error.InvalidMessage;
     const aspect = parseAspect(aspect_value.string) orelse return error.InvalidMessage;
+    const z_base: i32 = if (root.get("z_base")) |z_value| try jsonI32(z_value) else 0;
 
     if (std.mem.eql(u8, type_value.string, "viewport")) {
         return .{ .viewport = .{
             .window_id = "main",
             .rect_cells = rect,
             .aspect = aspect,
+            .z_base = z_base,
         } };
     }
 
@@ -195,6 +199,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         .window_id = "main",
         .rect_cells = rect,
         .aspect = aspect,
+        .z_base = z_base,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
@@ -346,6 +351,22 @@ test "attach message parses host-selected file upload policy" {
     try std.testing.expectEqual(UploadProfile.file_whole, attach.upload.profile);
     try std.testing.expectEqualStrings("/tmp/katzensteg-embed-upload", attach.upload.path.?);
     try std.testing.expectEqual(@as(u64, 4096), attach.upload.high_water);
+}
+
+test "attach and viewport messages parse host z base" {
+    const attach_msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","z_base":2000,"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach = try parseAttachMessage(std.testing.allocator, attach_msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(i32, 2000), attach.z_base);
+
+    const viewport_msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"cover","z_base":3000}
+    ;
+    var control = try parseControlMessage(std.testing.allocator, viewport_msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(@as(i32, 3000), control.viewport.z_base);
 }
 
 test "attach message accepts contain as fit compatibility alias" {
