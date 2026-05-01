@@ -422,6 +422,11 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     while (!allSessionsDone(sessions[0..initialized])) {
+        const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
+        if (lifecycle.changed) {
+            if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
+            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+        }
         if (!shutdown_sent) {
             const input = readInputForSessions(&tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
             const focused = &sessions[focused_index];
@@ -478,22 +483,20 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     }
 
     for (sessions[0..initialized]) |*session| {
-        if (!session.stdin_closed) {
-            if (session.child_stdin) |file| file.close();
-            session.stdin_closed = true;
-        }
+        closeSessionControl(session);
     }
     for (sessions[0..initialized]) |*session| {
         if (session.wait_thread) |thread| {
             thread.join();
             session.wait_thread = null;
         }
+        const already_recorded_exit = session.state == .exited;
         session.state = .exited;
         if (session.stdout_thread) |thread| {
             thread.join();
             session.stdout_thread = null;
         }
-        try event_log.record(.process_exited, session.profile_name);
+        if (!already_recorded_exit) try event_log.record(.process_exited, session.profile_name);
     }
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
     if (shutdown_sent) return 0;
@@ -578,6 +581,57 @@ fn sessionIsVisible(session: *const WmProducerSession) bool {
     return session.state == .running and !session.wait_state.done.load(.seq_cst);
 }
 
+const LifecycleReconcileResult = struct {
+    changed: bool = false,
+    focus_changed: bool = false,
+    z_order_changed: bool = false,
+};
+
+fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focused_index: *usize, mouse: *WmMouseInputState, events: *ProtocolEventLog, logger: *Logger) !LifecycleReconcileResult {
+    var result = LifecycleReconcileResult{};
+    for (sessions, 0..) |*session, session_index| {
+        if (session.state == .exited or !session.wait_state.done.load(.seq_cst)) continue;
+
+        session.state = .exited;
+        closeSessionControl(session);
+        result.changed = true;
+        logger.writeFmtScoped(.info, .wm, "producer exited profile={s} {s}", .{ session.profile_name, childTermSummary(session.wait_state.term) });
+        try events.record(.process_exited, session.profile_name);
+
+        if (session_index == focused_index.*) {
+            if (nextVisibleSessionIndex(sessions, focused_index.*)) |next_index| {
+                focused_index.* = next_index;
+                mouse.* = .{};
+                result.focus_changed = true;
+                try events.record(.focus_changed, sessions[focused_index.*].profile_name);
+                bringWindowToFront(z_order, focused_index.*);
+            }
+        }
+    }
+
+    if (focused_index.* >= sessions.len) {
+        focused_index.* = 0;
+        result.focus_changed = true;
+        result.changed = true;
+    }
+    if (sessions.len > 0 and !sessionIsVisible(&sessions[focused_index.*])) {
+        if (nextVisibleSessionIndex(sessions, focused_index.*)) |next_index| {
+            focused_index.* = next_index;
+            mouse.* = .{};
+            result.focus_changed = true;
+            result.changed = true;
+            try events.record(.focus_changed, sessions[focused_index.*].profile_name);
+            bringWindowToFront(z_order, focused_index.*);
+        }
+    }
+
+    if (compactVisibleZOrder(sessions, z_order)) {
+        result.changed = true;
+        result.z_order_changed = true;
+    }
+    return result;
+}
+
 fn nextVisibleSessionIndex(sessions: []const WmProducerSession, current_index: usize) ?usize {
     if (sessions.len == 0) return null;
     var offset: usize = 1;
@@ -586,6 +640,28 @@ fn nextVisibleSessionIndex(sessions: []const WmProducerSession, current_index: u
         if (sessionIsVisible(&sessions[index])) return index;
     }
     return null;
+}
+
+fn compactVisibleZOrder(sessions: []const WmProducerSession, z_order: []usize) bool {
+    var first_visible: usize = 0;
+    while (first_visible < z_order.len and !zOrderEntryVisible(sessions, z_order[first_visible])) : (first_visible += 1) {}
+
+    var changed = false;
+    var scan = first_visible + 1;
+    while (scan < z_order.len) : (scan += 1) {
+        if (zOrderEntryVisible(sessions, z_order[scan])) continue;
+        const value = z_order[scan];
+        var shift = scan;
+        while (shift > first_visible) : (shift -= 1) z_order[shift] = z_order[shift - 1];
+        z_order[first_visible] = value;
+        first_visible += 1;
+        changed = true;
+    }
+    return changed;
+}
+
+fn zOrderEntryVisible(sessions: []const WmProducerSession, session_index: usize) bool {
+    return session_index < sessions.len and sessionIsVisible(&sessions[session_index]);
 }
 
 fn bringWindowToFront(z_order: []usize, window_index: usize) void {
@@ -903,17 +979,28 @@ fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, events:
 }
 
 fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logger: *Logger) !void {
+    if (session.state == .draining or session.state == .exited) return;
     session.state = .draining;
-    if (session.control_open and !tryWriteShutdownControl(session.child_stdin.?.deprecatedWriter())) {
+    if (session.control_open and session.child_stdin != null and !tryWriteShutdownControl(session.child_stdin.?.deprecatedWriter())) {
         logger.writeFmtScoped(.warn, .wm, "shutdown control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
         session.control_open = false;
-    } else {
+    } else if (session.control_open and session.child_stdin != null) {
         logger.writeFmtScoped(.info, .wm, "shutdown sent profile={s}", .{session.profile_name});
+    } else {
+        logger.writeFmtScoped(.info, .wm, "shutdown skipped profile={s}; producer control pipe is closed", .{session.profile_name});
     }
     session.control_open = false;
     try events.record(.shutdown_sent, session.profile_name);
+    closeSessionControl(session);
+}
+
+fn closeSessionControl(session: *WmProducerSession) void {
+    session.control_open = false;
     if (!session.stdin_closed) {
-        session.child_stdin.?.close();
+        if (session.child_stdin) |file| {
+            file.close();
+            session.child_stdin = null;
+        }
         session.stdin_closed = true;
     }
 }
@@ -1766,6 +1853,76 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "active") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "closed") == null);
+}
+
+test "wm reconciles externally exited producer sessions" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "dead",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+            .stdin_closed = true,
+        },
+        .{
+            .profile_name = "alive",
+            .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+            .stdin_closed = true,
+        },
+    };
+    sessions[0].wait_state.done.store(true, .seq_cst);
+    var z_order = [_]usize{ 0, 1 };
+    var focused_index: usize = 0;
+    var mouse = WmMouseInputState{ .drag = WmMouseDrag.start(.title, .{ .row = 2, .col = 2 }, sessions[0].window.outer) };
+    var log = ProtocolEventLog.init(std.testing.allocator, 4);
+    defer log.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const result = try reconcileExitedSessions(sessions[0..], z_order[0..], &focused_index, &mouse, &log, &logger);
+
+    try std.testing.expect(result.changed);
+    try std.testing.expect(result.focus_changed);
+    try std.testing.expectEqual(ProducerSessionState.exited, sessions[0].state);
+    try std.testing.expectEqual(@as(usize, 1), focused_index);
+    try std.testing.expectEqual(@as(?WmMouseDrag, null), mouse.drag);
+    try std.testing.expectEqual(EventKind.process_exited, log.at(0).?.kind);
+    try std.testing.expectEqual(EventKind.focus_changed, log.at(1).?.kind);
+}
+
+test "wm z order compacts exited sessions behind visible sessions" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "visible-a",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+        .{
+            .profile_name = "exited",
+            .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .exited,
+        },
+        .{
+            .profile_name = "visible-b",
+            .window = WmWindowState.init("main", .{ .row = 5, .col = 9, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+    };
+    var z_order = [_]usize{ 0, 1, 2 };
+
+    try std.testing.expect(compactVisibleZOrder(sessions[0..], z_order[0..]));
+
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0, 2 }, z_order[0..]);
 }
 
 test "wm focus bring to front mutates z order without moving sessions" {

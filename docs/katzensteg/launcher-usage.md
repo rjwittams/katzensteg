@@ -100,6 +100,8 @@ The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band
 
 The status band is host-owned and stays outside the producer content rect. It currently shows the selected upload profile, outer window geometry, inner content geometry, and the last WM protocol event such as launch, attach, viewport, shutdown, or producer exit.
 
+If a producer exits or is killed outside the WM, the host removes that window from drawing, hit testing, and focus selection on the next lifecycle tick. Other producers continue running; the WM keeps the exited process status for its final exit code.
+
 Current controls:
 
 - `q`: send `shutdown`, drain producer output, restore the terminal
