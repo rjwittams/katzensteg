@@ -26,6 +26,7 @@ extern int ks_SDL_InitSubSystem(unsigned int);
 extern int ks_SDL_SetHint(const char *, const char *);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
+extern void ks_SDL_SetWindowSize(struct SDL_Window *, int, int);
 extern void ks_SDL_ShowWindow(struct SDL_Window *);
 extern void ks_SDL_HideWindow(struct SDL_Window *);
 extern void ks_SDL_MinimizeWindow(struct SDL_Window *);
@@ -89,6 +90,7 @@ __attribute__((used, section("__DATA,__mod_term_func")))
 static void (*katzensteg_module_destructor_ptr)(void) = katzensteg_module_destructor;
 
 extern struct SDL_Window *SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
+extern void SDL_SetWindowSize(struct SDL_Window *, int, int);
 extern void SDL_DestroyWindow(struct SDL_Window *);
 extern void SDL_ShowWindow(struct SDL_Window *);
 extern void SDL_HideWindow(struct SDL_Window *);
@@ -150,6 +152,7 @@ DYLD_INTERPOSE(ks_SDL_QuitSubSystem, SDL_QuitSubSystem)
 DYLD_INTERPOSE(ks_SDL_Quit, SDL_Quit)
 DYLD_INTERPOSE(ks_SDL_CreateWindow, SDL_CreateWindow)
 DYLD_INTERPOSE(ks_SDL_GetWindowFlags, SDL_GetWindowFlags)
+DYLD_INTERPOSE(ks_SDL_SetWindowSize, SDL_SetWindowSize)
 DYLD_INTERPOSE(ks_SDL_ShowWindow, SDL_ShowWindow)
 DYLD_INTERPOSE(ks_SDL_HideWindow, SDL_HideWindow)
 DYLD_INTERPOSE(ks_SDL_MinimizeWindow, SDL_MinimizeWindow)

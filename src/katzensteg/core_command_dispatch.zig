@@ -9,6 +9,7 @@ const CoreHandle = core.CoreHandle;
 const ExternalFramebufferFormat = @import("frame_builder.zig").ExternalFramebufferFormat;
 
 pub fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns: i128) void {
+    rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
     const duration = std.time.nanoTimestamp() - start_ns;
@@ -66,6 +67,7 @@ pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
         .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
+        .window_size => |c| rt.frame_builder.onWindowSize(c.window, c.w, c.h),
         .create_renderer => |c| rt.frame_builder.onCreateRenderer(c.window, c.renderer),
         .destroy_renderer => |c| rt.frame_builder.onDestroyRenderer(c.renderer),
         .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, c.format, c.w, c.h),

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const termscene = @import("termscene");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
@@ -33,6 +34,27 @@ const log = std.log.scoped(.runtime);
 const queue_compact_threshold = 4096;
 const payload_pool_max_buffers = 64;
 const payload_pool_max_bytes = 64 * 1024 * 1024;
+
+var terminal_resize_pending = std.atomic.Value(bool).init(false);
+var terminal_resize_handler_installed = std.atomic.Value(bool).init(false);
+
+fn handleTerminalResizeSignal(_: c_int) callconv(.c) void {
+    terminal_resize_pending.store(true, .release);
+}
+
+fn installTerminalResizeSignalHandler() void {
+    if (builtin.os.tag == .windows) return;
+    if (terminal_resize_handler_installed.swap(true, .acq_rel)) return;
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = handleTerminalResizeSignal },
+        .mask = switch (builtin.os.tag) {
+            .macos => 0,
+            else => std.posix.sigemptyset(),
+        },
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
+}
 
 const QueuedLockCapture = struct {
     rect: ?core.CoreRect,
@@ -153,6 +175,7 @@ pub const Runtime = struct {
     whiskers_client: ?WhiskersClient = null,
     shutdown_worker: bool = false,
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
+    sdl_window_ids: std.AutoHashMap(u32, core.CoreHandle),
     input_parser: ?input_mod.TerminalInputParser = null,
     relative_mouse_baseline: input_mod.RelativeMouseBaseline = .{},
     mouse_ownership: input_mod.MouseOwnership = .{},
@@ -210,6 +233,7 @@ pub const Runtime = struct {
             .queue_head = 0,
             .pending_presents = 0,
             .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
+            .sdl_window_ids = std.AutoHashMap(u32, core.CoreHandle).init(allocator),
             .present_interval_ns = if (config.present_fps > 0) @divTrunc(std.time.ns_per_s, config.present_fps) else 0,
             .producer_stats = .{ .enabled = stats, .last_report_ns = std.time.nanoTimestamp() },
             .gl_capture_mode = mapGlCaptureMode(config.gl_capture),
@@ -262,6 +286,7 @@ pub const Runtime = struct {
             log.warn("direct tty init failed: {any}", .{err});
             return runtime;
         };
+        installTerminalResizeSignalHandler();
         runtime.engine = ts_scene.SceneEngine.init(allocator);
 
         const backend_options = selectBackendOptions(allocator, &runtime) catch |err| blk: {
@@ -350,6 +375,7 @@ pub const Runtime = struct {
             .inspect_resources = std.ArrayList(InspectResource).empty,
             .inspect_resource_records = std.ArrayList(ResourceRecord).empty,
             .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
+            .sdl_window_ids = std.AutoHashMap(u32, core.CoreHandle).init(allocator),
             .producer_stats = .{},
             .gl_capture_mode = .disabled,
             .file_transport_enabled = false,
@@ -404,6 +430,7 @@ pub const Runtime = struct {
         self.inspect_resources.deinit(self.allocator);
         self.inspect_resource_records.deinit(self.allocator);
         self.queued_lock_captures.deinit();
+        self.sdl_window_ids.deinit();
         if (self.batch_sink) |*sink| sink.deinit();
         self.batch_control_line.deinit(self.allocator);
         if (self.batch_control) |file| file.close();
@@ -449,10 +476,52 @@ pub const Runtime = struct {
         self.maybeReportProducerStats();
     }
 
+    pub fn refreshTerminalSizeIfNeeded(self: *Runtime) void {
+        if (!terminal_resize_pending.swap(false, .acq_rel)) return;
+        self.refreshTerminalSize();
+    }
+
+    fn refreshTerminalSize(self: *Runtime) void {
+        if (self.tty) |*tty| {
+            const old_cols = tty.cols;
+            const old_rows = tty.rows;
+            const old_pixel_width = tty.pixel_width;
+            const old_pixel_height = tty.pixel_height;
+            if (!tty.refreshSize()) return;
+            log.info(
+                "terminal resized {d}x{d} px={d}x{d} -> {d}x{d} px={d}x{d}",
+                .{ old_cols, old_rows, old_pixel_width, old_pixel_height, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+            );
+            self.updateInputTarget();
+        }
+    }
+
     pub fn noteInputWindowSize(self: *Runtime, w: i32, h: i32) void {
         self.input_window_w = @max(1, w);
         self.input_window_h = @max(1, h);
         self.updateInputTarget();
+    }
+
+    pub fn noteSdlWindowId(self: *Runtime, window_id: u32, window: core.CoreHandle) void {
+        if (window_id == 0 or window == 0) return;
+        self.sdl_window_ids.put(window_id, window) catch |err| log.warn("failed to track SDL window id {d}: {any}", .{ window_id, err });
+    }
+
+    pub fn forgetSdlWindow(self: *Runtime, window: core.CoreHandle) void {
+        if (window == 0) return;
+        var it = self.sdl_window_ids.iterator();
+        var doomed: ?u32 = null;
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == window) {
+                doomed = entry.key_ptr.*;
+                break;
+            }
+        }
+        if (doomed) |window_id| _ = self.sdl_window_ids.remove(window_id);
+    }
+
+    pub fn coreWindowForSdlWindowId(self: *Runtime, window_id: u32) ?core.CoreHandle {
+        return self.sdl_window_ids.get(window_id);
     }
 
     pub fn notePresentationLayout(self: *Runtime, layout: presentation_layout_mod.PresentationLayout) void {
@@ -462,6 +531,7 @@ pub const Runtime = struct {
 
     pub fn pollTerminalInput(self: *Runtime) void {
         if (!self.input_enabled) return;
+        self.refreshTerminalSizeIfNeeded();
         const tty = &(self.tty orelse return);
         var parser = &(self.input_parser orelse return);
         var buf: [256]u8 = undefined;
@@ -566,6 +636,7 @@ pub const Runtime = struct {
         }
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
         const start_ns = std.time.nanoTimestamp();
+        self.refreshTerminalSizeIfNeeded();
         self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
         const duration = std.time.nanoTimestamp() - start_ns;

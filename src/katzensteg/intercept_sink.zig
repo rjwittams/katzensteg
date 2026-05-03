@@ -59,6 +59,7 @@ pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
 fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
     return switch (cmd) {
         .create_window => |c| .{ .create_window = c },
+        .window_size => |c| .{ .window_size = c },
         .create_renderer => |c| .{ .create_renderer = c },
         .destroy_renderer => |c| .{ .destroy_renderer = c },
         .create_texture => |c| .{ .create_texture = c },
@@ -158,6 +159,10 @@ fn cloneBytesToPayloadBuffer(rt: *runtime_mod.Runtime, src: ?[]u8) !?[]u8 {
 
 pub fn onCreateWindow(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
     rt.frame_builder.onCreateWindow(sdl_adapter.handleFromPtr(window), w, h);
+}
+
+pub fn onWindowSize(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, w: i32, h: i32) void {
+    rt.frame_builder.onWindowSize(sdl_adapter.handleFromPtr(window), w, h);
 }
 
 pub fn onCreateRenderer(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) void {
@@ -574,6 +579,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
 }
 
 fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns: i128) void {
+    rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
     const duration = std.time.nanoTimestamp() - start_ns;
@@ -631,6 +637,7 @@ pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
         .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
+        .window_size => |c| rt.frame_builder.onWindowSize(c.window, c.w, c.h),
         .create_renderer => |c| rt.frame_builder.onCreateRenderer(c.window, c.renderer),
         .destroy_renderer => |c| rt.frame_builder.onDestroyRenderer(c.renderer),
         .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, c.format, c.w, c.h),

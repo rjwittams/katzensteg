@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const DirectTty = struct {
+    const Size = struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 };
+
     file: std.fs.File,
     original_termios: std.posix.termios,
     rows: u16,
@@ -27,6 +29,10 @@ pub const DirectTty = struct {
 
         const size = querySize(file.handle);
         return .{ .file = file, .original_termios = original_termios, .rows = size.rows, .cols = size.cols, .pixel_width = size.pixel_width, .pixel_height = size.pixel_height };
+    }
+
+    pub fn refreshSize(self: *DirectTty) bool {
+        return self.applySize(querySize(self.file.handle));
     }
 
     pub fn deinit(self: *DirectTty) void {
@@ -70,7 +76,16 @@ pub const DirectTty = struct {
         }
     }
 
-    fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 } {
+    fn applySize(self: *DirectTty, size: Size) bool {
+        const changed = self.rows != size.rows or self.cols != size.cols or self.pixel_width != size.pixel_width or self.pixel_height != size.pixel_height;
+        self.rows = size.rows;
+        self.cols = size.cols;
+        self.pixel_width = size.pixel_width;
+        self.pixel_height = size.pixel_height;
+        return changed;
+    }
+
+    fn querySize(fd: std.posix.fd_t) Size {
         var wsz: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
         const rc = std.posix.system.ioctl(fd, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
         if (rc == 0 and wsz.row > 0 and wsz.col > 0) {
@@ -90,4 +105,19 @@ fn kittyGraphicsClearSequence() []const u8 {
 
 test "kitty graphics clear sequence frees visible placements" {
     try std.testing.expectEqualStrings("\x1b_Gq=2,a=d,d=A;\x1b\\", kittyGraphicsClearSequence());
+}
+
+test "direct tty size update reports only real geometry changes" {
+    var tty: DirectTty = undefined;
+    tty.rows = 24;
+    tty.cols = 80;
+    tty.pixel_width = 800;
+    tty.pixel_height = 480;
+
+    try std.testing.expect(!tty.applySize(.{ .rows = 24, .cols = 80, .pixel_width = 800, .pixel_height = 480 }));
+    try std.testing.expect(tty.applySize(.{ .rows = 40, .cols = 120, .pixel_width = 1200, .pixel_height = 800 }));
+    try std.testing.expectEqual(@as(u16, 40), tty.rows);
+    try std.testing.expectEqual(@as(u16, 120), tty.cols);
+    try std.testing.expectEqual(@as(u16, 1200), tty.pixel_width);
+    try std.testing.expectEqual(@as(u16, 800), tty.pixel_height);
 }

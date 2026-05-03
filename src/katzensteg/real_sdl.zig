@@ -9,7 +9,9 @@ extern fn ks_real_SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) sdl.SDL
 extern fn ks_real_SDL_QuitSubSystem(flags: sdl.Uint32) void;
 extern fn ks_real_SDL_Quit() void;
 extern fn ks_real_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) ?*sdl.SDL_Window;
+extern fn ks_real_SDL_GetWindowID(window: ?*sdl.SDL_Window) sdl.Uint32;
 extern fn ks_real_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) sdl.Uint32;
+extern fn ks_real_SDL_SetWindowSize(window: ?*sdl.SDL_Window, w: c_int, h: c_int) void;
 extern fn ks_real_SDL_ShowWindow(window: ?*sdl.SDL_Window) void;
 extern fn ks_real_SDL_HideWindow(window: ?*sdl.SDL_Window) void;
 extern fn ks_real_SDL_MinimizeWindow(window: ?*sdl.SDL_Window) void;
@@ -72,7 +74,9 @@ pub const SDL_SetHint = if (use_linux_real) ks_real_SDL_SetHint else sdl.SDL_Set
 pub const SDL_QuitSubSystem = if (use_linux_real) ks_real_SDL_QuitSubSystem else sdl.SDL_QuitSubSystem;
 pub const SDL_Quit = if (use_linux_real) ks_real_SDL_Quit else sdl.SDL_Quit;
 pub const SDL_CreateWindow = if (use_linux_real) ks_real_SDL_CreateWindow else sdl.SDL_CreateWindow;
+pub const SDL_GetWindowID = if (use_linux_real) ks_real_SDL_GetWindowID else sdl.SDL_GetWindowID;
 pub const SDL_GetWindowFlags = if (use_linux_real) ks_real_SDL_GetWindowFlags else sdl.SDL_GetWindowFlags;
+pub const SDL_SetWindowSize = if (use_linux_real) ks_real_SDL_SetWindowSize else sdl.SDL_SetWindowSize;
 pub const SDL_ShowWindow = if (use_linux_real) ks_real_SDL_ShowWindow else sdl.SDL_ShowWindow;
 pub const SDL_HideWindow = if (use_linux_real) ks_real_SDL_HideWindow else sdl.SDL_HideWindow;
 pub const SDL_MinimizeWindow = if (use_linux_real) ks_real_SDL_MinimizeWindow else sdl.SDL_MinimizeWindow;

@@ -18,6 +18,7 @@ extern int ks_SDL_InitSubSystem(unsigned int);
 extern int ks_SDL_SetHint(const char *, const char *);
 extern struct SDL_Window *ks_SDL_CreateWindow(const char *, int, int, int, int, unsigned int);
 extern unsigned int ks_SDL_GetWindowFlags(struct SDL_Window *);
+extern void ks_SDL_SetWindowSize(struct SDL_Window *, int, int);
 extern void ks_SDL_ShowWindow(struct SDL_Window *);
 extern void ks_SDL_HideWindow(struct SDL_Window *);
 extern void ks_SDL_MinimizeWindow(struct SDL_Window *);
@@ -85,6 +86,7 @@ void SDL_QuitSubSystem(unsigned int flags) { ks_SDL_QuitSubSystem(flags); }
 void SDL_Quit(void) { ks_SDL_Quit(); }
 struct SDL_Window *SDL_CreateWindow(const char *title, int x, int y, int w, int h, unsigned int flags) { return ks_SDL_CreateWindow(title, x, y, w, h, flags); }
 unsigned int SDL_GetWindowFlags(struct SDL_Window *window) { return ks_SDL_GetWindowFlags(window); }
+void SDL_SetWindowSize(struct SDL_Window *window, int w, int h) { ks_SDL_SetWindowSize(window, w, h); }
 void SDL_ShowWindow(struct SDL_Window *window) { ks_SDL_ShowWindow(window); }
 void SDL_HideWindow(struct SDL_Window *window) { ks_SDL_HideWindow(window); }
 void SDL_MinimizeWindow(struct SDL_Window *window) { ks_SDL_MinimizeWindow(window); }

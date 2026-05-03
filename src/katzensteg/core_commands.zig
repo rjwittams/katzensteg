@@ -8,6 +8,7 @@ const ExternalFramebufferFormat = frame_builder.ExternalFramebufferFormat;
 
 pub const Command = union(enum) {
     create_window: struct { window: CoreHandle, w: i32, h: i32 },
+    window_size: struct { window: CoreHandle, w: i32, h: i32 },
     create_renderer: struct { window: CoreHandle, renderer: CoreHandle },
     destroy_renderer: struct { renderer: CoreHandle },
     create_texture: struct { texture: CoreHandle, format: core.PixelFormat, w: i32, h: i32 },
