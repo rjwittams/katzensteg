@@ -107,7 +107,7 @@ Current controls:
 
 - `q`: send `shutdown`, drain producer output, restore the terminal
 - `Tab`: cycle focus when multiple producers are launched
-- `n`: open the internal launch prompt; type a profile name, Enter launches it, Esc cancels
+- `n`: open the internal launch prompt; type a profile name, Enter launches it, Esc cancels. Arrow-key escape sequences also cancel the first prompt version.
 - click a window: focus it and raise its host chrome
 - click `╳` in the title bar: send `shutdown` for that producer and drain its output
 - `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`

@@ -1209,6 +1209,8 @@ fn mapKittyOutputProfile(profile: ts_kitty.profile.OutputProfile) config_mod.Out
 
 fn uploadPolicyForOutputProfile(path: []const u8, profile: config_mod.OutputProfile) render_batch_protocol.UploadPolicy {
     return switch (profile) {
+        // The WM multiplexes producer batches through a shared JSONL host.
+        // Keep raw APC out of that path even when a probe or override requests it.
         .direct_apc => .{ .profile = .file_whole, .path = path },
         .file_whole => .{ .profile = .file_whole, .path = path },
         .file_offset_ring => .{ .profile = .file_offset_ring, .path = path },
@@ -1414,6 +1416,7 @@ const ChildWaitState = struct {
 
 fn waitChildThread(child: *std.process.Child, state: *ChildWaitState) void {
     state.term = child.wait() catch .{ .Unknown = 0 };
+    // term is safe to read after done is observed true; seq_cst releases the write.
     state.done.store(true, .seq_cst);
 }
 
