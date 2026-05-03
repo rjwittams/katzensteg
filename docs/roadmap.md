@@ -9,7 +9,7 @@ Katzensteg is an alpha project. The near-term goal is not broad arbitrary native
 - Keyboard and mouse input work for the main tested paths.
 - Real workloads include emulator, adventure-game, stream-client, and SDL probe targets.
 - Some larger targets need app-side patches or build modes.
-- Linux support is active and should be verified against the smoke matrix.
+- macOS and Linux should stay at parity for the main smoke paths.
 
 ## Phase 1: Stabilize The Public Path
 
@@ -32,15 +32,15 @@ Goals:
 - Track which profiles require app-side patches.
 - Make `bootstrap_external_projects.py` a more reliable doctor for local setup while staying honest that it is not a package manager.
 
-## Phase 3: Linux Readiness
+## Phase 3: Platform Parity
 
 Goals:
 
-- Make a fresh Linux checkout build Katzensteg.
-- Verify `probe.input` first.
-- Verify at least one emulator profile.
-- Keep Linux linker/toolchain assumptions documented.
-- Establish a repeatable profiling workflow.
+- Keep fresh macOS and Linux checkouts building.
+- Keep `probe.input` working on both platforms.
+- Keep representative real-app profiles working on both platforms where dependencies exist.
+- Keep platform-specific linker/toolchain assumptions documented.
+- Establish repeatable profiling workflows on both platforms.
 
 ## Phase 4: Runtime Boundaries
 

@@ -119,4 +119,3 @@ Runtime logs go to `/tmp/katzensteg-*`.
 - `docs/external-projects.md` - external app fork inventory.
 - `docs/development.md` - build, test, and logging notes.
 - `docs/roadmap.md` - current roadmap.
-- `docs/linux-readiness.md` - Linux bring-up notes.
