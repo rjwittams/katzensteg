@@ -19,7 +19,7 @@ Inspector UI work belongs in the separate **`whiskers`** repo (`~/dev/whiskers`)
 src/termscene/      reusable engine + kitty backend
 src/katzensteg/     preload runtime, launcher, frame builder, inspector client, C interposers
 examples/           ttytris, termscene-demo, kitty-* repros
-profiles/           JSON launcher profile sets (retroarch, moonlight, scummvm, media, probes, …)
+profiles/           JSON launcher profile sets and app profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
                     plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
 docs/              current project docs
