@@ -91,9 +91,10 @@
       },
       "profiles": [
         "sonic",
-        "sm64ds",
-        "smw",
-        "jsr"
+        "mmx",
+        "rrds",
+        "jsr",
+        "spyro"
       ],
       "build": {
         "macos": [
@@ -193,16 +194,19 @@
             ]
           },
           {
-            "path": "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
+            "path": "$HOME/roms/sonic.md"
           },
           {
-            "path": "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
+            "path": "$HOME/roms/mmx.sfc"
           },
           {
-            "path": "$HOME/roms/smw.smc"
+            "path": "$HOME/roms/rrds.nds"
           },
           {
-            "path": "$HOME/roms/JGR/Jet Grind Radio (USA).cue"
+            "path": "$HOME/roms/jgr/jgr.cue"
+          },
+          {
+            "path": "$HOME/roms/spyro/spyro.cue"
           }
         ]
       },
@@ -547,8 +551,7 @@
         "rjwittams": "https://github.com/rjwittams/ANESE.git"
       },
       "profiles": [
-        "anese.test",
-        "smb3"
+        "anese.test"
       ],
       "build": {
         "macos": [
@@ -573,11 +576,7 @@
             "path": "build/anese"
           }
         ],
-        "assets": [
-          {
-            "path": "$HOME/roms/smb3.nes"
-          }
-        ]
+        "assets": []
       },
       "notes": [
         "No app-side Katzensteg patch is currently required."
