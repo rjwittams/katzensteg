@@ -118,4 +118,3 @@ Runtime logs go to `/tmp/katzensteg-*`.
 - `docs/launcher.md` - launcher and profile usage.
 - `docs/external-projects.md` - external app fork inventory.
 - `docs/development.md` - build, test, and logging notes.
-- `docs/roadmap.md` - current roadmap.

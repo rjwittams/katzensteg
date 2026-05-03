@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, roadmap, launcher, external-project, and development notes.
+Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, launcher, external-project, and development notes.
 
 ## What this repo is
 
@@ -87,7 +87,7 @@ Test coverage is becoming a focus — agents adding non-trivial logic should add
 
 ## Docs
 
-Start with `docs/architecture.md` and `docs/roadmap.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, and `docs/development.md` for build/test/logging.
+Start with `docs/architecture.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, and `docs/development.md` for build/test/logging.
 
 Historical design notes, implementation plans, and agent-oriented handoffs were moved out of tree to `~/Documents/katzensteg/doc-archive/`.
 
