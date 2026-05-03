@@ -11,6 +11,7 @@ __pycache__/
 
 test-results/
 *.trace/
+.playwright-mcp/
 
 *crash*.txt
 *-crash*.txt
