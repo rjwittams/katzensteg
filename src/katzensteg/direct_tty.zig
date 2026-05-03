@@ -49,13 +49,13 @@ pub const DirectTty = struct {
 
     pub fn enableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        try writer.interface.writeAll("\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        try writer.interface.writeAll("\x1b[?1015l\x1b[?1016l\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
         try writer.interface.flush();
     }
 
     pub fn disableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        try writer.interface.writeAll("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l");
+        try writer.interface.writeAll("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
         try writer.interface.flush();
     }
 

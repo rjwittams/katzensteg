@@ -1157,7 +1157,7 @@ fn resetTerminalBestEffort() void {
 }
 
 fn terminalResetSequence() []const u8 {
-    return "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l" ++
+    return "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l" ++
         "\x1b[0m\x1b[?25h\x1b[?1049l" ++
         "\x1b_Gq=2,a=d,d=A;\x1b\\";
 }
@@ -1411,6 +1411,7 @@ test "launcher builds child argv from direct command target and remaining args" 
 test "launcher terminal reset disables mouse tracking and clears kitty graphics" {
     const seq = terminalResetSequence();
     try std.testing.expect(std.mem.indexOf(u8, seq, "\x1b[?1000l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seq, "\x1b[?1015l") != null);
     try std.testing.expect(std.mem.indexOf(u8, seq, "\x1b[?1049l") != null);
     try std.testing.expect(std.mem.indexOf(u8, seq, "\x1b_Gq=2,a=d,d=A;\x1b\\") != null);
 }

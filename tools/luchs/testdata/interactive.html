@@ -39,9 +39,25 @@
         border: 1px solid #557489;
         padding: 10px 12px;
       }
+      input {
+        caret-color: #f6c343;
+      }
       button:focus,
-      input:focus {
+      input:focus,
+      section[tabindex]:focus {
         outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      section:focus-within {
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px rgba(74, 163, 223, 0.55);
+      }
+      section[tabindex]:focus {
+        border-color: var(--accent);
+      }
+      input:focus {
+        border-color: #f6c343;
+        background: #1d3344;
       }
       #hover-zone.hovered,
       #click-zone.active,
@@ -114,7 +130,7 @@
       let clicks = 0;
       let keys = 0;
 
-      clickZone.addEventListener("click", () => {
+      document.querySelector("#click-button").addEventListener("click", () => {
         clicks += 1;
         clickZone.classList.toggle("active", clicks % 2 === 1);
         clickReadout.textContent = `clicks ${clicks}`;
@@ -128,7 +144,7 @@
         hoverZone.classList.remove("hovered");
       });
 
-      document.addEventListener("keydown", (event) => {
+      keyZone.addEventListener("keydown", (event) => {
         keys += 1;
         keyZone.classList.toggle("active", keys % 2 === 1);
         keyReadout.textContent = `keys ${keys} last ${event.key || event.keyCode}`;
