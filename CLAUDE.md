@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Deeper tracked context lives in `docs/katzensteg/`, especially the roadmap, launcher, external-project, and Linux readiness notes.
+Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, roadmap, launcher, external-project, development, and Linux readiness notes.
 
 ## What this repo is
 
@@ -22,7 +22,7 @@ examples/           ttytris, termscene-demo, kitty-* repros
 profiles/           JSON launcher profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
                     plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
-docs/katzensteg/    design notes, roadmap, port plans, handoffs
+docs/              current project docs; historical/agent-oriented notes are archived outside the repo
 .github/workflows/  claude-code-review.yml — automated PR review
 ```
 
@@ -68,7 +68,7 @@ Useful env vars: `KATZENSTEG_PROFILE_DIR`, `KATZENSTEG_REPO`, `KATZENSTEG_WHISKE
 
 The `scripts/katzensteg/run-*.sh` wrappers are **legacy**. The intent is the launcher reaches parity and we delete them. Don't add new ones; when fixing something a wrapper does, fix it in the launcher / a profile instead.
 
-For raw bring-up of `basic-sdl-demo` without the launcher, see the README — that path is for diagnosing the preload itself, not for running real apps.
+Direct preload commands are diagnostic-only. Prefer adding or fixing a launcher profile once a command becomes repeatable.
 
 ## Logging
 
@@ -87,9 +87,9 @@ Test coverage is becoming a focus — agents adding non-trivial logic should add
 
 ## Docs
 
-Start with `docs/katzensteg/2026-04-25-roadmap.md` for current direction and `docs/katzensteg/2026-04-26-launcher-config-design.md` / `docs/katzensteg/launcher-usage.md` for the profile system. Use `docs/katzensteg/external-projects.md` and `docs/katzensteg/linux-port-readiness.md` for Linux/bootstrap context.
+Start with `docs/architecture.md` and `docs/roadmap.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, `docs/development.md` for build/test/logging, and `docs/linux-readiness.md` for Linux bring-up.
 
-A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older inspector / "superpowers" iterations that have since been superseded). Treat anything not referenced from the roadmap as suspect until verified.
+Historical design notes, implementation plans, and agent-oriented handoffs were moved out of tree to `~/Documents/katzensteg/doc-archive/`.
 
 ## Conventions
 
