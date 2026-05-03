@@ -45,6 +45,16 @@ Preview a profile without launching it:
 ./zig-out/bin/katzensteg --dry-run probe.input
 ```
 
+If you use one checkout regularly, an alias keeps the commands short:
+
+```sh
+alias ks="$HOME/dev/katzensteg/zig-out/bin/katzensteg"
+ks --dry-run probe.input
+ks probe.input
+```
+
+Use the explicit `./zig-out/bin/katzensteg` path when testing a different worktree.
+
 For real app profiles, start with `--dry-run`. Many of them expect local app checkouts, game/media data, or platform-specific setup that is intentionally not stored in this repository.
 
 ## Requirements
