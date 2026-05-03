@@ -7,11 +7,11 @@ Orientation for coding agents working in this repo. Keep this file short: it's a
 This is a Zig + C codebase with two main source areas:
 
 - **`termscene`** (`src/termscene/`) — reusable terminal graphics engine. Scene model, types, backend abstraction, kitty-protocol backend.
-- **`Katzensteg`** (`src/katzensteg/`) — the active workstream. A preload library (`LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` on macOS) that interposes on SDL2 / GL / (optionally) Vulkan calls from a target app and mirrors its output to a terminal via `/dev/tty`. Includes a launcher, a JSON profile system, frame composition, and a client to a separate inspector service.
+- **`Katzensteg`** (`src/katzensteg/`) — the active workstream. A preload library (`LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` on macOS) that interposes on SDL2 / GL / (optionally) Vulkan calls from a target app and mirrors its output into terminal graphics, either directly via `/dev/tty` or through the batch/host path. Includes a launcher, a JSON profile system, frame composition, and a client to a separate inspector service.
 
 Demos in-repo: `ttytris` (Tetris stress test on termscene), `termscene-demo`, `basic-sdl-demo` (SDL bring-up target), plus a couple of kitty-protocol repro tools.
 
-The browser inspector and Python proxy that used to live here have been removed on purpose — the canonical inspector is the separate **`whiskers`** repo (`~/dev/whiskers`). This repo carries only producer-side instrumentation and `whiskers_client.zig`. Connect via `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock`. Do not re-introduce an embedded inspector here.
+Inspector UI work belongs in the separate **`whiskers`** repo (`~/dev/whiskers`). This repo carries only producer-side instrumentation and `whiskers_client.zig`. Connect via `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock`. Do not re-introduce an embedded inspector here.
 
 ## Repo layout
 
@@ -19,11 +19,11 @@ The browser inspector and Python proxy that used to live here have been removed 
 src/termscene/      reusable engine + kitty backend
 src/katzensteg/     preload runtime, launcher, frame builder, inspector client, C interposers
 examples/           ttytris, termscene-demo, kitty-* repros
-profiles/           JSON launcher profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
+profiles/           JSON launcher profile sets (retroarch, moonlight, scummvm, media, probes, …)
                     plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
 docs/              current project docs
-.github/workflows/  claude-code-review.yml — automated PR review
+.github/workflows/  CI and automated PR review
 ```
 
 ## Build
@@ -50,13 +50,15 @@ Artifacts (under `zig-out/`):
 - `bin/katzensteg-proxy` — proxy used by some profiles.
 - `bin/basic-sdl-demo`, `bin/ttytris`, `bin/termscene-demo` — demos.
 - `bin/katzensteg-{gl,input,vulkan}-probe` — probe binaries.
-- `lib/libkatzensteg.so` — fully linked preload.
-- `lib/libkatzensteg-unlinked.so` — preload that allows unresolved SDL/GL symbols (used by most profiles).
-- `lib/libkatzensteg-vulkan-layer.so` — Vulkan capture layer.
+- `lib/libkatzensteg-core.*` — core exported entry points.
+- `lib/libkatzensteg-sdl2.*` — SDL2 preload/interposer library.
+- `lib/libkatzensteg.*` — fully linked preload.
+- `lib/libkatzensteg-unlinked.*` — preload variant that allows unresolved SDL/GL symbols.
+- `lib/libkatzensteg-vulkan-layer.*` — Vulkan capture layer when Vulkan support is enabled.
 
 ## Running things
 
-**Use the launcher.** It resolves a JSON profile, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES`, and execs the target.
+**Use the launcher.** It resolves JSON profiles, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` according to the selected profile, and starts the target.
 
 ```bash
 ./zig-out/bin/katzensteg                    # list available profiles
@@ -64,7 +66,7 @@ Artifacts (under `zig-out/`):
 ./zig-out/bin/katzensteg <profile>          # run
 ```
 
-Useful env vars: `KATZENSTEG_PROFILE_DIR`, `KATZENSTEG_REPO`, `KATZENSTEG_WHISKERS_SOCKET`, `KATZENSTEG_PROXY_PROFILE`.
+Profile search defaults to `{repo}/profiles` plus `$XDG_CONFIG_HOME/katzensteg/profiles` or `~/.config/katzensteg/profiles`. `KATZENSTEG_PROFILE_DIR` overrides that search path. Other useful env vars: `KATZENSTEG_REPO`, `KATZENSTEG_WHISKERS_SOCKET`, `KATZENSTEG_PROXY_PROFILE`.
 
 The `scripts/katzensteg/run-*.sh` wrappers are **legacy**. The intent is the launcher reaches parity and we delete them. Don't add new ones; when fixing something a wrapper does, fix it in the launcher / a profile instead.
 
