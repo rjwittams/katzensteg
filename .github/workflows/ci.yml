@@ -31,6 +31,9 @@ jobs:
             pkg-config \
             python3
 
+      - name: Verify Linux headers
+        run: test -f /usr/include/vulkan/vulkan.h
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -41,9 +44,6 @@ jobs:
 
       - name: Zig tests
         run: zig build test
-
-      - name: Verify Linux headers
-        run: test -f /usr/include/vulkan/vulkan.h
 
       - name: Python tests
         run: |
