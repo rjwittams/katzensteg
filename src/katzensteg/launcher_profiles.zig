@@ -1198,7 +1198,7 @@ test "bundled RetroArch profiles disable pause when inactive" {
     var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();
 
-    for ([_][]const u8{ "smw", "jsr", "spyro" }) |name| {
+    for ([_][]const u8{ "sonic", "jsr", "spyro" }) |name| {
         const profile = catalog.find(name).?;
         var found = false;
         for (profile.seed_files) |seed| {

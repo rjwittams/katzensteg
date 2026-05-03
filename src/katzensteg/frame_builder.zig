@@ -460,7 +460,7 @@ pub const FrameBuilder = struct {
     pub fn renderExternalFramebufferBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, writer: anytype) void {
         const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, null) orelse return;
         var job = prepared.job;
-        self.renderPresentJobBatch(logger, sink, @ptrFromInt(external_framebuffer_renderer_key), &job, writer);
+        self.renderPresentJobBatch(logger, sink, external_framebuffer_renderer_key, &job, writer);
     }
 
     const PreparedExternalFramebuffer = struct {
@@ -3620,8 +3620,8 @@ test "frame builder queues presentation reset deletes into next batch frame" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2200);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 2, 2));
+    const renderer: core.CoreHandle = 0x2200;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -3687,8 +3687,8 @@ test "frame builder batch scene placements are translated into attached rect" {
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
 
-    const renderer: ?*sdl.SDL_Renderer = @ptrFromInt(0x2004);
-    try builder.renderers.put(FrameBuilder.ptrKey(renderer), RendererState.init(std.testing.allocator, 320, 240));
+    const renderer: core.CoreHandle = 0x2004;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
