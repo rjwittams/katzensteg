@@ -89,7 +89,7 @@ Test coverage is becoming a focus — agents adding non-trivial logic should add
 
 Start with `docs/architecture.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, and `docs/development.md` for build/test/logging.
 
-Historical design notes, implementation plans, and agent-oriented handoffs were removed from the repo; they remain available in git history. This workspace also keeps a local archive under `~/Documents/katzensteg/doc-archive/`.
+Historical design notes, implementation plans, and agent-oriented handoffs were removed from the repo; they remain available in git history. A copy was also saved to a local archive outside the repo for this workspace.
 
 ## Conventions
 
