@@ -80,3 +80,12 @@ zig build
 ```
 
 If that works, move on to real app profiles only after checking `docs/external-projects.md`.
+
+## Git Hooks
+
+Enable the repo hooks to catch local workflow mistakes such as agent-prefixed
+commit messages and branch names:
+
+```sh
+git config core.hooksPath .githooks
+```

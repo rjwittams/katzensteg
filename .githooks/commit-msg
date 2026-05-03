@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+subject=$(sed -n '1p' "$1")
+
+case "$subject" in
+  "[codex]"*|"[Codex]"*)
+    echo "commit message must not start with [codex]" >&2
+    exit 1
+    ;;
+esac

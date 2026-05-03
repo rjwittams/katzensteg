@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+
+case "$branch" in
+  codex|codex/*|codex-*|codex_*)
+    echo "branch name must not start with codex" >&2
+    exit 1
+    ;;
+esac

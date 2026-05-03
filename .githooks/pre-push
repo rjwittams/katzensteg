@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+zero=0000000000000000000000000000000000000000
+
+while read local_ref local_sha remote_ref remote_sha; do
+  # Allow deleting old remote branches with bad names.
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+
+  case "$local_ref" in
+    refs/heads/codex|refs/heads/codex/*|refs/heads/codex-*|refs/heads/codex_*)
+      echo "branch name must not start with codex: ${local_ref#refs/heads/}" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$remote_ref" in
+    refs/heads/codex|refs/heads/codex/*|refs/heads/codex-*|refs/heads/codex_*)
+      echo "remote branch name must not start with codex: ${remote_ref#refs/heads/}" >&2
+      exit 1
+      ;;
+  esac
+done
