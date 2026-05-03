@@ -57,8 +57,8 @@ pub const ProtocolEventLog = struct {
     events: []ProtocolEvent,
     count: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) ProtocolEventLog {
-        const events = allocator.alloc(ProtocolEvent, capacity) catch unreachable;
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !ProtocolEventLog {
+        const events = try allocator.alloc(ProtocolEvent, capacity);
         return .{ .allocator = allocator, .events = events };
     }
 
@@ -343,7 +343,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
 
     var logger = Logger.init(allocator);
     defer logger.deinit();
-    var event_log = ProtocolEventLog.init(allocator, 16);
+    var event_log = try ProtocolEventLog.init(allocator, 16);
     defer event_log.deinit();
     var tty_lock = std.Thread.Mutex{};
 
@@ -1108,7 +1108,9 @@ fn idRangesForSession(index: usize) SessionIdRanges {
 }
 
 fn zBaseForSlot(slot: usize) i32 {
-    return @as(i32, @intCast(@min(slot, @as(usize, 1000)))) * 1000;
+    const max_z_slots: usize = 1000;
+    const z_stride_per_slot: i32 = 1000;
+    return @as(i32, @intCast(@min(slot, max_z_slots))) * z_stride_per_slot;
 }
 
 fn zBaseForSessionIndex(z_order: []const usize, session_index: usize) i32 {
@@ -1240,7 +1242,7 @@ fn runInteractiveExec(allocator: std.mem.Allocator, argv: []const []const u8, tt
 
     var logger = Logger.init(allocator);
     defer logger.deinit();
-    var event_log = ProtocolEventLog.init(allocator, 16);
+    var event_log = try ProtocolEventLog.init(allocator, 16);
     defer event_log.deinit();
     var tty_lock = std.Thread.Mutex{};
 
@@ -1757,7 +1759,7 @@ test "wm content rect converts to presentation cells" {
 }
 
 test "wm producer records bounded protocol events" {
-    var log = ProtocolEventLog.init(std.testing.allocator, 3);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 3);
     defer log.deinit();
 
     try log.record(.launch_started, "probe");
@@ -1809,7 +1811,7 @@ test "wm status band renders host geometry and last event outside content" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
 
-    var log = ProtocolEventLog.init(std.testing.allocator, 2);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 2);
     defer log.deinit();
     try log.record(.attach_sent, "main");
 
@@ -1832,7 +1834,7 @@ test "wm status band renders host geometry and last event outside content" {
 test "wm desktop can render with no producer sessions" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
-    var log = ProtocolEventLog.init(std.testing.allocator, 1);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     try log.record(.launch_prompt, "launch:");
     var tty_lock = std.Thread.Mutex{};
@@ -2156,7 +2158,7 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
-    var log = ProtocolEventLog.init(std.testing.allocator, 1);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     var tty_lock = std.Thread.Mutex{};
     try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log);
@@ -2188,7 +2190,7 @@ test "wm reconciles externally exited producer sessions" {
     var z_order = [_]usize{ 0, 1 };
     var focused_index: usize = 0;
     var mouse = WmMouseInputState{ .drag = WmMouseDrag.start(.title, .{ .row = 2, .col = 2 }, sessions[0].window.outer) };
-    var log = ProtocolEventLog.init(std.testing.allocator, 4);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 4);
     defer log.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();

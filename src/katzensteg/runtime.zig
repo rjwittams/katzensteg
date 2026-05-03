@@ -428,6 +428,8 @@ pub const Runtime = struct {
         self.batch_control = std.fs.File{ .handle = @intCast(control_fd) };
         setNonblocking(self.batch_control.?.handle);
         self.batch_sink = RenderBatchSink.init(self.allocator, "main");
+        // Batch mode enables the parser so hosts can forward terminal_bytes.
+        // Consumers that never send input control messages observe no events.
         self.input_enabled = true;
         self.input_parser = input_mod.TerminalInputParser.init(self.allocator);
     }

@@ -6,19 +6,18 @@
 # per-host save files do not clobber each other.
 #
 # Examples:
-#   ./sync-roms.sh                       # dry-run, default src + remote
-#   ./sync-roms.sh --apply               # actually push
-#   ./sync-roms.sh --apply mmx.sfc       # push a single file
+#   KATZENSTEG_ROMS_REMOTE=user@host:roms/ ./sync-roms.sh
+#   KATZENSTEG_ROMS_REMOTE=user@host:roms/ ./sync-roms.sh --apply
+#   KATZENSTEG_ROMS_REMOTE=user@host:roms/ ./sync-roms.sh --apply mmx.sfc
 #   KATZENSTEG_ROMS_REMOTE=other:roms/ ./sync-roms.sh --apply
 #
 # Direction is one-way push (local -> remote). Use --pull to invert.
 set -euo pipefail
 
 SRC_DEFAULT="$HOME/roms/"
-REMOTE_DEFAULT="feta:roms/"
 
 src="${KATZENSTEG_ROMS_SRC:-$SRC_DEFAULT}"
-remote="${KATZENSTEG_ROMS_REMOTE:-$REMOTE_DEFAULT}"
+remote="${KATZENSTEG_ROMS_REMOTE:-}"
 mode_args=(--dry-run)
 direction=push
 
@@ -38,6 +37,11 @@ done
 
 # Optional positional ROM-path narrowing: append each as src/<arg> -> dest preserving structure.
 extras=("$@")
+
+if [[ -z "$remote" ]]; then
+  echo "KATZENSTEG_ROMS_REMOTE must be set, for example: user@host:roms/" >&2
+  exit 2
+fi
 
 excludes=(
   --exclude='*.sav' --exclude='*.state' --exclude='*.srm' --exclude='*.auto.sav'

@@ -1,6 +1,6 @@
 # Katzensteg WM Implementation Plan
 
-> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
+Status: Historical implementation plan. This records the slice structure used to build the first `katzensteg wm` host; the current user-facing behavior is documented in `launcher-usage.md`.
 
 **Goal:** Build the first interactive `katzensteg wm` host: a Mac-inspired text-window compositor that launches an embedded producer, owns all decorations, and maps the producer's JSONL output into a host-owned content rectangle.
 
@@ -47,7 +47,7 @@
 **Files:**
 - Modify: `src/katzensteg/launcher.zig`
 
-- [ ] **Step 1: Write launcher parser tests**
+- **Step 1: Write launcher parser tests**
 
 Add tests near the existing command parser tests:
 
@@ -61,7 +61,7 @@ test "launcher rejects wm without a profile target" {
 }
 ```
 
-- [ ] **Step 2: Run launcher tests and verify failure**
+- **Step 2: Run launcher tests and verify failure**
 
 Run:
 
@@ -71,11 +71,11 @@ zig build test
 
 Expected: fail because `Command.wm` does not exist.
 
-- [ ] **Step 3: Add command enum and parser branch**
+- **Step 3: Add command enum and parser branch**
 
 Add `wm` to `Command`. In `parseCommand`, treat `args[1] == "wm"` as `.wm` only when a profile/target argument follows. Do not let `wm` fall through as a normal profile name.
 
-- [ ] **Step 4: Update usage text**
+- **Step 4: Update usage text**
 
 Add:
 
@@ -85,7 +85,7 @@ katzensteg wm <profile>
 
 Describe it as an interactive terminal host for an embedded producer.
 
-- [ ] **Step 5: Run tests**
+- **Step 5: Run tests**
 
 Run:
 
@@ -101,7 +101,7 @@ Expected: pass or fail only on later not-yet-implemented dispatch if added in th
 - Create: `src/katzensteg/wm_host.zig`
 - Modify: `build.zig`
 
-- [ ] **Step 1: Write geometry tests**
+- **Step 1: Write geometry tests**
 
 Create `wm_host.zig` with tests first:
 
@@ -126,7 +126,7 @@ test "wm window clamps outer rect to terminal" {
 
 Use a local `Rect` with the same 1-based cell convention as `PresentationRectCells`.
 
-- [ ] **Step 2: Add build test**
+- **Step 2: Add build test**
 
 In `build.zig`, add:
 
@@ -138,7 +138,7 @@ addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig
 
 Adjust dependencies if the file does not need `termscene`.
 
-- [ ] **Step 3: Run tests and verify failure**
+- **Step 3: Run tests and verify failure**
 
 Run:
 
@@ -148,7 +148,7 @@ zig build test
 
 Expected: fail because the WM types/functions are missing.
 
-- [ ] **Step 4: Implement minimal geometry**
+- **Step 4: Implement minimal geometry**
 
 Implement:
 
@@ -165,7 +165,7 @@ Use text chrome assumptions for slice 1:
 - left/right border consumes 1 col each
 - bottom border consumes 1 row
 
-- [ ] **Step 5: Run tests**
+- **Step 5: Run tests**
 
 Run:
 
@@ -184,13 +184,13 @@ Expected: pass.
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`
 
-- [ ] **Step 1: Write producer state tests**
+- **Step 1: Write producer state tests**
 
 Add tests for pure state transitions:
 
 ```zig
 test "wm producer records attach viewport detach shutdown events" {
-    var log = ProtocolEventLog.init(std.testing.allocator, 8);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 8);
     defer log.deinit();
 
     try log.record(.attach_sent, "main");
@@ -205,7 +205,7 @@ test "wm producer records attach viewport detach shutdown events" {
 
 Adjust exact expectations after choosing the log API.
 
-- [ ] **Step 2: Run tests and verify failure**
+- **Step 2: Run tests and verify failure**
 
 Run:
 
@@ -215,7 +215,7 @@ zig build test
 
 Expected: fail because the log/session model is missing.
 
-- [ ] **Step 3: Implement pure session state**
+- **Step 3: Implement pure session state**
 
 Implement:
 
@@ -227,7 +227,7 @@ Implement:
 
 Keep this independent of child process spawning so tests stay cheap.
 
-- [ ] **Step 4: Run tests**
+- **Step 4: Run tests**
 
 Run:
 
@@ -243,7 +243,7 @@ Expected: pass.
 - Modify: `src/katzensteg/wm_host.zig`
 - Modify: `src/katzensteg/launcher.zig`
 
-- [ ] **Step 1: Add dispatch test at parser level only**
+- **Step 1: Add dispatch test at parser level only**
 
 Do not spawn an app in a Zig unit test. Prove that `wm` preserves the target string:
 
@@ -255,7 +255,7 @@ test "launcher parses wm target" {
 }
 ```
 
-- [ ] **Step 2: Implement `parseWmArgs`**
+- **Step 2: Implement `parseWmArgs`**
 
 Return a small args struct:
 
@@ -267,7 +267,7 @@ const WmArgs = struct {
 
 Keep options minimal in the first slice.
 
-- [ ] **Step 3: Add launcher dispatch**
+- **Step 3: Add launcher dispatch**
 
 In `.wm`, call:
 
@@ -278,7 +278,7 @@ std.process.exit(exit_code);
 
 Import `wm_host.zig`.
 
-- [ ] **Step 4: Implement child argv construction for producer**
+- **Step 4: Implement child argv construction for producer**
 
 Inside `wm_host.runProfile`, launch:
 
@@ -288,7 +288,7 @@ Inside `wm_host.runProfile`, launch:
 
 Use `std.fs.selfExePathAlloc` where practical. This keeps the WM host using the public embed path instead of reaching into launcher internals.
 
-- [ ] **Step 5: Run tests**
+- **Step 5: Run tests**
 
 Run:
 
@@ -304,7 +304,7 @@ Expected: pass.
 - Modify: `src/katzensteg/wm_host.zig`
 - Modify: `src/katzensteg/attach_host.zig` only if control-message factoring is needed
 
-- [ ] **Step 1: Write chrome rendering tests**
+- **Step 1: Write chrome rendering tests**
 
 Test rendered lines without a terminal:
 
@@ -325,7 +325,7 @@ test "wm chrome renders title and content hole" {
 
 Keep the test structural; exact Unicode border characters can change.
 
-- [ ] **Step 2: Implement chrome renderer**
+- **Step 2: Implement chrome renderer**
 
 Use terminal cursor movement and text output owned by the WM host. Text decoration output must not go through the producer.
 
@@ -336,7 +336,7 @@ Use text first:
 - left/right vertical border if it does not interfere with image placement
 - status/debug row outside the content rect
 
-- [ ] **Step 3: Send initial attach**
+- **Step 3: Send initial attach**
 
 After spawning the child, write:
 
@@ -347,13 +347,13 @@ After spawning the child, write:
 
 Prefer reusing or factoring `attach_host.writeInitialControl`.
 
-- [ ] **Step 4: Apply frame batches**
+- **Step 4: Apply frame batches**
 
 Read child stdout as JSONL. For `frame_batch`, call `attach_protocol.parseFrameBatch`, then `terminal_batch_applier.applyFrameBatch` to write producer-owned bytes to the terminal.
 
 Ignore unknown lifecycle lines at first, but log them.
 
-- [ ] **Step 5: Run the interactive proof**
+- **Step 5: Run the interactive proof**
 
 Build:
 
@@ -378,11 +378,11 @@ Expected: the terminal shows WM-owned chrome and the producer renders inside the
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`
 
-- [ ] **Step 1: Write pure lifecycle tests**
+- **Step 1: Write pure lifecycle tests**
 
 Test that closing a session schedules `shutdown` once and enters a draining state.
 
-- [ ] **Step 2: Implement quit key path**
+- **Step 2: Implement quit key path**
 
 In interactive mode:
 
@@ -391,7 +391,7 @@ In interactive mode:
 - after cleanup or timeout, terminate the child process if still alive
 - restore terminal state
 
-- [ ] **Step 3: Verify manually**
+- **Step 3: Verify manually**
 
 Run:
 
@@ -413,11 +413,11 @@ Expected:
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`
 
-- [ ] **Step 1: Write viewport state tests**
+- **Step 1: Write viewport state tests**
 
 Prove that resizing a window changes the content rect and produces a viewport command payload.
 
-- [ ] **Step 2: Add keyboard bindings**
+- **Step 2: Add keyboard bindings**
 
 Initial bindings can be simple:
 
@@ -427,7 +427,7 @@ Initial bindings can be simple:
 
 Avoid consuming keys that must later route to the producer while the WM is in window-management mode.
 
-- [ ] **Step 3: Send `viewport` on content rect change**
+- **Step 3: Send `viewport` on content rect change**
 
 Write JSONL to child stdin:
 
@@ -437,7 +437,7 @@ Write JSONL to child stdin:
 
 Use `render_batch_protocol.writeJsonString` for string fields.
 
-- [ ] **Step 4: Verify manually**
+- **Step 4: Verify manually**
 
 Run:
 
@@ -463,7 +463,7 @@ Expected:
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`
 
-- [ ] **Step 1: Refactor single session into array/list**
+- **Step 1: Refactor single session into array/list**
 
 If earlier tasks used a single `ProducerSession`, change host state to:
 
@@ -472,15 +472,15 @@ sessions: std.ArrayList(ProducerSession)
 focused_index: ?usize
 ```
 
-- [ ] **Step 2: Write focus tests**
+- **Step 2: Write focus tests**
 
 Test next/previous focus changes active window and chrome state without spawning children.
 
-- [ ] **Step 3: Add focus key**
+- **Step 3: Add focus key**
 
 Use `tab` or a simple key like `n` for next window.
 
-- [ ] **Step 4: Render active/inactive chrome**
+- **Step 4: Render active/inactive chrome**
 
 The focused window gets active title styling; inactive windows remain visible but muted.
 
@@ -489,7 +489,7 @@ The focused window gets active title styling; inactive windows remain visible bu
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`
 
-- [ ] **Step 1: Add command shape**
+- **Step 1: Add command shape**
 
 Keep this simple for the first multi-producer proof:
 
@@ -499,14 +499,14 @@ katzensteg wm <profile-a> <profile-b>
 
 or an interactive `l` launch prompt if parsing multiple profiles makes the launcher awkward. Prefer multiple profile args first because it is testable.
 
-- [ ] **Step 2: Allocate distinct id ranges per session**
+- **Step 2: Allocate distinct id ranges per session**
 
 Avoid cross-session cleanup conflicts by assigning non-overlapping ranges, for example:
 
 - session 0 images `100000..199999`, placements `200000..299999`
 - session 1 images `300000..399999`, placements `400000..499999`
 
-- [ ] **Step 3: Verify multi-producer manually**
+- **Step 3: Verify multi-producer manually**
 
 Run two lightweight profiles.
 
@@ -527,7 +527,7 @@ Expected:
 - Modify: `docs/katzensteg/launcher-usage.md`
 - Modify: `docs/katzensteg/2026-04-30-wm-design.md` if implementation diverged
 
-- [ ] **Step 1: Add usage examples**
+- **Step 1: Add usage examples**
 
 Document:
 
@@ -538,7 +538,7 @@ Document:
 
 Include current keybindings and lifecycle caveats.
 
-- [ ] **Step 2: Run doc-adjacent smoke**
+- **Step 2: Run doc-adjacent smoke**
 
 Run:
 
@@ -554,7 +554,7 @@ Expected: help mentions `wm`; dry-run behavior unchanged.
 **Files:**
 - All touched files
 
-- [ ] **Step 1: Run aggregate tests**
+- **Step 1: Run aggregate tests**
 
 Run:
 
@@ -564,7 +564,7 @@ zig build test
 
 Expected: pass.
 
-- [ ] **Step 2: Run full build**
+- **Step 2: Run full build**
 
 Run:
 
@@ -574,7 +574,7 @@ zig build
 
 Expected: pass.
 
-- [ ] **Step 3: Manual interactive proof**
+- **Step 3: Manual interactive proof**
 
 Run:
 
@@ -590,7 +590,7 @@ Exercise:
 
 Expected: no orphan child process, terminal usable after exit.
 
-- [ ] **Step 4: Check worktree**
+- **Step 4: Check worktree**
 
 Run:
 
@@ -598,4 +598,4 @@ Run:
 git status --short
 ```
 
-Expected: only intentional source/docs/test changes. Do not include `.superpowers/brainstorm/`.
+Expected: only intentional source/docs/test changes.
