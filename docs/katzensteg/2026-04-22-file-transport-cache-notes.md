@@ -1,5 +1,16 @@
 # Katzensteg File Transport Cache Notes
 
+> **Status (2026-05-01): superseded for general workloads.** The transport
+> substrate in
+> [`2026-05-01-graphics-protocol-transport-sketch.md`](2026-05-01-graphics-protocol-transport-sketch.md)
+> replaces per-frame uploads with registered swapchain surfaces over an
+> out-of-band sidechannel, which removes the motivation for in-file caching
+> outside narrow 2D-tilemap workloads (NES/SNES/GB emulation, some pixel-art
+> ScummVM content). Anything 3D destroys pixel-grid temporal coherence, and
+> video codecs already exploit motion-compensated coherence in motion-vector
+> space far better than a fixed-grid tile cache could. Kept as a record of the
+> experiment and its reasoning.
+
 This note captures a more ambitious direction beyond the immediate safe file-transport fixes.
 
 ## Why this is interesting
@@ -183,8 +194,11 @@ Those should still be chosen from a combination of:
 
 The simple ring-buffer file transport is the immediate practical step.
 
-But the more exciting long-term direction is:
+The longer-term direction this note originally proposed —
 
-> treat the backing file as a persistent cached image store and compose frames from reused cached regions instead of re-uploading every frame wholesale.
+> treat the backing file as a persistent cached image store and compose frames from reused cached regions instead of re-uploading every frame wholesale
 
-That idea feels promising enough to preserve explicitly, even though the exact cache/index shape is not yet proved out.
+— turned out not to generalise. See the status banner at the top and
+[`2026-05-01-graphics-protocol-transport-sketch.md`](2026-05-01-graphics-protocol-transport-sketch.md)
+for the design that replaces it. The cache idea is preserved here as a record
+of the experiment.

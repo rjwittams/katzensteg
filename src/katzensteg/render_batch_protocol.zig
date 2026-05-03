@@ -43,6 +43,7 @@ pub const AttachMessage = struct {
     window_id: []const u8,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
+    z_base: i32 = 0,
     image_ids: IdRange,
     placement_ids: IdRange,
     upload: UploadPolicy,
@@ -52,16 +53,23 @@ pub const ViewportMessage = struct {
     window_id: []const u8,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
+    z_base: i32 = 0,
 };
 
 pub const DetachMessage = struct {
     window_id: []const u8,
 };
 
+pub const InputMessage = struct {
+    window_id: []const u8,
+    bytes: []const u8,
+};
+
 pub const ControlMessage = union(enum) {
     attach: AttachMessage,
     viewport: ViewportMessage,
     detach: DetachMessage,
+    input: InputMessage,
     shutdown,
 };
 
@@ -128,6 +136,7 @@ pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !Atta
         .attach => |attach| return attach,
         .viewport => return error.InvalidMessage,
         .detach => return error.InvalidMessage,
+        .input => return error.InvalidMessage,
         .shutdown => return error.InvalidMessage,
     }
 }
@@ -152,16 +161,29 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         return .{ .detach = .{ .window_id = "main" } };
     }
 
+    if (std.mem.eql(u8, type_value.string, "input")) {
+        const event_value = root.get("event") orelse return error.InvalidMessage;
+        if (event_value != .string or !std.mem.eql(u8, event_value.string, "terminal_bytes")) return error.InvalidMessage;
+        const bytes_value = root.get("bytes") orelse return error.InvalidMessage;
+        if (bytes_value != .string) return error.InvalidMessage;
+        return .{ .input = .{
+            .window_id = "main",
+            .bytes = try allocator.dupe(u8, bytes_value.string),
+        } };
+    }
+
     const rect = try parseRect(root.get("rect_cells") orelse return error.InvalidMessage);
     const aspect_value = root.get("aspect") orelse return error.InvalidMessage;
     if (aspect_value != .string) return error.InvalidMessage;
     const aspect = parseAspect(aspect_value.string) orelse return error.InvalidMessage;
+    const z_base: i32 = if (root.get("z_base")) |z_value| try jsonI32(z_value) else 0;
 
     if (std.mem.eql(u8, type_value.string, "viewport")) {
         return .{ .viewport = .{
             .window_id = "main",
             .rect_cells = rect,
             .aspect = aspect,
+            .z_base = z_base,
         } };
     }
 
@@ -177,6 +199,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         .window_id = "main",
         .rect_cells = rect,
         .aspect = aspect,
+        .z_base = z_base,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
@@ -191,6 +214,10 @@ pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage)
 pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessage) void {
     switch (control.*) {
         .attach => |*attach| deinitAttachMessage(allocator, attach),
+        .input => |*input| {
+            allocator.free(input.bytes);
+            input.bytes = "";
+        },
         .viewport, .detach => {},
         .shutdown => {},
     }
@@ -326,6 +353,22 @@ test "attach message parses host-selected file upload policy" {
     try std.testing.expectEqual(@as(u64, 4096), attach.upload.high_water);
 }
 
+test "attach and viewport messages parse host z base" {
+    const attach_msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","z_base":2000,"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach = try parseAttachMessage(std.testing.allocator, attach_msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(i32, 2000), attach.z_base);
+
+    const viewport_msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"cover","z_base":3000}
+    ;
+    var control = try parseControlMessage(std.testing.allocator, viewport_msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(@as(i32, 3000), control.viewport.z_base);
+}
+
 test "attach message accepts contain as fit compatibility alias" {
     const msg =
         \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"contain","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
@@ -349,6 +392,15 @@ test "control message parses viewport geometry without id ranges" {
     try std.testing.expectEqualStrings("main", viewport.window_id);
     try std.testing.expectEqual(PresentationAspect.cover, viewport.aspect);
     try std.testing.expectEqual(PresentationRectCells{ .row = 6, .col = 10, .rows = 20, .cols = 64 }, viewport.rect_cells);
+}
+
+test "control message parses terminal input bytes" {
+    var control = try parseControlMessage(std.testing.allocator, "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":\"\\u001b[<35;11;6M\"}");
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    const input = control.input;
+    try std.testing.expectEqualStrings("main", input.window_id);
+    try std.testing.expectEqualStrings("\x1b[<35;11;6M", input.bytes);
 }
 
 test "control message parses detach" {

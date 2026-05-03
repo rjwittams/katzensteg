@@ -70,7 +70,9 @@ When an optional env value, arg, or seed file path has no value for the active p
 
 In this mode, launcher stdout is JSONL protocol output and launcher stdin is JSONL protocol input. The launcher stays quiet, keeps the target program stdout on the normal profile log path, and passes dedicated fds to the preloaded runtime for render batches and control messages.
 
-The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, and an upload policy. Until attach is received, the runtime suppresses graphics batches. After attach, the host may send `viewport` to resize or move the presentation rect, or `detach` to remove known placements and suppress future batches while the producer keeps running. `detach` is acknowledged with `{"type":"detached","window_id":"main"}` after cleanup output has been emitted. To close the whole producer session, the host sends `{"type":"shutdown"}` and keeps reading stdout until cleanup/lifecycle output drains or the process exits. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+The first control message that enables graphics is an `attach` for `window_id: "main"` with a cell rect, id ranges, upload policy, and optional `z_base`. Until attach is received, the runtime suppresses graphics batches. After attach, the host may send `viewport` to resize or move the presentation rect, update `z_base`, or `detach` to remove known placements and suppress future batches while the producer keeps running. `detach` is acknowledged with `{"type":"detached","window_id":"main"}` after cleanup output has been emitted. To close the whole producer session, the host sends `{"type":"shutdown"}` and keeps reading stdout until cleanup/lifecycle output drains or the process exits. The host may choose `direct_apc`, `file_whole`, or `file_offset_ring`; file modes include a shared upload path that the producer writes and the host passes through as terminal graphics APCs. Socket transport, target stdout events, non-kitty side channels, keyboard/mouse focus events, and multiple windows are follow-up work.
+
+Hosts may forward input with `{"type":"input","window_id":"main","event":"terminal_bytes","bytes":"..."}`. The first WM implementation forwards non-command terminal bytes directly. Mouse escape sequences keep their absolute terminal cell coordinates; the runtime maps those cells through the current presentation layout back to SDL coordinates.
 
 ## Attach Host Mode
 
@@ -84,6 +86,45 @@ The first control message that enables graphics is an `attach` for `window_id: "
 The outer `katzensteg attach` owns `/dev/tty`, probes terminal graphics capabilities, sends `hello` and `attach` to the peer's stdin, reads `frame_batch` JSONL from the peer's stdout, decodes the batch strings, and writes the resulting terminal bytes to the terminal. `--rect x,y,w,h` uses 1-based terminal cells and maps to `col,row,cols,rows`; `--aspect` accepts `fit`, `stretch`, or `cover`. The inner command can be Katzensteg producer mode, `ssh`, `socat`, or another implementation of the same stdio protocol.
 
 This is separate from `--embed-jsonl`: producer mode emits JSONL; attach mode consumes JSONL and presents it. A future `attach --socket <path>` should reuse the same host protocol and terminal presenter path.
+
+## WM Host Mode
+
+`wm` is the first interactive host/compositor for the same JSONL embed path:
+
+```sh
+./zig-out/bin/katzensteg wm
+./zig-out/bin/katzensteg wm probe.embed.basic_sdl
+./zig-out/bin/katzensteg wm sonic mi2
+```
+
+The WM owns `/dev/tty`, draws text window chrome plus a bottom status/debug band, launches each selected profile through `katzensteg --embed-jsonl`, sends `attach` for each inner content rectangle, and applies producer `frame_batch` output inside that rectangle. It can also start with no producer; use the internal launch prompt to add the first one. The producers do not own title bars, borders, status/debug areas, layout, or window lifecycle policy.
+
+The status band is host-owned and stays outside the producer content rect. It currently shows the selected upload profile, outer window geometry, inner content geometry, and the last WM protocol event such as launch, attach, viewport, shutdown, or producer exit.
+
+If a producer exits or is killed outside the WM, the host removes that window from drawing, hit testing, and focus selection on the next lifecycle tick. Other producers continue running; the WM keeps the exited process status for its final exit code.
+
+Current controls:
+
+- `q`: send `shutdown`, drain producer output, restore the terminal
+- `Tab`: cycle focus when multiple producers are launched
+- `n`: open the internal launch prompt; type a profile name, Enter launches it, Esc cancels. Arrow-key escape sequences also cancel the first prompt version.
+- click a window: focus it and raise its host chrome
+- click `╳` in the title bar: send `shutdown` for that producer and drain its output
+- `h` / `j` / `k` / `l`: move the window left/down/up/right and send `viewport`
+- `H` / `J` / `K` / `L`: resize narrower/shorter/taller/wider and send `viewport`
+- `t`: tile visible producer windows and send `viewport` for each
+- `c`: cascade visible producer windows and send `viewport` for each
+- drag the title bar with mouse button 1: move the window and send `viewport`
+- drag the right, bottom, or bottom-right border with mouse button 1: resize the window and send `viewport`
+
+This is intentionally still early. Overlap currently exposes terminal image/text occlusion limits: producer image placements can cover host text chrome, and host text from lower windows can show through unfilled areas of higher windows. Tiling is the current practical escape hatch while a real occlusion protocol is designed. Detach/minimize policy, richer debug UI, and alternate text themes are follow-up work.
+
+Current WM smoke notes:
+
+- `sonic`, `smw`, and `sm64ds` work through the current JSONL SDL renderer path.
+- `mi2` exercises the SDL sprite/scene path rather than only the full-frame path; batch scene placements are expected to be translated into the WM content rect.
+- `jsr` uses the Vulkan/external-framebuffer path. That path now routes through the JSONL batch presenter in `wm`, but still needs real-profile smoke because it depends on the platform Vulkan layer and RetroArch/Flycast behavior.
+- Producer input is wired through `wm` as terminal-byte input for the focused producer. WM command keys and chrome drags remain host-owned, and mouse input is forwarded only when the terminal event lands inside the focused producer content rect. Multi-producer sessions use disjoint image/placement id ranges, per-session file upload paths, and host-assigned `z_base` bands for graphics stacking.
 
 ## Current Smoke Status
 

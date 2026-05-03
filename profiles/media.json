@@ -37,19 +37,10 @@
         "$HOME/dev/ANESE/roms/tests/cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
       ]
     },
-    "smb3": {
-      "extends": [
-        "app.anese",
-        "adapter.sdl2_preload",
-        "runtime.fullscreen_file"
-      ],
-      "args": [
-        "$HOME/roms/smb3.nes"
-      ]
-    },
     "app.cannonball": {
       "hidden": true,
       "target": "$HOME/dev/cannonball/build/cannonball",
+      "cwd": "$HOME/dev/cannonball",
       "env": {
         "SDL_RENDER_DRIVER": "software"
       }

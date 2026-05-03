@@ -145,7 +145,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual("arch", bootstrap.detect_distro_family(os_release_text))
+        self.assertEqual("arch", bootstrap.detect_distro_family(os_release_text, platform="linux"))
 
     def test_detect_distro_family_recognizes_debian_like(self):
         bootstrap = load_module()
@@ -158,7 +158,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual("debian", bootstrap.detect_distro_family(os_release_text))
+        self.assertEqual("debian", bootstrap.detect_distro_family(os_release_text, platform="linux"))
 
     def test_detect_distro_family_recognizes_macos(self):
         bootstrap = load_module()
