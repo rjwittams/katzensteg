@@ -434,13 +434,48 @@ pub const FrameBuilder = struct {
     }
 
     pub fn presentExternalFramebuffer(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, cursor: ?cursor_mod.Snapshot, debug_protocol_replies: bool, image_gc: bool) void {
-        if (width <= 0 or height <= 0) return;
+        const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, cursor) orelse return;
+        const state = prepared.state;
+        var job = prepared.job;
+
+        engine.beginScene();
+        engine.diff() catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "scene diff failed while entering GL framebuffer mode: {any}", .{err});
+            return;
+        };
+        backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
+        engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering GL framebuffer mode: {any}", .{err});
+
+        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
+
+        self.last_inspect_summary = self.buildInspectSummary(state, &job);
+        if (image_gc) self.deleteRetiredImages(logger, backend);
+        if (debug_protocol_replies) self.drainKittyReplies(logger, tty);
+        if (self.stats.enabled) {
+            self.stats.frame_count += 1;
+            self.maybeReportStats(logger);
+        }
+    }
+
+    pub fn renderExternalFramebufferBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, writer: anytype) void {
+        const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, null) orelse return;
+        var job = prepared.job;
+        self.renderPresentJobBatch(logger, sink, external_framebuffer_renderer_key, &job, writer);
+    }
+
+    const PreparedExternalFramebuffer = struct {
+        state: *RendererState,
+        job: PresentJob,
+    };
+
+    fn prepareExternalFramebufferJob(self: *FrameBuilder, logger: *Logger, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, cursor: ?cursor_mod.Snapshot) ?PreparedExternalFramebuffer {
+        if (width <= 0 or height <= 0) return null;
         const expected_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
-        if (pixels.len < expected_len) return;
+        if (pixels.len < expected_len) return null;
 
         const result = self.renderers.getOrPut(external_framebuffer_renderer_key) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "external framebuffer state allocation failed: {any}", .{err});
-            return;
+            return null;
         };
         if (!result.found_existing) {
             result.value_ptr.* = RendererState.init(self.allocator, width, height);
@@ -451,41 +486,25 @@ pub const FrameBuilder = struct {
             if (result.value_ptr.composite_last_presented) |last| @memset(last, 0);
         }
         const state = result.value_ptr;
-
-        engine.beginScene();
-        engine.diff() catch |err| {
-            logger.writeFmtScoped(.info, .frame_builder, "scene diff failed while entering GL framebuffer mode: {any}", .{err});
-            return;
-        };
-        backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
-        engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering GL framebuffer mode: {any}", .{err});
-
         if (state.composite_rgba == null or state.composite_rgba.?.len != expected_len) {
             if (state.composite_rgba) |old| self.allocator.free(old);
             state.composite_rgba = self.allocator.alloc(u8, expected_len) catch |err| {
-                logger.writeFmtScoped(.info, .frame_builder, "GL framebuffer copy allocation failed: {any}", .{err});
-                return;
+                logger.writeFmtScoped(.info, .frame_builder, "external framebuffer copy allocation failed: {any}", .{err});
+                return null;
             };
         }
-        if (!convertExternalFramebufferToRgba(state.composite_rgba.?[0..expected_len], pixels[0..expected_len], width, height, format)) return;
+        if (!convertExternalFramebufferToRgba(state.composite_rgba.?[0..expected_len], pixels[0..expected_len], width, height, format)) return null;
         compositeCursor(state.composite_rgba.?[0..expected_len], width, height, cursor);
         state.composite_mode_active = true;
-
-        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
-
-        var job = PresentJob{ .framebuffer = .{
-            .width = width,
-            .height = height,
-            .rgba = state.composite_rgba.?,
-            .owns_rgba = false,
-        } };
-        self.last_inspect_summary = self.buildInspectSummary(state, &job);
-        if (image_gc) self.deleteRetiredImages(logger, backend);
-        if (debug_protocol_replies) self.drainKittyReplies(logger, tty);
-        if (self.stats.enabled) {
-            self.stats.frame_count += 1;
-            self.maybeReportStats(logger);
-        }
+        return .{
+            .state = state,
+            .job = .{ .framebuffer = .{
+                .width = width,
+                .height = height,
+                .rgba = state.composite_rgba.?,
+                .owns_rgba = false,
+            } },
+        };
     }
 
     pub fn onCreateTexture(self: *FrameBuilder, texture: core.CoreHandle, format: core.PixelFormat, w: i32, h: i32) void {
@@ -1131,6 +1150,13 @@ pub const FrameBuilder = struct {
     }
 
     pub fn flushBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, writer: anytype) void {
+        self.queueBatchDeletesForPresentationReset(logger, sink);
+        if (sink.hasPendingBytes()) {
+            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentation reset render batch flush failed: {any}", .{err});
+        }
+    }
+
+    pub fn queueBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink) void {
         var renderer_it = self.renderers.iterator();
         while (renderer_it.next()) |entry| {
             const state = entry.value_ptr;
@@ -1143,9 +1169,6 @@ pub const FrameBuilder = struct {
             if (state.composite_last_presented) |last| @memset(last, 0);
         }
         self.deleteRetiredImagesBatch(logger, sink);
-        if (sink.hasPendingBytes()) {
-            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentation reset render batch flush failed: {any}", .{err});
-        }
     }
 
     fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
@@ -1171,12 +1194,13 @@ pub const FrameBuilder = struct {
                 var solid_sprite_count: usize = 0;
                 for (scene_job.solids) |solid| {
                     const image_id = try self.ensureSolidImageBatch(sink, solid.color);
+                    const dest = batchSceneCellRect(solid.dest_rect, sink.presentationRect());
                     solid_sprite_count += 1;
-                    try sink.place(solid.dest_rect.row, solid.dest_rect.col, .{
+                    try sink.place(dest.row, dest.col, .{
                         .image_id = image_id,
                         .placement_id = self.allocCompositePlacementId(),
-                        .cols = solid.dest_rect.w,
-                        .rows = solid.dest_rect.h,
+                        .cols = dest.w,
+                        .rows = dest.h,
                         .src_x = 0,
                         .src_y = 0,
                         .src_w = 1,
@@ -1186,11 +1210,12 @@ pub const FrameBuilder = struct {
                 }
                 for (scene_job.sprites) |sprite| {
                     const image_id = self.published_assets.get(sprite.asset_id) orelse continue;
-                    try sink.place(sprite.dest_rect.row, sprite.dest_rect.col, .{
+                    const dest = batchSceneCellRect(sprite.dest_rect, sink.presentationRect());
+                    try sink.place(dest.row, dest.col, .{
                         .image_id = image_id,
                         .placement_id = self.allocCompositePlacementId(),
-                        .cols = sprite.dest_rect.w,
-                        .rows = sprite.dest_rect.h,
+                        .cols = dest.w,
+                        .rows = dest.h,
                         .src_x = sprite.source_rect.x,
                         .src_y = sprite.source_rect.y,
                         .src_w = sprite.source_rect.w,
@@ -1210,6 +1235,15 @@ pub const FrameBuilder = struct {
             .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
         }
         return layout;
+    }
+
+    fn batchSceneCellRect(relative: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
+        return .{
+            .col = rect.col + relative.col - 1,
+            .row = rect.row + relative.row - 1,
+            .w = relative.w,
+            .h = relative.h,
+        };
     }
 
     pub fn presentationLayoutForExternalFramebuffer(self: *FrameBuilder, tty: *const DirectTty) presentation_layout.PresentationLayout {
@@ -3511,6 +3545,37 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
 }
 
+test "frame builder renders external framebuffer to batch sink" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 5, .rows = 12, .cols = 40 });
+    try sink.setUploadPolicy(.{ .profile = .file_whole, .path = "/tmp/katzensteg-external-fb-batch-test" });
+
+    var pixels = [_]u8{
+        255, 0, 0, 255,
+        0, 255, 0, 255,
+        0, 0, 255, 255,
+        255, 255, 255, 255,
+    };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderExternalFramebufferBatch(&logger, &sink, 2, 2, .rgba8, &pixels, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"direct_apc\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;13H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=24,r=12") != null);
+}
+
 test "frame builder detach flushes known batch placements and suppresses future frames" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
@@ -3549,6 +3614,44 @@ test "frame builder detach flushes known batch placements and suppresses future 
     try std.testing.expectEqual(after_detach_len, out.items.len);
 }
 
+test "frame builder queues presentation reset deletes into next batch frame" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2200;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 2 * 2 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const after_present_len = out.items.len;
+
+    builder.queueBatchDeletesForPresentationReset(&logger, &sink);
+    try std.testing.expectEqual(after_present_len, out.items.len);
+    try std.testing.expect(sink.hasPendingBytes());
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const next_frame = out.items[after_present_len..];
+    try std.testing.expect(std.mem.indexOf(u8, next_frame, "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, next_frame, "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, next_frame, "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, next_frame, "a=p") != null);
+}
+
 test "frame builder batch placement contains source inside attached rect" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
@@ -3576,6 +3679,55 @@ test "frame builder batch placement contains source inside attached rect" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;5H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
+}
+
+test "frame builder batch scene placements are translated into attached rect" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2004;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+
+    var rgba = [_]u8{ 255, 255, 255, 255 };
+    var publications = [_]AssetPublication{
+        .{ .new_asset = .{ .asset_id = 42, .width = 1, .height = 1, .rgba = &rgba, .owns_rgba = false } },
+    };
+    var sprites = [_]SceneSprite{
+        .{
+            .asset_id = 42,
+            .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+            .dest_rect = .{ .col = 2, .row = 2, .w = 3, .h = 4 },
+            .z = 100,
+        },
+    };
+    var solids = [_]SolidSprite{
+        .{ .color = .{ 0, 0, 0, 255 }, .dest_rect = .{ .col = 1, .row = 1, .w = 40, .h = 20 }, .z = -100 },
+    };
+    var job = PresentJob{ .scene = .{
+        .had_clear = true,
+        .clear_color = .{ 0, 0, 0, 255 },
+        .publications = &publications,
+        .sprites = &sprites,
+        .solids = &solids,
+    } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[5;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[6;12H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;2H") == null);
 }
 
 test "frame builder batch placement stretches source to attached rect" {

@@ -6,6 +6,7 @@ const real_sdl = @import("real_sdl.zig");
 
 pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
     if (!rt.input_enabled) return false;
+    rt.pollBatchControl();
     var parser = &(rt.input_parser orelse return false);
     const input_event = parser.pop() orelse return false;
     if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
@@ -17,6 +18,7 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
 
 pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, min_type: u32, max_type: u32) bool {
     if (!rt.input_enabled) return false;
+    rt.pollBatchControl();
     var parser = &(rt.input_parser orelse return false);
     const input_event = parser.popSdlRange(min_type, max_type) orelse return false;
     if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
@@ -33,6 +35,7 @@ pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void
 
 pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
     if (!rt.input_enabled) return real_state;
+    rt.pollBatchControl();
     var parser = &(rt.input_parser orelse return real_state);
     @memset(&rt.keyboard_state, 0);
     if (real_state) |keys| {

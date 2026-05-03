@@ -98,10 +98,25 @@
         "genesis_plus_gx_libretro",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
-        "$HOME/roms/Sonic The Hedgehog (USA, Europe).md"
+        "$HOME/roms/sonic.md"
       ]
     },
-    "sm64ds": {
+    "mmx": {
+      "extends": [
+        "retroarch",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "config.retroarch_sdl2"
+      ],
+      "args": [
+        "-L",
+        "snes9x_libretro",
+        "-c",
+        "/tmp/retroarch-sdl2.cfg",
+        "$HOME/roms/mmx.sfc"
+      ]
+    },
+    "rrds": {
       "extends": [
         "retroarch",
         "adapter.sdl2_preload",
@@ -114,22 +129,7 @@
         "melonds_libretro",
         "-c",
         "/tmp/retroarch-sdl2.cfg",
-        "$HOME/roms/Super Mario 64 DS (Europe) (En,Fr,De,Es,It).nds"
-      ]
-    },
-    "smw": {
-      "extends": [
-        "retroarch",
-        "adapter.sdl2_preload",
-        "runtime.fullscreen_file",
-        "config.retroarch_sdl2"
-      ],
-      "args": [
-        "-L",
-        "bsnes_libretro",
-        "-c",
-        "/tmp/retroarch-sdl2.cfg",
-        "$HOME/roms/smw.smc"
+        "$HOME/roms/rrds.nds"
       ]
     },
     "jsr": {
@@ -145,7 +145,7 @@
         "flycast_libretro",
         "-c",
         "/tmp/retroarch-sdl2-vulkan.cfg",
-        "$HOME/roms/JGR/Jet Grind Radio (USA).cue"
+        "$HOME/roms/jgr/jgr.cue"
       ]
     },
     "spyro": {
@@ -161,7 +161,7 @@
         "mednafen_psx_hw_libretro",
         "-c",
         "/tmp/retroarch-sdl2-vulkan.cfg",
-        "$HOME/roms/Spyro the Dragon (USA)/Spyro the Dragon (USA).cue"
+        "$HOME/roms/spyro/spyro.cue"
       ]
     }
   }

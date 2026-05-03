@@ -409,6 +409,9 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-render-batch-protocol-test", "src/katzensteg/render_batch_protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-attach-protocol-test", "src/katzensteg/attach_protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+    });
     addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
     });
