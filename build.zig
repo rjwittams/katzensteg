@@ -7,6 +7,12 @@ pub fn build(b: *std.Build) void {
     const is_macos = target.result.os.tag == .macos;
     const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
     const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
+    const default_preload_options = b.addOptions();
+    default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);
+    const test_preload_options = b.addOptions();
+    test_preload_options.addOption(bool, "use_c_real_sdl", false);
+    const rebind_preload_options = b.addOptions();
+    rebind_preload_options.addOption(bool, "use_c_real_sdl", true);
 
     const termscene_mod = b.createModule(.{
         .root_source_file = b.path("src/termscene/mod.zig"),
@@ -114,6 +120,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_sdl2_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_sdl2_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_sdl2_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_sdl2_lib.root_module.strip = false;
     katzensteg_sdl2_lib.root_module.omit_frame_pointer = false;
     katzensteg_sdl2_lib.linker_allow_shlib_undefined = true;
@@ -134,6 +141,35 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_sdl2_lib);
 
+    if (is_macos) {
+        const katzensteg_sdl2_rebind_lib = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = "katzensteg-sdl2-rebind",
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/katzensteg/preload.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_sdl2_rebind_lib.root_module.addImport("termscene", termscene_mod);
+        katzensteg_sdl2_rebind_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+        katzensteg_sdl2_rebind_lib.root_module.addImport("katzensteg_build_options", rebind_preload_options.createModule());
+        katzensteg_sdl2_rebind_lib.root_module.strip = false;
+        katzensteg_sdl2_rebind_lib.root_module.omit_frame_pointer = false;
+        katzensteg_sdl2_rebind_lib.linker_allow_shlib_undefined = true;
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_macos.c") });
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/darwin_rebinder.c") });
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/sdl2_rebind_macos.c") });
+        katzensteg_sdl2_rebind_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/preload_macos_rebind.c") });
+        katzensteg_sdl2_rebind_lib.linkFramework("Accelerate");
+        katzensteg_sdl2_rebind_lib.linkFramework("OpenGL");
+        b.installArtifact(katzensteg_sdl2_rebind_lib);
+    }
+
     const katzensteg_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg",
@@ -147,6 +183,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_lib.root_module.strip = false;
     katzensteg_lib.root_module.omit_frame_pointer = false;
     if (is_macos) katzensteg_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -181,6 +218,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_unlinked_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_unlinked_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_unlinked_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_unlinked_lib.root_module.strip = false;
     katzensteg_unlinked_lib.root_module.omit_frame_pointer = false;
     katzensteg_unlinked_lib.linker_allow_shlib_undefined = true;
@@ -430,6 +468,7 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
         .link_sdl2 = true,
         .link_opengl = true,
@@ -447,6 +486,7 @@ pub fn build(b: *std.Build) void {
 const UnitTestOptions = struct {
     termscene: ?*std.Build.Module = null,
     katzensteg_sdl: ?*std.Build.Module = null,
+    katzensteg_build_options: ?*std.Build.Module = null,
     link_libc: bool = false,
     link_sdl2: bool = false,
     link_opengl: bool = false,
@@ -474,6 +514,7 @@ fn addUnitTest(
     });
     if (options.termscene) |mod| unit_test.root_module.addImport("termscene", mod);
     if (options.katzensteg_sdl) |mod| unit_test.root_module.addImport("katzensteg_sdl", mod);
+    if (options.katzensteg_build_options) |mod| unit_test.root_module.addImport("katzensteg_build_options", mod);
     if (options.link_sdl2) {
         if (target.result.os.tag == .macos) unit_test.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         unit_test.linkSystemLibrary("SDL2");
