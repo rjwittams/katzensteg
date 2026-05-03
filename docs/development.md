@@ -28,6 +28,9 @@ To skip Vulkan while bringing up a machine:
 zig build -Dvulkan=false
 ```
 
+This is diagnostic-only. Once Vulkan dependencies are available, switch back to
+the default `zig build` and `zig build test` before relying on the result.
+
 ## Tests
 
 Run Zig unit tests:
