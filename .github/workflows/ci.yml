@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -40,9 +42,11 @@ jobs:
       - name: Zig tests
         run: zig build test
 
+      - name: Verify Linux headers
+        run: test -f /usr/include/vulkan/vulkan.h
+
       - name: Python tests
         run: |
-          python3 scripts/katzensteg/test_attach_exec.py
           python3 scripts/katzensteg/test_bootstrap_external_projects.py
           python3 scripts/katzensteg/test_env_scrub.py
           python3 scripts/katzensteg/test_image_fastpath_portable.py

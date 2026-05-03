@@ -13,6 +13,18 @@ ENV_SCRUB_SOURCE = ROOT / "src" / "katzensteg" / "env_scrub.c"
 VULKAN_LAYER_SOURCE = ROOT / "src" / "katzensteg" / "vulkan_layer.c"
 
 
+def system_libm_path():
+    for candidate in (
+        pathlib.Path("/usr/lib/libm.so.6"),
+        pathlib.Path("/lib/x86_64-linux-gnu/libm.so.6"),
+        pathlib.Path("/usr/lib/x86_64-linux-gnu/libm.so.6"),
+        pathlib.Path("/lib64/libm.so.6"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    raise unittest.SkipTest("libm.so.6 path is required to test LD_PRELOAD scrubbing")
+
+
 def vulkan_include_args():
     candidates = []
     vulkan_sdk = os.environ.get("VULKAN_SDK")
@@ -148,7 +160,7 @@ class EnvScrubTests(unittest.TestCase):
             lib_path.exists(),
             f"{lib_path} does not exist; run `zig build` first",
         )
-        keep_path = "/usr/lib/libm.so.6"
+        keep_path = system_libm_path()
 
         env = os.environ.copy()
         env["LD_PRELOAD"] = f"{lib_path}:{keep_path}"

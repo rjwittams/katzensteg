@@ -311,7 +311,7 @@ class LinuxPreloadExportsTests(unittest.TestCase):
         needed = needed_libraries(lib_path)
         self.assertTrue(
             any(name.startswith("libyuv.so") for name in needed),
-            needed,
+            f"expected a libyuv.so* NEEDED entry; got: {needed}",
         )
 
 
