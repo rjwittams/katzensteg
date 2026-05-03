@@ -217,8 +217,12 @@ const usage_text =
     \\  With no target, Katzensteg lists available profiles.
     \\
     \\Environment:
-    \\  KATZENSTEG_PROFILE_DIR  Override the profile directory.
-    \\  KATZENSTEG_REPO         Override {repo}/$ROOT expansion.
+    \\  KATZENSTEG_PROFILE_DIR    Profile directories, ':'-separated. First match wins;
+    \\                            non-existent dirs are silently skipped.
+    \\                            Default: <repo>/profiles plus
+    \\                            $XDG_CONFIG_HOME/katzensteg/profiles
+    \\                            (or ~/.config/katzensteg/profiles).
+    \\  KATZENSTEG_REPO           Override {repo}/$ROOT expansion.
     \\  KATZENSTEG_PROXY_PROFILE  Child profile used by katzensteg-proxy.
     \\
 ;
@@ -383,10 +387,11 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     if (embed_jsonl) applyEmbedJsonlRuntime(&plan.runtime, defaultEmbedRuntimeFds());
 
     std.debug.print(
-        "katzensteg dry-run\nprofile={s}\ntarget={s}\nstdout={s}\nstderr={s}\n",
+        "katzensteg dry-run\nprofile={s}\ntarget={s}\ncwd={s}\nstdout={s}\nstderr={s}\n",
         .{
             plan.profile_name,
             plan.target,
+            plan.cwd orelse "<inherit>",
             outputSpecLabel(plan.stdout),
             outputSpecLabel(plan.stderr),
         },
@@ -634,20 +639,61 @@ fn usesPathLookup(executable: []const u8) bool {
 }
 
 fn loadProfileCatalog(allocator: std.mem.Allocator) !profiles_mod.ProfileCatalog {
-    const profile_dir = try resolveProfileDir(allocator);
-    defer allocator.free(profile_dir);
-    return profiles_mod.ProfileCatalog.parseDirectory(allocator, profile_dir);
+    var dirs = try resolveProfileDirs(allocator);
+    defer {
+        for (dirs.items) |dir| allocator.free(dir);
+        dirs.deinit(allocator);
+    }
+    return profiles_mod.ProfileCatalog.parseDirectories(allocator, dirs.items);
 }
 
-fn resolveProfileDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |dir| return dir else |err| switch (err) {
+fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+    var dirs = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (dirs.items) |dir| allocator.free(dir);
+        dirs.deinit(allocator);
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |raw| {
+        defer allocator.free(raw);
+        var it = std.mem.splitScalar(u8, raw, ':');
+        while (it.next()) |segment| {
+            const trimmed = std.mem.trim(u8, segment, " \t");
+            if (trimmed.len == 0) continue;
+            try dirs.append(allocator, try allocator.dupe(u8, trimmed));
+        }
+        if (dirs.items.len > 0) return dirs;
+    } else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
 
     const repo = try resolveRepoRoot(allocator);
     defer allocator.free(repo);
-    return std.fs.path.join(allocator, &.{ repo, "profiles" });
+    try dirs.append(allocator, try std.fs.path.join(allocator, &.{ repo, "profiles" }));
+
+    if (try userConfigProfilesDir(allocator)) |user_dir| {
+        try dirs.append(allocator, user_dir);
+    }
+    return dirs;
+}
+
+fn userConfigProfilesDir(allocator: std.mem.Allocator) !?[]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+        defer allocator.free(xdg);
+        if (xdg.len > 0) return try std.fs.path.join(allocator, &.{ xdg, "katzensteg", "profiles" });
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        defer allocator.free(home);
+        if (home.len > 0) return try std.fs.path.join(allocator, &.{ home, ".config", "katzensteg", "profiles" });
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+    return null;
 }
 
 fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {

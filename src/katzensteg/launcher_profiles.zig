@@ -123,8 +123,15 @@ pub const ProfileCatalog = struct {
     }
 
     pub fn parseDirectoryForPlatform(allocator: std.mem.Allocator, dir_path: []const u8, platform: ProfilePlatform) !ProfileCatalog {
-        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-        defer dir.close();
+        return parseDirectoriesForPlatform(allocator, &.{dir_path}, platform);
+    }
+
+    pub fn parseDirectories(allocator: std.mem.Allocator, dir_paths: []const []const u8) !ProfileCatalog {
+        return parseDirectoriesForPlatform(allocator, dir_paths, currentProfilePlatform());
+    }
+
+    pub fn parseDirectoriesForPlatform(allocator: std.mem.Allocator, dir_paths: []const []const u8, platform: ProfilePlatform) !ProfileCatalog {
+        if (dir_paths.len == 0) return error.MissingProfiles;
 
         var profiles = std.ArrayList(LaunchProfile).empty;
         errdefer {
@@ -132,13 +139,21 @@ pub const ProfileCatalog = struct {
             profiles.deinit(allocator);
         }
 
-        var it = dir.iterate();
-        while (try it.next()) |entry| {
-            if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-            const bytes = try dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
-            defer allocator.free(bytes);
-            try parseDocumentInto(allocator, &profiles, bytes, entry.name, .ignore_non_profile, platform);
+        for (dir_paths) |dir_path| {
+            var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => return err,
+            };
+            defer dir.close();
+
+            var it = dir.iterate();
+            while (try it.next()) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+                const bytes = try dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
+                defer allocator.free(bytes);
+                try parseDocumentInto(allocator, &profiles, bytes, entry.name, .ignore_non_profile, platform);
+            }
         }
 
         try resolveInheritance(allocator, profiles.items);
@@ -1082,13 +1097,66 @@ test "profile parser keeps loading documents after a malformed document" {
     try std.testing.expectEqualStrings("/bin/echo", catalog.find("good").?.target);
 }
 
-test "bundled profiles include smb3 ANESE launch target" {
+test "bundled retroarch profiles use neutral ROM paths" {
     var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();
 
-    const profile = catalog.find("smb3").?;
-    try std.testing.expectEqualStrings("$HOME/dev/ANESE/build/anese", profile.target);
-    try std.testing.expectEqualStrings("$HOME/roms/smb3.nes", profile.args[0]);
+    const sonic = catalog.find("sonic").?;
+    try std.testing.expectEqualStrings("$HOME/roms/sonic.md", sonic.args[sonic.args.len - 1]);
+
+    const jsr = catalog.find("jsr").?;
+    try std.testing.expectEqualStrings("$HOME/roms/jgr/jgr.cue", jsr.args[jsr.args.len - 1]);
+
+    const spyro = catalog.find("spyro").?;
+    try std.testing.expectEqualStrings("$HOME/roms/spyro/spyro.cue", spyro.args[spyro.args.len - 1]);
+
+    try std.testing.expect(catalog.find("smw") == null);
+    try std.testing.expect(catalog.find("sm64ds") == null);
+    try std.testing.expect(catalog.find("smb3") == null);
+}
+
+test "parseDirectories silently skips non-existent directories" {
+    var catalog = try ProfileCatalog.parseDirectories(
+        std.testing.allocator,
+        &.{ "profiles", "/tmp/katzensteg-nonexistent-profiles-dir-xyzzy" },
+    );
+    defer catalog.deinit();
+
+    try std.testing.expect(catalog.find("sonic") != null);
+    try std.testing.expect(catalog.find("cannonball") != null);
+}
+
+test "parseDirectories overlays profiles from multiple directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const overlay_json =
+        \\{
+        \\  "profiles": {
+        \\    "overlay.example": {
+        \\      "target": "/bin/echo",
+        \\      "args": ["hello"]
+        \\    }
+        \\  }
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "overlay.json", .data = overlay_json });
+
+    const overlay_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(overlay_dir);
+
+    var catalog = try ProfileCatalog.parseDirectories(
+        std.testing.allocator,
+        &.{ "profiles", overlay_dir },
+    );
+    defer catalog.deinit();
+
+    try std.testing.expect(catalog.find("sonic") != null);
+    try std.testing.expect(catalog.find("cannonball") != null);
+
+    const overlay = catalog.find("overlay.example").?;
+    try std.testing.expectEqualStrings("/bin/echo", overlay.target);
+    try std.testing.expectEqualStrings("hello", overlay.args[0]);
 }
 
 test "bundled profile directory ignores non-profile JSON documents" {
