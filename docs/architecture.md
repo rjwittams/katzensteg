@@ -54,10 +54,3 @@ Hidden profiles are reusable fragments. Visible profiles are direct launch targe
 ### External App Forks
 
 Some real workloads need patched application branches to expose paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.
-
-## Non-Goals For The Current Public Surface
-
-- Claiming general arbitrary native-app support.
-- Making broad API-level support claims from the current profile matrix.
-- Publishing prototype host/compositor/protocol experiments as user-facing features before they have a release shape.
-- Reintroducing one-off launcher scripts for new profiles.
