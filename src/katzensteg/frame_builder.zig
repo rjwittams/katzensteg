@@ -218,6 +218,8 @@ const RendererState = struct {
         self.window_w = new_w;
         self.window_h = new_h;
         if (old_full_viewport) self.viewport = .{ .x = 0, .y = 0, .w = new_w, .h = new_h };
+        // The next composite present reallocates composite_rgba if needed; the
+        // previous-frame cache must be invalidated immediately for full upload.
         if (self.composite_last_presented) |last| @memset(last, 0);
     }
 

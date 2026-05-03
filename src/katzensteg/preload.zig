@@ -154,7 +154,7 @@ fn dispatchWindowSizeByHandle(rt: *runtime.Runtime, window: usize, w: i32, h: i3
     if (window == 0 or w <= 0 or h <= 0) return;
     rt.noteInputWindowSize(w, h);
     switch (rt.intercept_mode) {
-        .sync_compose => rt.frame_builder.onWindowSize(window, w, h),
+        .sync_compose => sink.onWindowSize(rt, sdl_adapter.ptrFromHandle(sdl.SDL_Window, window), w, h),
         .queued_replay => sink.dispatchCommand(rt, .{ .window_size = .{ .window = window, .w = w, .h = h } }),
     }
 }
@@ -460,6 +460,8 @@ pub export fn ks_SDL_SetWindowSize(window: ?*sdl.SDL_Window, w: c_int, h: c_int)
     const rt = runtime.get();
     real_sdl.SDL_SetWindowSize(window, w, h);
     traceLimited(rt, &trace_set_window_size, "SDL_SetWindowSize window={x} size={d}x{d}", .{ if (window) |p| @intFromPtr(p) else 0, w, h });
+    // SDL will later deliver SIZE_CHANGED with the actual result. This eager
+    // update keeps our coordinate basis aligned if the app renders before then.
     dispatchWindowSizeByHandle(rt, sdl_adapter.handleFromPtr(window), w, h);
 }
 

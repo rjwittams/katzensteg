@@ -15,6 +15,7 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_Quit",
     "SDL_CreateWindow",
     "SDL_GetWindowFlags",
+    "SDL_SetWindowSize",
     "SDL_ShowWindow",
     "SDL_HideWindow",
     "SDL_MinimizeWindow",
