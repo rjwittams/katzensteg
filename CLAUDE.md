@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, launcher, external-project, and development notes.
+Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, launcher, external-projects, and development notes.
 
 ## What this repo is
 
-Two things, in one Zig + C codebase:
+This is a Zig + C codebase with two main source areas:
 
 - **`termscene`** (`src/termscene/`) — reusable terminal graphics engine. Scene model, types, backend abstraction, kitty-protocol backend.
 - **`Katzensteg`** (`src/katzensteg/`) — the active workstream. A preload library (`LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` on macOS) that interposes on SDL2 / GL / (optionally) Vulkan calls from a target app and mirrors its output to a terminal via `/dev/tty`. Includes a launcher, a JSON profile system, frame composition, and a client to a separate inspector service.
@@ -22,13 +22,13 @@ examples/           ttytris, termscene-demo, kitty-* repros
 profiles/           JSON launcher profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
                     plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
-docs/              current project docs; historical/agent-oriented notes are archived outside the repo
+docs/              current project docs
 .github/workflows/  claude-code-review.yml — automated PR review
 ```
 
 ## Build
 
-- Zig **0.15.2** is the expected toolchain for current Linux work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
+- Zig **0.15.2** is the expected toolchain for current work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
 - No `build.zig.zon` yet; system libs (SDL2, libyuv on Linux) are required.
 - Linux currently forces LLVM codegen in `build.zig`. Do not flip this back to non-LLVM/system-linker experiments casually: current Arch/CachyOS toolchains have hit `.sframe` relocation failures on that path.
 
@@ -89,7 +89,7 @@ Test coverage is becoming a focus — agents adding non-trivial logic should add
 
 Start with `docs/architecture.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, and `docs/development.md` for build/test/logging.
 
-Historical design notes, implementation plans, and agent-oriented handoffs were removed from the repo; they remain available in git history. A copy was also saved to a local archive outside the repo for this workspace.
+Historical design notes, implementation plans, and agent-oriented handoffs were removed from the repo; use git history if that context is needed.
 
 ## Conventions
 
@@ -98,7 +98,7 @@ Historical design notes, implementation plans, and agent-oriented handoffs were 
 - Linux: keep `build.zig`'s LLVM-codegen setting unless you have revalidated the `.sframe`/linker behavior on the target distro.
 - Preload code must not write to stdout/stderr (file logging only).
 - Vulkan capture should pass the original external framebuffer format through to the preload/present layer (`ExternalFramebufferFormat`) instead of normalizing in `vulkan_layer.c`. Format conversion belongs in the present path so queued stale frames can be dropped before conversion and future format-specific fast paths have one owner.
-- For GitHub publishing, use normal `git` and `gh` commands with work-focused branch names, commit messages, and PR titles. Do not prefix PRs or branches with the coding agent name, and do not use workflows that encode agent-specific naming conventions such as `github:yeet`.
+- Use work-focused branch names, commit messages, and PR titles. Do not prefix them with a coding-agent or tool name.
 
 ## Architecture boundaries
 
