@@ -7,6 +7,13 @@
         "SDL_RENDER_DRIVER": "software"
       }
     },
+    "ffplay": {
+      "extends": [
+        "app.ffplay",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ]
+    },
     "ffplay.testsrc": {
       "extends": [
         "app.ffplay",

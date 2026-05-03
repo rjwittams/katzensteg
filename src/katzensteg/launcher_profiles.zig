@@ -1177,6 +1177,19 @@ test "bundled profiles include Cannonball launch target" {
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/config.xml", profile.args[1]);
 }
 
+test "bundled profiles include ffplay passthrough launch target" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("ffplay").?;
+    try std.testing.expect(!profile.hidden);
+    try std.testing.expectEqualStrings("ffplay", profile.target);
+    try std.testing.expectEqual(@as(usize, 0), profile.args.len);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expectEqualStrings("software", envValue(profile, "SDL_RENDER_DRIVER").?);
+    try std.testing.expect(envValue(profile, "LD_PRELOAD") != null or envValue(profile, "DYLD_INSERT_LIBRARIES") != null);
+}
+
 test "bundled Vulkan capture profile resolves platform layer paths" {
     var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
