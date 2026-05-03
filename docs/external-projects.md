@@ -49,11 +49,11 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 | --- | --- | --- | --- | --- |
 | RetroArch | [`rjwittams/RetroArch`](https://github.com/rjwittams/RetroArch) | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | Uses forked branches for macOS video/input and context-driver behavior. |
 | Flycast | [`rjwittams/flycast@libretro-hide-symbols`](https://github.com/rjwittams/flycast/tree/libretro-hide-symbols) | Dreamcast libretro core used by RetroArch profiles | `jsr` | Needed on Linux to avoid libretro core linking issues. |
-| ScummVM | [`rjwittams/scummvm`](https://github.com/rjwittams/scummvm) | SDL software/surface behavior | `mi2` | Currently useful without app-side patches. |
+| ScummVM | upstream | SDL software/surface behavior | `mi2` | Currently useful without app-side patches. |
 | Moonlight Qt | [`rjwittams/moonlight-qt`](https://github.com/rjwittams/moonlight-qt) | Streaming/video workload through an SDL renderer path | `moonlight.steam` | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
 | Cannonball | [`rjwittams/cannonball`](https://github.com/rjwittams/cannonball) | Simple SDL app target | `cannonball` | Uses a small build-fix branch. |
 | Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | Stream client prototype | `chiaki.sdl` | Uses an SDL stream-only frontend branch. |
-| ANESE | [`rjwittams/ANESE`](https://github.com/rjwittams/ANESE) | Small SDL emulator target | `anese.test`, `smb3` | Currently useful without app-side patches. |
+| ANESE | upstream | Small SDL emulator target | `anese.test`, `smb3` | Currently useful without app-side patches. |
 
 ## Local Data
 
