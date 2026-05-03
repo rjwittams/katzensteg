@@ -67,7 +67,7 @@ KATZENSTEG_REPO=/path/to/katzensteg ./zig-out/bin/katzensteg probe.input
 Real app profiles often assume:
 
 - local source checkouts under `~/dev`
-- patched app branches that expose pure SDL2 output/input
+- patched app branches that expose output/input paths Katzensteg can currently exercise
 - ROM, game, or media files that are not stored in this repository
 - platform-specific build products
 

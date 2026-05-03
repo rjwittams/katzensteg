@@ -1,14 +1,14 @@
 # Roadmap
 
-Katzensteg is an alpha project. The near-term goal is not broad arbitrary native-app support; it is a reliable, understandable path for real SDL2 applications and selected patched workloads to run inside kitty-compatible terminals.
+Katzensteg is an alpha project. The near-term goal is not broad arbitrary native-app support; it is a reliable, understandable path for selected real applications and patched workloads to run inside kitty-compatible terminals.
 
 ## Current Baseline
 
-- Pure SDL2 output/input is the reliable path.
+- The current app matrix is workload-specific, not a blanket API support claim.
 - The launcher and profile system are the normal way to run targets.
 - Keyboard and mouse input work for the main tested paths.
 - Real workloads include emulator, adventure-game, stream-client, and SDL probe targets.
-- Some larger targets need app-side SDL2 patches or build modes.
+- Some larger targets need app-side patches or build modes.
 - Linux support is active and should be verified against the smoke matrix.
 
 ## Phase 1: Stabilize The Public Path
@@ -16,7 +16,7 @@ Katzensteg is an alpha project. The near-term goal is not broad arbitrary native
 Goals:
 
 - Keep `probe.input` as the first bring-up target.
-- Keep SDL2 software/renderer capture reliable.
+- Keep the current probe and profile capture paths reliable.
 - Keep terminal cleanup and log output predictable.
 - Make profile dry-runs clear enough to diagnose missing local setup.
 - Remove stale or misleading docs and scripts.
@@ -26,7 +26,7 @@ Goals:
 
 Goals:
 
-- Keep RetroArch SDL2 profiles working.
+- Keep RetroArch profiles working.
 - Keep ScummVM and small SDL apps working.
 - Keep Moonlight/Chiaki streaming profiles useful as stress tests.
 - Track which profiles require app-side patches.
@@ -46,10 +46,10 @@ Goals:
 
 Goals:
 
-- Keep SDL2 adapter behavior separate from reusable runtime behavior.
+- Keep adapter behavior separate from reusable runtime behavior.
 - Preserve one owner for terminal graphics state, input, image lifetime, and logging.
 - Keep platform-specific interposer code isolated.
-- Make future SDL3 or deeper Vulkan work possible without muddling the current SDL2 baseline.
+- Make future SDL3 or deeper Vulkan work possible without muddling the current tested baseline.
 
 ## Phase 5: Performance And Formats
 
@@ -68,5 +68,5 @@ These areas are real, but should not be presented as stable user-facing features
 - richer terminal chrome/control surfaces
 - multi-window host/compositor experiments
 - general host/embedding protocols
-- arbitrary OpenGL/Vulkan application support
+- arbitrary SDL2/OpenGL/Vulkan application support
 - external surface import paths such as dmabuf or IOSurface

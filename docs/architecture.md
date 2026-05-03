@@ -6,16 +6,15 @@ The launcher starts a target application from a JSON profile. The runtime is inj
 
 ## Current Support Boundary
 
-The reliable path today is pure SDL2 output and input:
+The current support boundary is defined by tested workloads, not by a blanket API guarantee.
 
-- SDL2 software surfaces.
-- SDL2 renderer output.
-- SDL keyboard and mouse event paths.
+The best-tested paths are:
+
+- SDL2 software and renderer output used by the current probes and patched app profiles.
+- SDL keyboard and mouse event paths used by those profiles.
 - Terminal graphics output using kitty-compatible protocol support.
 
-Several larger applications in the smoke matrix needed app-side patches or build modes so they expose a pure SDL2 renderer/input path. Katzensteg should be documented and tested honestly around that boundary.
-
-OpenGL and Vulkan capture work exists in the tree, and some profiles exercise those paths, but arbitrary GL/Vulkan application support is not the current baseline.
+Several larger applications in the smoke matrix needed app-side patches or build modes so they expose an SDL2 renderer/input path. OpenGL and Vulkan capture work exists in the tree, and some profiles exercise those paths, but none of this should be read as arbitrary SDL2, OpenGL, or Vulkan application support.
 
 ## Main Pieces
 
@@ -37,7 +36,7 @@ The launcher should be the place to encode repeatable run policy. Avoid adding n
 
 The runtime lives under `src/katzensteg/`. It owns:
 
-- SDL2 capture and replay state
+- SDL2 capture and replay state for tested paths
 - frame composition
 - terminal graphics output
 - keyboard and mouse input mapping
@@ -54,11 +53,11 @@ Hidden profiles are reusable fragments. Visible profiles are direct launch targe
 
 ### External App Forks
 
-Some real workloads need patched application branches to expose SDL2 paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.
+Some real workloads need patched application branches to expose paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.
 
 ## Non-Goals For The Current Public Surface
 
 - Claiming general arbitrary native-app support.
-- Treating GL/Vulkan as the stable default path.
+- Making broad API-level support claims from the current profile matrix.
 - Publishing prototype host/compositor/protocol experiments as user-facing features before they have a release shape.
 - Reintroducing one-off launcher scripts for new profiles.

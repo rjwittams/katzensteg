@@ -1,12 +1,12 @@
 # External Projects
 
-Katzensteg's most useful tests are real applications, but several of those applications need local forks or build modes so they expose a pure SDL2 output/input path. This document tracks those external projects and explains what the bootstrap helper is trying to verify.
+Katzensteg's most useful tests are real applications, but several of those applications need local forks or build modes so they expose an output/input path Katzensteg can currently exercise. This document tracks those external projects and explains what the bootstrap helper is trying to verify.
 
 The external projects are not vendored into this repository.
 
 ## Why Forks Exist
 
-Katzensteg's reliable path today is pure SDL2. Some larger targets normally prefer Cocoa, Qt, OpenGL, Vulkan, Metal, or other platform-specific frontends. For Katzensteg testing, they may need patches that:
+Some larger targets normally prefer Cocoa, Qt, OpenGL, Vulkan, Metal, or other platform-specific frontends. For Katzensteg testing, they may need patches that:
 
 - enable an SDL2 video driver on a platform where it is not normally offered
 - force a software or SDL renderer path
@@ -47,7 +47,7 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 
 | Project | Purpose | Profile coverage | Notes |
 | --- | --- | --- | --- |
-| RetroArch | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | Uses forked branches for macOS SDL2 video/input and context-driver behavior. |
+| RetroArch | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | Uses forked branches for macOS video/input and context-driver behavior. |
 | ScummVM | SDL software/surface behavior | `mi2` | Currently useful without app-side patches. |
 | Moonlight Qt | Streaming/video workload through an SDL renderer path | `moonlight.steam` | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
 | Cannonball | Simple SDL app target | `cannonball` | Uses a small build-fix branch. |

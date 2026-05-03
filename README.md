@@ -4,7 +4,7 @@ Katzensteg puts native application graphics in your terminal.
 
 It currently works by launching applications with the Katzensteg runtime injected into the process, using `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` on macOS. The runtime captures the app's SDL2 output and presents it through kitty-compatible terminal graphics.
 
-The current practical support boundary is important: Katzensteg works best with pure SDL2 output and input paths. Several larger test applications have needed app-side patches or build modes so they can expose a pure SDL2 renderer/input path for Katzensteg to capture. The current proving ground is games and emulators: RetroArch, ScummVM, Moonlight, Chiaki, small SDL probes, and similar workloads.
+The current practical support boundary is workload-specific. Several larger test applications have needed app-side patches or build modes so they expose an SDL2 output/input path for Katzensteg to capture. The current proving ground is games and emulators: RetroArch, ScummVM, Moonlight, Chiaki, small SDL probes, and similar workloads.
 
 This is alpha software. It is already useful for experiments and demos, but the interfaces, profiles, and supported app matrix are still moving.
 
@@ -12,12 +12,12 @@ Project site: <https://katzensteg.kitty-yet.com>
 
 ## What Works Today
 
-- SDL2 software and renderer paths.
+- SDL2 software and renderer paths used by the current probes and patched app profiles.
 - Keyboard and mouse input for the main tested paths.
 - Launcher profiles for repeatable app runs.
 - Kitty-compatible output in terminals such as Kitty and Ghostty, with additional compatibility testing in WezTerm and iTerm2.
 
-OpenGL and Vulkan capture work exists in the tree, but the README should not be read as a promise that arbitrary GL/Vulkan applications work out of the box. The reliable path today is pure SDL2.
+OpenGL and Vulkan capture work exists in the tree for specific experiments and profiles. The README should not be read as a promise that arbitrary SDL2, OpenGL, or Vulkan applications work out of the box.
 
 ## Try It
 
