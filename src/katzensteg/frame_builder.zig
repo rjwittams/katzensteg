@@ -167,6 +167,7 @@ const PresentDebugSignature = struct {
 };
 
 const RendererState = struct {
+    window: core.CoreHandle = 0,
     window_w: i32,
     window_h: i32,
     viewport: core.CoreRect,
@@ -208,6 +209,18 @@ const RendererState = struct {
         self.copies.deinit(allocator);
         self.fills.deinit(allocator);
         self.lines.deinit(allocator);
+    }
+
+    fn resizeWindow(self: *RendererState, w: i32, h: i32) void {
+        const new_w = @max(1, w);
+        const new_h = @max(1, h);
+        const old_full_viewport = self.viewport.x == 0 and self.viewport.y == 0 and self.viewport.w == self.window_w and self.viewport.h == self.window_h;
+        self.window_w = new_w;
+        self.window_h = new_h;
+        if (old_full_viewport) self.viewport = .{ .x = 0, .y = 0, .w = new_w, .h = new_h };
+        // The next composite present reallocates composite_rgba if needed; the
+        // previous-frame cache must be invalidated immediately for full upload.
+        if (self.composite_last_presented) |last| @memset(last, 0);
     }
 
     fn rememberFullscreenPlacement(self: *RendererState, old: CompositePlacement) ?CompositePlacement {
@@ -423,7 +436,18 @@ pub const FrameBuilder = struct {
     pub fn onCreateRenderer(self: *FrameBuilder, window: core.CoreHandle, renderer: core.CoreHandle) void {
         if (renderer == 0) return;
         const dims = self.windows.get(window) orelse WindowRecord{ .w = 640, .h = 480 };
-        self.renderers.put(renderer, RendererState.init(self.allocator, dims.w, dims.h)) catch {};
+        var state = RendererState.init(self.allocator, dims.w, dims.h);
+        state.window = window;
+        self.renderers.put(renderer, state) catch {};
+    }
+
+    pub fn onWindowSize(self: *FrameBuilder, window: core.CoreHandle, w: i32, h: i32) void {
+        if (window == 0 or w <= 0 or h <= 0) return;
+        self.windows.put(window, .{ .w = w, .h = h }) catch {};
+        var it = self.renderers.valueIterator();
+        while (it.next()) |state| {
+            if (state.window == window) state.resizeWindow(w, h);
+        }
     }
 
     pub fn onDestroyRenderer(self: *FrameBuilder, renderer: core.CoreHandle) void {
@@ -3478,6 +3502,48 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
     const scene_job = job.scene;
     try std.testing.expectEqual(@as(usize, 1), scene_job.sprites.len);
     try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.sprites[0].dest_rect);
+}
+
+test "fullscreen sprite path uses resized window dimensions for copy mapping" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const window_key: usize = 1;
+    const renderer_key: usize = 2;
+    const texture_key: usize = 3;
+    builder.onCreateWindow(window_key, 640, 480);
+    builder.onCreateRenderer(window_key, renderer_key);
+    builder.onWindowSize(window_key, 854, 480);
+
+    const pixels = try std.testing.allocator.alloc(u8, 854 * 480 * 4);
+    @memset(pixels, 255);
+    try builder.textures.put(texture_key, .{
+        .w = 854,
+        .h = 480,
+        .format = default_texture_format,
+        .image_id = 0,
+        .base_rgba = pixels,
+        .base_opaque = true,
+    });
+
+    const dst = core.CoreRect{ .x = 0, .y = 0, .w = 854, .h = 480 };
+    builder.onRenderCopyEx(&logger, renderer_key, texture_key, null, &dst, 0, null, compat_sdl_flip_none);
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    const scene_job = job.scene;
+    try std.testing.expectEqual(@as(usize, 1), scene_job.sprites.len);
+    try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 7, .w = 100, .h = 28 }, scene_job.sprites[0].dest_rect);
 }
 
 test "fullscreen composite upload size falls back to source without terminal pixels" {

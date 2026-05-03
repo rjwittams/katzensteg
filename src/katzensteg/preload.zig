@@ -26,6 +26,7 @@ const sdl_log = std.log.scoped(.sdl);
 const gl_log = std.log.scoped(.gl);
 
 var trace_create_window: usize = 0;
+var trace_set_window_size: usize = 0;
 var trace_show_window: usize = 0;
 var trace_hide_window: usize = 0;
 var trace_minimize_window: usize = 0;
@@ -138,6 +139,8 @@ fn noteTrackedSdlWindowDestroy(window: ?*sdl.SDL_Window) i32 {
 
 fn windowEventTraceName(event: sdl.Uint8) []const u8 {
     return switch (event) {
+        sdl.SDL_WINDOWEVENT_RESIZED => "window.resized",
+        sdl.SDL_WINDOWEVENT_SIZE_CHANGED => "window.size_changed",
         sdl.SDL_WINDOWEVENT_ENTER => "window.enter",
         sdl.SDL_WINDOWEVENT_LEAVE => "window.leave",
         sdl.SDL_WINDOWEVENT_FOCUS_GAINED => "window.focus_gained",
@@ -145,6 +148,28 @@ fn windowEventTraceName(event: sdl.Uint8) []const u8 {
         sdl.SDL_WINDOWEVENT_CLOSE => "window.close",
         else => "window.other",
     };
+}
+
+fn dispatchWindowSizeByHandle(rt: *runtime.Runtime, window: usize, w: i32, h: i32) void {
+    if (window == 0 or w <= 0 or h <= 0) return;
+    rt.noteInputWindowSize(w, h);
+    switch (rt.intercept_mode) {
+        .sync_compose => sink.onWindowSize(rt, sdl_adapter.ptrFromHandle(sdl.SDL_Window, window), w, h),
+        .queued_replay => sink.dispatchCommand(rt, .{ .window_size = .{ .window = window, .w = w, .h = h } }),
+    }
+}
+
+fn noteDeliveredWindowSizeEvent(rt: *runtime.Runtime, event: *const sdl.SDL_Event) void {
+    if (event.type != sdl.SDL_WINDOWEVENT) return;
+    switch (event.window.event) {
+        sdl.SDL_WINDOWEVENT_RESIZED,
+        sdl.SDL_WINDOWEVENT_SIZE_CHANGED,
+        => {
+            const window = rt.coreWindowForSdlWindowId(event.window.windowID) orelse return;
+            dispatchWindowSizeByHandle(rt, window, event.window.data1, event.window.data2);
+        },
+        else => {},
+    }
 }
 
 fn shouldTraceSdlEvent(event: *const sdl.SDL_Event) bool {
@@ -417,6 +442,10 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
     const window = real_sdl.SDL_CreateWindow(title, x, y, w, h, flags);
     const tracked_windows = noteTrackedSdlWindowCreate(window);
     const rt = runtime.get();
+    if (window) |win| {
+        const window_id = real_sdl.SDL_GetWindowID(win);
+        rt.noteSdlWindowId(window_id, sdl_adapter.handleFromPtr(window));
+    }
     rt.noteInputWindowSize(w, h);
     traceLimited(rt, &trace_create_window, "SDL_CreateWindow window={x} size={d}x{d} flags=0x{x} tracked_windows={d}", .{ if (window) |p| @intFromPtr(p) else 0, w, h, flags, tracked_windows });
     switch (rt.intercept_mode) {
@@ -425,6 +454,15 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
     }
     applyRealWindowAction(rt.realWindowCreateAction(), window);
     return window;
+}
+
+pub export fn ks_SDL_SetWindowSize(window: ?*sdl.SDL_Window, w: c_int, h: c_int) callconv(.c) void {
+    const rt = runtime.get();
+    real_sdl.SDL_SetWindowSize(window, w, h);
+    traceLimited(rt, &trace_set_window_size, "SDL_SetWindowSize window={x} size={d}x{d}", .{ if (window) |p| @intFromPtr(p) else 0, w, h });
+    // SDL will later deliver SIZE_CHANGED with the actual result. This eager
+    // update keeps our coordinate basis aligned if the app renders before then.
+    dispatchWindowSizeByHandle(rt, sdl_adapter.handleFromPtr(window), w, h);
 }
 
 pub export fn ks_SDL_GetWindowFlags(window: ?*sdl.SDL_Window) callconv(.c) sdl.Uint32 {
@@ -481,6 +519,8 @@ pub export fn ks_SDL_RaiseWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
 
 pub export fn ks_SDL_DestroyWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
     const before = tracked_sdl_window_count;
+    const rt = runtime.get();
+    rt.forgetSdlWindow(sdl_adapter.handleFromPtr(window));
     real_sdl.SDL_DestroyWindow(window);
     const after = noteTrackedSdlWindowDestroy(window);
     traceSdlLifecycle("SDL_DestroyWindow window={x} tracked_windows={d}->{d}", .{ if (window) |p| @intFromPtr(p) else 0, before, after });
@@ -1057,6 +1097,7 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
             continue;
         }
         traceSdlEvent("SDL_PollEvent delivered", out, false);
+        noteDeliveredWindowSizeEvent(rt, out);
         sdl_input.noteRealEvent(rt, out);
         return rc;
     }
@@ -1093,6 +1134,7 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     traceSdlEvents("SDL_PeepEvents delivered", rest_ptr, real_rc);
     var real_index: c_int = 0;
     while (real_index < real_rc) : (real_index += 1) {
+        noteDeliveredWindowSizeEvent(rt, &rest_ptr[@intCast(real_index)]);
         sdl_input.noteRealEvent(rt, &rest_ptr[@intCast(real_index)]);
     }
     return emitted + real_rc;
