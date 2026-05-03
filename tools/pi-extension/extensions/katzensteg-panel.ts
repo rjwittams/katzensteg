@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
-import { type OverlayHandle, visibleWidth } from "@mariozechner/pi-tui";
+import { type OverlayHandle, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 const WINDOW_ID = "main" as const;
 const IMAGE_IDS: [number, number] = [100000, 199999];
@@ -21,8 +21,17 @@ const FRAME_OVERHEAD_ROWS = 4; // top border + title + status + bottom border
 const FRAME_OVERHEAD_COLS = 2; // left/right borders
 const PANEL_MARGIN = 1;
 const PANEL_ASPECT: Aspect = "fit";
-const CLOSE_DRAIN_MS = 750;
-const CLOSE_AFTER_CLEANUP_MS = 75;
+// Katzensteg's full-frame composite uses z=100. In a Pi overlay the host text
+// chrome should remain readable, so neutralize that by default and let callers
+// override when debugging terminal z behaviour.
+const PANEL_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_Z_BASE, -100);
+const DEFAULT_WINDOW_POLICY = process.env.KATZENSTEG_PANEL_WINDOW_POLICY || process.env.KATZENSTEG_WINDOW_POLICY || "mirror";
+const DEFAULT_REAL_WINDOW = process.env.KATZENSTEG_PANEL_REAL_WINDOW || process.env.KATZENSTEG_REAL_WINDOW || "show";
+// The launcher gives an embed producer 1500ms after shutdown before SIGTERM.
+// Keep the panel alive longer than that so producer-authored delete batches can
+// drain instead of leaving stale kitty placements behind.
+const CLOSE_DRAIN_MS = 2500;
+const CLOSE_AFTER_CLEANUP_MS = 150;
 
 type Aspect = "fit" | "stretch" | "cover";
 type UploadProfile = "direct_apc" | "file_whole" | "file_offset_ring";
@@ -71,6 +80,7 @@ interface AttachOptions {
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
 	aspect: Aspect;
+	zBase: number;
 	imageIds: [number, number];
 	placementIds: [number, number];
 	upload: { profile: UploadProfile; path?: string; highWater: number };
@@ -80,6 +90,7 @@ interface ViewportOptions {
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
 	aspect: Aspect;
+	zBase: number;
 }
 
 const SIZE_PRESETS: Record<SizePresetName, SizePreset> = {
@@ -215,12 +226,12 @@ class PanelController {
 
 	render(width: number, theme: Theme): string[] {
 		const innerWidth = Math.max(1, width - 2);
-		const row = (content: string) => theme.fg("border", "│") + pad(content, innerWidth) + theme.fg("border", "│");
+		const row = (content: string) => theme.fg("border", "│") + fitCellText(content, innerWidth) + theme.fg("border", "│");
 		const lines: string[] = [];
 		const title = ` 🐈 Katzensteg · ${this.mode} · ${this.profile} · ${this.size.name}`;
 		const status = this.error ? theme.fg("error", ` ${this.error}`) : theme.fg("dim", ` ${this.status}`);
 		const rectLine = this.latestOverlayRect
-			? ` overlay ${formatRect(this.latestOverlayRect)} viewport ${formatRect(this.latestViewport)}`
+			? ` overlay ${formatRect(this.latestOverlayRect)} viewport ${formatRect(this.latestViewport)} z=${PANEL_Z_BASE}`
 			: " waiting for overlay rect";
 
 		const panelRows = this.latestOverlayRect?.rows ?? fallbackPanelRowsForSize(this.size);
@@ -508,7 +519,7 @@ class KatzenstegProducer implements ProducerConnection {
 		this.child = spawn(bin, ["--embed-jsonl", this.profile], {
 			cwd: REPO_ROOT,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: process.env,
+			env: producerEnv(),
 		});
 		this.child.stdout.setEncoding("utf8");
 		this.child.stderr.setEncoding("utf8");
@@ -539,6 +550,7 @@ class KatzenstegProducer implements ProducerConnection {
 				windowId: WINDOW_ID,
 				rectCells: viewport,
 				aspect: PANEL_ASPECT,
+				zBase: PANEL_Z_BASE,
 				imageIds: IMAGE_IDS,
 				placementIds: PLACEMENT_IDS,
 				upload: { profile: "file_whole", path: this.uploadPath, highWater: DEFAULT_UPLOAD_HIGH_WATER },
@@ -553,7 +565,7 @@ class KatzenstegProducer implements ProducerConnection {
 			return;
 		}
 		debugLog(`producer.live.viewport ${formatRect(viewport)}`);
-		this.writeControl(makeViewportMessage({ windowId: WINDOW_ID, rectCells: viewport, aspect: PANEL_ASPECT }));
+		this.writeControl(makeViewportMessage({ windowId: WINDOW_ID, rectCells: viewport, aspect: PANEL_ASPECT, zBase: PANEL_Z_BASE }));
 		this.lastViewportSent = viewport;
 		this.callbacks.onStatus("viewport");
 	}
@@ -563,7 +575,10 @@ class KatzenstegProducer implements ProducerConnection {
 		debugLog(`producer.live.stop reason=${reason} child=${child ? "yes" : "no"} attached=${this.attached}`);
 		if (!child) return;
 		if (child.stdin && !child.stdin.destroyed) {
-			if (this.attached) this.writeControl(makeDetachMessage());
+			// Match the WM host: shutdown is the close primitive. The runtime handles
+			// shutdown by flushing producer-owned delete placements and then emitting
+			// a detached ack. Sending a separate detach first can make close ordering
+			// harder to reason about and is unnecessary for panel teardown.
 			this.writeControl(makeShutdownMessage());
 			child.stdin.end();
 		}
@@ -596,7 +611,10 @@ class KatzenstegProducer implements ProducerConnection {
 			const line = this.carry.slice(0, newline);
 			this.carry = this.carry.slice(newline + 1);
 			const message = parseProducerLine(line);
-			if (!message) continue;
+			if (!message) {
+				debugLog(`producer.live.stdout ignored ${line.slice(0, 160)}`);
+				continue;
+			}
 			if (message.type === "frame_batch") this.callbacks.onFrame?.(message);
 			else this.callbacks.onDetached?.(message);
 		}
@@ -617,6 +635,14 @@ class KatzenstegProducer implements ProducerConnection {
 		if (existsSync(localBuild)) return localBuild;
 		return "katzensteg";
 	}
+}
+
+function producerEnv(): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		KATZENSTEG_WINDOW_POLICY: DEFAULT_WINDOW_POLICY,
+		KATZENSTEG_REAL_WINDOW: DEFAULT_REAL_WINDOW,
+	};
 }
 
 function parseCommand(args: string): PanelCommand {
@@ -657,6 +683,7 @@ function makeAttachMessage(options: AttachOptions): string {
 		window_id: options.windowId,
 		rect_cells: options.rectCells,
 		aspect: options.aspect,
+		z_base: options.zBase,
 		id_ranges: { image: [options.imageIds], placement: [options.placementIds] },
 		upload: {
 			profile: options.upload.profile,
@@ -672,11 +699,8 @@ function makeViewportMessage(options: ViewportOptions): string {
 		window_id: options.windowId,
 		rect_cells: options.rectCells,
 		aspect: options.aspect,
+		z_base: options.zBase,
 	}) + "\n";
-}
-
-function makeDetachMessage(windowId: typeof WINDOW_ID = WINDOW_ID): string {
-	return JSON.stringify({ type: "detach", window_id: windowId }) + "\n";
 }
 
 function makeShutdownMessage(): string {
@@ -733,8 +757,15 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function pad(value: string, width: number): string {
-	return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
+function fitCellText(value: string, width: number): string {
+	const truncated = truncateToWidth(value, width, "…");
+	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
+}
+
+function parseIntegerEnv(value: string | undefined, fallback: number): number {
+	if (value === undefined || value.trim().length === 0) return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function sameRect(a: RectCells | undefined, b: RectCells): boolean {
