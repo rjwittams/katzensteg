@@ -15,6 +15,7 @@ Renderer backends produce raw frames and input/event hooks:
 - `test-pattern`: current bring-up renderer, useful for SDL/Katzensteg smoke tests.
 - `native-webview`: macOS `WKWebView` helper process first, producing raw RGBA frames.
 - Future Linux WebKitGTK renderer when dependencies and snapshot mechanics are settled.
+- Future CEF renderer if we need a heavier, debuggable browser backend with real DevTools support.
 
 Presenter backends consume raw frames:
 
@@ -23,11 +24,11 @@ Presenter backends consume raw frames:
 
 This split lets `luchs` drive the evolution of Katzensteg core without blocking the immediate viewer on that API work.
 
-## Why Not CDP
+## Why Not CDP Screenshotting
 
 CDP screenshot and screencast APIs deliver encoded images, usually base64 PNG/JPEG frames. A per-frame PNG loop would force browser encode, helper decode, SDL upload, and terminal encode/composition. That path is useful for one-shot screenshots, but it does not prove the architecture we want for an interactive viewer.
 
-Building or bundling Chromium is also intentionally out of scope. If Chromium becomes interesting later, it should be through a deeper native embedding path, not a JavaScript bridge plus screenshot stream.
+If Chromium becomes interesting later, it should be through a deeper embedded-browser backend such as CEF, not a JavaScript bridge plus screenshot stream. Playwright/CDP can still be useful for tests or automation, but it should not be a `luchs` renderer backend.
 
 ## First Slice
 
@@ -112,6 +113,7 @@ Focused tests should cover:
 - raw frame metadata validation
 - SDL presenter smoke through the existing synthetic renderer
 - native WebView helper tests around file loading and frame metadata once introduced
+- manual input checks through `tools/luchs/testdata/interactive.html`
 - future core presenter tests around external framebuffer batch/embed behavior
 
 End-to-end visual verification can start as a manual smoke because the value is proving the renderer-to-presenter-to-Katzensteg path. Once stable, add a script that checks logs or embed JSONL for at least one frame batch.

@@ -1,0 +1,146 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Luchs Interactive Test</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --accent: #4aa3df;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #101820;
+        color: #f2f6f8;
+        font: 16px system-ui, sans-serif;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        padding: 24px;
+      }
+      section {
+        border: 1px solid #35566a;
+        padding: 18px;
+        min-height: 150px;
+      }
+      h1 {
+        grid-column: 1 / -1;
+        margin: 0;
+        font-size: 22px;
+      }
+      button,
+      input {
+        font: inherit;
+        color: #f2f6f8;
+        background: #172938;
+        border: 1px solid #557489;
+        padding: 10px 12px;
+      }
+      button:focus,
+      input:focus {
+        outline: 2px solid var(--accent);
+      }
+      #hover-zone.hovered,
+      #click-zone.active,
+      #key-zone.active {
+        border-color: #f6c343;
+        color: #f6c343;
+      }
+      #scroll-box {
+        height: 110px;
+        overflow: auto;
+      }
+      #scroll-content {
+        height: 420px;
+        background:
+          linear-gradient(#24394b 0 2px, transparent 2px 42px),
+          linear-gradient(90deg, rgba(74, 163, 223, 0.18), transparent);
+        background-size: 100% 42px, 100% 100%;
+      }
+      .readout {
+        margin-top: 10px;
+        color: #9fb3bf;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Luchs interactive fixture</h1>
+
+      <section id="click-zone">
+        <button id="click-button">Click target</button>
+        <div class="readout" id="click-readout">clicks 0</div>
+      </section>
+
+      <section id="hover-zone">
+        Hover target
+        <div class="readout" id="coord-readout">x 0 y 0</div>
+      </section>
+
+      <section id="key-zone" tabindex="0">
+        Key target
+        <div class="readout" id="key-readout">keys 0 last none</div>
+      </section>
+
+      <section>
+        <label for="text-input">Text input</label><br>
+        <input id="text-input" autocomplete="off" spellcheck="false">
+        <div class="readout" id="text-readout">text empty</div>
+      </section>
+
+      <section>
+        Scroll target
+        <div id="scroll-box">
+          <div id="scroll-content"></div>
+        </div>
+        <div class="readout" id="scroll-readout">scroll 0</div>
+      </section>
+    </main>
+    <script>
+      const clickZone = document.querySelector("#click-zone");
+      const clickReadout = document.querySelector("#click-readout");
+      const hoverZone = document.querySelector("#hover-zone");
+      const coordReadout = document.querySelector("#coord-readout");
+      const keyZone = document.querySelector("#key-zone");
+      const keyReadout = document.querySelector("#key-readout");
+      const textInput = document.querySelector("#text-input");
+      const textReadout = document.querySelector("#text-readout");
+      const scrollBox = document.querySelector("#scroll-box");
+      const scrollReadout = document.querySelector("#scroll-readout");
+
+      let clicks = 0;
+      let keys = 0;
+
+      clickZone.addEventListener("click", () => {
+        clicks += 1;
+        clickZone.classList.toggle("active", clicks % 2 === 1);
+        clickReadout.textContent = `clicks ${clicks}`;
+      });
+
+      hoverZone.addEventListener("mousemove", (event) => {
+        hoverZone.classList.add("hovered");
+        coordReadout.textContent = `x ${Math.round(event.clientX)} y ${Math.round(event.clientY)}`;
+      });
+      hoverZone.addEventListener("mouseleave", () => {
+        hoverZone.classList.remove("hovered");
+      });
+
+      document.addEventListener("keydown", (event) => {
+        keys += 1;
+        keyZone.classList.toggle("active", keys % 2 === 1);
+        keyReadout.textContent = `keys ${keys} last ${event.key || event.keyCode}`;
+      });
+
+      textInput.addEventListener("input", () => {
+        textReadout.textContent = textInput.value ? `text ${textInput.value}` : "text empty";
+      });
+
+      scrollBox.addEventListener("scroll", () => {
+        scrollReadout.textContent = `scroll ${Math.round(scrollBox.scrollTop)}`;
+      });
+    </script>
+  </body>
+</html>

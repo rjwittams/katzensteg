@@ -1280,6 +1280,19 @@ test "bundled profiles include embed luchs static probe" {
     try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
 }
 
+test "bundled profiles include embed luchs interactive probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.embed.luchs_interactive").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/luchs", profile.target);
+    try std.testing.expect(profile.args.len >= 1);
+    try std.testing.expectEqualStrings("{repo}/tools/luchs/testdata/interactive.html", profile.args[profile.args.len - 1]);
+    try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+}
+
 test "bundled profiles include Tempest Rising gamescope launch target" {
     var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();

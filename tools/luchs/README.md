@@ -26,3 +26,11 @@ luchs --renderer=native-webview path/to/fragment.html
 The helper binary is installed next to `luchs` as `luchs-webview-capture`. Direct helper invocation emits one frame by default; `luchs` invokes it with a bounded frame count and FPS so it streams repeated `LUCHS_RAW_FRAME` headers plus raw RGBA bytes. `luchs` consumes that pipe internally and keeps helper stderr away from the terminal render stream.
 
 `luchs` also forwards SDL mouse, wheel, key, and text-input events to the helper over stdin as JSONL. The helper dispatches those into the page as DOM events. This is intentionally separate from any future app/control stdin channel.
+
+Manual input smoke:
+
+```bash
+./zig-out/bin/katzensteg probe.embed.luchs_interactive
+```
+
+Use the interactive fixture to check click, hover/motion, key, text, and scroll behavior through SDL/Katzensteg.
