@@ -1058,6 +1058,67 @@ test "sync dispatch recycles cloned external framebuffer payload" {
     try std.testing.expectEqual(@as(usize, pixels.len), runtime.payload_pool.bytes);
 }
 
+test "queued batch texture update reaches frame builder without terminal backend" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.active = true;
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+
+    const texture: core.CoreHandle = 0x1234;
+    core_dispatch.handleCommand(&runtime, .{ .create_texture = .{
+        .texture = texture,
+        .format = core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }),
+        .w = 1,
+        .h = 1,
+    } });
+
+    var pixel = [_]u8{ 17, 34, 51, 255 };
+    core_dispatch.handleCommand(&runtime, .{ .update_texture = .{
+        .texture = texture,
+        .rect = null,
+        .pixels = pixel[0..],
+        .pitch = 4,
+    } });
+
+    const resources = try runtime.frame_builder.snapshotResources(std.testing.allocator);
+    defer std.testing.allocator.free(resources);
+
+    try std.testing.expectEqual(@as(usize, 1), resources.len);
+    try std.testing.expectEqual(@as(u64, 1), resources[0].update_count);
+}
+
+test "queued batch texture unlock reaches frame builder without terminal backend" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.active = true;
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+
+    const texture: core.CoreHandle = 0x5678;
+    core_dispatch.handleCommand(&runtime, .{ .create_texture = .{
+        .texture = texture,
+        .format = core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }),
+        .w = 1,
+        .h = 1,
+    } });
+
+    var pixel = [_]u8{ 68, 85, 102, 255 };
+    core_dispatch.handleCommand(&runtime, .{ .lock_texture = .{
+        .texture = texture,
+        .rect = null,
+        .pixels = @ptrCast(&pixel),
+        .pitch = 4,
+    } });
+    core_dispatch.handleCommand(&runtime, .{ .unlock_texture = .{ .texture = texture } });
+
+    const resources = try runtime.frame_builder.snapshotResources(std.testing.allocator);
+    defer std.testing.allocator.free(resources);
+
+    try std.testing.expectEqual(@as(usize, 1), resources.len);
+    try std.testing.expectEqual(@as(u64, 1), resources[0].update_count);
+}
+
 test "batch input terminal bytes map through attached rect" {
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();

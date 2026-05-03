@@ -618,12 +618,20 @@ pub const FrameBuilder = struct {
     }
 
     pub fn onUnlockTexture(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, texture: core.CoreHandle) void {
+        _ = backend;
+        self.onUnlockTextureBatch(logger, texture);
+    }
+
+    pub fn onUnlockTextureBatch(self: *FrameBuilder, logger: *Logger, texture: core.CoreHandle) void {
         const record = self.textures.getPtr(texture) orelse return;
         const pixels = record.locked_pixels orelse return;
         const pitch = record.locked_pitch;
         record.locked_pixels = null;
         record.locked_pitch = 0;
-        self.captureTexturePixels(logger, backend, record, pixels, pitch);
+        self.captureTexturePixelsIntoRecord(record, pixels, pitch) catch |err| switch (err) {
+            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
+            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
+        };
     }
 
     fn invalidateTexturePublication(self: *FrameBuilder, record: *TextureRecord) void {
@@ -657,14 +665,6 @@ pub const FrameBuilder = struct {
         record.publish_rgba = modulated;
         record.publish_rgba_owned = true;
         record.asset_id = self.allocAssetId();
-    }
-
-    fn captureTexturePixels(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord, src: [*]u8, pitch: i32) void {
-        _ = backend;
-        self.captureTexturePixelsIntoRecord(record, src, pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
-            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
-        };
     }
 
     fn captureTexturePixelsIntoRecord(self: *FrameBuilder, record: *TextureRecord, src: [*]u8, pitch: i32) !void {

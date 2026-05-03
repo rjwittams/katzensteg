@@ -72,23 +72,53 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         .destroy_texture => |c| rt.frame_builder.onDestroyTexture(c.texture),
         .update_texture => |c| {
             var rect = c.rect;
-            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onUpdateTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
+            }
         },
         .update_yuv_texture => |c| {
             var rect = c.rect;
-            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
+            }
         },
         .update_nv_texture => |c| {
             var rect = c.rect;
-            if (rt.active and rt.backend != null) rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
+            }
         },
         .lock_texture => |c| {
             var rect = c.rect;
             rt.frame_builder.onLockTexture(&rt.logger, c.texture, if (rect) |*r| r else null, c.pixels, c.pitch);
         },
-        .unlock_texture => |c| if (rt.active and rt.backend != null) rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, c.texture),
-        .set_texture_color_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, c.texture, c.r, c.g, c.b),
-        .set_texture_alpha_mod => |c| if (rt.active and rt.backend != null) rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, c.texture, c.a),
+        .unlock_texture => |c| {
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, c.texture);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onUnlockTextureBatch(&rt.logger, c.texture);
+            }
+        },
+        .set_texture_color_mod => |c| {
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, c.texture, c.r, c.g, c.b);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onSetTextureColorModBatch(c.texture, c.r, c.g, c.b);
+            }
+        },
+        .set_texture_alpha_mod => |c| {
+            if (rt.active and rt.backend != null) {
+                rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, c.texture, c.a);
+            } else if (rt.active and rt.batch_sink != null) {
+                rt.frame_builder.onSetTextureAlphaModBatch(c.texture, c.a);
+            }
+        },
         .set_texture_blend_mode => |c| rt.frame_builder.onSetTextureBlendMode(&rt.logger, c.texture, c.blend_mode),
         .set_render_draw_color => |c| rt.frame_builder.onSetRenderDrawColor(c.renderer, c.r, c.g, c.b, c.a),
         .render_clear => |c| rt.frame_builder.onRenderClear(c.renderer),

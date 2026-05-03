@@ -44,6 +44,9 @@ The actual extension entrypoint lives in `extensions/katzensteg-panel.ts`.
 - `KATZENSTEG_PANEL_MODE=live` runs the real Katzensteg embed producer. This is the default.
 - `KATZENSTEG_BIN` overrides the Katzensteg binary path.
 - `KATZENSTEG_PI_PROFILE` sets the default profile used by the panel.
+- `KATZENSTEG_PANEL_WINDOW_POLICY` overrides the producer window policy (default: `mirror`, so the real SDL window also renders while the panel is active).
+- `KATZENSTEG_PANEL_REAL_WINDOW` overrides real-window visibility (default: `show`).
+- `KATZENSTEG_PANEL_Z_BASE` overrides the embed `z_base` (default: `-100`, to keep Pi overlay text chrome above Katzensteg full-frame placements).
 
 The live panel uses `file_whole` upload transport with a temp upload path under the system temp directory.
 
