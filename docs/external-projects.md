@@ -45,15 +45,15 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 
 ## Current Matrix
 
-| Project | Fork | Purpose | Profile coverage | Notes |
-| --- | --- | --- | --- | --- |
-| RetroArch | [`rjwittams/RetroArch`](https://github.com/rjwittams/RetroArch) | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | Uses forked branches for macOS video/input and context-driver behavior. |
-| Flycast | [`rjwittams/flycast`](https://github.com/rjwittams/flycast) | Dreamcast libretro core used by RetroArch profiles | `jsr` | Branch `libretro-hide-symbols` is needed on Linux to avoid libretro core linking issues. |
-| ScummVM | upstream | SDL software/surface behavior | `mi2` | Currently useful without app-side patches. |
-| Moonlight Qt | [`rjwittams/moonlight-qt`](https://github.com/rjwittams/moonlight-qt) | Streaming/video workload through an SDL renderer path | `moonlight.steam` | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
-| Cannonball | [`rjwittams/cannonball`](https://github.com/rjwittams/cannonball) | Simple SDL app target | `cannonball` | Uses a small build-fix branch. |
-| Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | Stream client prototype | `chiaki.sdl` | Uses an SDL stream-only frontend branch. |
-| ANESE | upstream | Small SDL emulator target | `anese.test`, `smb3` | Currently useful without app-side patches. |
+| Project | Fork | Branch | Purpose | Profile coverage | Notes |
+| --- | --- | --- | --- | --- | --- |
+| RetroArch | [`rjwittams/RetroArch`](https://github.com/rjwittams/RetroArch) | `macos-sdl2-window-contexts` | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | Uses forked branches for macOS video/input and context-driver behavior. |
+| Flycast | [`rjwittams/flycast`](https://github.com/rjwittams/flycast) | `libretro-hide-symbols` | Dreamcast libretro core used by RetroArch profiles | `jsr` | Needed on Linux to avoid libretro core linking issues. |
+| ScummVM | upstream | `master` | SDL software/surface behavior | `mi2` | Currently useful without app-side patches. |
+| Moonlight Qt | [`rjwittams/moonlight-qt`](https://github.com/rjwittams/moonlight-qt) | `macos-sdl-renderer-output` | Streaming/video workload through an SDL renderer path | `moonlight.steam` | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
+| Cannonball | [`rjwittams/cannonball`](https://github.com/rjwittams/cannonball) | `macos-sdl2-build-fixes` | Simple SDL app target | `cannonball` | Uses a small build-fix branch. |
+| Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | `macos-sdl-client-build` | Stream client prototype | `chiaki.sdl` | Uses an SDL stream-only frontend branch. |
+| ANESE | upstream | `master` | Small SDL emulator target | `anese.test`, `smb3` | Currently useful without app-side patches. |
 
 ## Local Data
 
