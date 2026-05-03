@@ -411,6 +411,7 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
+        .link_libc = true,
     });
     addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,

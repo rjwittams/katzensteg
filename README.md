@@ -1,76 +1,120 @@
-# termscene / katzensteg
+# Katzensteg
 
-A Zig terminal graphics/runtime repo centered on `termscene` and `Katzensteg`.
+Katzensteg puts native application graphics in your terminal.
 
-This repo currently contains:
+It currently works by launching applications with the Katzensteg runtime injected into the process, using `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` on macOS. The runtime captures the app's SDL2 output and presents it through kitty-compatible terminal graphics.
 
-- `src/termscene/` — reusable engine core and kitty backend
-- `src/katzensteg/` — the main active SDL preload/runtime bridge work
-- `profiles/` — Katzensteg launcher profiles and support manifests
-- `scripts/katzensteg/` — helper scripts for local app smoke tests and setup
-- `examples/ttytris/` — in-repo demo/stress game built on termscene
-- `examples/termscene-demo/` — focused termscene feature demo
-- `docs/katzensteg/` — Katzensteg design notes, plans, and roadmap
+The current practical support boundary is workload-specific. Several larger test applications have needed app-side patches or build modes so they expose an SDL2 output/input path for Katzensteg to capture. The current proving ground is games and emulators: RetroArch, ScummVM, Moonlight, Chiaki, small SDL probes, and similar workloads.
 
-## Build targets
+This is alpha software. It is already useful for experiments and demos, but the interfaces, profiles, and supported app matrix are still moving.
 
-- `zig build run` — run ttytris
-- `zig build debug-run` — run ttytris with debug settings
-- `zig build termscene-demo` — run the termscene engine demo
-- `zig build` — also builds `libkatzensteg` and the basic SDL bring-up demo
-- `zig build basic-sdl-demo` — run the custom SDL2 demo used for Katzensteg bring-up
+Project site: <https://katzensteg.kitty-yet.com>
 
-## Project direction
+## What Works Today
 
-- `termscene` is the reusable rendering/core layer.
-- `Katzensteg` is the main active runtime/interposition project in this repo.
-- `ttytris` remains in-repo as a small demo/stress test, not the architectural center.
+- SDL2 software and renderer paths used by the current probes and patched app profiles.
+- Keyboard and mouse input for the main tested paths.
+- Launcher profiles for repeatable app runs.
+- Kitty-compatible output in terminals such as Kitty and Ghostty, with additional compatibility testing in WezTerm and iTerm2.
 
-Inspector/devtools direction is now split clearly:
+OpenGL and Vulkan capture work exists in the tree for specific experiments and profiles. The README should not be read as a promise that arbitrary SDL2, OpenGL, or Vulkan applications work out of the box.
 
-- producer-side instrumentation for Katzensteg lives here in `src/katzensteg/`
-- the canonical inspector service and web UI live in the separate `whiskers` repo
+## Try It
 
-This repo no longer carries an embedded inspector runtime path; `whiskers` is the inspection path.
+Build with Zig 0.15.2:
 
-## Katzensteg first-slice bootstrap
-
-Current first-slice behavior:
-- direct `/dev/tty` mode only
-- file-based logging only (no stdout/stderr diagnostics)
-- real SDL window remains visible for comparison/debugging
-- terminal mirroring currently targets a small custom SDL2 demo and the minimal supported renderer API surface
-- if no real controlling tty is available, Katzensteg fails soft and the SDL app continues normally
-
-Build:
-
-```bash
-zig build -Doptimize=Debug
+```sh
+zig build
 ```
 
-Run the SDL bring-up demo normally:
+List available profiles:
 
-```bash
-./zig-out/bin/basic-sdl-demo
+```sh
+./zig-out/bin/katzensteg
 ```
 
-Run it under Katzensteg preload on macOS from a real terminal session:
+Run the SDL input probe:
 
-```bash
-DYLD_INSERT_LIBRARIES="$PWD/zig-out/lib/libkatzensteg.dylib" ./zig-out/bin/basic-sdl-demo
+```sh
+./zig-out/bin/katzensteg probe.input
 ```
 
-Katzensteg logs to a file under `/tmp`, for example:
+Preview a profile without launching it:
 
-```bash
-ls /tmp/katzensteg-*.log
+```sh
+./zig-out/bin/katzensteg --dry-run probe.input
 ```
 
-## Inspector status
+If you use one checkout regularly, an alias keeps the commands short:
 
-For current inspection work:
+```sh
+alias ks="$HOME/dev/katzensteg/zig-out/bin/katzensteg"
+ks --dry-run probe.input
+ks probe.input
+```
 
-- use `whiskers-service` and `~/dev/whiskers/web/inspector`
-- use `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock` to connect Katzensteg to `whiskers`
+Use the explicit `./zig-out/bin/katzensteg` path when testing a different worktree.
 
-The copied browser inspector and Python proxy have been removed from this repo on purpose so there is a single canonical web UI.
+For real app profiles, start with `--dry-run`. Many of them expect local app checkouts, game/media data, or platform-specific setup that is intentionally not stored in this repository.
+
+## Requirements
+
+- Zig 0.15.2.
+- SDL2 development headers and libraries.
+- A terminal with kitty graphics protocol support.
+- libyuv on Linux.
+- Vulkan loader and headers for Vulkan capture.
+
+There is no `build.zig.zon` yet, so dependencies come from your system package manager.
+
+## Running Apps
+
+The `katzensteg` launcher is the normal entry point. Profiles live in `profiles/` and describe how to start a target app, what runtime policy to use, and which local paths or environment settings are needed.
+
+Useful commands:
+
+```sh
+./zig-out/bin/katzensteg
+./zig-out/bin/katzensteg --dry-run <profile>
+./zig-out/bin/katzensteg <profile>
+```
+
+See `docs/launcher.md` for profile details.
+
+## External Projects
+
+Some useful targets need local source checkouts or Katzensteg-specific app branches. The helper in `scripts/katzensteg/bootstrap_external_projects.py` is meant to make that less mysterious: it records the expected repositories, fork remotes, branches, build notes, and profile names for the current smoke-test matrix.
+
+It is not a package manager and it is not mature. Treat it as pre-alpha automation: useful for checking what a local machine is missing, but still expected to break as it sees more systems and more setups.
+
+Useful starting points:
+
+```sh
+scripts/katzensteg/bootstrap_external_projects.py --doctor-only --root ~/dev
+scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
+```
+
+See `docs/external-projects.md` for the current external app inventory.
+
+## Development
+
+Run the Zig unit tests:
+
+```sh
+zig build test
+```
+
+Run the Python regression helpers:
+
+```sh
+python3 -m unittest discover -s scripts/katzensteg -p 'test_*.py'
+```
+
+Runtime logs go to `/tmp/katzensteg-*`.
+
+## Docs
+
+- `docs/architecture.md` - current architecture and support boundary.
+- `docs/launcher.md` - launcher and profile usage.
+- `docs/external-projects.md` - external app fork inventory.
+- `docs/development.md` - build, test, and logging notes.

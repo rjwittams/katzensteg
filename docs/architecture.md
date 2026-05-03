@@ -1,0 +1,56 @@
+# Katzensteg Architecture
+
+Katzensteg is currently an injected runtime plus a launcher.
+
+The launcher starts a target application from a JSON profile. The runtime is injected into that process with `LD_PRELOAD` on Linux or `DYLD_INSERT_LIBRARIES` on macOS. Once inside the process, Katzensteg intercepts the SDL2 presentation/input surface that the application exposes, mirrors the rendered output into terminal graphics, and routes terminal input back into SDL where supported.
+
+## Current Support Boundary
+
+The current support boundary is defined by tested workloads, not by a blanket API guarantee.
+
+The best-tested paths are:
+
+- SDL2 software and renderer output used by the current probes and patched app profiles.
+- SDL keyboard and mouse event paths used by those profiles.
+- Terminal graphics output using kitty-compatible protocol support.
+
+Several larger applications in the smoke matrix needed app-side patches or build modes so they expose an SDL2 renderer/input path. OpenGL and Vulkan capture work exists in the tree, and some profiles exercise those paths, but none of this should be read as arbitrary SDL2, OpenGL, or Vulkan application support.
+
+## Main Pieces
+
+### Launcher
+
+`zig-out/bin/katzensteg` is the normal entry point. It:
+
+- loads and resolves JSON profiles from `profiles/`
+- expands local path placeholders
+- writes runtime configuration
+- prepares the target environment
+- redirects target output away from the terminal when needed
+- starts the target process
+- performs best-effort terminal cleanup after exit
+
+The launcher should be the place to encode repeatable run policy. Avoid adding new ad hoc run scripts when a launcher profile would do.
+
+### Runtime
+
+The runtime lives under `src/katzensteg/`. It owns:
+
+- SDL2 capture and replay state for tested paths
+- frame composition
+- terminal graphics output
+- keyboard and mouse input mapping
+- logging
+- platform interposer glue
+
+The runtime must not write diagnostics to stdout or stderr during a captured run, because those streams may be part of the terminal presentation.
+
+### Profiles
+
+Profiles are JSON files under `profiles/`. They define target commands, inheritance, platform-specific values, runtime policy, and local setup details.
+
+Hidden profiles are reusable fragments. Visible profiles are direct launch targets.
+
+### External App Forks
+
+Some real workloads need patched application branches to expose paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.

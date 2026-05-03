@@ -1,17 +1,17 @@
 # CLAUDE.md
 
-Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Deeper tracked context lives in `docs/katzensteg/`, especially the roadmap, launcher, external-project, and Linux readiness notes.
+Orientation for coding agents working in this repo. Keep this file short: it's an entry point, not a manual. Current tracked project docs live directly under `docs/`, especially the architecture, launcher, external-projects, and development notes.
 
 ## What this repo is
 
-Two things, in one Zig + C codebase:
+This is a Zig + C codebase with two main source areas:
 
 - **`termscene`** (`src/termscene/`) — reusable terminal graphics engine. Scene model, types, backend abstraction, kitty-protocol backend.
-- **`Katzensteg`** (`src/katzensteg/`) — the active workstream. A preload library (`LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` on macOS) that interposes on SDL2 / GL / (optionally) Vulkan calls from a target app and mirrors its output to a terminal via `/dev/tty`. Includes a launcher, a JSON profile system, frame composition, and a client to a separate inspector service.
+- **`Katzensteg`** (`src/katzensteg/`) — the active workstream. A preload library (`LD_PRELOAD` on Linux, `DYLD_INSERT_LIBRARIES` on macOS) that interposes on SDL2 / GL / (optionally) Vulkan calls from a target app and mirrors its output into terminal graphics, either directly via `/dev/tty` or through the batch/host path. Includes a launcher, a JSON profile system, frame composition, and a client to a separate inspector service.
 
 Demos in-repo: `ttytris` (Tetris stress test on termscene), `termscene-demo`, `basic-sdl-demo` (SDL bring-up target), plus a couple of kitty-protocol repro tools.
 
-The browser inspector and Python proxy that used to live here have been removed on purpose — the canonical inspector is the separate **`whiskers`** repo (`~/dev/whiskers`). This repo carries only producer-side instrumentation and `whiskers_client.zig`. Connect via `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock`. Do not re-introduce an embedded inspector here.
+Inspector UI work belongs in the separate **`whiskers`** repo (`~/dev/whiskers`). This repo carries only producer-side instrumentation and `whiskers_client.zig`. Connect via `KATZENSTEG_WHISKERS_SOCKET=/tmp/whiskers.sock`. Do not re-introduce an embedded inspector here.
 
 ## Repo layout
 
@@ -19,16 +19,16 @@ The browser inspector and Python proxy that used to live here have been removed 
 src/termscene/      reusable engine + kitty backend
 src/katzensteg/     preload runtime, launcher, frame builder, inspector client, C interposers
 examples/           ttytris, termscene-demo, kitty-* repros
-profiles/           JSON launcher profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
+profiles/           JSON launcher profile sets and app profiles (retroarch, moonlight, scummvm, chiaki, media, probes, …)
                     plus platform Vulkan layer manifests under profiles/vulkan/
 scripts/katzensteg/ Python helpers + tests; legacy run-*.sh wrappers (see "Running things")
-docs/katzensteg/    design notes, roadmap, port plans, handoffs
-.github/workflows/  claude-code-review.yml — automated PR review
+docs/              current project docs
+.github/workflows/  CI and automated PR review
 ```
 
 ## Build
 
-- Zig **0.15.2** is the expected toolchain for current Linux work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
+- Zig **0.15.2** is the expected toolchain for current work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
 - No `build.zig.zon` yet; system libs (SDL2, libyuv on Linux) are required.
 - Linux currently forces LLVM codegen in `build.zig`. Do not flip this back to non-LLVM/system-linker experiments casually: current Arch/CachyOS toolchains have hit `.sframe` relocation failures on that path.
 
@@ -50,13 +50,15 @@ Artifacts (under `zig-out/`):
 - `bin/katzensteg-proxy` — proxy used by some profiles.
 - `bin/basic-sdl-demo`, `bin/ttytris`, `bin/termscene-demo` — demos.
 - `bin/katzensteg-{gl,input,vulkan}-probe` — probe binaries.
-- `lib/libkatzensteg.so` — fully linked preload.
-- `lib/libkatzensteg-unlinked.so` — preload that allows unresolved SDL/GL symbols (used by most profiles).
-- `lib/libkatzensteg-vulkan-layer.so` — Vulkan capture layer.
+- `lib/libkatzensteg-core.*` — core exported entry points.
+- `lib/libkatzensteg-sdl2.*` — SDL2 preload/interposer library.
+- `lib/libkatzensteg.*` — fully linked preload.
+- `lib/libkatzensteg-unlinked.*` — preload variant that allows unresolved SDL/GL symbols.
+- `lib/libkatzensteg-vulkan-layer.*` — Vulkan capture layer when Vulkan support is enabled.
 
 ## Running things
 
-**Use the launcher.** It resolves a JSON profile, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES`, and execs the target.
+**Use the launcher.** It resolves JSON profiles, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` according to the selected profile, and starts the target.
 
 ```bash
 ./zig-out/bin/katzensteg                    # list available profiles
@@ -64,11 +66,11 @@ Artifacts (under `zig-out/`):
 ./zig-out/bin/katzensteg <profile>          # run
 ```
 
-Useful env vars: `KATZENSTEG_PROFILE_DIR`, `KATZENSTEG_REPO`, `KATZENSTEG_WHISKERS_SOCKET`, `KATZENSTEG_PROXY_PROFILE`.
+Profile search defaults to `{repo}/profiles` plus `$XDG_CONFIG_HOME/katzensteg/profiles` or `~/.config/katzensteg/profiles`. `KATZENSTEG_PROFILE_DIR` overrides that search path. Other useful env vars: `KATZENSTEG_REPO`, `KATZENSTEG_WHISKERS_SOCKET`, `KATZENSTEG_PROXY_PROFILE`.
 
 The `scripts/katzensteg/run-*.sh` wrappers are **legacy**. The intent is the launcher reaches parity and we delete them. Don't add new ones; when fixing something a wrapper does, fix it in the launcher / a profile instead.
 
-For raw bring-up of `basic-sdl-demo` without the launcher, see the README — that path is for diagnosing the preload itself, not for running real apps.
+Direct preload commands are diagnostic-only. Prefer adding or fixing a launcher profile once a command becomes repeatable.
 
 ## Logging
 
@@ -87,9 +89,9 @@ Test coverage is becoming a focus — agents adding non-trivial logic should add
 
 ## Docs
 
-Start with `docs/katzensteg/2026-04-25-roadmap.md` for current direction and `docs/katzensteg/2026-04-26-launcher-config-design.md` / `docs/katzensteg/launcher-usage.md` for the profile system. Use `docs/katzensteg/external-projects.md` and `docs/katzensteg/linux-port-readiness.md` for Linux/bootstrap context.
+Start with `docs/architecture.md` for current direction, `docs/launcher.md` for the profile system, `docs/external-projects.md` for app forks, and `docs/development.md` for build/test/logging.
 
-A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older inspector / "superpowers" iterations that have since been superseded). Treat anything not referenced from the roadmap as suspect until verified.
+Historical design notes, implementation plans, and agent-oriented handoffs were removed from the repo; use git history if that context is needed.
 
 ## Conventions
 
@@ -98,7 +100,7 @@ A docs cleanup is pending — some files in `docs/katzensteg/` are stale (older 
 - Linux: keep `build.zig`'s LLVM-codegen setting unless you have revalidated the `.sframe`/linker behavior on the target distro.
 - Preload code must not write to stdout/stderr (file logging only).
 - Vulkan capture should pass the original external framebuffer format through to the preload/present layer (`ExternalFramebufferFormat`) instead of normalizing in `vulkan_layer.c`. Format conversion belongs in the present path so queued stale frames can be dropped before conversion and future format-specific fast paths have one owner.
-- For GitHub publishing, use normal `git` and `gh` commands with work-focused branch names, commit messages, and PR titles. Do not prefix PRs or branches with the coding agent name, and do not use workflows that encode agent-specific naming conventions such as `github:yeet`.
+- Use work-focused branch names, commit messages, and PR titles. Do not prefix them with a coding-agent or tool name.
 
 ## Architecture boundaries
 

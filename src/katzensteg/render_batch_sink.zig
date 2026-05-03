@@ -347,9 +347,15 @@ test "batch sink detach suppresses attachment without clearing pending deletes" 
 }
 
 test "batch sink file whole upload writes image bytes to path and emits file APC" {
-    const path = "/tmp/katzensteg-batch-sink-file-upload";
-    std.fs.deleteFileAbsolute(path ++ ".0") catch {};
-    defer std.fs.deleteFileAbsolute(path ++ ".0") catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "upload" });
+    defer std.testing.allocator.free(path);
+    const uploaded_path = try std.fmt.allocPrint(std.testing.allocator, "{s}.0", .{path});
+    defer std.testing.allocator.free(uploaded_path);
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
@@ -359,7 +365,7 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
 
     try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
     try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "t=f") != null);
-    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, path ++ ".0", 16);
+    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, uploaded_path, 16);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, bytes);
 }
