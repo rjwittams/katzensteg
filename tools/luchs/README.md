@@ -33,4 +33,4 @@ Manual input smoke:
 ./zig-out/bin/katzensteg probe.embed.luchs_interactive
 ```
 
-Use the interactive fixture to check click, hover/motion, key, text, and scroll behavior through SDL/Katzensteg.
+Use the interactive fixture to check click, hover/motion, key, text, and scroll behavior through SDL/Katzensteg. This profile is intentionally unbounded and should run until you quit it. The static smoke profile passes `--frames=180` when a bounded run is useful.

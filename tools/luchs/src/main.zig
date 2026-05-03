@@ -4,7 +4,7 @@ const sdl = @import("katzensteg_sdl");
 
 const frame_width = 800;
 const frame_height = 600;
-const run_frames = 180;
+const default_smoke_frames = 180;
 const native_webview_fps = 15;
 
 const RendererBackend = enum {
@@ -50,7 +50,16 @@ const WebInputEvent = union(enum) {
 const CliOptions = struct {
     html_path: []const u8,
     renderer_backend: RendererBackend = .test_pattern,
+    frame_limit: ?u32 = null,
 };
+
+fn effectiveFrameLimit(options: CliOptions) u32 {
+    if (options.frame_limit) |limit| return limit;
+    return switch (options.renderer_backend) {
+        .test_pattern => default_smoke_frames,
+        .native_webview => 0,
+    };
+}
 
 fn parseRendererBackend(value: []const u8) !RendererBackend {
     if (std.mem.eql(u8, value, "test-pattern")) return .test_pattern;
@@ -162,7 +171,7 @@ const NativeWebviewStream = struct {
     stdout_file: std.fs.File,
     waited: bool = false,
 
-    fn init(allocator: std.mem.Allocator, html_path: []const u8) !NativeWebviewStream {
+    fn init(allocator: std.mem.Allocator, html_path: []const u8, frame_limit: u32) !NativeWebviewStream {
         const helper_path = try nativeWebviewHelperPath(allocator);
         defer allocator.free(helper_path);
 
@@ -172,7 +181,7 @@ const NativeWebviewStream = struct {
         var fps_buf: [16]u8 = undefined;
         const width_arg = try std.fmt.bufPrint(&width_buf, "{d}", .{frame_width});
         const height_arg = try std.fmt.bufPrint(&height_buf, "{d}", .{frame_height});
-        const frames_arg = try std.fmt.bufPrint(&frames_buf, "{d}", .{run_frames});
+        const frames_arg = try std.fmt.bufPrint(&frames_buf, "{d}", .{frame_limit});
         const fps_arg = try std.fmt.bufPrint(&fps_buf, "{d}", .{native_webview_fps});
 
         var argv = [_][]const u8{ helper_path, html_path, width_arg, height_arg, frames_arg, fps_arg };
@@ -269,6 +278,11 @@ fn parseArgs(args: []const []const u8) !CliOptions {
             options.renderer_backend = try parseRendererBackend(arg[renderer_prefix.len..]);
             continue;
         }
+        const frames_prefix = "--frames=";
+        if (std.mem.startsWith(u8, arg, frames_prefix)) {
+            options.frame_limit = std.fmt.parseInt(u32, arg[frames_prefix.len..], 10) catch return error.Usage;
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--")) return error.Usage;
         if (html_path != null) return error.Usage;
         html_path = arg;
@@ -304,6 +318,14 @@ test "luchs accepts explicit renderer backend option" {
     try std.testing.expectEqualStrings("tools/luchs/testdata/static.html", opts.html_path);
 }
 
+test "luchs accepts optional frame limit option" {
+    const bounded = try parseArgs(&.{ "luchs", "--frames=12", "tools/luchs/testdata/static.html" });
+    try std.testing.expectEqual(@as(u32, 12), bounded.frame_limit.?);
+
+    const native_default = try parseArgs(&.{ "luchs", "--renderer=native-webview", "tools/luchs/testdata/static.html" });
+    try std.testing.expectEqual(@as(u32, 0), effectiveFrameLimit(native_default));
+}
+
 test "native webview renderer is available on macOS only" {
     try ensureRendererBackendAvailable(.test_pattern);
     if (builtin.os.tag == .macos) {
@@ -335,7 +357,7 @@ test "helperPathFromExePath resolves sibling helper" {
 }
 
 test "native webview stream uses bounded frame cadence" {
-    try std.testing.expect(run_frames > 1);
+    try std.testing.expect(default_smoke_frames > 1);
     try std.testing.expect(native_webview_fps > 0);
 }
 
@@ -359,11 +381,12 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(arena.allocator());
     const options = try parseArgs(args);
     try ensureRendererBackendAvailable(options.renderer_backend);
+    const frame_limit = effectiveFrameLimit(options);
 
     const frame_allocator = std.heap.page_allocator;
     var native_stream: ?NativeWebviewStream = switch (options.renderer_backend) {
         .test_pattern => null,
-        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path),
+        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path, frame_limit),
     };
     defer if (native_stream) |*stream| stream.deinit();
 
@@ -412,7 +435,7 @@ pub fn main() !void {
     const pixels = try arena.allocator().alloc(u8, @as(usize, window_width) * @as(usize, window_height) * 4);
     var frame: usize = 0;
     var quit = false;
-    while (!quit and frame < run_frames) : (frame += 1) {
+    while (!quit and (frame_limit == 0 or frame < frame_limit)) : (frame += 1) {
         var event: sdl.SDL_Event = undefined;
         while (sdl.SDL_PollEvent(&event) != 0) {
             if (event.type == sdl.SDL_QUIT) quit = true;

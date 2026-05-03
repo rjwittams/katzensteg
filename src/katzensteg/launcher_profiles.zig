@@ -1276,6 +1276,7 @@ test "bundled profiles include embed luchs static probe" {
     try std.testing.expect(!profile.isBroken());
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/luchs", profile.target);
     try std.testing.expect(profile.args.len >= 1);
+    try std.testing.expectEqualStrings("--frames=180", profile.args[profile.args.len - 2]);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
     try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
 }
@@ -1288,6 +1289,9 @@ test "bundled profiles include embed luchs interactive probe" {
     try std.testing.expect(!profile.isBroken());
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/luchs", profile.target);
     try std.testing.expect(profile.args.len >= 1);
+    for (profile.args) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "--frames=0"));
+    }
     try std.testing.expectEqualStrings("{repo}/tools/luchs/testdata/interactive.html", profile.args[profile.args.len - 1]);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
     try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);

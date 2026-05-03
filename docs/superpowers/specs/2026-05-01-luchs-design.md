@@ -46,7 +46,7 @@ luchs --renderer=native-webview path/to/fragment.html
 
 That should load one local HTML file through the native WebView backend and stream raw frames into the SDL presenter.
 
-The first native WebView slice does not need a manifest, persistent stdio protocol, DOM event forwarding, hot reload, browser selection UI, or a direct Katzensteg core presenter.
+The native WebView path should run unbounded by default. Bounded frame counts are useful for smoke profiles and tests, but interactive profiles must not require an explicit `--frames=0` escape hatch. The first native WebView slice does not need a manifest, persistent stdio protocol, hot reload, browser selection UI, or a direct Katzensteg core presenter.
 
 ## Data Flow
 

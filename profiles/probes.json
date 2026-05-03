@@ -55,6 +55,7 @@
         {
           "macos": "--renderer=native-webview"
         },
+        "--frames=180",
         "{repo}/tools/luchs/testdata/static.html"
       ]
     },

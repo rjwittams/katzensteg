@@ -212,7 +212,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
             FileHandle.standardOutput.write(Data(buffer: buffer))
         }
         emittedFrames += 1
-        if emittedFrames >= frameCount {
+        if frameCount > 0 && emittedFrames >= frameCount {
             NSApplication.shared.terminate(nil)
             exit(0)
         }
@@ -234,8 +234,8 @@ private enum LuchsWebviewCapture {
         let height = args.count >= 4 ? (Int(args[3]) ?? defaultHeight) : defaultHeight
         let frameCount = args.count >= 5 ? (Int(args[4]) ?? defaultFrameCount) : defaultFrameCount
         let fps = args.count >= 6 ? (Int(args[5]) ?? defaultFps) : defaultFps
-        guard width > 0 && height > 0 && frameCount > 0 && fps > 0 else {
-            fail("width, height, frame_count, and fps must be positive")
+        guard width > 0 && height > 0 && frameCount >= 0 && fps > 0 else {
+            fail("width, height, and fps must be positive; frame_count must be zero or positive")
         }
 
         let url = URL(fileURLWithPath: args[1])
