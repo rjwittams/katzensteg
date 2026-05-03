@@ -667,14 +667,6 @@ pub const FrameBuilder = struct {
         record.asset_id = self.allocAssetId();
     }
 
-    fn captureTexturePixels(self: *FrameBuilder, logger: *Logger, backend: *ts_kitty.Backend, record: *TextureRecord, src: [*]u8, pitch: i32) void {
-        _ = backend;
-        self.captureTexturePixelsIntoRecord(record, src, pitch) catch |err| switch (err) {
-            error.UnsupportedTextureFormat => logger.writeFmtScoped(.info, .frame_builder, "unsupported texture pixel format: {s} ({d})", .{ @tagName(record.format.semantic), pixelFormatRawSdl2(record.format) }),
-            error.OutOfMemory => logger.writeOnceScoped(.warn, .frame_builder, "failed to allocate texture pixel storage"),
-        };
-    }
-
     fn captureTexturePixelsIntoRecord(self: *FrameBuilder, record: *TextureRecord, src: [*]u8, pitch: i32) !void {
         if (!isSupportedTextureFormat(record.format)) return error.UnsupportedTextureFormat;
 
