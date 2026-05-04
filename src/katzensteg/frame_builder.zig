@@ -1353,7 +1353,7 @@ pub const FrameBuilder = struct {
         for (state.scene_batch_placements.items) |*placement| {
             if (placement.image_id == 0 or placement.placement_id == 0) continue;
             const rect = sink.presentationRect();
-            const dest = sceneBatchPlacementDest(state, rect, placement.*);
+            const dest = sceneBatchPlacementDest(state, sink, placement.*);
             placement.dest_rect = relativeSceneBatchCellRect(dest, rect);
             try sink.place(dest.row, dest.col, .{
                 .image_id = placement.image_id,
@@ -1434,13 +1434,10 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn sceneBatchPlacementDest(state: *const RendererState, rect: render_batch_protocol.PresentationRectCells, placement: SceneBatchPlacement) ts_types.CellRect {
+    fn sceneBatchPlacementDest(state: *const RendererState, sink: *const RenderBatchSink, placement: SceneBatchPlacement) ts_types.CellRect {
+        const rect = sink.presentationRect();
         if (placement.logical_dest) |logical_dest| {
-            var tty: DirectTty = undefined;
-            tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
-            tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
-            tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-            tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+            const tty = sink.presentationTty();
             const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, &tty);
             const source_rect: core.CoreRect = switch (logical_dest) {
                 .rect => |source_rect| source_rect,
@@ -4096,6 +4093,46 @@ test "frame builder reprojects retained batch scene placements after viewport re
     const resized_frame = out.items[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "\\u001b[7;11H") != null);
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
+}
+
+test "frame builder reprojects retained batch scene placements after viewport move without resizing" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2106;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 640, 480));
+    builder.onRenderClear(renderer);
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+    sink.setTerminalGeometry(.{
+        .cells = .{ .rows = 40, .cols = 160 },
+        .pixels = .{ .w = 1280, .h = 800 },
+    });
+
+    const tty = sink.presentationTty();
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+
+    sink.viewport(.{ .row = 6, .col = 11, .rows = 20, .cols = 40 }, .fit);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+
+    const moved_frame = out.items[first_len..];
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "\\u001b[10;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=15") == null);
 }
 
 test "frame builder reprojects retained clear against current source window size" {
