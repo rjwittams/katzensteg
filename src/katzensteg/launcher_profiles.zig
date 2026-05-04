@@ -1207,6 +1207,19 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
     try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
 }
 
+test "bundled profiles include experimental macOS SDL2 rebind adapter" {
+    var catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer catalog.deinit();
+
+    const profile = catalog.find("adapter.sdl2_rebind_preload").?;
+    try std.testing.expect(profile.hidden);
+    try std.testing.expectEqualStrings(
+        "{repo}/zig-out/lib/libkatzensteg-sdl2-rebind.dylib",
+        envValue(profile, "DYLD_INSERT_LIBRARIES").?,
+    );
+    try std.testing.expect(envValue(profile, "LD_PRELOAD") == null);
+}
+
 test "bundled RetroArch profiles disable pause when inactive" {
     var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
     defer catalog.deinit();

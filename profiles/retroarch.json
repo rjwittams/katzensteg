@@ -73,6 +73,12 @@
         "LD_PRELOAD": "{repo}/zig-out/lib/libkatzensteg-sdl2.so"
       }
     },
+    "adapter.sdl2_rebind_preload": {
+      "hidden": true,
+      "env": {
+        "DYLD_INSERT_LIBRARIES": "{repo}/zig-out/lib/libkatzensteg-sdl2-rebind.dylib"
+      }
+    },
     "retroarch": {
       "target": "$HOME/dev/RetroArch/retroarch",
       "env": {

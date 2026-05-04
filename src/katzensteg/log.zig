@@ -41,6 +41,7 @@ pub fn writeCLog(scope: []const u8, message: []const u8) void {
     if (std.mem.eql(u8, scope, "real_sdl")) return writeCLogScoped(.real_sdl, message);
     if (std.mem.eql(u8, scope, "real_gl")) return writeCLogScoped(.real_gl, message);
     if (std.mem.eql(u8, scope, "vulkan")) return writeCLogScoped(.vulkan, message);
+    if (std.mem.eql(u8, scope, "darwin_rebinder")) return writeCLogScoped(.darwin_rebinder, message);
     writeCLogScoped(.c, message);
 }
 
