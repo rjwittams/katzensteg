@@ -349,6 +349,35 @@ fn constrainOuterForPresentation(previous: Rect, proposed: Rect, axis: ResizeAxi
     return next;
 }
 
+fn resolveInitialReadyPresentations(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+    var changed = false;
+    for (sessions) |*session| {
+        if (session.initial_presentation_resolved or !sessionIsVisible(session)) continue;
+        if (!session.presentation_status.ready_to_show) continue;
+        const next = initialResolvedOuterForPresentation(terminal, session.presentation_status) orelse {
+            session.initial_presentation_resolved = true;
+            continue;
+        };
+        session.initial_presentation_resolved = true;
+        if (!std.meta.eql(session.window.outer, next)) {
+            session.window.outer = next;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+fn initialResolvedOuterForPresentation(terminal: TerminalSize, status: WmPresentationStatus) ?Rect {
+    const effective = status.effective_rect_cells orelse return null;
+    if (effective.rows <= 0 or effective.cols <= 0) return null;
+    return clampOuterRect(.{
+        .row = effective.row - 3,
+        .col = effective.col - 1,
+        .rows = @max(min_outer_rows, effective.rows + 4),
+        .cols = @max(min_outer_cols, effective.cols + 2),
+    }, terminal);
+}
+
 fn rowsForContentCols(content_cols: i32, source: render_batch_protocol.SourcePixels, terminal: TerminalSize) i32 {
     const numerator = @as(i64, content_cols) * terminal.pixel_width * source.h * terminal.rows;
     const denominator = @as(i64, terminal.cols) * terminal.pixel_height * source.w;
@@ -379,6 +408,7 @@ const WmProducerSession = struct {
     window: WmWindowState,
     upload: render_batch_protocol.UploadPolicy,
     presentation_status: WmPresentationStatus = .{},
+    initial_presentation_resolved: bool = false,
     child: std.process.Child,
     child_stdin: ?std.fs.File = null,
     stdout_file: ?std.fs.File = null,
@@ -457,6 +487,9 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
         if (redraw_requested.swap(false, .seq_cst)) {
+            if (resolveInitialReadyPresentations(sessions[0..initialized], terminal)) {
+                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+            }
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
         if (prompt_active) {
@@ -1128,8 +1161,11 @@ fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: 
         .presentation_status => |status| if (session) |producer| {
             tty_lock.lock();
             defer tty_lock.unlock();
-            producer.presentation_status = presentationStatusFromPeer(status);
-            if (redraw_requested) |flag| flag.store(true, .seq_cst);
+            const next_status = presentationStatusFromPeer(status);
+            if (!std.meta.eql(producer.presentation_status, next_status)) {
+                producer.presentation_status = next_status;
+                if (redraw_requested) |flag| flag.store(true, .seq_cst);
+            }
         },
         .detached => {},
     }
@@ -1919,6 +1955,50 @@ test "wm peer presentation status updates session cache" {
     try std.testing.expect(session.presentation_status.ready_to_show);
     try std.testing.expectEqual(render_batch_protocol.SourcePixels{ .w = 640, .h = 480 }, session.presentation_status.source_px.?);
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 11, .rows = 15, .cols = 40 }, session.presentation_status.effective_rect_cells.?);
+}
+
+test "wm peer presentation status only requests redraw on visible state changes" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+    };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var tty_lock = std.Thread.Mutex{};
+    var redraw_requested = std.atomic.Value(bool).init(false);
+    const line = "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":640,\"h\":480},\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}}";
+
+    try applyPeerLineLocked(std.testing.allocator, out.writer(std.testing.allocator), &tty_lock, &session, &redraw_requested, line);
+    try std.testing.expect(redraw_requested.swap(false, .seq_cst));
+
+    try applyPeerLineLocked(std.testing.allocator, out.writer(std.testing.allocator), &tty_lock, &session, &redraw_requested, line);
+    try std.testing.expect(!redraw_requested.load(.seq_cst));
+}
+
+test "wm resolves initial ready presentation to effective content rect" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "ready",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 22, .cols = 78 }),
+            .upload = .{ .profile = .direct_apc },
+            .presentation_status = .{
+                .seen = true,
+                .ready_to_show = true,
+                .source_px = .{ .w = 640, .h = 480 },
+                .effective_rect_cells = .{ .row = 6, .col = 10, .rows = 12, .cols = 40 },
+            },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+    };
+
+    try std.testing.expect(resolveInitialReadyPresentations(sessions[0..], .{ .rows = 24, .cols = 80, .pixel_width = 640, .pixel_height = 480 }));
+    try std.testing.expect(sessions[0].initial_presentation_resolved);
+    try std.testing.expectEqual(Rect{ .row = 3, .col = 9, .rows = 16, .cols = 42 }, sessions[0].window.outer);
+    try std.testing.expect(!resolveInitialReadyPresentations(sessions[0..], .{ .rows = 24, .cols = 80, .pixel_width = 640, .pixel_height = 480 }));
 }
 
 test "wm desktop waits for presentation ready before drawing producer chrome" {
