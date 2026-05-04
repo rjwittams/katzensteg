@@ -232,6 +232,23 @@ pub const StatusBandOptions = struct {
     events: *const ProtocolEventLog,
 };
 
+pub const WmDesktopRedrawState = struct {
+    previous_outer: [default_wm_session_capacity]Rect = undefined,
+    previous_count: usize = 0,
+
+    fn capture(self: *WmDesktopRedrawState, sessions: []const WmProducerSession, z_order: []const usize) void {
+        self.previous_count = 0;
+        for (z_order) |session_index| {
+            if (session_index >= sessions.len) continue;
+            const session = &sessions[session_index];
+            if (!sessionIsVisible(session)) continue;
+            if (self.previous_count >= self.previous_outer.len) break;
+            self.previous_outer[self.previous_count] = session.window.outer;
+            self.previous_count += 1;
+        }
+    }
+};
+
 pub const RunExecOptions = struct {
     title: []const u8,
     terminal: TerminalSize,
@@ -343,8 +360,9 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     }
 
     var focused_index: usize = 0;
+    var redraw_state = WmDesktopRedrawState{};
     const writer = tty.file.deprecatedWriter();
-    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized]) |*session| {
         try startSessionStdoutThread(allocator, session, tty.file, &tty_lock);
     }
@@ -361,7 +379,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
         if (lifecycle.changed) {
             if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
-            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
         if (prompt_active) {
             const prompt = try readLaunchPromptInput(&tty, &input_buf, &launch_prompt, allocator);
@@ -369,13 +387,13 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 .none => {},
                 .changed => {
                     try recordLaunchPrompt(&event_log, launch_prompt.items);
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
                 .cancel => {
                     prompt_active = false;
                     launch_prompt.clearRetainingCapacity();
                     try event_log.record(.launch_prompt, "cancelled");
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
                 .submit => {
                     prompt_active = false;
@@ -397,7 +415,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                     }
                     launch_prompt.clearRetainingCapacity();
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
             }
             std.Thread.sleep(20 * std.time.ns_per_ms);
@@ -408,7 +426,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             if (input.focus_changed) {
                 try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
-                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
             }
             switch (input.action) {
                 .none, .consume => {},
@@ -416,7 +434,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     prompt_active = true;
                     launch_prompt.clearRetainingCapacity();
                     try recordLaunchPrompt(&event_log, launch_prompt.items);
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
                 .focus_next => {
                     if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
@@ -425,7 +443,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                         mouse_state = .{};
                         try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                     }
                 },
                 .close_focused => {
@@ -439,7 +457,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                         try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
                     }
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
                 .forward => {
                     if (initialized == 0) continue;
@@ -448,21 +466,21 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 .quit => {
                     shutdown_sent = true;
                     for (sessions[0..initialized]) |*session| try shutdownSession(session, &event_log, &logger);
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
                 .window => |action| {
                     if (initialized == 0) continue;
                     const focused = &sessions[focused_index];
                     if (applyWindowAction(&focused.window, action, terminal)) {
                         try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                     }
                 },
                 .layout => |action| {
                     if (applyLayoutAction(sessions[0..initialized], action, terminal)) {
                         mouse_state = .{};
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                     }
                 },
                 .mouse_drag => |outer| {
@@ -471,7 +489,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     if (!std.meta.eql(focused.window.outer, outer)) {
                         focused.window.outer = outer;
                         try sendViewportForSession(focused, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                     }
                 },
             }
@@ -495,7 +513,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         }
         if (!already_recorded_exit) try event_log.record(.process_exited, session.profile_name);
     }
-    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log);
+    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     if (shutdown_sent) return 0;
     for (sessions[0..initialized]) |*session| {
         const code = childTermExitCode(session.wait_state.term);
@@ -976,27 +994,35 @@ fn applyPeerStdoutLocked(allocator: std.mem.Allocator, stdout_file: std.fs.File,
 }
 
 fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8) !void {
-    var batch = attach_protocol.parseFrameBatch(allocator, line) catch return;
-    defer batch.deinit(allocator);
-    try terminal_batch_applier.applyFrameBatch(writer, .{
-        .deletes = batch.groups.deletes,
-        .uploads = batch.groups.uploads,
-        .placements = batch.groups.placements,
-        .after = batch.groups.after,
-    });
+    var message = attach_protocol.parsePeerMessage(allocator, line) catch return;
+    defer message.deinit(allocator);
+    switch (message) {
+        .frame_batch => |batch| try terminal_batch_applier.applyFrameBatch(writer, .{
+            .deletes = batch.groups.deletes,
+            .uploads = batch.groups.uploads,
+            .placements = batch.groups.placements,
+            .after = batch.groups.after,
+        }),
+        .detached, .presentation_status => {},
+    }
 }
 
 fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: *std.Thread.Mutex, line: []const u8) !void {
-    var batch = attach_protocol.parseFrameBatch(allocator, line) catch return;
-    defer batch.deinit(allocator);
-    tty_lock.lock();
-    defer tty_lock.unlock();
-    try terminal_batch_applier.applyFrameBatch(writer, .{
-        .deletes = batch.groups.deletes,
-        .uploads = batch.groups.uploads,
-        .placements = batch.groups.placements,
-        .after = batch.groups.after,
-    });
+    var message = attach_protocol.parsePeerMessage(allocator, line) catch return;
+    defer message.deinit(allocator);
+    switch (message) {
+        .frame_batch => |batch| {
+            tty_lock.lock();
+            defer tty_lock.unlock();
+            try terminal_batch_applier.applyFrameBatch(writer, .{
+                .deletes = batch.groups.deletes,
+                .uploads = batch.groups.uploads,
+                .placements = batch.groups.placements,
+                .after = batch.groups.after,
+            });
+        },
+        .detached, .presentation_status => {},
+    }
 }
 
 fn childTermExitCode(term: std.process.Child.Term) u8 {
@@ -1296,7 +1322,10 @@ fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect,
 fn readInputForSessions(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     const n = std.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
     if (n == 0) return .{ .action = .none };
-    const bytes = buf[0..n];
+    return readInputForSessionsBytes(buf[0..n], mouse, sessions, z_order, focused_index, terminal);
+}
+
+fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     const action = inputActionFromBytes(bytes);
     switch (action) {
         .quit, .focus_next, .start_launch => return .{ .action = action },
@@ -1310,15 +1339,17 @@ fn readInputForSessions(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, s
     }
     if (action != .none) return .{ .action = action };
     var changed_focus = false;
-    if (parseSgrMouseAt(bytes, 0)) |event| {
-        if (event.pressed and (event.button & 3) == 0) {
-            const cell = Cell{ .row = event.row, .col = event.col };
-            if (hitSessionIndex(sessions, z_order, cell)) |hit_index| {
-                if (focused_index.* != hit_index) {
-                    focused_index.* = hit_index;
-                    bringWindowToFront(z_order, hit_index);
-                    mouse.* = .{};
-                    changed_focus = true;
+    if (mouse.drag == null) {
+        if (parseSgrMouseAt(bytes, 0)) |event| {
+            if (event.pressed and (event.button & 3) == 0) {
+                const cell = Cell{ .row = event.row, .col = event.col };
+                if (hitSessionIndex(sessions, z_order, cell)) |hit_index| {
+                    if (focused_index.* != hit_index) {
+                        focused_index.* = hit_index;
+                        bringWindowToFront(z_order, hit_index);
+                        mouse.* = .{};
+                        changed_focus = true;
+                    }
                 }
             }
         }
@@ -1479,10 +1510,18 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
     return .{ .row = row, .col = col, .len = final - start + 1, .button = button, .pressed = bytes[final] == 'M' };
 }
 
-fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog) !void {
+fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     tty_lock.lock();
     defer tty_lock.unlock();
-    try writer.writeAll("\x1b[2J");
+    for (redraw_state.previous_outer[0..redraw_state.previous_count]) |outer| {
+        try clearChrome(writer, outer, terminal);
+    }
+    for (z_order) |session_index| {
+        if (session_index >= sessions.len) continue;
+        const session = &sessions[session_index];
+        if (!sessionIsVisible(session)) continue;
+        try clearChrome(writer, session.window.outer, terminal);
+    }
     for (z_order) |session_index| {
         if (session_index >= sessions.len) continue;
         const session = &sessions[session_index];
@@ -1499,6 +1538,33 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
     } else {
         try renderEmptyStatusAndReturn(writer, terminal, events);
     }
+    redraw_state.capture(sessions, z_order);
+}
+
+fn clearChrome(writer: anytype, outer: Rect, terminal: TerminalSize) !void {
+    if (outer.rows < 3 or outer.cols < 4) return;
+    const bottom = outer.row + outer.rows - 1;
+    try clearCellSpan(writer, outer.row, outer.col, outer.cols, terminal);
+    try clearCellSpan(writer, outer.row + 1, outer.col, outer.cols, terminal);
+    try clearCellSpan(writer, outer.row + 2, outer.col, outer.cols, terminal);
+    try clearCellSpan(writer, bottom, outer.col, outer.cols, terminal);
+
+    var row = outer.row + 3;
+    while (row < bottom) : (row += 1) {
+        try clearCellSpan(writer, row, outer.col, 1, terminal);
+        try clearCellSpan(writer, row, outer.col + outer.cols - 1, 1, terminal);
+    }
+}
+
+fn clearCellSpan(writer: anytype, row: i32, col: i32, cols: i32, terminal: TerminalSize) !void {
+    if (row < 1 or row > terminal.rows or cols <= 0) return;
+    const start_col = @max(1, col);
+    if (start_col > terminal.cols) return;
+    const requested_end = col + cols - 1;
+    const end_col = @min(terminal.cols, requested_end);
+    if (end_col < start_col) return;
+    try moveCursor(writer, row, start_col);
+    try writer.writeByteNTimes(' ', @intCast(end_col - start_col + 1));
 }
 
 fn visibleStatusSessionIndex(sessions: []const WmProducerSession, focused_index: usize) ?usize {
@@ -1674,11 +1740,27 @@ test "wm desktop can render with no producer sessions" {
     var tty_lock = std.Thread.Mutex{};
     const sessions = [_]WmProducerSession{};
     const z_order = [_]usize{};
-
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log);
+    var redraw_state = WmDesktopRedrawState{};
+    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "windows=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "last=launch_prompt launch:") != null);
+}
+
+test "wm desktop redraw avoids full screen clear" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 1);
+    defer log.deinit();
+    try log.record(.attach_sent, "main");
+    var tty_lock = std.Thread.Mutex{};
+    const sessions = [_]WmProducerSession{};
+    const z_order = [_]usize{};
+    var redraw_state = WmDesktopRedrawState{};
+    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[2K") != null);
 }
 
 test "wm initial control advertises file upload policy" {
@@ -1945,10 +2027,42 @@ test "wm z order hit test chooses frontmost window under mouse" {
         WmWindowState.init("back", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
         WmWindowState.init("front", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
     };
-    const z_order = [_]usize{ 0, 1 };
+    var z_order = [_]usize{ 0, 1 };
 
     try std.testing.expectEqual(@as(?usize, 1), hitWindowIndex(windows[0..], z_order[0..], .{ .row = 5, .col = 10 }));
     try std.testing.expectEqual(@as(?usize, 0), hitWindowIndex(windows[0..], z_order[0..], .{ .row = 2, .col = 2 }));
+}
+
+test "wm mouse drag keeps original focused window when crossing another window" {
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "back",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+        .{
+            .profile_name = "front",
+            .window = WmWindowState.init("main", .{ .row = 4, .col = 5, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .state = .running,
+        },
+    };
+    var z_order = [_]usize{ 0, 1 };
+    var focused_index: usize = 0;
+    var mouse = WmMouseInputState{};
+    var down = [_]u8{ 0x1b, '[', '<', '0', ';', '1', '0', ';', '2', 'M' };
+
+    const start = readInputForSessionsBytes(down[0..], &mouse, sessions[0..], z_order[0..], &focused_index, .{ .rows = 24, .cols = 80 });
+    try std.testing.expectEqual(@as(usize, 0), focused_index);
+    try std.testing.expectEqual(InputAction{ .mouse_drag = sessions[0].window.outer }, start.action);
+
+    var motion = [_]u8{ 0x1b, '[', '<', '3', '2', ';', '1', '0', ';', '5', 'M' };
+    const moved = readInputForSessionsBytes(motion[0..], &mouse, sessions[0..], z_order[0..], &focused_index, .{ .rows = 24, .cols = 80 });
+    try std.testing.expectEqual(@as(usize, 0), focused_index);
+    try std.testing.expectEqual(InputAction{ .mouse_drag = Rect{ .row = 4, .col = 1, .rows = 12, .cols = 40 } }, moved.action);
 }
 
 test "wm closed producer sessions stop drawing and hit testing immediately" {
@@ -1979,7 +2093,8 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     var tty_lock = std.Thread.Mutex{};
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log);
+    var redraw_state = WmDesktopRedrawState{};
+    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "active") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "closed") == null);

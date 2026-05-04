@@ -22,6 +22,18 @@ pub const PresentationRectCells = struct {
     cols: i32,
 };
 
+pub const SourcePixels = struct {
+    w: i32,
+    h: i32,
+};
+
+pub const PresentationStatusView = struct {
+    window_id: []const u8,
+    ready_to_show: bool = false,
+    source_px: ?SourcePixels = null,
+    effective_rect_cells: ?PresentationRectCells = null,
+};
+
 pub const IdRange = struct {
     start: u32,
     end: u32,
@@ -95,6 +107,20 @@ pub fn writeFrameBatchJsonl(_: std.mem.Allocator, writer: anytype, batch: BatchV
 pub fn writeDetachedJsonl(writer: anytype, window_id: []const u8) !void {
     try writer.writeAll("{\"type\":\"detached\",\"window_id\":");
     try writeJsonString(writer, window_id);
+    try writer.writeAll("}\n");
+}
+
+pub fn writePresentationStatusJsonl(writer: anytype, status: PresentationStatusView) !void {
+    try writer.writeAll("{\"type\":\"presentation_status\",\"window_id\":");
+    try writeJsonString(writer, status.window_id);
+    try writer.writeAll(",\"ready_to_show\":");
+    try writer.writeAll(if (status.ready_to_show) "true" else "false");
+    if (status.source_px) |source| {
+        try writer.print(",\"source_px\":{{\"w\":{d},\"h\":{d}}}", .{ source.w, source.h });
+    }
+    if (status.effective_rect_cells) |rect| {
+        try writer.print(",\"effective_rect_cells\":{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
+    }
     try writer.writeAll("}\n");
 }
 
@@ -321,6 +347,23 @@ test "detached JSON names the completed window" {
     try writeDetachedJsonl(out.writer(std.testing.allocator), "main");
 
     try std.testing.expectEqualStrings("{\"type\":\"detached\",\"window_id\":\"main\"}\n", out.items);
+}
+
+test "presentation status JSON carries producer readiness and effective rect" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writePresentationStatusJsonl(out.writer(std.testing.allocator), .{
+        .window_id = "main",
+        .ready_to_show = true,
+        .source_px = .{ .w = 320, .h = 240 },
+        .effective_rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 64 },
+    });
+
+    try std.testing.expectEqualStrings(
+        "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":320,\"h\":240},\"effective_rect_cells\":{\"row\":4,\"col\":2,\"rows\":18,\"cols\":64}}\n",
+        out.items,
+    );
 }
 
 test "attach message parses window geometry and id ranges" {
