@@ -13,6 +13,7 @@ const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
+const present_job_mod = @import("present_job.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const render_batch_sink_mod = @import("render_batch_sink.zig");
 const upload_path_mod = @import("upload_path.zig");
@@ -22,6 +23,7 @@ const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
+const PresentJob = present_job_mod.PresentJob;
 const CompositeMode = config_mod.CompositeMode;
 const InterceptMode = config_mod.InterceptMode;
 const Command = core_commands.Command;
@@ -679,8 +681,18 @@ pub const Runtime = struct {
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
         self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
+        self.writeBatchPresentationStatus(renderer, &job);
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
+    }
+
+    fn writeBatchPresentationStatus(self: *Runtime, renderer: core.CoreHandle, job: *const PresentJob) void {
+        const sink = &(self.batch_sink orelse return);
+        const writer = self.batch_writer orelse return;
+        const status = self.frame_builder.batchPresentationStatusForRenderer(sink, renderer, job) orelse return;
+        render_batch_protocol.writePresentationStatusJsonl(writer.deprecatedWriter(), status) catch |err| {
+            self.logger.writeFmtScoped(.info, .runtime, "batch presentation status write failed: {any}", .{err});
+        };
     }
 
     fn waitForInitialBatchAttach(self: *Runtime) void {
@@ -1282,6 +1294,37 @@ test "batch viewport immediately reprojects retained presentation when writer is
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
     try std.testing.expect(!runtime.batch_presentation_reset_pending);
+}
+
+test "batch present reports source pixels and effective fitted rect" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+
+    const window: core.CoreHandle = 0x6680;
+    const renderer: core.CoreHandle = 0x7780;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    setNonblocking(pipe[0]);
+    runtime.renderBatchPresent(renderer);
+
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"presentation_status\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":640,\"h\":480}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}") != null);
 }
 
 test "batch renderer destroy emits retained placement deletes before forgetting state" {

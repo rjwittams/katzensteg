@@ -1390,6 +1390,32 @@ pub const FrameBuilder = struct {
         return layout;
     }
 
+    pub fn batchPresentationStatusForRenderer(self: *FrameBuilder, sink: *const RenderBatchSink, renderer: core.CoreHandle, job: *const PresentJob) ?render_batch_protocol.PresentationStatusView {
+        const state = self.renderers.getPtr(renderer) orelse return null;
+        const source_px = switch (job.*) {
+            .framebuffer => |fb| render_batch_protocol.SourcePixels{ .w = fb.width, .h = fb.height },
+            .scene => render_batch_protocol.SourcePixels{ .w = state.window_w, .h = state.window_h },
+        };
+        const effective = switch (job.*) {
+            .framebuffer => |fb| batchPlacementRect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect()),
+            .scene => blk: {
+                var tty: DirectTty = undefined;
+                const rect = sink.presentationRect();
+                tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
+                tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
+                tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
+                tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+                break :blk batchSceneCellRect(fullscreenCompositeCellRect(state.window_w, state.window_h, &tty), rect);
+            },
+        };
+        return .{
+            .window_id = sink.window_id,
+            .ready_to_show = true,
+            .source_px = source_px,
+            .effective_rect_cells = cellRectToPresentationRect(effective),
+        };
+    }
+
     fn batchSceneCellRect(relative: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
         return .{
             .col = rect.col + relative.col - 1,
@@ -1397,6 +1423,10 @@ pub const FrameBuilder = struct {
             .w = relative.w,
             .h = relative.h,
         };
+    }
+
+    fn cellRectToPresentationRect(rect: ts_types.CellRect) render_batch_protocol.PresentationRectCells {
+        return .{ .row = rect.row, .col = rect.col, .rows = rect.h, .cols = rect.w };
     }
 
     fn relativeSceneBatchCellRect(absolute: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
