@@ -252,6 +252,7 @@ pub const WmDesktopRedrawState = struct {
             if (session_index >= sessions.len) continue;
             const session = &sessions[session_index];
             if (!sessionIsDrawable(session)) continue;
+            // Only the default interactive capacity gets previous-chrome cleanup tracking.
             if (self.previous_count >= self.previous_outer.len) break;
             self.previous_outer[self.previous_count] = session.window.outer;
             self.previous_count += 1;
