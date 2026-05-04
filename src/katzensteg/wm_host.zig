@@ -229,7 +229,15 @@ pub const StatusBandOptions = struct {
     terminal: TerminalSize,
     window: WmWindowState,
     upload_profile: render_batch_protocol.UploadProfile,
+    presentation_status: WmPresentationStatus = .{},
     events: *const ProtocolEventLog,
+};
+
+pub const WmPresentationStatus = struct {
+    seen: bool = false,
+    ready_to_show: bool = false,
+    source_px: ?render_batch_protocol.SourcePixels = null,
+    effective_rect_cells: ?render_batch_protocol.PresentationRectCells = null,
 };
 
 pub const WmDesktopRedrawState = struct {
@@ -305,6 +313,7 @@ const WmProducerSession = struct {
     profile_name: []const u8,
     window: WmWindowState,
     upload: render_batch_protocol.UploadPolicy,
+    presentation_status: WmPresentationStatus = .{},
     child: std.process.Child,
     child_stdin: ?std.fs.File = null,
     stdout_file: ?std.fs.File = null,
@@ -569,6 +578,7 @@ fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSe
     session.stdout_file = null;
     session.stdout_thread = try std.Thread.spawn(.{}, applyPeerStdoutThread, .{ThreadApplyArgs{
         .allocator = allocator,
+        .session = session,
         .stdout_file = stdout_file,
         .tty_file = tty_file,
         .tty_lock = tty_lock,
@@ -917,6 +927,20 @@ pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
     });
     try writeStatusPart(writer, &remaining, geometry);
 
+    if (options.presentation_status.seen) {
+        const status = options.presentation_status;
+        const ready = try std.fmt.bufPrint(&scratch, " ready={}", .{status.ready_to_show});
+        try writeStatusPart(writer, &remaining, ready);
+        if (status.source_px) |source| {
+            const source_text = try std.fmt.bufPrint(&scratch, " src={d}x{d}", .{ source.w, source.h });
+            try writeStatusPart(writer, &remaining, source_text);
+        }
+        if (status.effective_rect_cells) |rect| {
+            const effective_text = try std.fmt.bufPrint(&scratch, " eff={d},{d} {d}x{d}", .{ rect.row, rect.col, rect.cols, rect.rows });
+            try writeStatusPart(writer, &remaining, effective_text);
+        }
+    }
+
     if (options.events.last()) |event| {
         const event_prefix = try std.fmt.bufPrint(&scratch, " last={s} ", .{@tagName(event.kind)});
         try writeStatusPart(writer, &remaining, event_prefix);
@@ -972,7 +996,7 @@ fn applyPeerStdout(allocator: std.mem.Allocator, stdout_file: std.fs.File, write
     if (line.items.len > 0) try applyPeerLine(allocator, writer, line.items);
 }
 
-fn applyPeerStdoutLocked(allocator: std.mem.Allocator, stdout_file: std.fs.File, writer: anytype, tty_lock: *std.Thread.Mutex) !void {
+fn applyPeerStdoutLocked(allocator: std.mem.Allocator, stdout_file: std.fs.File, writer: anytype, tty_lock: *std.Thread.Mutex, session: ?*WmProducerSession) !void {
     defer stdout_file.close();
     var line = std.ArrayList(u8).empty;
     defer line.deinit(allocator);
@@ -983,14 +1007,14 @@ fn applyPeerStdoutLocked(allocator: std.mem.Allocator, stdout_file: std.fs.File,
         if (n == 0) break;
         for (buf[0..n]) |byte| {
             if (byte == '\n') {
-                try applyPeerLineLocked(allocator, writer, tty_lock, line.items);
+                try applyPeerLineLocked(allocator, writer, tty_lock, session, line.items);
                 line.clearRetainingCapacity();
             } else if (byte != '\r') {
                 try line.append(allocator, byte);
             }
         }
     }
-    if (line.items.len > 0) try applyPeerLineLocked(allocator, writer, tty_lock, line.items);
+    if (line.items.len > 0) try applyPeerLineLocked(allocator, writer, tty_lock, session, line.items);
 }
 
 fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8) !void {
@@ -1007,7 +1031,7 @@ fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8
     }
 }
 
-fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: *std.Thread.Mutex, line: []const u8) !void {
+fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: *std.Thread.Mutex, session: ?*WmProducerSession, line: []const u8) !void {
     var message = attach_protocol.parsePeerMessage(allocator, line) catch return;
     defer message.deinit(allocator);
     switch (message) {
@@ -1021,8 +1045,22 @@ fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: 
                 .after = batch.groups.after,
             });
         },
-        .detached, .presentation_status => {},
+        .presentation_status => |status| if (session) |producer| {
+            tty_lock.lock();
+            defer tty_lock.unlock();
+            producer.presentation_status = presentationStatusFromPeer(status);
+        },
+        .detached => {},
     }
+}
+
+fn presentationStatusFromPeer(status: attach_protocol.PresentationStatus) WmPresentationStatus {
+    return .{
+        .seen = true,
+        .ready_to_show = status.ready_to_show,
+        .source_px = status.source_px,
+        .effective_rect_cells = status.effective_rect_cells,
+    };
 }
 
 fn childTermExitCode(term: std.process.Child.Term) u8 {
@@ -1274,13 +1312,14 @@ fn childTermSummary(term: std.process.Child.Term) []const u8 {
 
 const ThreadApplyArgs = struct {
     allocator: std.mem.Allocator,
+    session: *WmProducerSession,
     stdout_file: std.fs.File,
     tty_file: std.fs.File,
     tty_lock: *std.Thread.Mutex,
 };
 
 fn applyPeerStdoutThread(args: ThreadApplyArgs) void {
-    applyPeerStdoutLocked(args.allocator, args.stdout_file, args.tty_file.deprecatedWriter(), args.tty_lock) catch {};
+    applyPeerStdoutLocked(args.allocator, args.stdout_file, args.tty_file.deprecatedWriter(), args.tty_lock, args.session) catch {};
 }
 
 const ChildWaitState = struct {
@@ -1534,7 +1573,7 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
     }
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
         const focused = sessions[status_index];
-        try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, events);
+        try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, focused.presentation_status, events);
     } else {
         try renderEmptyStatusAndReturn(writer, terminal, events);
     }
@@ -1577,11 +1616,12 @@ fn visibleStatusSessionIndex(sessions: []const WmProducerSession, focused_index:
     return null;
 }
 
-fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWindowState, upload_profile: render_batch_protocol.UploadProfile, events: *const ProtocolEventLog) !void {
+fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWindowState, upload_profile: render_batch_protocol.UploadProfile, presentation_status: WmPresentationStatus, events: *const ProtocolEventLog) !void {
     try renderStatusBand(writer, .{
         .terminal = terminal,
         .window = window,
         .upload_profile = upload_profile,
+        .presentation_status = presentation_status,
         .events = events,
     });
     const content = contentRectForOuter(window.outer);
@@ -1729,6 +1769,59 @@ test "wm status band renders host geometry and last event outside content" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "outer=1,1 80x20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "content=4,2 78x16") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "last=attach_sent main") != null);
+}
+
+test "wm status band renders producer presentation status" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    var log = try ProtocolEventLog.init(std.testing.allocator, 1);
+    defer log.deinit();
+
+    const window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 });
+    try renderStatusBand(out.writer(std.testing.allocator), .{
+        .terminal = .{ .rows = 24, .cols = 140 },
+        .window = window,
+        .upload_profile = .file_whole,
+        .presentation_status = .{
+            .seen = true,
+            .ready_to_show = true,
+            .source_px = .{ .w = 640, .h = 480 },
+            .effective_rect_cells = .{ .row = 7, .col = 11, .rows = 15, .cols = 40 },
+        },
+        .events = &log,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "ready=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "src=640x480") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "eff=7,11 40x15") != null);
+}
+
+test "wm peer presentation status updates session cache" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+    };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var tty_lock = std.Thread.Mutex{};
+
+    try applyPeerLineLocked(
+        std.testing.allocator,
+        out.writer(std.testing.allocator),
+        &tty_lock,
+        &session,
+        "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":640,\"h\":480},\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}}",
+    );
+
+    try std.testing.expectEqualStrings("", out.items);
+    try std.testing.expect(session.presentation_status.seen);
+    try std.testing.expect(session.presentation_status.ready_to_show);
+    try std.testing.expectEqual(render_batch_protocol.SourcePixels{ .w = 640, .h = 480 }, session.presentation_status.source_px.?);
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 11, .rows = 15, .cols = 40 }, session.presentation_status.effective_rect_cells.?);
 }
 
 test "wm desktop can render with no producer sessions" {
