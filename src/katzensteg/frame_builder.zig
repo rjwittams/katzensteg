@@ -19,6 +19,7 @@ const PresentJob = present_job.PresentJob;
 const SceneJob = present_job.SceneJob;
 const FramebufferJob = present_job.FramebufferJob;
 const AssetPublication = present_job.AssetPublication;
+const LogicalDest = present_job.LogicalDest;
 const SceneSprite = present_job.SceneSprite;
 const SolidSprite = present_job.SolidSprite;
 const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
@@ -156,7 +157,7 @@ const SceneBatchPlacement = struct {
     placement_id: u32 = 0,
     source_rect: core.CoreRect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
     dest_rect: ts_types.CellRect = .{ .col = 1, .row = 1, .w = 1, .h = 1 },
-    logical_dest: ?core.CoreRect = null,
+    logical_dest: ?LogicalDest = null,
     z: i32 = 0,
 };
 
@@ -1007,7 +1008,7 @@ pub const FrameBuilder = struct {
             try solids_list.append(self.allocator, .{
                 .color = state.clear_color,
                 .dest_rect = sdl_region,
-                .logical_dest = .{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h },
+                .logical_dest = .full_window,
                 .z = -100,
             });
         }
@@ -1016,7 +1017,7 @@ pub const FrameBuilder = struct {
                 try solids_list.append(self.allocator, .{
                     .color = fill.color,
                     .dest_rect = mapRectToCellsInRegion(fill.rect, state.window_w, state.window_h, sdl_region),
-                    .logical_dest = fill.rect,
+                    .logical_dest = .{ .rect = fill.rect },
                     .z = 0,
                 });
             }
@@ -1029,7 +1030,7 @@ pub const FrameBuilder = struct {
                 try solids_list.append(self.allocator, .{
                     .color = line.color,
                     .dest_rect = mapRectToCellsInRegion(line_rect, state.window_w, state.window_h, sdl_region),
-                    .logical_dest = line_rect,
+                    .logical_dest = .{ .rect = line_rect },
                     .z = 1,
                 });
             }
@@ -1051,7 +1052,7 @@ pub const FrameBuilder = struct {
                     .asset_id = texture.asset_id,
                     .source_rect = copy.src,
                     .dest_rect = mapRectToCellsInRegion(copy.dst, state.window_w, state.window_h, sdl_region),
-                    .logical_dest = copy.dst,
+                    .logical_dest = .{ .rect = copy.dst },
                     .z = @intCast(100 + i),
                 });
             }
@@ -1299,7 +1300,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn placeSceneBatchSlot(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, slot: usize, dest: ts_types.CellRect, logical_dest: ?core.CoreRect, placement: kitty_protocol.Placement) !void {
+    fn placeSceneBatchSlot(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, slot: usize, dest: ts_types.CellRect, logical_dest: ?LogicalDest, placement: kitty_protocol.Placement) !void {
         if (slot >= state.scene_batch_placements.items.len) {
             const old_len = state.scene_batch_placements.items.len;
             try state.scene_batch_placements.resize(self.allocator, slot + 1);
@@ -1389,7 +1390,11 @@ pub const FrameBuilder = struct {
             tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
             tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
             const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, &tty);
-            return batchSceneCellRect(mapRectToCellsInRegion(logical_dest, state.window_w, state.window_h, sdl_region), rect);
+            const source_rect: core.CoreRect = switch (logical_dest) {
+                .rect => |source_rect| source_rect,
+                .full_window => .{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h },
+            };
+            return batchSceneCellRect(mapRectToCellsInRegion(source_rect, state.window_w, state.window_h, sdl_region), rect);
         }
         return batchSceneCellRect(placement.dest_rect, rect);
     }
@@ -4038,6 +4043,47 @@ test "frame builder reprojects retained batch scene placements after viewport re
 
     const resized_frame = out.items[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "\\u001b[7;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
+}
+
+test "frame builder reprojects retained clear against current source window size" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const window: core.CoreHandle = 0x2007;
+    const renderer: core.CoreHandle = 0x2008;
+    builder.onCreateWindow(window, 320, 200);
+    builder.onCreateRenderer(window, renderer);
+    builder.onRenderClear(renderer);
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+
+    builder.onWindowSize(window, 640, 480);
+    sink.viewport(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 }, .fit);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+
+    const resized_frame = out.items[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
 }
 
