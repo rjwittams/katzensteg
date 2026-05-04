@@ -707,12 +707,7 @@ pub const Runtime = struct {
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
         if (self.batch_sink) |*sink| {
-            const rect = sink.presentationRect();
-            var tty: DirectTty = undefined;
-            tty.cols = @intCast(@max(1, rect.cols));
-            tty.rows = @intCast(@max(1, rect.rows));
-            tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-            tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+            const tty = sink.presentationTty();
             return self.frame_builder.externalFramebufferUploadSize(&tty, source_w, source_h);
         }
         const tty = &(self.tty orelse return .{ .w = source_w, .h = source_h });
@@ -788,6 +783,7 @@ pub const Runtime = struct {
                     },
                 );
                 sink.attachWithPresentation(attach.rect_cells, attach.aspect, attach.z_base);
+                sink.setTerminalGeometry(attach.terminal);
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
                     return;
@@ -812,6 +808,7 @@ pub const Runtime = struct {
                 const previous = sink.presentationRect();
                 const previous_aspect = sink.presentationAspect();
                 const previous_z_base = sink.presentationZBase();
+                const previous_terminal = sink.terminalGeometry();
                 log.info(
                     "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
@@ -830,9 +827,11 @@ pub const Runtime = struct {
                         viewport.z_base,
                     },
                 );
-                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base;
+                const terminal_changed = if (viewport.terminal) |terminal| previous_terminal == null or !std.meta.eql(previous_terminal.?, terminal) else false;
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed;
                 if (presentation_changed) self.batch_presentation_reset_pending = true;
                 sink.viewportWithPresentation(viewport.rect_cells, viewport.aspect, viewport.z_base);
+                if (viewport.terminal != null) sink.setTerminalGeometry(viewport.terminal);
                 if (presentation_changed) {
                     if (self.batch_writer) |writer| {
                         if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
@@ -882,12 +881,12 @@ pub const Runtime = struct {
     }
 
     fn batchVirtualTty(self: *Runtime) DirectTty {
+        if (self.batch_sink) |*sink| return sink.presentationTty();
         var tty: DirectTty = undefined;
-        const rect: render_batch_protocol.PresentationRectCells = if (self.batch_sink) |*sink| sink.presentationRect() else .{ .row = 1, .col = 1, .rows = 1, .cols = 1 };
-        tty.cols = @intCast(@max(1, rect.cols));
-        tty.rows = @intCast(@max(1, rect.rows));
-        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+        tty.cols = 1;
+        tty.rows = 1;
+        tty.pixel_width = 10;
+        tty.pixel_height = 20;
         return tty;
     }
 
@@ -1325,6 +1324,33 @@ test "batch present reports source pixels and effective fitted rect" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":640,\"h\":480}") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}") != null);
+}
+
+test "batch present uses host terminal pixels for effective fitted rect" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.processBatchControlLine("{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\",\"terminal_cells\":{\"rows\":40,\"cols\":160},\"terminal_px\":{\"w\":1280,\"h\":800},\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}");
+
+    const window: core.CoreHandle = 0x6681;
+    const renderer: core.CoreHandle = 0x7781;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    setNonblocking(pipe[0]);
+    runtime.renderBatchPresent(renderer);
+
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":9,\"col\":11,\"rows\":12,\"cols\":40}") != null);
 }
 
 test "batch renderer destroy emits retained placement deletes before forgetting state" {

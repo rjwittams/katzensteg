@@ -1397,14 +1397,10 @@ pub const FrameBuilder = struct {
             .scene => render_batch_protocol.SourcePixels{ .w = state.window_w, .h = state.window_h },
         };
         const effective = switch (job.*) {
-            .framebuffer => |fb| batchPlacementRect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect()),
+            .framebuffer => |fb| batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect()),
             .scene => blk: {
-                var tty: DirectTty = undefined;
                 const rect = sink.presentationRect();
-                tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
-                tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
-                tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-                tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+                const tty = sink.presentationTty();
                 break :blk batchSceneCellRect(fullscreenCompositeCellRect(state.window_w, state.window_h, &tty), rect);
             },
         };
@@ -1672,8 +1668,8 @@ pub const FrameBuilder = struct {
         state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
 
-        const dest = batchPlacementRect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
-        const source = batchSourceRectForAspect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
+        const dest = batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect());
+        const source = batchSourceRectForAspect(fb.width, fb.height, sink, sink.presentationAspect());
         try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
         try sink.place(dest.row, dest.col, .{
             .image_id = state.composite_image_id,
@@ -1700,7 +1696,8 @@ pub const FrameBuilder = struct {
         h: i32,
     };
 
-    fn batchPlacementRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) ts_types.CellRect {
+    fn batchPlacementRect(source_w: i32, source_h: i32, sink: *const RenderBatchSink, aspect: render_batch_protocol.PresentationAspect) ts_types.CellRect {
+        const rect = sink.presentationRect();
         return switch (aspect) {
             .stretch, .cover => .{
                 .col = rect.col,
@@ -1708,16 +1705,13 @@ pub const FrameBuilder = struct {
                 .w = rect.cols,
                 .h = rect.rows,
             },
-            .fit => batchFitCellRect(source_w, source_h, rect),
+            .fit => batchFitCellRect(source_w, source_h, sink),
         };
     }
 
-    fn batchFitCellRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
-        var tty: DirectTty = undefined;
-        tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
-        tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
-        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+    fn batchFitCellRect(source_w: i32, source_h: i32, sink: *const RenderBatchSink) ts_types.CellRect {
+        const rect = sink.presentationRect();
+        const tty = sink.presentationTty();
         const contained = containedCellRect(source_w, source_h, &tty);
         return .{
             .col = rect.col + contained.col - 1,
@@ -1727,12 +1721,14 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn batchSourceRectForAspect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) PixelRect {
+    fn batchSourceRectForAspect(source_w: i32, source_h: i32, sink: *const RenderBatchSink, aspect: render_batch_protocol.PresentationAspect) PixelRect {
         if (aspect != .cover) return .{ .x = 0, .y = 0, .w = source_w, .h = source_h };
+        const rect = sink.presentationRect();
+        const tty = sink.presentationTty();
         const safe_w = @max(1, source_w);
         const safe_h = @max(1, source_h);
-        const cell_w_px: f64 = 10.0;
-        const cell_h_px: f64 = 20.0;
+        const cell_w_px: f64 = if (tty.pixel_width > 0 and tty.cols > 0) @as(f64, @floatFromInt(tty.pixel_width)) / @as(f64, @floatFromInt(tty.cols)) else 1.0;
+        const cell_h_px: f64 = if (tty.pixel_height > 0 and tty.rows > 0) @as(f64, @floatFromInt(tty.pixel_height)) / @as(f64, @floatFromInt(tty.rows)) else 1.0;
         const dest_w = @as(f64, @floatFromInt(@max(1, rect.cols))) * cell_w_px;
         const dest_h = @as(f64, @floatFromInt(@max(1, rect.rows))) * cell_h_px;
         const scale = @max(dest_w / @as(f64, @floatFromInt(safe_w)), dest_h / @as(f64, @floatFromInt(safe_h)));

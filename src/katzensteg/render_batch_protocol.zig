@@ -27,6 +27,21 @@ pub const SourcePixels = struct {
     h: i32,
 };
 
+pub const TerminalCells = struct {
+    rows: i32,
+    cols: i32,
+};
+
+pub const TerminalPixels = struct {
+    w: i32,
+    h: i32,
+};
+
+pub const TerminalGeometry = struct {
+    cells: TerminalCells,
+    pixels: ?TerminalPixels = null,
+};
+
 pub const PresentationStatusView = struct {
     window_id: []const u8,
     ready_to_show: bool = false,
@@ -56,6 +71,7 @@ pub const AttachMessage = struct {
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
     z_base: i32 = 0,
+    terminal: ?TerminalGeometry = null,
     image_ids: IdRange,
     placement_ids: IdRange,
     upload: UploadPolicy,
@@ -66,6 +82,7 @@ pub const ViewportMessage = struct {
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
     z_base: i32 = 0,
+    terminal: ?TerminalGeometry = null,
 };
 
 pub const DetachMessage = struct {
@@ -203,6 +220,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
     if (aspect_value != .string) return error.InvalidMessage;
     const aspect = parseAspect(aspect_value.string) orelse return error.InvalidMessage;
     const z_base: i32 = if (root.get("z_base")) |z_value| try jsonI32(z_value) else 0;
+    const terminal = try parseTerminalGeometry(root);
 
     if (std.mem.eql(u8, type_value.string, "viewport")) {
         return .{ .viewport = .{
@@ -210,6 +228,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
             .rect_cells = rect,
             .aspect = aspect,
             .z_base = z_base,
+            .terminal = terminal,
         } };
     }
 
@@ -226,6 +245,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         .rect_cells = rect,
         .aspect = aspect,
         .z_base = z_base,
+        .terminal = terminal,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
@@ -292,6 +312,23 @@ fn parseRect(value: std.json.Value) !PresentationRectCells {
         .rows = try jsonI32(value.object.get("rows") orelse return error.InvalidMessage),
         .cols = try jsonI32(value.object.get("cols") orelse return error.InvalidMessage),
     };
+}
+
+fn parseTerminalGeometry(root: std.json.ObjectMap) !?TerminalGeometry {
+    const cells_value = root.get("terminal_cells") orelse return null;
+    if (cells_value != .object) return error.InvalidMessage;
+    const cells = TerminalCells{
+        .rows = try jsonI32(cells_value.object.get("rows") orelse return error.InvalidMessage),
+        .cols = try jsonI32(cells_value.object.get("cols") orelse return error.InvalidMessage),
+    };
+    const pixels = if (root.get("terminal_px")) |pixels_value| blk: {
+        if (pixels_value != .object) return error.InvalidMessage;
+        break :blk TerminalPixels{
+            .w = try jsonI32(pixels_value.object.get("w") orelse return error.InvalidMessage),
+            .h = try jsonI32(pixels_value.object.get("h") orelse return error.InvalidMessage),
+        };
+    } else null;
+    return .{ .cells = cells, .pixels = pixels };
 }
 
 fn parseFirstIdRange(value: std.json.Value) !IdRange {
@@ -381,6 +418,28 @@ test "attach message parses window geometry and id ranges" {
     try std.testing.expectEqual(IdRange{ .start = 200000, .end = 299999 }, attach.placement_ids);
     try std.testing.expectEqual(UploadProfile.direct_apc, attach.upload.profile);
     try std.testing.expectEqual(@as(?[]const u8, null), attach.upload.path);
+}
+
+test "attach and viewport messages parse terminal geometry" {
+    const attach_msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","terminal_cells":{"rows":50,"cols":160},"terminal_px":{"w":1280,"h":1000},"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach = try parseAttachMessage(std.testing.allocator, attach_msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(TerminalGeometry{
+        .cells = .{ .rows = 50, .cols = 160 },
+        .pixels = .{ .w = 1280, .h = 1000 },
+    }, attach.terminal.?);
+
+    const viewport_msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit","terminal_cells":{"rows":50,"cols":160},"terminal_px":{"w":1280,"h":1000}}
+    ;
+    var control = try parseControlMessage(std.testing.allocator, viewport_msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(TerminalGeometry{
+        .cells = .{ .rows = 50, .cols = 160 },
+        .pixels = .{ .w = 1280, .h = 1000 },
+    }, control.viewport.terminal.?);
 }
 
 test "attach message parses host-selected file upload policy" {
