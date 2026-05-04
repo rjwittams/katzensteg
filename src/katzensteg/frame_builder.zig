@@ -448,6 +448,10 @@ pub const FrameBuilder = struct {
 
     pub fn onCreateRenderer(self: *FrameBuilder, window: core.CoreHandle, renderer: core.CoreHandle) void {
         if (renderer == 0) return;
+        if (self.renderers.fetchRemove(renderer)) |entry| {
+            var state = entry.value;
+            state.deinit(self.allocator);
+        }
         const dims = self.windows.get(window) orelse WindowRecord{ .w = 640, .h = 480 };
         var state = RendererState.init(self.allocator, dims.w, dims.h);
         state.window = window;
@@ -1200,6 +1204,28 @@ pub const FrameBuilder = struct {
         if (sink.hasPendingBytes()) {
             sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentation reset render batch flush failed: {any}", .{err});
         }
+    }
+
+    pub fn flushBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle, writer: anytype) void {
+        self.queueBatchDeletesForRenderer(logger, sink, renderer);
+        if (sink.hasPendingBytes()) {
+            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup render batch flush failed: {any}", .{err});
+        }
+    }
+
+    pub fn queueBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        self.deleteSceneBatchPlacementsBatch(sink, state, 0) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup scene placement delete failed: {any}", .{err});
+        };
+        self.deleteCompositeFullscreenBatch(sink, state) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup fullscreen delete failed: {any}", .{err});
+        };
+        self.deleteCompositeTilesBatch(sink, state) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup tile delete failed: {any}", .{err});
+        };
+        if (state.composite_last_presented) |last| @memset(last, 0);
+        self.deleteRetiredImagesBatch(logger, sink);
     }
 
     pub fn queueBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink) void {

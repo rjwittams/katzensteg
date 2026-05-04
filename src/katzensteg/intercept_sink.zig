@@ -166,11 +166,11 @@ pub fn onWindowSize(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, w: i32, 
 }
 
 pub fn onCreateRenderer(rt: *runtime_mod.Runtime, window: ?*sdl.SDL_Window, renderer: ?*sdl.SDL_Renderer) void {
-    rt.frame_builder.onCreateRenderer(sdl_adapter.handleFromPtr(window), sdl_adapter.handleFromPtr(renderer));
+    rt.createRenderer(sdl_adapter.handleFromPtr(window), sdl_adapter.handleFromPtr(renderer));
 }
 
 pub fn onDestroyRenderer(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
-    rt.frame_builder.onDestroyRenderer(sdl_adapter.handleFromPtr(renderer));
+    rt.destroyRenderer(sdl_adapter.handleFromPtr(renderer));
 }
 
 pub fn onCreateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, format: sdl.Uint32, w: i32, h: i32) void {

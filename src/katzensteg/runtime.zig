@@ -643,6 +643,20 @@ pub const Runtime = struct {
         self.notePresentDuration(duration);
     }
 
+    pub fn createRenderer(self: *Runtime, window: core.CoreHandle, renderer: core.CoreHandle) void {
+        if (self.batch_sink != null and self.batch_writer != null) {
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+        }
+        self.frame_builder.onCreateRenderer(window, renderer);
+    }
+
+    pub fn destroyRenderer(self: *Runtime, renderer: core.CoreHandle) void {
+        if (self.batch_sink != null and self.batch_writer != null) {
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+        }
+        self.frame_builder.onDestroyRenderer(renderer);
+    }
+
     pub fn renderBatchPresent(self: *Runtime, renderer: core.CoreHandle) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
         self.pollBatchControl();
@@ -1268,6 +1282,84 @@ test "batch viewport immediately reprojects retained presentation when writer is
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
     try std.testing.expect(!runtime.batch_presentation_reset_pending);
+}
+
+test "batch renderer destroy emits retained placement deletes before forgetting state" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6666;
+    const renderer: core.CoreHandle = 0x7777;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.frame_builder.onCreateRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.destroyRenderer(renderer);
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
+}
+
+test "batch renderer replacement emits retained placement deletes before overwriting state" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6667;
+    const renderer: core.CoreHandle = 0x7778;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.createRenderer(window, renderer);
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
 }
 
 test "batch input poll drains control pipe before SDL event reads" {
