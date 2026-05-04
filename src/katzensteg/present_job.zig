@@ -21,16 +21,23 @@ pub const AssetPublication = union(enum) {
     }
 };
 
+pub const LogicalDest = union(enum) {
+    rect: core.CoreRect,
+    full_window,
+};
+
 pub const SceneSprite = struct {
     asset_id: u64,
     source_rect: core.CoreRect,
     dest_rect: ts_types.CellRect,
+    logical_dest: ?LogicalDest = null,
     z: i32,
 };
 
 pub const SolidSprite = struct {
     color: [4]u8,
     dest_rect: ts_types.CellRect,
+    logical_dest: ?LogicalDest = null,
     z: i32,
 };
 

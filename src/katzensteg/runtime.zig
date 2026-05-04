@@ -13,6 +13,7 @@ const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
 const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
+const present_job_mod = @import("present_job.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const render_batch_sink_mod = @import("render_batch_sink.zig");
 const upload_path_mod = @import("upload_path.zig");
@@ -22,6 +23,7 @@ const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
 const FrameBuilder = frame_builder_mod.FrameBuilder;
+const PresentJob = present_job_mod.PresentJob;
 const CompositeMode = config_mod.CompositeMode;
 const InterceptMode = config_mod.InterceptMode;
 const Command = core_commands.Command;
@@ -643,6 +645,20 @@ pub const Runtime = struct {
         self.notePresentDuration(duration);
     }
 
+    pub fn createRenderer(self: *Runtime, window: core.CoreHandle, renderer: core.CoreHandle) void {
+        if (self.batch_sink != null and self.batch_writer != null) {
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+        }
+        self.frame_builder.onCreateRenderer(window, renderer);
+    }
+
+    pub fn destroyRenderer(self: *Runtime, renderer: core.CoreHandle) void {
+        if (self.batch_sink != null and self.batch_writer != null) {
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+        }
+        self.frame_builder.onDestroyRenderer(renderer);
+    }
+
     pub fn renderBatchPresent(self: *Runtime, renderer: core.CoreHandle) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
         self.pollBatchControl();
@@ -665,8 +681,18 @@ pub const Runtime = struct {
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
         self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
+        self.writeBatchPresentationStatus(renderer, &job);
         const duration = std.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
+    }
+
+    fn writeBatchPresentationStatus(self: *Runtime, renderer: core.CoreHandle, job: *const PresentJob) void {
+        const sink = &(self.batch_sink orelse return);
+        const writer = self.batch_writer orelse return;
+        const status = self.frame_builder.batchPresentationStatusForRenderer(sink, renderer, job) orelse return;
+        render_batch_protocol.writePresentationStatusJsonl(writer.deprecatedWriter(), status) catch |err| {
+            self.logger.writeFmtScoped(.info, .runtime, "batch presentation status write failed: {any}", .{err});
+        };
     }
 
     fn waitForInitialBatchAttach(self: *Runtime) void {
@@ -681,12 +707,7 @@ pub const Runtime = struct {
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
         if (self.batch_sink) |*sink| {
-            const rect = sink.presentationRect();
-            var tty: DirectTty = undefined;
-            tty.cols = @intCast(@max(1, rect.cols));
-            tty.rows = @intCast(@max(1, rect.rows));
-            tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-            tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+            const tty = sink.presentationTty();
             return self.frame_builder.externalFramebufferUploadSize(&tty, source_w, source_h);
         }
         const tty = &(self.tty orelse return .{ .w = source_w, .h = source_h });
@@ -762,6 +783,7 @@ pub const Runtime = struct {
                     },
                 );
                 sink.attachWithPresentation(attach.rect_cells, attach.aspect, attach.z_base);
+                sink.setTerminalGeometry(attach.terminal);
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
                     return;
@@ -786,6 +808,7 @@ pub const Runtime = struct {
                 const previous = sink.presentationRect();
                 const previous_aspect = sink.presentationAspect();
                 const previous_z_base = sink.presentationZBase();
+                const previous_terminal = sink.terminalGeometry();
                 log.info(
                     "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
@@ -804,8 +827,18 @@ pub const Runtime = struct {
                         viewport.z_base,
                     },
                 );
-                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base) self.batch_presentation_reset_pending = true;
+                const terminal_changed = if (viewport.terminal) |terminal| previous_terminal == null or !std.meta.eql(previous_terminal.?, terminal) else false;
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed;
+                if (presentation_changed) self.batch_presentation_reset_pending = true;
                 sink.viewportWithPresentation(viewport.rect_cells, viewport.aspect, viewport.z_base);
+                if (viewport.terminal != null) sink.setTerminalGeometry(viewport.terminal);
+                if (presentation_changed) {
+                    if (self.batch_writer) |writer| {
+                        if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
+                            self.batch_presentation_reset_pending = false;
+                        }
+                    }
+                }
                 const applied = sink.presentationRect();
                 self.updateBatchInputTarget(sink);
                 log.info(
@@ -848,12 +881,12 @@ pub const Runtime = struct {
     }
 
     fn batchVirtualTty(self: *Runtime) DirectTty {
+        if (self.batch_sink) |*sink| return sink.presentationTty();
         var tty: DirectTty = undefined;
-        const rect: render_batch_protocol.PresentationRectCells = if (self.batch_sink) |*sink| sink.presentationRect() else .{ .row = 1, .col = 1, .rows = 1, .cols = 1 };
-        tty.cols = @intCast(@max(1, rect.cols));
-        tty.rows = @intCast(@max(1, rect.rows));
-        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+        tty.cols = 1;
+        tty.rows = 1;
+        tty.pixel_width = 10;
+        tty.pixel_height = 20;
         return tty;
     }
 
@@ -1222,6 +1255,180 @@ test "batch viewport marks presentation reset pending without immediate flush" {
     try std.testing.expect(runtime.batch_presentation_reset_pending);
     try std.testing.expect(runtime.batch_sink.?.hasPendingBytes() == false);
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 12, .rows = 28, .cols = 76 }, runtime.batch_sink.?.presentationRect());
+}
+
+test "batch viewport immediately reprojects retained presentation when writer is available" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6666;
+    const renderer: core.CoreHandle = 0x7777;
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.frame_builder.onCreateRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\"}");
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
+    try std.testing.expect(!runtime.batch_presentation_reset_pending);
+}
+
+test "batch present reports source pixels and effective fitted rect" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+
+    const window: core.CoreHandle = 0x6680;
+    const renderer: core.CoreHandle = 0x7780;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    setNonblocking(pipe[0]);
+    runtime.renderBatchPresent(renderer);
+
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"presentation_status\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":640,\"h\":480}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}") != null);
+}
+
+test "batch present uses host terminal pixels for effective fitted rect" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.processBatchControlLine("{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\",\"terminal_cells\":{\"rows\":40,\"cols\":160},\"terminal_px\":{\"w\":1280,\"h\":800},\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}");
+
+    const window: core.CoreHandle = 0x6681;
+    const renderer: core.CoreHandle = 0x7781;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    setNonblocking(pipe[0]);
+    runtime.renderBatchPresent(renderer);
+
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":9,\"col\":11,\"rows\":12,\"cols\":40}") != null);
+}
+
+test "batch renderer destroy emits retained placement deletes before forgetting state" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6666;
+    const renderer: core.CoreHandle = 0x7777;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.frame_builder.onCreateRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.destroyRenderer(renderer);
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
+}
+
+test "batch renderer replacement emits retained placement deletes before overwriting state" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6667;
+    const renderer: core.CoreHandle = 0x7778;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.createRenderer(window, renderer);
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
 }
 
 test "batch input poll drains control pipe before SDL event reads" {

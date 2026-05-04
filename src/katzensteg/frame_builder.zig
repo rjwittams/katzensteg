@@ -19,6 +19,7 @@ const PresentJob = present_job.PresentJob;
 const SceneJob = present_job.SceneJob;
 const FramebufferJob = present_job.FramebufferJob;
 const AssetPublication = present_job.AssetPublication;
+const LogicalDest = present_job.LogicalDest;
 const SceneSprite = present_job.SceneSprite;
 const SolidSprite = present_job.SolidSprite;
 const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
@@ -151,6 +152,15 @@ const CompositePlacement = struct {
     placement_id: u32 = 0,
 };
 
+const SceneBatchPlacement = struct {
+    image_id: u32 = 0,
+    placement_id: u32 = 0,
+    source_rect: core.CoreRect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+    dest_rect: ts_types.CellRect = .{ .col = 1, .row = 1, .w = 1, .h = 1 },
+    logical_dest: ?LogicalDest = null,
+    z: i32 = 0,
+};
+
 const PresentDebugSignature = struct {
     use_composite: bool,
     copies: usize,
@@ -181,6 +191,7 @@ const RendererState = struct {
     composite_placement_id: u32 = 0,
     retained_fullscreen_placements: [fullscreen_retained_placement_count]CompositePlacement = [_]CompositePlacement{.{}} ** fullscreen_retained_placement_count,
     retained_fullscreen_placement_count: usize = 0,
+    scene_batch_placements: std.ArrayList(SceneBatchPlacement),
     composite_rgba: ?[]u8 = null,
     composite_last_presented: ?[]u8 = null,
     composite_tiles: std.ArrayList(CompositeTileState),
@@ -195,6 +206,7 @@ const RendererState = struct {
             .window_w = window_w,
             .window_h = window_h,
             .viewport = .{ .x = 0, .y = 0, .w = window_w, .h = window_h },
+            .scene_batch_placements = std.ArrayList(SceneBatchPlacement).empty,
             .composite_tiles = std.ArrayList(CompositeTileState).empty,
             .copies = std.ArrayList(RenderCopyOp).empty,
             .fills = std.ArrayList(FillRectOp).empty,
@@ -205,6 +217,7 @@ const RendererState = struct {
     fn deinit(self: *RendererState, allocator: std.mem.Allocator) void {
         if (self.composite_rgba) |buf| allocator.free(buf);
         if (self.composite_last_presented) |buf| allocator.free(buf);
+        self.scene_batch_placements.deinit(allocator);
         self.composite_tiles.deinit(allocator);
         self.copies.deinit(allocator);
         self.fills.deinit(allocator);
@@ -435,6 +448,10 @@ pub const FrameBuilder = struct {
 
     pub fn onCreateRenderer(self: *FrameBuilder, window: core.CoreHandle, renderer: core.CoreHandle) void {
         if (renderer == 0) return;
+        if (self.renderers.fetchRemove(renderer)) |entry| {
+            var state = entry.value;
+            state.deinit(self.allocator);
+        }
         const dims = self.windows.get(window) orelse WindowRecord{ .w = 640, .h = 480 };
         var state = RendererState.init(self.allocator, dims.w, dims.h);
         state.window = window;
@@ -990,26 +1007,34 @@ pub const FrameBuilder = struct {
         var published_in_job = std.AutoHashMap(u64, void).init(self.allocator);
         defer published_in_job.deinit();
 
+        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         if (state.had_clear) {
             try solids_list.append(self.allocator, .{
                 .color = state.clear_color,
-                .dest_rect = .{ .col = 1, .row = 1, .w = tty.cols, .h = tty.rows },
+                .dest_rect = sdl_region,
+                .logical_dest = .full_window,
                 .z = -100,
             });
         }
-        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         if (!bg_only) {
             for (state.fills.items) |fill| {
                 try solids_list.append(self.allocator, .{
                     .color = fill.color,
                     .dest_rect = mapRectToCellsInRegion(fill.rect, state.window_w, state.window_h, sdl_region),
+                    .logical_dest = .{ .rect = fill.rect },
                     .z = 0,
                 });
             }
             for (state.lines.items) |line| {
+                const min_x = @min(line.x1, line.x2);
+                const min_y = @min(line.y1, line.y2);
+                const max_x = @max(line.x1, line.x2);
+                const max_y = @max(line.y1, line.y2);
+                const line_rect = core.CoreRect{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) };
                 try solids_list.append(self.allocator, .{
                     .color = line.color,
-                    .dest_rect = mapLineToCellsInRegion(line, state.window_w, state.window_h, sdl_region),
+                    .dest_rect = mapRectToCellsInRegion(line_rect, state.window_w, state.window_h, sdl_region),
+                    .logical_dest = .{ .rect = line_rect },
                     .z = 1,
                 });
             }
@@ -1031,6 +1056,7 @@ pub const FrameBuilder = struct {
                     .asset_id = texture.asset_id,
                     .source_rect = copy.src,
                     .dest_rect = mapRectToCellsInRegion(copy.dst, state.window_w, state.window_h, sdl_region),
+                    .logical_dest = .{ .rect = copy.dst },
                     .z = @intCast(100 + i),
                 });
             }
@@ -1180,10 +1206,35 @@ pub const FrameBuilder = struct {
         }
     }
 
+    pub fn flushBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle, writer: anytype) void {
+        self.queueBatchDeletesForRenderer(logger, sink, renderer);
+        if (sink.hasPendingBytes()) {
+            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup render batch flush failed: {any}", .{err});
+        }
+    }
+
+    pub fn queueBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        self.deleteSceneBatchPlacementsBatch(sink, state, 0) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup scene placement delete failed: {any}", .{err});
+        };
+        self.deleteCompositeFullscreenBatch(sink, state) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup fullscreen delete failed: {any}", .{err});
+        };
+        self.deleteCompositeTilesBatch(sink, state) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup tile delete failed: {any}", .{err});
+        };
+        if (state.composite_last_presented) |last| @memset(last, 0);
+        self.deleteRetiredImagesBatch(logger, sink);
+    }
+
     pub fn queueBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink) void {
         var renderer_it = self.renderers.iterator();
         while (renderer_it.next()) |entry| {
             const state = entry.value_ptr;
+            self.deleteSceneBatchPlacementsBatch(sink, state, 0) catch |err| {
+                logger.writeFmtScoped(.info, .frame_builder, "presentation reset scene placement delete failed: {any}", .{err});
+            };
             self.deleteCompositeFullscreenBatch(sink, state) catch |err| {
                 logger.writeFmtScoped(.info, .frame_builder, "presentation reset fullscreen delete failed: {any}", .{err});
             };
@@ -1195,9 +1246,28 @@ pub const FrameBuilder = struct {
         self.deleteRetiredImagesBatch(logger, sink);
     }
 
+    pub fn flushBatchPresentationReproject(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, writer: anytype) bool {
+        var reprojected = false;
+        var renderer_it = self.renderers.iterator();
+        while (renderer_it.next()) |entry| {
+            const state = entry.value_ptr;
+            if (reprojectSceneBatchPlacements(sink, state) catch |err| blk: {
+                logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject failed: {any}", .{err});
+                break :blk false;
+            }) reprojected = true;
+        }
+        if (sink.hasPendingBytes()) {
+            sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject flush failed: {any}", .{err});
+        }
+        return reprojected;
+    }
+
     fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
         switch (job.*) {
-            .framebuffer => |fb| try self.presentCompositeFullscreenBatch(sink, state, fb),
+            .framebuffer => |fb| {
+                try self.deleteSceneBatchPlacementsBatch(sink, state, 0);
+                try self.presentCompositeFullscreenBatch(sink, state, fb);
+            },
             .scene => |scene_job| {
                 try self.deleteCompositeFullscreenBatch(sink, state);
                 for (scene_job.publications) |publication| {
@@ -1216,13 +1286,14 @@ pub const FrameBuilder = struct {
                     }
                 }
                 var solid_sprite_count: usize = 0;
+                var scene_slot: usize = 0;
                 for (scene_job.solids) |solid| {
                     const image_id = try self.ensureSolidImageBatch(sink, solid.color);
                     const dest = batchSceneCellRect(solid.dest_rect, sink.presentationRect());
                     solid_sprite_count += 1;
-                    try sink.place(dest.row, dest.col, .{
+                    try self.placeSceneBatchSlot(sink, state, scene_slot, dest, solid.logical_dest, .{
                         .image_id = image_id,
-                        .placement_id = self.allocCompositePlacementId(),
+                        .placement_id = 0,
                         .cols = dest.w,
                         .rows = dest.h,
                         .src_x = 0,
@@ -1231,13 +1302,14 @@ pub const FrameBuilder = struct {
                         .src_h = 1,
                         .z = solid.z,
                     });
+                    scene_slot += 1;
                 }
                 for (scene_job.sprites) |sprite| {
                     const image_id = self.published_assets.get(sprite.asset_id) orelse continue;
                     const dest = batchSceneCellRect(sprite.dest_rect, sink.presentationRect());
-                    try sink.place(dest.row, dest.col, .{
+                    try self.placeSceneBatchSlot(sink, state, scene_slot, dest, sprite.logical_dest, .{
                         .image_id = image_id,
-                        .placement_id = self.allocCompositePlacementId(),
+                        .placement_id = 0,
                         .cols = dest.w,
                         .rows = dest.h,
                         .src_x = sprite.source_rect.x,
@@ -1246,10 +1318,66 @@ pub const FrameBuilder = struct {
                         .src_h = sprite.source_rect.h,
                         .z = sprite.z,
                     });
+                    scene_slot += 1;
                 }
+                try self.deleteSceneBatchPlacementsBatch(sink, state, scene_slot);
                 if (self.stats.enabled) self.stats.sprite_ops += solid_sprite_count + scene_job.sprites.len;
             },
         }
+    }
+
+    fn placeSceneBatchSlot(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, slot: usize, dest: ts_types.CellRect, logical_dest: ?LogicalDest, placement: kitty_protocol.Placement) !void {
+        if (slot >= state.scene_batch_placements.items.len) {
+            const old_len = state.scene_batch_placements.items.len;
+            try state.scene_batch_placements.resize(self.allocator, slot + 1);
+            for (state.scene_batch_placements.items[old_len..]) |*entry| entry.* = .{};
+        }
+        var retained = &state.scene_batch_placements.items[slot];
+        if (retained.placement_id == 0) retained.placement_id = self.allocCompositePlacementId();
+        if (retained.image_id != 0 and retained.image_id != placement.image_id) {
+            try sink.deletePlacement(.{ .image_id = retained.image_id, .placement_id = retained.placement_id });
+        }
+        retained.image_id = placement.image_id;
+        retained.source_rect = .{ .x = placement.src_x, .y = placement.src_y, .w = placement.src_w, .h = placement.src_h };
+        retained.dest_rect = relativeSceneBatchCellRect(dest, sink.presentationRect());
+        retained.logical_dest = logical_dest;
+        retained.z = placement.z;
+        var adjusted = placement;
+        adjusted.placement_id = retained.placement_id;
+        try sink.place(dest.row, dest.col, adjusted);
+    }
+
+    fn reprojectSceneBatchPlacements(sink: *RenderBatchSink, state: *RendererState) !bool {
+        var reprojected = false;
+        for (state.scene_batch_placements.items) |*placement| {
+            if (placement.image_id == 0 or placement.placement_id == 0) continue;
+            const rect = sink.presentationRect();
+            const dest = sceneBatchPlacementDest(state, sink, placement.*);
+            placement.dest_rect = relativeSceneBatchCellRect(dest, rect);
+            try sink.place(dest.row, dest.col, .{
+                .image_id = placement.image_id,
+                .placement_id = placement.placement_id,
+                .cols = dest.w,
+                .rows = dest.h,
+                .src_x = placement.source_rect.x,
+                .src_y = placement.source_rect.y,
+                .src_w = placement.source_rect.w,
+                .src_h = placement.source_rect.h,
+                .z = placement.z,
+            });
+            reprojected = true;
+        }
+        return reprojected;
+    }
+
+    fn deleteSceneBatchPlacementsBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, keep_count: usize) !void {
+        const clamped_keep = @min(keep_count, state.scene_batch_placements.items.len);
+        for (state.scene_batch_placements.items[clamped_keep..]) |placement| {
+            if (placement.image_id != 0 and placement.placement_id != 0) {
+                try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement.placement_id });
+            }
+        }
+        try state.scene_batch_placements.resize(self.allocator, clamped_keep);
     }
 
     pub fn presentationLayoutForRenderer(self: *FrameBuilder, tty: *const DirectTty, renderer: core.CoreHandle) presentation_layout.PresentationLayout {
@@ -1261,6 +1389,28 @@ pub const FrameBuilder = struct {
         return layout;
     }
 
+    pub fn batchPresentationStatusForRenderer(self: *FrameBuilder, sink: *const RenderBatchSink, renderer: core.CoreHandle, job: *const PresentJob) ?render_batch_protocol.PresentationStatusView {
+        const state = self.renderers.getPtr(renderer) orelse return null;
+        const source_px = switch (job.*) {
+            .framebuffer => |fb| render_batch_protocol.SourcePixels{ .w = fb.width, .h = fb.height },
+            .scene => render_batch_protocol.SourcePixels{ .w = state.window_w, .h = state.window_h },
+        };
+        const effective = switch (job.*) {
+            .framebuffer => |fb| batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect()),
+            .scene => blk: {
+                const rect = sink.presentationRect();
+                const tty = sink.presentationTty();
+                break :blk batchSceneCellRect(fullscreenCompositeCellRect(state.window_w, state.window_h, &tty), rect);
+            },
+        };
+        return .{
+            .window_id = sink.window_id,
+            .ready_to_show = true,
+            .source_px = source_px,
+            .effective_rect_cells = cellRectToPresentationRect(effective),
+        };
+    }
+
     fn batchSceneCellRect(relative: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
         return .{
             .col = rect.col + relative.col - 1,
@@ -1268,6 +1418,33 @@ pub const FrameBuilder = struct {
             .w = relative.w,
             .h = relative.h,
         };
+    }
+
+    fn cellRectToPresentationRect(rect: ts_types.CellRect) render_batch_protocol.PresentationRectCells {
+        return .{ .row = rect.row, .col = rect.col, .rows = rect.h, .cols = rect.w };
+    }
+
+    fn relativeSceneBatchCellRect(absolute: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
+        return .{
+            .col = absolute.col - rect.col + 1,
+            .row = absolute.row - rect.row + 1,
+            .w = absolute.w,
+            .h = absolute.h,
+        };
+    }
+
+    fn sceneBatchPlacementDest(state: *const RendererState, sink: *const RenderBatchSink, placement: SceneBatchPlacement) ts_types.CellRect {
+        const rect = sink.presentationRect();
+        if (placement.logical_dest) |logical_dest| {
+            const tty = sink.presentationTty();
+            const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, &tty);
+            const source_rect: core.CoreRect = switch (logical_dest) {
+                .rect => |source_rect| source_rect,
+                .full_window => .{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h },
+            };
+            return batchSceneCellRect(mapRectToCellsInRegion(source_rect, state.window_w, state.window_h, sdl_region), rect);
+        }
+        return batchSceneCellRect(placement.dest_rect, rect);
     }
 
     pub fn presentationLayoutForExternalFramebuffer(self: *FrameBuilder, tty: *const DirectTty) presentation_layout.PresentationLayout {
@@ -1487,8 +1664,8 @@ pub const FrameBuilder = struct {
         state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
 
-        const dest = batchPlacementRect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
-        const source = batchSourceRectForAspect(fb.width, fb.height, sink.presentationRect(), sink.presentationAspect());
+        const dest = batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect());
+        const source = batchSourceRectForAspect(fb.width, fb.height, sink, sink.presentationAspect());
         try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
         try sink.place(dest.row, dest.col, .{
             .image_id = state.composite_image_id,
@@ -1515,7 +1692,8 @@ pub const FrameBuilder = struct {
         h: i32,
     };
 
-    fn batchPlacementRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) ts_types.CellRect {
+    fn batchPlacementRect(source_w: i32, source_h: i32, sink: *const RenderBatchSink, aspect: render_batch_protocol.PresentationAspect) ts_types.CellRect {
+        const rect = sink.presentationRect();
         return switch (aspect) {
             .stretch, .cover => .{
                 .col = rect.col,
@@ -1523,16 +1701,13 @@ pub const FrameBuilder = struct {
                 .w = rect.cols,
                 .h = rect.rows,
             },
-            .fit => batchFitCellRect(source_w, source_h, rect),
+            .fit => batchFitCellRect(source_w, source_h, sink),
         };
     }
 
-    fn batchFitCellRect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
-        var tty: DirectTty = undefined;
-        tty.cols = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols)));
-        tty.rows = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows)));
-        tty.pixel_width = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.cols) * 10));
-        tty.pixel_height = @intCast(@min(@as(i32, std.math.maxInt(u16)), @max(1, rect.rows) * 20));
+    fn batchFitCellRect(source_w: i32, source_h: i32, sink: *const RenderBatchSink) ts_types.CellRect {
+        const rect = sink.presentationRect();
+        const tty = sink.presentationTty();
         const contained = containedCellRect(source_w, source_h, &tty);
         return .{
             .col = rect.col + contained.col - 1,
@@ -1542,12 +1717,14 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn batchSourceRectForAspect(source_w: i32, source_h: i32, rect: render_batch_protocol.PresentationRectCells, aspect: render_batch_protocol.PresentationAspect) PixelRect {
+    fn batchSourceRectForAspect(source_w: i32, source_h: i32, sink: *const RenderBatchSink, aspect: render_batch_protocol.PresentationAspect) PixelRect {
         if (aspect != .cover) return .{ .x = 0, .y = 0, .w = source_w, .h = source_h };
+        const rect = sink.presentationRect();
+        const tty = sink.presentationTty();
         const safe_w = @max(1, source_w);
         const safe_h = @max(1, source_h);
-        const cell_w_px: f64 = 10.0;
-        const cell_h_px: f64 = 20.0;
+        const cell_w_px: f64 = if (tty.pixel_width > 0 and tty.cols > 0) @as(f64, @floatFromInt(tty.pixel_width)) / @as(f64, @floatFromInt(tty.cols)) else 1.0;
+        const cell_h_px: f64 = if (tty.pixel_height > 0 and tty.rows > 0) @as(f64, @floatFromInt(tty.pixel_height)) / @as(f64, @floatFromInt(tty.rows)) else 1.0;
         const dest_w = @as(f64, @floatFromInt(@max(1, rect.cols))) * cell_w_px;
         const dest_h = @as(f64, @floatFromInt(@max(1, rect.rows))) * cell_h_px;
         const scale = @max(dest_w / @as(f64, @floatFromInt(safe_w)), dest_h / @as(f64, @floatFromInt(safe_h)));
@@ -3504,6 +3681,31 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
     try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.sprites[0].dest_rect);
 }
 
+test "fullscreen sprite clear follows source aspect in terminal cells" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const renderer_key: usize = 11;
+    try builder.renderers.put(renderer_key, RendererState.init(std.testing.allocator, 640, 480));
+    builder.onRenderClear(renderer_key);
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    const scene_job = job.scene;
+    try std.testing.expectEqual(@as(usize, 1), scene_job.solids.len);
+    try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.solids[0].dest_rect);
+}
+
 test "fullscreen sprite path uses resized window dimensions for copy mapping" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
@@ -3794,6 +3996,183 @@ test "frame builder batch scene placements are translated into attached rect" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[6;12H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;2H") == null);
+}
+
+test "frame builder batch scene deletes placements that disappear" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2005;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+
+    var rgba = [_]u8{ 255, 255, 255, 255 };
+    var publications = [_]AssetPublication{
+        .{ .new_asset = .{ .asset_id = 42, .width = 1, .height = 1, .rgba = &rgba, .owns_rgba = false } },
+    };
+    var sprites = [_]SceneSprite{
+        .{
+            .asset_id = 42,
+            .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+            .dest_rect = .{ .col = 2, .row = 2, .w = 3, .h = 4 },
+            .z = 100,
+        },
+    };
+    var solids = [_]SolidSprite{
+        .{ .color = .{ 0, 0, 0, 255 }, .dest_rect = .{ .col = 1, .row = 1, .w = 40, .h = 20 }, .z = -100 },
+    };
+    var first_job = PresentJob{ .scene = .{
+        .had_clear = true,
+        .clear_color = .{ 0, 0, 0, 255 },
+        .publications = &publications,
+        .sprites = &sprites,
+        .solids = &solids,
+    } };
+    var second_job = PresentJob{ .scene = .{
+        .had_clear = false,
+        .clear_color = .{ 0, 0, 0, 255 },
+        .publications = &.{},
+        .sprites = &sprites,
+        .solids = &.{},
+    } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &first_job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &second_job, out.writer(std.testing.allocator));
+
+    const second_frame = out.items[first_len..];
+    try std.testing.expect(std.mem.indexOf(u8, second_frame, "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_frame, "a=d") != null);
+}
+
+test "frame builder reprojects retained batch scene placements after viewport resize" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2006;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 640, 480));
+    builder.onRenderClear(renderer);
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+
+    sink.viewport(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 }, .fit);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+
+    const resized_frame = out.items[first_len..];
+    try std.testing.expect(std.mem.indexOf(u8, resized_frame, "\\u001b[7;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
+}
+
+test "frame builder reprojects retained batch scene placements after viewport move without resizing" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2106;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 640, 480));
+    builder.onRenderClear(renderer);
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+    sink.setTerminalGeometry(.{
+        .cells = .{ .rows = 40, .cols = 160 },
+        .pixels = .{ .w = 1280, .h = 800 },
+    });
+
+    const tty = sink.presentationTty();
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+
+    sink.viewport(.{ .row = 6, .col = 11, .rows = 20, .cols = 40 }, .fit);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+
+    const moved_frame = out.items[first_len..];
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "\\u001b[10;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=15") == null);
+}
+
+test "frame builder reprojects retained clear against current source window size" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const window: core.CoreHandle = 0x2007;
+    const renderer: core.CoreHandle = 0x2008;
+    builder.onCreateWindow(window, 320, 200);
+    builder.onCreateRenderer(window, renderer);
+    builder.onRenderClear(renderer);
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const first_len = out.items.len;
+
+    builder.onWindowSize(window, 640, 480);
+    sink.viewport(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 }, .fit);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+
+    const resized_frame = out.items[first_len..];
+    try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
 }
 
 test "frame builder batch placement stretches source to attached rect" {

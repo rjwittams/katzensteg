@@ -1,6 +1,7 @@
 const std = @import("std");
 const kitty_protocol = @import("termscene").kitty.protocol;
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const DirectTty = @import("direct_tty.zig").DirectTty;
 
 const rotating_file_count = 256;
 
@@ -36,6 +37,7 @@ pub const RenderBatchSink = struct {
     rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
     aspect: render_batch_protocol.PresentationAspect = .fit,
     z_base: i32 = 0,
+    terminal: ?render_batch_protocol.TerminalGeometry = null,
     upload: UploadState = .direct_apc,
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
@@ -106,6 +108,31 @@ pub const RenderBatchSink = struct {
 
     pub fn presentationZBase(self: *const RenderBatchSink) i32 {
         return self.z_base;
+    }
+
+    pub fn setTerminalGeometry(self: *RenderBatchSink, terminal: ?render_batch_protocol.TerminalGeometry) void {
+        self.terminal = terminal;
+    }
+
+    pub fn terminalGeometry(self: *const RenderBatchSink) ?render_batch_protocol.TerminalGeometry {
+        return self.terminal;
+    }
+
+    pub fn presentationTty(self: *const RenderBatchSink) DirectTty {
+        var tty: DirectTty = undefined;
+        const rect = self.presentationRect();
+        tty.cols = clampU16(@max(1, rect.cols));
+        tty.rows = clampU16(@max(1, rect.rows));
+        if (self.terminal) |terminal| {
+            if (terminal.pixels) |pixels| {
+                tty.pixel_width = scaledPixelExtent(rect.cols, terminal.cells.cols, pixels.w);
+                tty.pixel_height = scaledPixelExtent(rect.rows, terminal.cells.rows, pixels.h);
+                return tty;
+            }
+        }
+        tty.pixel_width = clampU16(@max(1, rect.cols) * 10);
+        tty.pixel_height = clampU16(@max(1, rect.rows) * 20);
+        return tty;
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
@@ -270,6 +297,20 @@ pub const RenderBatchSink = struct {
     }
 };
 
+fn scaledPixelExtent(rect_cells: i32, terminal_cells: i32, terminal_pixels: i32) u16 {
+    if (terminal_cells <= 0 or terminal_pixels <= 0) return 0;
+    return clampU16(@max(1, divRound(rect_cells * terminal_pixels, terminal_cells)));
+}
+
+fn clampU16(value: i32) u16 {
+    return @intCast(std.math.clamp(value, 0, @as(i32, std.math.maxInt(u16))));
+}
+
+fn divRound(numerator: i32, denominator: i32) i32 {
+    if (denominator <= 0) return numerator;
+    return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
+}
+
 test "batch sink groups upload place and delete bytes" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
@@ -311,6 +352,23 @@ test "batch sink viewport updates geometry without changing attach state" {
     try std.testing.expect(sink.isAttached());
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 3, .col = 5, .rows = 12, .cols = 40 }, sink.presentationRect());
     try std.testing.expectEqual(render_batch_protocol.PresentationAspect.stretch, sink.presentationAspect());
+}
+
+test "batch sink derives presentation tty pixels from host terminal geometry" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    sink.attach(.{ .row = 3, .col = 5, .rows = 20, .cols = 40 });
+    sink.setTerminalGeometry(.{
+        .cells = .{ .rows = 40, .cols = 160 },
+        .pixels = .{ .w = 1280, .h = 800 },
+    });
+
+    const tty = sink.presentationTty();
+    try std.testing.expectEqual(@as(u16, 40), tty.cols);
+    try std.testing.expectEqual(@as(u16, 20), tty.rows);
+    try std.testing.expectEqual(@as(u16, 320), tty.pixel_width);
+    try std.testing.expectEqual(@as(u16, 400), tty.pixel_height);
 }
 
 test "batch sink applies presentation z base to placements" {
