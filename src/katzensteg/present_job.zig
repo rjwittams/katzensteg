@@ -25,12 +25,14 @@ pub const SceneSprite = struct {
     asset_id: u64,
     source_rect: core.CoreRect,
     dest_rect: ts_types.CellRect,
+    logical_dest: ?core.CoreRect = null,
     z: i32,
 };
 
 pub const SolidSprite = struct {
     color: [4]u8,
     dest_rect: ts_types.CellRect,
+    logical_dest: ?core.CoreRect = null,
     z: i32,
 };
 

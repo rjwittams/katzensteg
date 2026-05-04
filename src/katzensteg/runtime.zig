@@ -804,8 +804,16 @@ pub const Runtime = struct {
                         viewport.z_base,
                     },
                 );
-                if (!std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base) self.batch_presentation_reset_pending = true;
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base;
+                if (presentation_changed) self.batch_presentation_reset_pending = true;
                 sink.viewportWithPresentation(viewport.rect_cells, viewport.aspect, viewport.z_base);
+                if (presentation_changed) {
+                    if (self.batch_writer) |writer| {
+                        if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
+                            self.batch_presentation_reset_pending = false;
+                        }
+                    }
+                }
                 const applied = sink.presentationRect();
                 self.updateBatchInputTarget(sink);
                 log.info(
@@ -1222,6 +1230,44 @@ test "batch viewport marks presentation reset pending without immediate flush" {
     try std.testing.expect(runtime.batch_presentation_reset_pending);
     try std.testing.expect(runtime.batch_sink.?.hasPendingBytes() == false);
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 12, .rows = 28, .cols = 76 }, runtime.batch_sink.?.presentationRect());
+}
+
+test "batch viewport immediately reprojects retained presentation when writer is available" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
+
+    const window: core.CoreHandle = 0x6666;
+    const renderer: core.CoreHandle = 0x7777;
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.frame_builder.onCreateRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\"}");
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
+    try std.testing.expect(!runtime.batch_presentation_reset_pending);
 }
 
 test "batch input poll drains control pipe before SDL event reads" {
