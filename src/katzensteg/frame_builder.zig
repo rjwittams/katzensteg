@@ -995,14 +995,14 @@ pub const FrameBuilder = struct {
         var published_in_job = std.AutoHashMap(u64, void).init(self.allocator);
         defer published_in_job.deinit();
 
+        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         if (state.had_clear) {
             try solids_list.append(self.allocator, .{
                 .color = state.clear_color,
-                .dest_rect = .{ .col = 1, .row = 1, .w = tty.cols, .h = tty.rows },
+                .dest_rect = sdl_region,
                 .z = -100,
             });
         }
-        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
         if (!bg_only) {
             for (state.fills.items) |fill| {
                 try solids_list.append(self.allocator, .{
@@ -3544,6 +3544,31 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
     const scene_job = job.scene;
     try std.testing.expectEqual(@as(usize, 1), scene_job.sprites.len);
     try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.sprites[0].dest_rect);
+}
+
+test "fullscreen sprite clear follows source aspect in terminal cells" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+
+    var tty: DirectTty = undefined;
+    tty.cols = 100;
+    tty.rows = 40;
+    tty.pixel_width = 1000;
+    tty.pixel_height = 800;
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const renderer_key: usize = 11;
+    try builder.renderers.put(renderer_key, RendererState.init(std.testing.allocator, 640, 480));
+    builder.onRenderClear(renderer_key);
+
+    var job = try builder.buildPresentJob(&logger, &tty, renderer_key, false, null);
+    defer job.deinit(std.testing.allocator);
+
+    const scene_job = job.scene;
+    try std.testing.expectEqual(@as(usize, 1), scene_job.solids.len);
+    try std.testing.expectEqual(ts_types.CellRect{ .col = 1, .row = 2, .w = 100, .h = 38 }, scene_job.solids[0].dest_rect);
 }
 
 test "fullscreen sprite path uses resized window dimensions for copy mapping" {
