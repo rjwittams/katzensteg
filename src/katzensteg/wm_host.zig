@@ -303,7 +303,7 @@ pub fn applyWindowActionWithPresentation(window: *WmWindowState, action: WindowA
     }
     next.rows = @max(min_outer_rows, next.rows);
     next.cols = @max(min_outer_cols, next.cols);
-    next = constrainOuterForPresentation(previous, next, resizeAxisForAction(action), terminal, presentation_status);
+    next = constrainOuterForPresentation(next, resizeAxisForAction(action), terminal, presentation_status);
     window.outer = clampOuterRect(next, terminal);
     return !std.meta.eql(previous, window.outer);
 }
@@ -330,8 +330,7 @@ fn resizeAxisForMouseHit(hit: WmMouseHit) ResizeAxis {
     };
 }
 
-fn constrainOuterForPresentation(previous: Rect, proposed: Rect, axis: ResizeAxis, terminal: TerminalSize, status: WmPresentationStatus) Rect {
-    _ = previous;
+fn constrainOuterForPresentation(proposed: Rect, axis: ResizeAxis, terminal: TerminalSize, status: WmPresentationStatus) Rect {
     if (axis == .none) return proposed;
     const source = status.source_px orelse return proposed;
     if (source.w <= 0 or source.h <= 0 or terminal.pixel_width <= 0 or terminal.pixel_height <= 0 or terminal.cols <= 0 or terminal.rows <= 0) return proposed;
@@ -487,7 +486,12 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
         if (redraw_requested.swap(false, .seq_cst)) {
-            if (resolveInitialReadyPresentations(sessions[0..initialized], terminal)) {
+            const initial_ready_changed = blk: {
+                tty_lock.lock();
+                defer tty_lock.unlock();
+                break :blk resolveInitialReadyPresentations(sessions[0..initialized], terminal);
+            };
+            if (initial_ready_changed) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
             }
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -533,7 +537,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             continue;
         }
         if (!shutdown_sent) {
-            const input = readInputForSessions(&tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
+            const input = readInputForSessionsLocked(&tty_lock, &tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
             if (input.focus_changed) {
                 try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
@@ -582,7 +586,12 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 .window => |action| {
                     if (initialized == 0) continue;
                     const focused = &sessions[focused_index];
-                    if (applyWindowActionWithPresentation(&focused.window, action, terminal, focused.presentation_status)) {
+                    const presentation_status = blk: {
+                        tty_lock.lock();
+                        defer tty_lock.unlock();
+                        break :blk focused.presentation_status;
+                    };
+                    if (applyWindowActionWithPresentation(&focused.window, action, terminal, presentation_status)) {
                         try sendViewportForSession(focused, terminal, .fit, zBaseForSessionIndex(z_order[0..initialized], focused_index), &event_log, &logger);
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                     }
@@ -597,8 +606,13 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 .mouse_drag => |outer| {
                     if (initialized == 0) continue;
                     const focused = &sessions[focused_index];
+                    const presentation_status = blk: {
+                        tty_lock.lock();
+                        defer tty_lock.unlock();
+                        break :blk focused.presentation_status;
+                    };
                     const next_outer = if (mouse_state.drag) |drag|
-                        constrainOuterForPresentation(focused.window.outer, outer, resizeAxisForMouseHit(drag.hit), terminal, focused.presentation_status)
+                        constrainOuterForPresentation(outer, resizeAxisForMouseHit(drag.hit), terminal, presentation_status)
                     else
                         outer;
                     if (!std.meta.eql(focused.window.outer, next_outer)) {
@@ -1490,9 +1504,11 @@ fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect,
     return readInputBytes(buf[0..n], mouse, outer, terminal);
 }
 
-fn readInputForSessions(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
+fn readInputForSessionsLocked(tty_lock: *std.Thread.Mutex, tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     const n = std.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
     if (n == 0) return .{ .action = .none };
+    tty_lock.lock();
+    defer tty_lock.unlock();
     return readInputForSessionsBytes(buf[0..n], mouse, sessions, z_order, focused_index, terminal);
 }
 

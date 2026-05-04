@@ -1251,7 +1251,7 @@ pub const FrameBuilder = struct {
         var renderer_it = self.renderers.iterator();
         while (renderer_it.next()) |entry| {
             const state = entry.value_ptr;
-            if (self.reprojectSceneBatchPlacements(sink, state) catch |err| blk: {
+            if (reprojectSceneBatchPlacements(sink, state) catch |err| blk: {
                 logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject failed: {any}", .{err});
                 break :blk false;
             }) reprojected = true;
@@ -1347,8 +1347,7 @@ pub const FrameBuilder = struct {
         try sink.place(dest.row, dest.col, adjusted);
     }
 
-    fn reprojectSceneBatchPlacements(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !bool {
-        _ = self;
+    fn reprojectSceneBatchPlacements(sink: *RenderBatchSink, state: *RendererState) !bool {
         var reprojected = false;
         for (state.scene_batch_placements.items) |*placement| {
             if (placement.image_id == 0 or placement.placement_id == 0) continue;
