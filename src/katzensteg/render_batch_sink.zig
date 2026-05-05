@@ -38,6 +38,7 @@ pub const RenderBatchSink = struct {
     aspect: render_batch_protocol.PresentationAspect = .fit,
     z_base: i32 = 0,
     terminal: ?render_batch_protocol.TerminalGeometry = null,
+    occlusion_rects: std.ArrayList(render_batch_protocol.PresentationRectCells) = .empty,
     upload: UploadState = .direct_apc,
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
@@ -57,6 +58,7 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
+        self.occlusion_rects.deinit(self.allocator);
     }
 
     pub fn attach(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells) void {
@@ -86,6 +88,7 @@ pub const RenderBatchSink = struct {
 
     pub fn detach(self: *RenderBatchSink) void {
         self.attached = false;
+        self.occlusion_rects.clearRetainingCapacity();
     }
 
     pub fn setUploadPolicy(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !void {
@@ -116,6 +119,15 @@ pub const RenderBatchSink = struct {
 
     pub fn terminalGeometry(self: *const RenderBatchSink) ?render_batch_protocol.TerminalGeometry {
         return self.terminal;
+    }
+
+    pub fn setOcclusionRects(self: *RenderBatchSink, occlusion_rects: []const render_batch_protocol.PresentationRectCells) !void {
+        self.occlusion_rects.clearRetainingCapacity();
+        try self.occlusion_rects.appendSlice(self.allocator, occlusion_rects);
+    }
+
+    pub fn occlusionRects(self: *const RenderBatchSink) []const render_batch_protocol.PresentationRectCells {
+        return self.occlusion_rects.items;
     }
 
     pub fn presentationTty(self: *const RenderBatchSink) DirectTty {
@@ -174,17 +186,33 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn deletePlacement(self: *RenderBatchSink, target: kitty_protocol.ExactPlacement) !void {
+        try self.deletePlacementInto(&self.deletes, target);
+    }
+
+    pub fn deletePlacementAfter(self: *RenderBatchSink, target: kitty_protocol.ExactPlacement) !void {
+        try self.deletePlacementInto(&self.after, target);
+    }
+
+    fn deletePlacementInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), target: kitty_protocol.ExactPlacement) !void {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         try kitty_protocol.writeDeleteExactPlacement(out.writer(self.allocator), target);
-        try self.deletes.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
     }
 
     pub fn deleteImageData(self: *RenderBatchSink, image_id: u32) !void {
+        try self.deleteImageDataInto(&self.deletes, image_id);
+    }
+
+    pub fn deleteImageDataAfter(self: *RenderBatchSink, image_id: u32) !void {
+        try self.deleteImageDataInto(&self.after, image_id);
+    }
+
+    fn deleteImageDataInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), image_id: u32) !void {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         try kitty_protocol.writeDeleteImageWithQuiet(out.writer(self.allocator), .suppress_fail, .free_data, image_id);
-        try self.deletes.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
     }
 
     pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {

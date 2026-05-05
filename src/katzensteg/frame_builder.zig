@@ -31,6 +31,7 @@ const composite_tile_cols: i32 = 8;
 const composite_tile_rows: i32 = 4;
 const composite_strip_max_w: i32 = 4096;
 const primitive_composite_threshold: usize = 128;
+const max_occlusion_pieces: usize = 64;
 const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 const fullscreen_retained_placement_count: usize = 2;
 const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
@@ -150,15 +151,24 @@ const CompositeTileState = struct {
 const CompositePlacement = struct {
     image_id: u32 = 0,
     placement_id: u32 = 0,
+    placement_ids: [max_occlusion_pieces]u32 = [_]u32{0} ** max_occlusion_pieces,
+    placement_count: usize = 0,
 };
 
 const SceneBatchPlacement = struct {
     image_id: u32 = 0,
     placement_id: u32 = 0,
+    placement_ids: [max_occlusion_pieces]u32 = [_]u32{0} ** max_occlusion_pieces,
+    placement_count: usize = 0,
     source_rect: core.CoreRect = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
     dest_rect: ts_types.CellRect = .{ .col = 1, .row = 1, .w = 1, .h = 1 },
     logical_dest: ?LogicalDest = null,
     z: i32 = 0,
+};
+
+const PlacementKey = struct {
+    image_id: u32,
+    placement_id: u32,
 };
 
 const PresentDebugSignature = struct {
@@ -189,9 +199,12 @@ const RendererState = struct {
     composite_mode_active: bool = false,
     composite_image_id: u32 = 0,
     composite_placement_id: u32 = 0,
+    composite_placement_ids: [max_occlusion_pieces]u32 = [_]u32{0} ** max_occlusion_pieces,
+    composite_placement_count: usize = 0,
     retained_fullscreen_placements: [fullscreen_retained_placement_count]CompositePlacement = [_]CompositePlacement{.{}} ** fullscreen_retained_placement_count,
     retained_fullscreen_placement_count: usize = 0,
     scene_batch_placements: std.ArrayList(SceneBatchPlacement),
+    placement_audit_live: std.AutoHashMap(PlacementKey, void),
     composite_rgba: ?[]u8 = null,
     composite_last_presented: ?[]u8 = null,
     composite_tiles: std.ArrayList(CompositeTileState),
@@ -201,12 +214,13 @@ const RendererState = struct {
     last_debug_present_signature: ?PresentDebugSignature = null,
     logged_debug_composite_unchanged: bool = false,
 
-    fn init(_: std.mem.Allocator, window_w: i32, window_h: i32) RendererState {
+    fn init(allocator: std.mem.Allocator, window_w: i32, window_h: i32) RendererState {
         return .{
             .window_w = window_w,
             .window_h = window_h,
             .viewport = .{ .x = 0, .y = 0, .w = window_w, .h = window_h },
             .scene_batch_placements = std.ArrayList(SceneBatchPlacement).empty,
+            .placement_audit_live = std.AutoHashMap(PlacementKey, void).init(allocator),
             .composite_tiles = std.ArrayList(CompositeTileState).empty,
             .copies = std.ArrayList(RenderCopyOp).empty,
             .fills = std.ArrayList(FillRectOp).empty,
@@ -218,6 +232,7 @@ const RendererState = struct {
         if (self.composite_rgba) |buf| allocator.free(buf);
         if (self.composite_last_presented) |buf| allocator.free(buf);
         self.scene_batch_placements.deinit(allocator);
+        self.placement_audit_live.deinit();
         self.composite_tiles.deinit(allocator);
         self.copies.deinit(allocator);
         self.fills.deinit(allocator);
@@ -252,6 +267,16 @@ const RendererState = struct {
         );
         self.retained_fullscreen_placements[fullscreen_retained_placement_count - 1] = old;
         return evicted;
+    }
+
+    fn activeCompositePlacement(self: *const RendererState) CompositePlacement {
+        if (self.composite_image_id == 0 or self.composite_placement_id == 0) return .{};
+        return .{
+            .image_id = self.composite_image_id,
+            .placement_id = self.composite_placement_id,
+            .placement_ids = self.composite_placement_ids,
+            .placement_count = self.composite_placement_count,
+        };
     }
 };
 
@@ -390,6 +415,7 @@ pub const FrameBuilder = struct {
     next_composite_placement_id: u32 = 1,
     composite_placement_id_start: u32 = 1,
     composite_placement_id_end: u32 = std.math.maxInt(u32),
+    placement_audit_enabled: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, stats_enabled: bool, composite_mode: CompositeMode, dump_composites: bool, debug_composite: bool) FrameBuilder {
         return .{
@@ -439,6 +465,196 @@ pub const FrameBuilder = struct {
         self.composite_placement_id_start = start;
         self.composite_placement_id_end = end;
         self.next_composite_placement_id = start;
+    }
+
+    pub fn enablePlacementAudit(self: *FrameBuilder) void {
+        self.placement_audit_enabled = true;
+        var it = self.renderers.valueIterator();
+        while (it.next()) |state| {
+            state.placement_audit_live.clearRetainingCapacity();
+            self.auditSeedRetained(state);
+        }
+    }
+
+    pub fn expectPlacementAuditConsistent(self: *FrameBuilder, renderer: core.CoreHandle) !void {
+        if (!self.placement_audit_enabled) return;
+        const state = self.renderers.getPtr(renderer) orelse return error.MissingRenderer;
+        if (!(try self.placementAuditConsistent(state))) return error.PlacementAuditMismatch;
+    }
+
+    fn auditSeedRetained(self: *FrameBuilder, state: *RendererState) void {
+        if (!self.placement_audit_enabled) return;
+        self.auditPlaceComposite(state, state.activeCompositePlacement());
+        var retained_index: usize = 0;
+        while (retained_index < state.retained_fullscreen_placement_count) : (retained_index += 1) {
+            self.auditPlaceComposite(state, state.retained_fullscreen_placements[retained_index]);
+        }
+        for (state.scene_batch_placements.items) |placement| self.auditPlaceScene(state, placement);
+        for (state.composite_tiles.items) |tile| {
+            if (tile.image_id != 0 and tile.placement_id != 0) {
+                self.auditPlaceOne(state, tile.image_id, tile.placement_id);
+            }
+        }
+    }
+
+    fn auditPlaceComposite(self: *FrameBuilder, state: *RendererState, placement: CompositePlacement) void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            self.auditPlaceOne(state, placement.image_id, placement_id);
+        }
+    }
+
+    fn auditPlaceScene(self: *FrameBuilder, state: *RendererState, placement: SceneBatchPlacement) void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            self.auditPlaceOne(state, placement.image_id, placement_id);
+        }
+    }
+
+    fn auditPlaceIds(self: *FrameBuilder, state: *RendererState, image_id: u32, placement_ids: []const u32) void {
+        if (!self.placement_audit_enabled or image_id == 0) return;
+        for (placement_ids) |placement_id| self.auditPlaceOne(state, image_id, placement_id);
+    }
+
+    fn auditPlaceOne(self: *FrameBuilder, state: *RendererState, image_id: u32, placement_id: u32) void {
+        if (!self.placement_audit_enabled or image_id == 0 or placement_id == 0) return;
+        state.placement_audit_live.put(.{ .image_id = image_id, .placement_id = placement_id }, {}) catch {};
+    }
+
+    fn auditDeleteComposite(self: *FrameBuilder, state: *RendererState, placement: CompositePlacement) void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            self.auditDeleteOne(state, placement.image_id, placement_id);
+        }
+    }
+
+    fn auditDeleteScene(self: *FrameBuilder, state: *RendererState, placement: SceneBatchPlacement) void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            self.auditDeleteOne(state, placement.image_id, placement_id);
+        }
+    }
+
+    fn auditDeleteIds(self: *FrameBuilder, state: *RendererState, image_id: u32, placement_ids: []const u32) void {
+        if (!self.placement_audit_enabled or image_id == 0) return;
+        for (placement_ids) |placement_id| self.auditDeleteOne(state, image_id, placement_id);
+    }
+
+    fn auditDeleteOne(self: *FrameBuilder, state: *RendererState, image_id: u32, placement_id: u32) void {
+        if (!self.placement_audit_enabled or image_id == 0 or placement_id == 0) return;
+        _ = state.placement_audit_live.remove(.{ .image_id = image_id, .placement_id = placement_id });
+    }
+
+    fn placementAuditConsistent(self: *FrameBuilder, state: *RendererState) !bool {
+        var retained = std.AutoHashMap(PlacementKey, void).init(self.allocator);
+        defer retained.deinit();
+        try self.collectRetainedPlacementKeys(state, &retained);
+        if (retained.count() != state.placement_audit_live.count()) return false;
+        var live_it = state.placement_audit_live.keyIterator();
+        while (live_it.next()) |key| {
+            if (!retained.contains(key.*)) return false;
+        }
+        return true;
+    }
+
+    fn auditCheckAndLog(self: *FrameBuilder, logger: *Logger, op: []const u8, renderer: core.CoreHandle, state: *RendererState, sink: *const RenderBatchSink) void {
+        if (!self.placement_audit_enabled) return;
+        var retained = std.AutoHashMap(PlacementKey, void).init(self.allocator);
+        defer retained.deinit();
+        self.collectRetainedPlacementKeys(state, &retained) catch |err| {
+            logger.writeFmtScoped(.warn, .frame_builder, "placement audit collect failed op={s} renderer={x}: {any}", .{ op, renderer, err });
+            return;
+        };
+
+        var first_live_unretained = PlacementKey{ .image_id = 0, .placement_id = 0 };
+        var live_it = state.placement_audit_live.keyIterator();
+        while (live_it.next()) |key| {
+            if (!retained.contains(key.*)) {
+                first_live_unretained = key.*;
+                break;
+            }
+        }
+
+        var first_retained_missing = PlacementKey{ .image_id = 0, .placement_id = 0 };
+        var retained_it = retained.keyIterator();
+        while (retained_it.next()) |key| {
+            if (!state.placement_audit_live.contains(key.*)) {
+                first_retained_missing = key.*;
+                break;
+            }
+        }
+
+        if (retained.count() == state.placement_audit_live.count() and first_live_unretained.image_id == 0 and first_retained_missing.image_id == 0) return;
+
+        const rect = sink.presentationRect();
+        logger.writeFmtScoped(
+            .warn,
+            .frame_builder,
+            "placement audit violation op={s} renderer={x} live={d} retained={d} viewport={d},{d} {d}x{d} aspect={s} occlusions={d} live_unretained={d}/{d} retained_missing={d}/{d}",
+            .{
+                op,
+                renderer,
+                state.placement_audit_live.count(),
+                retained.count(),
+                rect.row,
+                rect.col,
+                rect.rows,
+                rect.cols,
+                @tagName(sink.presentationAspect()),
+                sink.occlusionRects().len,
+                first_live_unretained.image_id,
+                first_live_unretained.placement_id,
+                first_retained_missing.image_id,
+                first_retained_missing.placement_id,
+            },
+        );
+    }
+
+    fn collectRetainedPlacementKeys(self: *FrameBuilder, state: *const RendererState, out: *std.AutoHashMap(PlacementKey, void)) !void {
+        try collectCompositePlacementKeys(state.activeCompositePlacement(), out);
+        var retained_index: usize = 0;
+        while (retained_index < state.retained_fullscreen_placement_count) : (retained_index += 1) {
+            try collectCompositePlacementKeys(state.retained_fullscreen_placements[retained_index], out);
+        }
+        for (state.scene_batch_placements.items) |placement| try collectScenePlacementKeys(placement, out);
+        for (state.composite_tiles.items) |tile| {
+            if (tile.image_id != 0 and tile.placement_id != 0) {
+                try out.put(.{ .image_id = tile.image_id, .placement_id = tile.placement_id }, {});
+            }
+        }
+        _ = self;
+    }
+
+    fn collectCompositePlacementKeys(placement: CompositePlacement, out: *std.AutoHashMap(PlacementKey, void)) !void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            if (placement_id != 0) try out.put(.{ .image_id = placement.image_id, .placement_id = placement_id }, {});
+        }
+    }
+
+    fn collectScenePlacementKeys(placement: SceneBatchPlacement, out: *std.AutoHashMap(PlacementKey, void)) !void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            if (placement_id != 0) try out.put(.{ .image_id = placement.image_id, .placement_id = placement_id }, {});
+        }
     }
 
     pub fn onCreateWindow(self: *FrameBuilder, window: core.CoreHandle, w: i32, h: i32) void {
@@ -1186,6 +1402,7 @@ pub const FrameBuilder = struct {
         };
         self.last_inspect_summary = self.buildInspectSummary(state, job);
         self.deleteRetiredImagesBatch(logger, sink);
+        self.auditCheckAndLog(logger, "present_batch", renderer, state, sink);
         sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "render batch flush failed: {any}", .{err});
         if (self.stats.enabled) {
             self.stats.frame_count += 1;
@@ -1225,6 +1442,7 @@ pub const FrameBuilder = struct {
             logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup tile delete failed: {any}", .{err});
         };
         if (state.composite_last_presented) |last| @memset(last, 0);
+        self.auditCheckAndLog(logger, "renderer_cleanup", renderer, state, sink);
         self.deleteRetiredImagesBatch(logger, sink);
     }
 
@@ -1242,6 +1460,7 @@ pub const FrameBuilder = struct {
                 logger.writeFmtScoped(.info, .frame_builder, "presentation reset tile delete failed: {any}", .{err});
             };
             if (state.composite_last_presented) |last| @memset(last, 0);
+            self.auditCheckAndLog(logger, "presentation_reset", entry.key_ptr.*, state, sink);
         }
         self.deleteRetiredImagesBatch(logger, sink);
     }
@@ -1251,10 +1470,18 @@ pub const FrameBuilder = struct {
         var renderer_it = self.renderers.iterator();
         while (renderer_it.next()) |entry| {
             const state = entry.value_ptr;
-            if (reprojectSceneBatchPlacements(sink, state) catch |err| blk: {
+            self.deleteRetainedFullscreenPlacementsBatch(sink, state) catch |err| {
+                logger.writeFmtScoped(.info, .frame_builder, "retained fullscreen placement delete failed during reproject: {any}", .{err});
+            };
+            if (self.reprojectCompositeBatchPlacement(sink, state) catch |err| blk: {
+                logger.writeFmtScoped(.info, .frame_builder, "composite placement reproject failed: {any}", .{err});
+                break :blk false;
+            }) reprojected = true;
+            if (self.reprojectSceneBatchPlacements(sink, state) catch |err| blk: {
                 logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject failed: {any}", .{err});
                 break :blk false;
             }) reprojected = true;
+            self.auditCheckAndLog(logger, "presentation_reproject", entry.key_ptr.*, state, sink);
         }
         if (sink.hasPendingBytes()) {
             sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject flush failed: {any}", .{err});
@@ -1333,30 +1560,64 @@ pub const FrameBuilder = struct {
             for (state.scene_batch_placements.items[old_len..]) |*entry| entry.* = .{};
         }
         var retained = &state.scene_batch_placements.items[slot];
-        if (retained.placement_id == 0) retained.placement_id = self.allocCompositePlacementId();
         if (retained.image_id != 0 and retained.image_id != placement.image_id) {
-            try sink.deletePlacement(.{ .image_id = retained.image_id, .placement_id = retained.placement_id });
+            try deleteSceneBatchPlacementPieces(sink, retained.*);
+            self.auditDeleteScene(state, retained.*);
+            retained.placement_count = 0;
+            retained.placement_id = 0;
         }
         retained.image_id = placement.image_id;
         retained.source_rect = .{ .x = placement.src_x, .y = placement.src_y, .w = placement.src_w, .h = placement.src_h };
         retained.dest_rect = relativeSceneBatchCellRect(dest, sink.presentationRect());
         retained.logical_dest = logical_dest;
         retained.z = placement.z;
-        var adjusted = placement;
-        adjusted.placement_id = retained.placement_id;
-        try sink.place(dest.row, dest.col, adjusted);
+        const piece_count = try self.placeClippedBatch(sink, dest, retained.source_rect, placement, &retained.placement_ids);
+        self.auditPlaceIds(state, retained.image_id, retained.placement_ids[0..piece_count]);
+        if (piece_count < retained.placement_count) {
+            try deletePlacementIds(sink, retained.image_id, retained.placement_ids[piece_count..retained.placement_count]);
+            self.auditDeleteIds(state, retained.image_id, retained.placement_ids[piece_count..retained.placement_count]);
+        }
+        retained.placement_count = piece_count;
+        retained.placement_id = if (piece_count > 0) retained.placement_ids[0] else 0;
     }
 
-    fn reprojectSceneBatchPlacements(sink: *RenderBatchSink, state: *RendererState) !bool {
+    fn reprojectCompositeBatchPlacement(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !bool {
+        if (state.composite_image_id == 0 or state.composite_placement_id == 0 or state.window_w <= 0 or state.window_h <= 0) return false;
+        const dest = batchPlacementRect(state.window_w, state.window_h, sink, sink.presentationAspect());
+        const source = batchSourceRectForAspect(state.window_w, state.window_h, sink, sink.presentationAspect());
+        const source_rect = core.CoreRect{ .x = source.x, .y = source.y, .w = source.w, .h = source.h };
+        const placement_template = kitty_protocol.Placement{
+            .image_id = state.composite_image_id,
+            .placement_id = 0,
+            .cols = dest.w,
+            .rows = dest.h,
+            .src_x = source.x,
+            .src_y = source.y,
+            .src_w = source.w,
+            .src_h = source.h,
+            .z = 100,
+        };
+        const piece_count = try self.placeClippedBatch(sink, dest, source_rect, placement_template, &state.composite_placement_ids);
+        self.auditPlaceIds(state, state.composite_image_id, state.composite_placement_ids[0..piece_count]);
+        if (piece_count < state.composite_placement_count) {
+            try deletePlacementIds(sink, state.composite_image_id, state.composite_placement_ids[piece_count..state.composite_placement_count]);
+            self.auditDeleteIds(state, state.composite_image_id, state.composite_placement_ids[piece_count..state.composite_placement_count]);
+        }
+        state.composite_placement_count = piece_count;
+        state.composite_placement_id = if (piece_count > 0) state.composite_placement_ids[0] else 0;
+        return true;
+    }
+
+    fn reprojectSceneBatchPlacements(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !bool {
         var reprojected = false;
         for (state.scene_batch_placements.items) |*placement| {
             if (placement.image_id == 0 or placement.placement_id == 0) continue;
             const rect = sink.presentationRect();
             const dest = sceneBatchPlacementDest(state, sink, placement.*);
             placement.dest_rect = relativeSceneBatchCellRect(dest, rect);
-            try sink.place(dest.row, dest.col, .{
+            const piece_count = try self.placeClippedBatch(sink, dest, placement.source_rect, .{
                 .image_id = placement.image_id,
-                .placement_id = placement.placement_id,
+                .placement_id = 0,
                 .cols = dest.w,
                 .rows = dest.h,
                 .src_x = placement.source_rect.x,
@@ -1364,18 +1625,160 @@ pub const FrameBuilder = struct {
                 .src_w = placement.source_rect.w,
                 .src_h = placement.source_rect.h,
                 .z = placement.z,
-            });
+            }, &placement.placement_ids);
+            self.auditPlaceIds(state, placement.image_id, placement.placement_ids[0..piece_count]);
+            if (piece_count < placement.placement_count) {
+                try deletePlacementIds(sink, placement.image_id, placement.placement_ids[piece_count..placement.placement_count]);
+                self.auditDeleteIds(state, placement.image_id, placement.placement_ids[piece_count..placement.placement_count]);
+            }
+            placement.placement_count = piece_count;
+            placement.placement_id = if (piece_count > 0) placement.placement_ids[0] else 0;
             reprojected = true;
         }
         return reprojected;
     }
 
+    fn placeClippedBatch(self: *FrameBuilder, sink: *RenderBatchSink, dest: ts_types.CellRect, source: core.CoreRect, placement: kitty_protocol.Placement, placement_ids: *[max_occlusion_pieces]u32) !usize {
+        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), null);
+        if (piece_count == 0) return 0;
+        var index: usize = 0;
+        while (index < piece_count) : (index += 1) {
+            if (placement_ids[index] == 0) placement_ids[index] = self.allocCompositePlacementId();
+        }
+        return placeClippedBatchWithExistingIds(sink, dest, source, placement, placement_ids[0..piece_count]);
+    }
+
+    fn placeClippedBatchWithExistingIds(sink: *RenderBatchSink, dest: ts_types.CellRect, source: core.CoreRect, placement: kitty_protocol.Placement, placement_ids: []const u32) !usize {
+        var pieces_buf: [max_occlusion_pieces]ClippedPlacementPiece = undefined;
+        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), pieces_buf[0..]);
+        const count = @min(piece_count, placement_ids.len);
+        for (pieces_buf[0..count], 0..) |piece, index| {
+            if (placement_ids[index] == 0) continue;
+            var adjusted = placement;
+            adjusted.placement_id = placement_ids[index];
+            adjusted.cols = piece.dest.w;
+            adjusted.rows = piece.dest.h;
+            adjusted.src_x = piece.source.x;
+            adjusted.src_y = piece.source.y;
+            adjusted.src_w = piece.source.w;
+            adjusted.src_h = piece.source.h;
+            try sink.place(piece.dest.row, piece.dest.col, adjusted);
+        }
+        return count;
+    }
+
+    const ClippedPlacementPiece = struct {
+        dest: ts_types.CellRect,
+        source: core.CoreRect,
+    };
+
+    fn clippedPlacementPieces(dest: ts_types.CellRect, source: core.CoreRect, occlusions: []const render_batch_protocol.PresentationRectCells, out: ?[]ClippedPlacementPiece) usize {
+        var fragments_a: [max_occlusion_pieces]ts_types.CellRect = undefined;
+        var fragments_b: [max_occlusion_pieces]ts_types.CellRect = undefined;
+        fragments_a[0] = dest;
+        var count: usize = 1;
+        var current = fragments_a[0..];
+        var next = fragments_b[0..];
+        for (occlusions) |occlusion| {
+            var next_count: usize = 0;
+            const occ = ts_types.CellRect{ .row = occlusion.row, .col = occlusion.col, .w = occlusion.cols, .h = occlusion.rows };
+            for (current[0..count]) |fragment| {
+                next_count = appendRectMinus(next, next_count, fragment, occ);
+                if (next_count >= max_occlusion_pieces) break;
+            }
+            count = next_count;
+            const tmp = current;
+            current = next;
+            next = tmp;
+            if (count == 0) break;
+        }
+        if (out) |pieces| {
+            const n = @min(count, pieces.len);
+            for (current[0..n], 0..) |fragment, index| {
+                pieces[index] = .{
+                    .dest = fragment,
+                    .source = sourceRectForCellFragment(dest, source, fragment),
+                };
+            }
+        }
+        return count;
+    }
+
+    fn appendRectMinus(out: []ts_types.CellRect, count: usize, rect: ts_types.CellRect, cutter: ts_types.CellRect) usize {
+        const intersection = intersectCellRect(rect, cutter) orelse {
+            if (count < out.len) out[count] = rect;
+            return @min(count + 1, out.len);
+        };
+        var next_count = count;
+        next_count = appendCellRect(out, next_count, .{ .row = rect.row, .col = rect.col, .w = rect.w, .h = intersection.row - rect.row });
+        const bottom = intersection.row + intersection.h;
+        next_count = appendCellRect(out, next_count, .{ .row = bottom, .col = rect.col, .w = rect.w, .h = rect.row + rect.h - bottom });
+        next_count = appendCellRect(out, next_count, .{ .row = intersection.row, .col = rect.col, .w = intersection.col - rect.col, .h = intersection.h });
+        const right = intersection.col + intersection.w;
+        next_count = appendCellRect(out, next_count, .{ .row = intersection.row, .col = right, .w = rect.col + rect.w - right, .h = intersection.h });
+        return next_count;
+    }
+
+    fn appendCellRect(out: []ts_types.CellRect, count: usize, rect: ts_types.CellRect) usize {
+        if (rect.w <= 0 or rect.h <= 0) return count;
+        if (count >= out.len) return count;
+        out[count] = rect;
+        return count + 1;
+    }
+
+    fn intersectCellRect(a: ts_types.CellRect, b: ts_types.CellRect) ?ts_types.CellRect {
+        const row0 = @max(a.row, b.row);
+        const col0 = @max(a.col, b.col);
+        const row1 = @min(a.row + a.h, b.row + b.h);
+        const col1 = @min(a.col + a.w, b.col + b.w);
+        if (row1 <= row0 or col1 <= col0) return null;
+        return .{ .row = row0, .col = col0, .w = col1 - col0, .h = row1 - row0 };
+    }
+
+    fn sourceRectForCellFragment(dest: ts_types.CellRect, source: core.CoreRect, fragment: ts_types.CellRect) core.CoreRect {
+        const dx0 = fragment.col - dest.col;
+        const dy0 = fragment.row - dest.row;
+        const dx1 = dx0 + fragment.w;
+        const dy1 = dy0 + fragment.h;
+        const src_x0 = source.x + divFloorI32(dx0 * source.w, dest.w);
+        const src_y0 = source.y + divFloorI32(dy0 * source.h, dest.h);
+        const src_x1 = source.x + divCeilI32(dx1 * source.w, dest.w);
+        const src_y1 = source.y + divCeilI32(dy1 * source.h, dest.h);
+        return .{ .x = src_x0, .y = src_y0, .w = @max(1, src_x1 - src_x0), .h = @max(1, src_y1 - src_y0) };
+    }
+
+    fn divFloorI32(numerator: i32, denominator: i32) i32 {
+        if (denominator <= 0) return 0;
+        return @divFloor(numerator, denominator);
+    }
+
+    fn divCeilI32(numerator: i32, denominator: i32) i32 {
+        if (denominator <= 0) return 0;
+        return @divFloor(numerator + denominator - 1, denominator);
+    }
+
+    fn deleteSceneBatchPlacementPieces(sink: *RenderBatchSink, placement: SceneBatchPlacement) !void {
+        if (placement.image_id == 0) return;
+        const count = if (placement.placement_count == 0 and placement.placement_id != 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            if (placement_id != 0) try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement_id });
+        }
+    }
+
+    fn deletePlacementIds(sink: *RenderBatchSink, image_id: u32, placement_ids: []const u32) !void {
+        if (image_id == 0) return;
+        for (placement_ids) |placement_id| {
+            if (placement_id != 0) try sink.deletePlacement(.{ .image_id = image_id, .placement_id = placement_id });
+        }
+    }
+
     fn deleteSceneBatchPlacementsBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, keep_count: usize) !void {
         const clamped_keep = @min(keep_count, state.scene_batch_placements.items.len);
         for (state.scene_batch_placements.items[clamped_keep..]) |placement| {
-            if (placement.image_id != 0 and placement.placement_id != 0) {
-                try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement.placement_id });
-            }
+            try deleteSceneBatchPlacementPieces(sink, placement);
+            self.auditDeleteScene(state, placement);
         }
         try state.scene_batch_placements.resize(self.allocator, clamped_keep);
     }
@@ -1409,6 +1812,11 @@ pub const FrameBuilder = struct {
             .source_px = source_px,
             .effective_rect_cells = cellRectToPresentationRect(effective),
         };
+    }
+
+    pub fn batchPresentationStatusForExternalFramebuffer(self: *FrameBuilder, sink: *const RenderBatchSink, width: i32, height: i32) ?render_batch_protocol.PresentationStatusView {
+        var job = PresentJob{ .framebuffer = .{ .width = width, .height = height, .rgba = &.{}, .owns_rgba = false } };
+        return self.batchPresentationStatusForRenderer(sink, external_framebuffer_renderer_key, &job);
     }
 
     fn batchSceneCellRect(relative: ts_types.CellRect, rect: render_batch_protocol.PresentationRectCells) ts_types.CellRect {
@@ -1659,17 +2067,17 @@ pub const FrameBuilder = struct {
     }
 
     fn presentCompositeFullscreenBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, fb: FramebufferJob) !void {
-        const old_placement = CompositePlacement{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id };
-        state.composite_image_id = self.allocImageId();
-        state.composite_placement_id = self.allocCompositePlacementId();
-        self.last_composite_image_id = state.composite_image_id;
+        const old_placement = state.activeCompositePlacement();
+        const image_id = self.allocImageId();
+        self.last_composite_image_id = image_id;
 
         const dest = batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect());
         const source = batchSourceRectForAspect(fb.width, fb.height, sink, sink.presentationAspect());
-        try sink.uploadRgba(state.composite_image_id, fb.rgba, fb.width, fb.height);
-        try sink.place(dest.row, dest.col, .{
-            .image_id = state.composite_image_id,
-            .placement_id = state.composite_placement_id,
+        const source_rect = core.CoreRect{ .x = source.x, .y = source.y, .w = source.w, .h = source.h };
+        try sink.uploadRgba(image_id, fb.rgba, fb.width, fb.height);
+        const placement_template = kitty_protocol.Placement{
+            .image_id = image_id,
+            .placement_id = 0,
             .cols = dest.w,
             .rows = dest.h,
             .src_x = source.x,
@@ -1677,8 +2085,18 @@ pub const FrameBuilder = struct {
             .src_w = source.w,
             .src_h = source.h,
             .z = 100,
-        });
-        if (state.rememberFullscreenPlacement(old_placement)) |evicted| try self.deleteCompositePlacementBatch(sink, evicted);
+        };
+        var placement_ids = [_]u32{0} ** max_occlusion_pieces;
+        const piece_count = try self.placeClippedBatch(sink, dest, source_rect, placement_template, &placement_ids);
+        self.auditPlaceIds(state, image_id, placement_ids[0..piece_count]);
+        state.composite_image_id = image_id;
+        state.composite_placement_ids = placement_ids;
+        state.composite_placement_count = piece_count;
+        state.composite_placement_id = if (piece_count > 0) state.composite_placement_ids[0] else 0;
+        if (state.rememberFullscreenPlacement(old_placement)) |evicted| {
+            try self.deleteCompositePlacementBatchAfter(sink, evicted);
+            self.auditDeleteComposite(state, evicted);
+        }
         if (self.stats.enabled) {
             self.stats.texture_uploads += 1;
             self.stats.texture_upload_bytes += fb.rgba.len;
@@ -1749,12 +2167,13 @@ pub const FrameBuilder = struct {
     }
 
     fn deleteCompositeFullscreenBatch(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !void {
-        if (state.composite_image_id != 0 and state.composite_placement_id != 0) {
-            try self.deleteCompositePlacementBatch(sink, .{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id });
-        }
+        const active = state.activeCompositePlacement();
+        try self.deleteCompositePlacementBatch(sink, active);
+        self.auditDeleteComposite(state, active);
         try self.deleteRetainedFullscreenPlacementsBatch(sink, state);
         state.composite_image_id = 0;
         state.composite_placement_id = 0;
+        state.composite_placement_count = 0;
     }
 
     fn presentCompositeTilesDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, backend: *ts_kitty.Backend, state: *RendererState) !void {
@@ -1878,6 +2297,7 @@ pub const FrameBuilder = struct {
         for (state.composite_tiles.items) |*tile| {
             if (tile.image_id != 0 and tile.placement_id != 0) {
                 try sink.deletePlacement(.{ .image_id = tile.image_id, .placement_id = tile.placement_id });
+                self.auditDeleteOne(state, tile.image_id, tile.placement_id);
             }
             const old_image_id = tile.image_id;
             tile.image_id = 0;
@@ -2305,8 +2725,25 @@ pub const FrameBuilder = struct {
 
     fn deleteCompositePlacementBatch(self: *FrameBuilder, sink: *RenderBatchSink, placement: CompositePlacement) !void {
         if (placement.image_id == 0 or placement.placement_id == 0) return;
-        try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement.placement_id });
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            if (placement_id != 0) try sink.deletePlacement(.{ .image_id = placement.image_id, .placement_id = placement_id });
+        }
         self.retireImageId(placement.image_id);
+    }
+
+    fn deleteCompositePlacementBatchAfter(self: *FrameBuilder, sink: *RenderBatchSink, placement: CompositePlacement) !void {
+        if (placement.image_id == 0 or placement.placement_id == 0) return;
+        const count = if (placement.placement_count == 0) @as(usize, 1) else placement.placement_count;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const placement_id = if (index == 0 and placement.placement_ids[index] == 0) placement.placement_id else placement.placement_ids[index];
+            if (placement_id != 0) try sink.deletePlacementAfter(.{ .image_id = placement.image_id, .placement_id = placement_id });
+        }
+        try sink.deleteImageDataAfter(placement.image_id);
+        if (self.stats.enabled) self.stats.retired_images += 1;
     }
 
     fn deleteRetainedFullscreenPlacements(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
@@ -2322,6 +2759,7 @@ pub const FrameBuilder = struct {
         var i: usize = 0;
         while (i < state.retained_fullscreen_placement_count) : (i += 1) {
             try self.deleteCompositePlacementBatch(sink, state.retained_fullscreen_placements[i]);
+            self.auditDeleteComposite(state, state.retained_fullscreen_placements[i]);
             state.retained_fullscreen_placements[i] = .{};
         }
         state.retained_fullscreen_placement_count = 0;
@@ -3920,6 +4358,80 @@ test "frame builder queues presentation reset deletes into next batch frame" {
     try std.testing.expect(std.mem.indexOf(u8, next_frame, "a=p") != null);
 }
 
+test "frame builder emits retained fullscreen batch eviction after replacement frame" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2201;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 2 * 2 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    var frame_index: usize = 0;
+    while (frame_index < fullscreen_retained_placement_count + 2) : (frame_index += 1) {
+        const before_frame_len = out.items.len;
+        builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+        if (frame_index == fullscreen_retained_placement_count + 1) {
+            const evicting_frame = out.items[before_frame_len..];
+            try std.testing.expect(std.mem.indexOf(u8, evicting_frame, "\"deletes\":[]") != null);
+            try std.testing.expect(std.mem.indexOf(u8, evicting_frame, "\"after\":[") != null);
+            const upload_index = std.mem.indexOf(u8, evicting_frame, "\"uploads\":[") orelse return error.TestExpectedEqual;
+            const placement_index = std.mem.indexOf(u8, evicting_frame, "\"placements\":[") orelse return error.TestExpectedEqual;
+            const after_index = std.mem.indexOf(u8, evicting_frame, "\"after\":[") orelse return error.TestExpectedEqual;
+            const delete_index = std.mem.indexOf(u8, evicting_frame, "a=d") orelse return error.TestExpectedEqual;
+            try std.testing.expect(upload_index < placement_index);
+            try std.testing.expect(placement_index < after_index);
+            try std.testing.expect(after_index < delete_index);
+        }
+    }
+}
+
+test "frame builder gives replacement fullscreen images distinct retained placement ids" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2202;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 2 * 2 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const before_second_frame_len = out.items.len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    const second_frame = out.items[before_second_frame_len..];
+
+    try std.testing.expect(std.mem.indexOf(u8, second_frame, "i=100001,p=200001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_frame, "i=100001,p=200000") == null);
+}
+
 test "frame builder batch placement contains source inside attached rect" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
@@ -3949,13 +4461,173 @@ test "frame builder batch placement contains source inside attached rect" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
 }
 
-test "frame builder batch scene placements are translated into attached rect" {
+test "frame builder batch framebuffer splits placement around occlusion" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2002;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+    const occlusions = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
+    };
+    try sink.setOcclusionRects(&occlusions);
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;2H") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200001") != null);
+}
+
+test "frame builder deletes retained framebuffer placements when occlusion changes" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2003;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    const occlusions = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
+    };
+    try sink.setOcclusionRects(&occlusions);
+    const before_reproject_len = out.items.len;
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    const reproject_frame = out.items[before_reproject_len..];
+
+    try std.testing.expect(std.mem.indexOf(u8, reproject_frame, "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reproject_frame, "i=100000,p=200000") != null);
+}
+
+test "frame builder placement audit survives occlusion piece count transitions" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.enablePlacementAudit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2009;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    try builder.expectPlacementAuditConsistent(renderer);
+
+    const middle_occlusion = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
+    };
+    try sink.setOcclusionRects(&middle_occlusion);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try builder.expectPlacementAuditConsistent(renderer);
+
+    const edge_occlusion = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 1, .col = 1, .rows = 1, .cols = 4 },
+    };
+    try sink.setOcclusionRects(&edge_occlusion);
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try builder.expectPlacementAuditConsistent(renderer);
+
+    try sink.setOcclusionRects(&.{});
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try builder.expectPlacementAuditConsistent(renderer);
+}
+
+test "frame builder deletes active split framebuffer placements on renderer cleanup" {
     var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
 
     const renderer: core.CoreHandle = 0x2004;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+    const occlusions = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
+    };
+    try sink.setOcclusionRects(&occlusions);
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    const before_cleanup_len = out.items.len;
+    builder.flushBatchDeletesForRenderer(&logger, &sink, renderer, out.writer(std.testing.allocator));
+    const cleanup_frame = out.items[before_cleanup_len..];
+
+    try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "i=100000,p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "i=100000,p=200001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "i=100000,p=200002") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "i=100000,p=200003") != null);
+}
+
+test "frame builder batch scene placements are translated into attached rect" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2005;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
     var sink = RenderBatchSink.init(std.testing.allocator, "main");

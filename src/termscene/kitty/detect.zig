@@ -53,9 +53,42 @@ pub fn detectFileTransmissionSupportWhole(allocator: std.mem.Allocator, tty: std
 }
 
 pub fn detectFileTransmissionSupportOffset(allocator: std.mem.Allocator, tty: std.fs.File, path: []const u8) !bool {
+    try prepareFileOffsetProbeData(path);
+    if (!try detectFileTransmissionSupportOffsetAt(allocator, tty, path, 0)) return false;
+    return detectFileTransmissionSupportOffsetAt(allocator, tty, path, 1);
+}
+
+fn detectFileTransmissionSupportOffsetAt(allocator: std.mem.Allocator, tty: std.fs.File, path: []const u8, offset: u64) !bool {
     const writer = tty.deprecatedWriter();
-    try protocol.writeQueryFileRgbaRegion(writer, path, 0, 4, 1, 1);
+    try protocol.writeQueryFileRgbaRegion(writer, path, offset, 4, 1, 1);
     const reply = try readRepliesFromFile(allocator, tty, 300);
     defer allocator.free(reply);
     return std.mem.indexOf(u8, reply, "OK") != null;
+}
+
+fn prepareFileOffsetProbeData(path: []const u8) !void {
+    const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_write });
+    defer file.close();
+    const bytes = [_]u8{
+        0, 0, 0, 255,
+        255, 0, 0, 255,
+    };
+    try file.pwriteAll(&bytes, 0);
+    try file.setEndPos(bytes.len);
+    try file.sync();
+}
+
+test "file offset probe data is long enough for unaligned region query" {
+    const path = "/tmp/katzensteg-file-offset-probe-test.rgba";
+    {
+        const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = true });
+        file.close();
+    }
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    try prepareFileOffsetProbeData(path);
+
+    const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    defer file.close();
+    try std.testing.expectEqual(@as(u64, 8), try file.getEndPos());
 }

@@ -136,6 +136,18 @@ const PayloadBufferPool = struct {
     }
 };
 
+fn presentationStatusEqual(a: render_batch_protocol.PresentationStatusView, b: render_batch_protocol.PresentationStatusView) bool {
+    return std.mem.eql(u8, a.window_id, b.window_id) and
+        a.ready_to_show == b.ready_to_show and
+        optionalEqual(render_batch_protocol.SourcePixels, a.source_px, b.source_px) and
+        optionalEqual(render_batch_protocol.PresentationRectCells, a.effective_rect_cells, b.effective_rect_cells);
+}
+
+fn optionalEqual(comptime T: type, a: ?T, b: ?T) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.meta.eql(a.?, b.?);
+}
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     logger: Logger,
@@ -147,6 +159,7 @@ pub const Runtime = struct {
     batch_control_line: std.ArrayList(u8),
     batch_sink: ?RenderBatchSink = null,
     batch_presentation_reset_pending: bool = false,
+    last_batch_presentation_status: ?render_batch_protocol.PresentationStatusView = null,
     frame_builder: FrameBuilder,
     cursor_state: cursor_mod.State,
     bg_only: bool = false,
@@ -243,6 +256,10 @@ pub const Runtime = struct {
             .file_transport_enabled = config.file_transport,
             .file_transport_max_bytes = config.file_transport_max_bytes,
         };
+        if (std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null) {
+            runtime.frame_builder.enablePlacementAudit();
+            log.info("placement invariant audit enabled", .{});
+        }
         if (std.c.getenv("KATZENSTEG_WHISKERS_SOCKET")) |path_z| {
             var free_producer_hello = true;
             const producer_hello = runtime.buildWhiskersHello() catch |err| blk: {
@@ -433,7 +450,12 @@ pub const Runtime = struct {
         self.inspect_resource_records.deinit(self.allocator);
         self.queued_lock_captures.deinit();
         self.sdl_window_ids.deinit();
-        if (self.batch_sink) |*sink| sink.deinit();
+        if (self.batch_sink) |*sink| {
+            if (self.batch_writer) |writer| {
+                self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
+            }
+            sink.deinit();
+        }
         self.batch_control_line.deinit(self.allocator);
         if (self.batch_control) |file| file.close();
         if (self.batch_writer) |file| file.close();
@@ -632,6 +654,7 @@ pub const Runtime = struct {
             var virtual_tty = self.batchVirtualTty();
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
             self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
+            self.writeExternalFramebufferBatchPresentationStatus(width, height);
             const duration = std.time.nanoTimestamp() - start_ns;
             self.notePresentDuration(duration);
             return;
@@ -688,11 +711,26 @@ pub const Runtime = struct {
 
     fn writeBatchPresentationStatus(self: *Runtime, renderer: core.CoreHandle, job: *const PresentJob) void {
         const sink = &(self.batch_sink orelse return);
-        const writer = self.batch_writer orelse return;
         const status = self.frame_builder.batchPresentationStatusForRenderer(sink, renderer, job) orelse return;
+        self.writeBatchPresentationStatusView(status);
+    }
+
+    fn writeExternalFramebufferBatchPresentationStatus(self: *Runtime, width: i32, height: i32) void {
+        const sink = &(self.batch_sink orelse return);
+        const status = self.frame_builder.batchPresentationStatusForExternalFramebuffer(sink, width, height) orelse return;
+        self.writeBatchPresentationStatusView(status);
+    }
+
+    fn writeBatchPresentationStatusView(self: *Runtime, status: render_batch_protocol.PresentationStatusView) void {
+        if (self.last_batch_presentation_status) |previous| {
+            if (presentationStatusEqual(previous, status)) return;
+        }
+        const writer = self.batch_writer orelse return;
         render_batch_protocol.writePresentationStatusJsonl(writer.deprecatedWriter(), status) catch |err| {
             self.logger.writeFmtScoped(.info, .runtime, "batch presentation status write failed: {any}", .{err});
+            return;
         };
+        self.last_batch_presentation_status = status;
     }
 
     fn waitForInitialBatchAttach(self: *Runtime) void {
@@ -783,7 +821,12 @@ pub const Runtime = struct {
                     },
                 );
                 sink.attachWithPresentation(attach.rect_cells, attach.aspect, attach.z_base);
+                self.last_batch_presentation_status = null;
                 sink.setTerminalGeometry(attach.terminal);
+                sink.setOcclusionRects(attach.occlusion_rects) catch |err| {
+                    log.warn("batch occlusion policy failed: {any}", .{err});
+                    return;
+                };
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
                     return;
@@ -809,6 +852,7 @@ pub const Runtime = struct {
                 const previous_aspect = sink.presentationAspect();
                 const previous_z_base = sink.presentationZBase();
                 const previous_terminal = sink.terminalGeometry();
+                const previous_occlusions = sink.occlusionRects();
                 log.info(
                     "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
@@ -828,10 +872,18 @@ pub const Runtime = struct {
                     },
                 );
                 const terminal_changed = if (viewport.terminal) |terminal| previous_terminal == null or !std.meta.eql(previous_terminal.?, terminal) else false;
-                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed;
-                if (presentation_changed) self.batch_presentation_reset_pending = true;
+                const occlusions_changed = !presentationRectsEqual(previous_occlusions, viewport.occlusion_rects);
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed or occlusions_changed;
+                if (presentation_changed) {
+                    self.batch_presentation_reset_pending = true;
+                    self.last_batch_presentation_status = null;
+                }
                 sink.viewportWithPresentation(viewport.rect_cells, viewport.aspect, viewport.z_base);
                 if (viewport.terminal != null) sink.setTerminalGeometry(viewport.terminal);
+                sink.setOcclusionRects(viewport.occlusion_rects) catch |err| {
+                    log.warn("batch viewport occlusion policy failed: {any}", .{err});
+                    return;
+                };
                 if (presentation_changed) {
                     if (self.batch_writer) |writer| {
                         if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
@@ -1326,6 +1378,67 @@ test "batch present reports source pixels and effective fitted rect" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}") != null);
 }
 
+test "batch present emits presentation status only when it changes" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+
+    const window: core.CoreHandle = 0x6683;
+    const renderer: core.CoreHandle = 0x7783;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 640, 480);
+    runtime.createRenderer(window, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+
+    setNonblocking(pipe[0]);
+    runtime.adaptive_present_target_ns = std.time.ns_per_s;
+    runtime.renderBatchPresent(renderer);
+    runtime.next_present_ns = 0;
+    runtime.renderBatchPresent(renderer);
+    runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":18,\"cols\":40},\"aspect\":\"fit\"}");
+    runtime.next_present_ns = 0;
+    runtime.renderBatchPresent(renderer);
+
+    var buf: [32768]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf[0..n], "\"type\":\"frame_batch\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, buf[0..n], "\"type\":\"presentation_status\""));
+}
+
+test "external framebuffer batch present reports presentation status" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    var pixels = [_]u8{255} ** (4 * 4 * 4);
+
+    setNonblocking(pipe[0]);
+    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
+
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"presentation_status\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40}") != null);
+}
+
 test "batch present uses host terminal pixels for effective fitted rect" {
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -1390,6 +1503,47 @@ test "batch renderer destroy emits retained placement deletes before forgetting 
     const n = try std.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
+}
+
+test "batch runtime deinit emits split placement deletes without renderer destroy" {
+    var runtime = Runtime.initShutdownStub();
+    var runtime_deinited = false;
+    defer if (!runtime_deinited) runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+    const occlusions = [_]render_batch_protocol.PresentationRectCells{
+        .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
+    };
+    try runtime.batch_sink.?.setOcclusionRects(&occlusions);
+
+    const window: core.CoreHandle = 0x6682;
+    const renderer: core.CoreHandle = 0x7782;
+    runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+    runtime.frame_builder.onCreateWindow(window, 4, 4);
+    runtime.frame_builder.onCreateRenderer(window, renderer);
+
+    var rgba = [_]u8{255} ** (4 * 4 * 4);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = &rgba, .owns_rgba = false } };
+    var first_out = std.ArrayList(u8).empty;
+    defer first_out.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+
+    setNonblocking(pipe[0]);
+    runtime.deinit();
+    runtime_deinited = true;
+
+    var buf: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200002") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200003") != null);
 }
 
 test "batch renderer replacement emits retained placement deletes before overwriting state" {
@@ -1647,6 +1801,14 @@ fn mapGlCaptureMode(mode: config_mod.GlCaptureMode) gl_capture_mod.CaptureMode {
         .sync => .sync,
         .pbo => .pbo,
     };
+}
+
+fn presentationRectsEqual(a: []const render_batch_protocol.PresentationRectCells, b: []const render_batch_protocol.PresentationRectCells) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (!std.meta.eql(left, right)) return false;
+    }
+    return true;
 }
 
 test "payload buffer pool reuses exact-sized buffers" {

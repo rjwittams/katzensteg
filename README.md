@@ -8,7 +8,7 @@ The current practical support boundary is workload-specific. Several larger test
 
 This is alpha software. It is already useful for experiments and demos, but the interfaces, profiles, and supported app matrix are still moving.
 
-Project site: <https://katzensteg.kitty-yet.com>
+Project site: <https://katzensteg.dev>
 
 ## What Works Today
 
