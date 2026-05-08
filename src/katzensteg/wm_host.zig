@@ -440,7 +440,6 @@ const WmProducerSession = struct {
     child_stdin: ?std.fs.File = null,
     stdout_file: ?std.fs.File = null,
     stdout_buffer: std.ArrayList(u8) = .empty,
-    wait_thread: ?std.Thread = null,
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
     control_open: bool = true,
@@ -566,7 +565,6 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         for (sessions[0..initialized]) |*session| {
             closeSessionControl(session);
             if (session.stdout_file) |file| file.close();
-            if (session.wait_thread) |thread| thread.join();
             session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(allocator, &session.upload);
             allocator.free(session.profile_name);
@@ -578,7 +576,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         z_order[i] = i;
         sessions[i] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, &event_log);
         initialized += 1;
-        try startSessionWaitThread(&sessions[i]);
+        try startSessionProcessPolling(&sessions[i]);
     }
 
     var focused_index: usize = 0;
@@ -600,6 +598,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     while (!shutdown_sent and (keep_alive_when_empty or !allSessionsDone(sessions[0..initialized]))) {
         _ = try drainSessionStdoutsAvailable(allocator, sessions[0..initialized], &peer_queue);
         _ = try drainQueuedPeerLines(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 64);
+        _ = try pollSessionChildExits(sessions[0..initialized]);
         const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
         if (lifecycle.changed) {
             if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
@@ -641,7 +640,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                         z_order[new_index] = new_index;
                         sessions[new_index] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
                         initialized += 1;
-                        try startSessionWaitThread(&sessions[new_index]);
+                        try startSessionProcessPolling(&sessions[new_index]);
                         focused_index = new_index;
                         bringWindowToFront(z_order[0..initialized], focused_index);
                         mouse_state = .{};
@@ -750,10 +749,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         closeSessionControl(session);
     }
     for (sessions[0..initialized]) |*session| {
-        if (session.wait_thread) |thread| {
-            thread.join();
-            session.wait_thread = null;
-        }
+        try waitForSessionChildExit(session);
         const already_recorded_exit = session.state == .exited;
         session.state = .exited;
         _ = try drainSessionStdoutAvailable(allocator, session, &peer_queue);
@@ -890,23 +886,50 @@ fn setNonBlocking(fd: std.posix.fd_t) void {
     _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
-fn startSessionWaitThread(session: *WmProducerSession) !void {
-    if (session.wait_thread != null) return;
-    session.wait_thread = std.Thread.spawn(.{}, waitChildThread, .{ &session.child, &session.wait_state }) catch |err| {
-        terminateSessionAfterWaitThreadFailure(session);
-        return err;
-    };
+fn startSessionProcessPolling(session: *WmProducerSession) !void {
+    try session.child.waitForSpawn();
 }
 
-fn terminateSessionAfterWaitThreadFailure(session: *WmProducerSession) void {
-    closeSessionControl(session);
-    if (session.stdout_file) |file| {
-        file.close();
-        session.stdout_file = null;
+fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
+    var changed = false;
+    for (sessions) |*session| {
+        if (try pollSessionChildExit(session)) changed = true;
     }
-    session.wait_state.term = session.child.kill() catch session.child.wait() catch .{ .Unknown = 0 };
+    return changed;
+}
+
+fn pollSessionChildExit(session: *WmProducerSession) !bool {
+    if (session.wait_state.done.load(.seq_cst)) return false;
+    try session.child.waitForSpawn();
+
+    const result = std.posix.waitpid(session.child.id, std.posix.W.NOHANG);
+    if (result.pid == 0) return false;
+
+    markSessionChildExited(session, childTermFromStatus(result.status));
+    return true;
+}
+
+fn waitForSessionChildExit(session: *WmProducerSession) !void {
+    if (session.wait_state.done.load(.seq_cst)) return;
+    markSessionChildExited(session, session.child.wait() catch .{ .Unknown = 0 });
+}
+
+fn markSessionChildExited(session: *WmProducerSession, term: std.process.Child.Term) void {
+    session.child.term = term;
+    session.wait_state.term = term;
+    // term is safe to read after done is observed true; seq_cst releases the write.
     session.wait_state.done.store(true, .seq_cst);
-    session.state = .exited;
+}
+
+fn childTermFromStatus(status: u32) std.process.Child.Term {
+    return if (std.posix.W.IFEXITED(status))
+        .{ .Exited = std.posix.W.EXITSTATUS(status) }
+    else if (std.posix.W.IFSIGNALED(status))
+        .{ .Signal = std.posix.W.TERMSIG(status) }
+    else if (std.posix.W.IFSTOPPED(status))
+        .{ .Stopped = std.posix.W.STOPSIG(status) }
+    else
+        .{ .Unknown = status };
 }
 
 pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: anytype, options: RunExecOptions) !u8 {
@@ -1664,12 +1687,6 @@ const ChildWaitState = struct {
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     term: std.process.Child.Term = .{ .Unknown = 0 },
 };
-
-fn waitChildThread(child: *std.process.Child, state: *ChildWaitState) void {
-    state.term = child.wait() catch .{ .Unknown = 0 };
-    // term is safe to read after done is observed true; seq_cst releases the write.
-    state.done.store(true, .seq_cst);
-}
 
 const InputAction = union(enum) {
     none,
@@ -2918,6 +2935,28 @@ test "wm reconciles externally exited producer sessions" {
     try std.testing.expectEqual(@as(?WmMouseDrag, null), mouse.drag);
     try std.testing.expectEqual(EventKind.process_exited, log.at(0).?.kind);
     try std.testing.expectEqual(EventKind.focus_changed, log.at(1).?.kind);
+}
+
+test "wm child exit polling marks finished child without wait thread" {
+    var child = std.process.Child.init(&.{"/usr/bin/true"}, std.testing.allocator);
+    try child.spawn();
+
+    var session = WmProducerSession{
+        .profile_name = "done",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = child,
+        .state = .running,
+    };
+
+    var timer = try std.time.Timer.start();
+    while (timer.read() < 5 * std.time.ns_per_s and !session.wait_state.done.load(.seq_cst)) {
+        _ = try pollSessionChildExit(&session);
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expect(session.wait_state.done.load(.seq_cst));
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, session.wait_state.term);
 }
 
 test "wm z order compacts exited sessions behind visible sessions" {
