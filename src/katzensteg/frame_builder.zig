@@ -605,7 +605,7 @@ pub const FrameBuilder = struct {
         logger.writeFmtScoped(
             .warn,
             .frame_builder,
-            "placement audit violation op={s} renderer={x} live={d} retained={d} viewport={d},{d} {d}x{d} aspect={s} occlusions={d} live_unretained={d}/{d} retained_missing={d}/{d}",
+            "placement audit violation op={s} renderer={x} live={d} retained={d} viewport={d},{d} {d}x{d} aspect={s} occlusions={d} piece_cap={d} live_unretained={d}/{d} retained_missing={d}/{d}",
             .{
                 op,
                 renderer,
@@ -617,6 +617,7 @@ pub const FrameBuilder = struct {
                 rect.cols,
                 @tagName(sink.presentationAspect()),
                 sink.occlusionRects().len,
+                max_occlusion_pieces,
                 first_live_unretained.image_id,
                 first_live_unretained.placement_id,
                 first_retained_missing.image_id,

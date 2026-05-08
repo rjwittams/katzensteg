@@ -443,6 +443,7 @@ const WmPeerLineQueue = struct {
     entries: std.ArrayList(WmPeerLineQueueEntry) = .empty,
     head: usize = 0,
     max_entries: usize = wm_peer_line_queue_max_entries,
+    blocked_enqueue_count: usize = 0,
     closed: bool = false,
 
     fn init(allocator: std.mem.Allocator) WmPeerLineQueue {
@@ -477,7 +478,9 @@ const WmPeerLineQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         while (!self.closed and self.entries.items.len - self.head >= self.max_entries) {
+            self.blocked_enqueue_count += 1;
             self.not_full.wait(&self.mutex);
+            self.blocked_enqueue_count -= 1;
         }
         if (self.closed) return error.QueueClosed;
         try self.entries.append(self.allocator, .{ .session = session, .line = owned_line });
@@ -762,7 +765,8 @@ fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file
     var child = std.process.Child.init(&.{ exe, "--embed-jsonl", owned_profile_name }, allocator);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
-    child.stderr_behavior = wmProducerStderrBehavior();
+    // Producers run inside the terminal surface, so stderr must not inherit it.
+    child.stderr_behavior = .Ignore;
     try child.spawn();
 
     var session = WmProducerSession{
@@ -792,11 +796,6 @@ fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file
     session.stdout_file = session.child.stdout.?;
     session.child.stdout = null;
     return session;
-}
-
-fn wmProducerStderrBehavior() std.process.Child.StdIo {
-    // Producers run inside the terminal surface, so stderr must not inherit it.
-    return .Ignore;
 }
 
 fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
@@ -2168,8 +2167,23 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
 }
 
 fn enqueuePeerLineForQueueBoundTest(queue: *WmPeerLineQueue, done: *std.atomic.Value(bool)) void {
-    queue.enqueueCopy(null, "two") catch unreachable;
+    queue.enqueueCopy(null, "two") catch {
+        done.store(true, .seq_cst);
+        return;
+    };
     done.store(true, .seq_cst);
+}
+
+fn waitForBlockedQueueProducer(queue: *WmPeerLineQueue) !void {
+    var timer = try std.time.Timer.start();
+    while (timer.read() < 5 * std.time.ns_per_s) {
+        queue.mutex.lock();
+        const blocked = queue.blocked_enqueue_count > 0;
+        queue.mutex.unlock();
+        if (blocked) return;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
 }
 
 test "wm peer stdout queue wakes blocked producers when drained" {
@@ -2180,8 +2194,13 @@ test "wm peer stdout queue wakes blocked producers when drained" {
 
     var done = std.atomic.Value(bool).init(false);
     const thread = try std.Thread.spawn(.{}, enqueuePeerLineForQueueBoundTest, .{ &queue, &done });
+    var thread_joined = false;
+    defer if (!thread_joined) {
+        queue.close();
+        thread.join();
+    };
 
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try waitForBlockedQueueProducer(&queue);
     try std.testing.expect(!done.load(.seq_cst));
 
     var batch = try queue.take(std.testing.allocator, 1);
@@ -2191,6 +2210,7 @@ test "wm peer stdout queue wakes blocked producers when drained" {
     try std.testing.expectEqualStrings("one", batch.items[0].line);
 
     thread.join();
+    thread_joined = true;
     try std.testing.expect(done.load(.seq_cst));
 
     var remaining = try queue.take(std.testing.allocator, 0);
@@ -2469,10 +2489,6 @@ test "wm exec path renders chrome and applies fake peer frame batch" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "fake") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "DUPA") != null);
-}
-
-test "wm producer stderr is not inherited by the terminal surface" {
-    try std.testing.expectEqual(std.process.Child.StdIo.Ignore, wmProducerStderrBehavior());
 }
 
 test "wm window actions move and resize within terminal bounds" {
