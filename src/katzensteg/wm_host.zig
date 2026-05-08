@@ -402,12 +402,32 @@ fn divRoundI64(numerator: i64, denominator: i64) i64 {
     return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
 }
 
+pub const SessionLaunchSpec = struct {
+    profile_name: []const u8,
+    extra_args: []const []const u8 = &.{},
+};
+
 pub fn runProfile(allocator: std.mem.Allocator, profile_name: []const u8) !u8 {
-    return runProfiles(allocator, &.{profile_name});
+    return runSessionSpecs(allocator, &.{.{ .profile_name = profile_name }});
 }
 
 pub fn runProfiles(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
-    return runMultiProfile(allocator, profile_names);
+    var specs = try allocator.alloc(SessionLaunchSpec, profile_names.len);
+    defer allocator.free(specs);
+    for (profile_names, 0..) |profile_name, i| {
+        specs[i] = .{ .profile_name = profile_name };
+    }
+    return runSessionSpecs(allocator, specs);
+}
+
+pub fn runSessionSpecs(allocator: std.mem.Allocator, specs: []const SessionLaunchSpec) !u8 {
+    const exe = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe);
+    return runSessionSpecsWithProducerExe(allocator, exe, specs);
+}
+
+pub fn runSessionSpecsWithProducerExe(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
+    return runMultiProfile(allocator, producer_exe, specs);
 }
 
 const WmProducerSession = struct {
@@ -521,10 +541,7 @@ const WmPeerLineQueue = struct {
     }
 };
 
-fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
-    const exe = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(exe);
-
+fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
     var tty = try DirectTty.init();
     defer tty.deinit();
 
@@ -538,7 +555,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     defer peer_queue.deinit();
 
     const terminal = TerminalSize{ .rows = tty.rows, .cols = tty.cols, .pixel_width = tty.pixel_width, .pixel_height = tty.pixel_height };
-    const session_capacity = @max(profile_names.len, default_wm_session_capacity);
+    const session_capacity = @max(specs.len, default_wm_session_capacity);
     var sessions = try allocator.alloc(WmProducerSession, session_capacity);
     defer allocator.free(sessions);
     var z_order = try allocator.alloc(usize, session_capacity);
@@ -557,9 +574,9 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     }
 
     try tty.enableInputCapture();
-    for (profile_names, 0..) |profile_name, i| {
+    for (specs, 0..) |spec, i| {
         z_order[i] = i;
-        sessions[i] = try launchProducerSession(allocator, exe, tty.file, terminal, profile_name, i, &event_log);
+        sessions[i] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, &event_log);
         initialized += 1;
         try startSessionWaitThread(&sessions[i]);
     }
@@ -574,7 +591,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
     var shutdown_sent = false;
-    const keep_alive_when_empty = profile_names.len == 0;
+    const keep_alive_when_empty = specs.len == 0;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
@@ -621,7 +638,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     } else {
                         const new_index = initialized;
                         z_order[new_index] = new_index;
-                        sessions[new_index] = try launchProducerSession(allocator, exe, tty.file, terminal, launch_prompt.items, new_index, &event_log);
+                        sessions[new_index] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
                         initialized += 1;
                         try startSessionWaitThread(&sessions[new_index]);
                         focused_index = new_index;
@@ -755,14 +772,17 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     return 0;
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, profile_name: []const u8, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
     var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
     errdefer deinitUploadPolicy(allocator, &upload);
 
-    const owned_profile_name = try allocator.dupe(u8, profile_name);
+    const owned_profile_name = try allocator.dupe(u8, spec.profile_name);
     errdefer allocator.free(owned_profile_name);
 
-    var child = std.process.Child.init(&.{ exe, "--embed-jsonl", owned_profile_name }, allocator);
+    const child_argv = try buildProducerArgv(allocator, producer_exe, owned_profile_name, spec.extra_args);
+    defer allocator.free(child_argv);
+
+    var child = std.process.Child.init(child_argv, allocator);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     // Producers run inside the terminal surface, so stderr must not inherit it.
@@ -796,6 +816,17 @@ fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file
     session.stdout_file = session.child.stdout.?;
     session.child.stdout = null;
     return session;
+}
+
+fn buildProducerArgv(allocator: std.mem.Allocator, producer_exe: []const u8, profile_name: []const u8, extra_args: []const []const u8) ![]const []const u8 {
+    var argv = try allocator.alloc([]const u8, 3 + extra_args.len);
+    argv[0] = producer_exe;
+    argv[1] = "--embed-jsonl";
+    argv[2] = profile_name;
+    for (extra_args, 0..) |arg, i| {
+        argv[3 + i] = arg;
+    }
+    return argv;
 }
 
 fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
@@ -2063,6 +2094,18 @@ test "wm status band renders host geometry and last event outside content" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "outer=1,1 80x20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "content=4,2 78x16") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "last=attach_sent main") != null);
+}
+
+test "wm producer argv includes profile arguments" {
+    const argv = try buildProducerArgv(std.testing.allocator, "katzensteg", "retroarch", &.{ "rom.sfc", "--fullscreen" });
+    defer std.testing.allocator.free(argv);
+
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("katzensteg", argv[0]);
+    try std.testing.expectEqualStrings("--embed-jsonl", argv[1]);
+    try std.testing.expectEqualStrings("retroarch", argv[2]);
+    try std.testing.expectEqualStrings("rom.sfc", argv[3]);
+    try std.testing.expectEqualStrings("--fullscreen", argv[4]);
 }
 
 test "wm status band renders producer presentation status" {

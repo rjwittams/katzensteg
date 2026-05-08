@@ -367,6 +367,26 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_launcher.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(katzensteg_launcher);
+    const katzensteg_wm = b.addExecutable(.{
+        .name = "katzensteg-wm",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/katzensteg/wm/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_wm.root_module.addImport("termscene", termscene_mod);
+    const katzensteg_wm_host_mod = b.createModule(.{
+        .root_source_file = b.path("src/katzensteg/wm_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    katzensteg_wm_host_mod.addImport("termscene", termscene_mod);
+    katzensteg_wm.root_module.addImport("wm_host", katzensteg_wm_host_mod);
+    b.installArtifact(katzensteg_wm);
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
         .use_llvm = use_llvm,
