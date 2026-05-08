@@ -35,7 +35,7 @@
     },
     "app.codexbar_sdl": {
       "hidden": true,
-      "target": "$HOME/dev/CodexBar/.build/debug/CodexBarSDL"
+      "target": "{home}/dev/CodexBar/.build/debug/CodexBarSDL"
     },
     "probe.codexbar_sdl": {
       "extends": [
