@@ -439,7 +439,7 @@ const WmProducerSession = struct {
     child: std.process.Child,
     child_stdin: ?std.fs.File = null,
     stdout_file: ?std.fs.File = null,
-    stdout_thread: ?std.Thread = null,
+    stdout_buffer: std.ArrayList(u8) = .empty,
     wait_thread: ?std.Thread = null,
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
@@ -567,7 +567,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
             closeSessionControl(session);
             if (session.stdout_file) |file| file.close();
             if (session.wait_thread) |thread| thread.join();
-            if (session.stdout_thread) |thread| thread.join();
+            session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(allocator, &session.upload);
             allocator.free(session.profile_name);
         }
@@ -586,7 +586,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     const writer = tty.file.deprecatedWriter();
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized]) |*session| {
-        try startSessionStdoutThread(allocator, session, &peer_queue);
+        try startSessionStdoutPolling(session);
     }
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
@@ -598,6 +598,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     defer launch_prompt.deinit(allocator);
     var prompt_active = false;
     while (!shutdown_sent and (keep_alive_when_empty or !allSessionsDone(sessions[0..initialized]))) {
+        _ = try drainSessionStdoutsAvailable(allocator, sessions[0..initialized], &peer_queue);
         _ = try drainQueuedPeerLines(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 64);
         const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
         if (lifecycle.changed) {
@@ -644,7 +645,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                         focused_index = new_index;
                         bringWindowToFront(z_order[0..initialized], focused_index);
                         mouse_state = .{};
-                        try startSessionStdoutThread(allocator, &sessions[new_index], &peer_queue);
+                        try startSessionStdoutPolling(&sessions[new_index]);
                         try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     }
@@ -748,7 +749,6 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     for (sessions[0..initialized]) |*session| {
         closeSessionControl(session);
     }
-    peer_queue.close();
     for (sessions[0..initialized]) |*session| {
         if (session.wait_thread) |thread| {
             thread.join();
@@ -756,12 +756,10 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         }
         const already_recorded_exit = session.state == .exited;
         session.state = .exited;
-        if (session.stdout_thread) |thread| {
-            thread.join();
-            session.stdout_thread = null;
-        }
+        _ = try drainSessionStdoutAvailable(allocator, session, &peer_queue);
         if (!already_recorded_exit) try event_log.record(.process_exited, session.profile_name);
     }
+    peer_queue.close();
     while (try drainQueuedPeerLines(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0)) {}
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     if (shutdown_sent) return 0;
@@ -829,16 +827,67 @@ fn buildProducerArgv(allocator: std.mem.Allocator, producer_exe: []const u8, pro
     return argv;
 }
 
-fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
-    if (session.stdout_thread != null) return;
+fn startSessionStdoutPolling(session: *WmProducerSession) !void {
     const stdout_file = session.stdout_file orelse return;
-    session.stdout_file = null;
-    session.stdout_thread = try std.Thread.spawn(.{}, applyPeerStdoutThread, .{ThreadApplyArgs{
-        .allocator = allocator,
-        .session = session,
-        .stdout_file = stdout_file,
-        .peer_queue = peer_queue,
-    }});
+    setNonBlocking(stdout_file.handle);
+}
+
+fn drainSessionStdoutsAvailable(allocator: std.mem.Allocator, sessions: []WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+    var made_progress = false;
+    for (sessions) |*session| {
+        if (try drainSessionStdoutAvailable(allocator, session, peer_queue)) made_progress = true;
+    }
+    return made_progress;
+}
+
+fn drainSessionStdoutAvailable(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+    const stdout_file = session.stdout_file orelse return false;
+
+    var made_progress = false;
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = stdout_file.read(&buf) catch |err| switch (err) {
+            error.WouldBlock => return made_progress,
+            else => {
+                stdout_file.close();
+                session.stdout_file = null;
+                try flushPeerStdoutBuffer(session, peer_queue);
+                return made_progress;
+            },
+        };
+        if (n == 0) {
+            stdout_file.close();
+            session.stdout_file = null;
+            try flushPeerStdoutBuffer(session, peer_queue);
+            return true;
+        }
+        made_progress = true;
+        try queuePeerStdoutBytes(allocator, session, peer_queue, buf[0..n]);
+    }
+}
+
+fn queuePeerStdoutBytes(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, bytes: []const u8) !void {
+    for (bytes) |byte| {
+        if (byte == '\n') {
+            try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
+            session.stdout_buffer.clearRetainingCapacity();
+        } else if (byte != '\r') {
+            try session.stdout_buffer.append(allocator, byte);
+        }
+    }
+}
+
+fn flushPeerStdoutBuffer(session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
+    if (session.stdout_buffer.items.len == 0) return;
+    try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
+    session.stdout_buffer.clearRetainingCapacity();
+}
+
+fn setNonBlocking(fd: std.posix.fd_t) void {
+    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+    typed_flags.NONBLOCK = true;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
 fn startSessionWaitThread(session: *WmProducerSession) !void {
@@ -1257,27 +1306,6 @@ fn applyPeerStdout(allocator: std.mem.Allocator, stdout_file: std.fs.File, write
     if (line.items.len > 0) try applyPeerLine(allocator, writer, line.items);
 }
 
-fn applyPeerStdoutQueued(allocator: std.mem.Allocator, stdout_file: std.fs.File, session: ?*WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
-    defer stdout_file.close();
-    var line = std.ArrayList(u8).empty;
-    defer line.deinit(allocator);
-
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = try stdout_file.read(&buf);
-        if (n == 0) break;
-        for (buf[0..n]) |byte| {
-            if (byte == '\n') {
-                try peer_queue.enqueueCopy(session, line.items);
-                line.clearRetainingCapacity();
-            } else if (byte != '\r') {
-                try line.append(allocator, byte);
-            }
-        }
-    }
-    if (line.items.len > 0) try peer_queue.enqueueCopy(session, line.items);
-}
-
 fn drainQueuedPeerLines(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool), max_items: usize) !bool {
     var batch = try peer_queue.take(allocator, max_items);
     defer batch.deinit(allocator);
@@ -1630,17 +1658,6 @@ fn childTermSummary(term: std.process.Child.Term) []const u8 {
         .Stopped => "stopped",
         .Unknown => "unknown",
     };
-}
-
-const ThreadApplyArgs = struct {
-    allocator: std.mem.Allocator,
-    session: *WmProducerSession,
-    stdout_file: std.fs.File,
-    peer_queue: *WmPeerLineQueue,
-};
-
-fn applyPeerStdoutThread(args: ThreadApplyArgs) void {
-    applyPeerStdoutQueued(args.allocator, args.stdout_file, args.session, args.peer_queue) catch {};
 }
 
 const ChildWaitState = struct {
@@ -2207,6 +2224,28 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
 
     try std.testing.expectEqualStrings("DUPA", out.items);
     try std.testing.expect(!redraw_requested.load(.seq_cst));
+}
+
+test "wm peer stdout polling queues complete lines and retains partial lines" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+    };
+    defer session.stdout_buffer.deinit(std.testing.allocator);
+
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    try queuePeerStdoutBytes(std.testing.allocator, &session, &queue, "one\ntwo");
+
+    var batch = try queue.take(std.testing.allocator, 0);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("one", batch.items[0].line);
+    try std.testing.expectEqualStrings("two", session.stdout_buffer.items);
 }
 
 fn enqueuePeerLineForQueueBoundTest(queue: *WmPeerLineQueue, done: *std.atomic.Value(bool)) void {
