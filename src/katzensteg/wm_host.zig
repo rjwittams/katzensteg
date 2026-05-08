@@ -8,6 +8,8 @@ const config_mod = @import("config.zig");
 const upload_path_mod = @import("upload_path.zig");
 const ts_kitty = @import("termscene").kitty;
 
+const wm_peer_line_queue_max_entries: usize = 256;
+
 pub const TerminalSize = struct {
     rows: i32,
     cols: i32,
@@ -437,14 +439,30 @@ const WmPeerLineQueueEntry = struct {
 const WmPeerLineQueue = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex = .{},
+    not_full: std.Thread.Condition = .{},
     entries: std.ArrayList(WmPeerLineQueueEntry) = .empty,
     head: usize = 0,
+    max_entries: usize = wm_peer_line_queue_max_entries,
+    closed: bool = false,
 
     fn init(allocator: std.mem.Allocator) WmPeerLineQueue {
-        return .{ .allocator = allocator };
+        return initWithMaxEntries(allocator, wm_peer_line_queue_max_entries);
+    }
+
+    fn initWithMaxEntries(allocator: std.mem.Allocator, max_entries: usize) WmPeerLineQueue {
+        std.debug.assert(max_entries > 0);
+        return .{ .allocator = allocator, .max_entries = max_entries };
+    }
+
+    fn close(self: *WmPeerLineQueue) void {
+        self.mutex.lock();
+        self.closed = true;
+        self.not_full.broadcast();
+        self.mutex.unlock();
     }
 
     fn deinit(self: *WmPeerLineQueue) void {
+        self.close();
         self.mutex.lock();
         for (self.entries.items[self.head..]) |entry| self.allocator.free(entry.line);
         self.entries.deinit(self.allocator);
@@ -458,6 +476,10 @@ const WmPeerLineQueue = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
+        while (!self.closed and self.entries.items.len - self.head >= self.max_entries) {
+            self.not_full.wait(&self.mutex);
+        }
+        if (self.closed) return error.QueueClosed;
         try self.entries.append(self.allocator, .{ .session = session, .line = owned_line });
     }
 
@@ -475,6 +497,7 @@ const WmPeerLineQueue = struct {
             try batch.append(allocator, self.entries.items[self.head + index]);
         }
         self.head += count;
+        if (count > 0) self.not_full.broadcast();
         self.compactRetainedEntries();
         return batch;
     }
@@ -519,6 +542,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     defer allocator.free(z_order);
     var initialized: usize = 0;
     defer {
+        peer_queue.close();
         for (sessions[0..initialized]) |*session| {
             closeSessionControl(session);
             if (session.stdout_file) |file| file.close();
@@ -704,6 +728,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     for (sessions[0..initialized]) |*session| {
         closeSessionControl(session);
     }
+    peer_queue.close();
     for (sessions[0..initialized]) |*session| {
         if (session.wait_thread) |thread| {
             thread.join();
@@ -770,6 +795,7 @@ fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file
 }
 
 fn wmProducerStderrBehavior() std.process.Child.StdIo {
+    // Producers run inside the terminal surface, so stderr must not inherit it.
     return .Ignore;
 }
 
@@ -2139,6 +2165,39 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
 
     try std.testing.expectEqualStrings("DUPA", out.items);
     try std.testing.expect(!redraw_requested.load(.seq_cst));
+}
+
+fn enqueuePeerLineForQueueBoundTest(queue: *WmPeerLineQueue, done: *std.atomic.Value(bool)) void {
+    queue.enqueueCopy(null, "two") catch unreachable;
+    done.store(true, .seq_cst);
+}
+
+test "wm peer stdout queue wakes blocked producers when drained" {
+    var queue = WmPeerLineQueue.initWithMaxEntries(std.testing.allocator, 1);
+    defer queue.deinit();
+
+    try queue.enqueueCopy(null, "one");
+
+    var done = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, enqueuePeerLineForQueueBoundTest, .{ &queue, &done });
+
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try std.testing.expect(!done.load(.seq_cst));
+
+    var batch = try queue.take(std.testing.allocator, 1);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("one", batch.items[0].line);
+
+    thread.join();
+    try std.testing.expect(done.load(.seq_cst));
+
+    var remaining = try queue.take(std.testing.allocator, 0);
+    defer remaining.deinit(std.testing.allocator);
+    defer for (remaining.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), remaining.items.len);
+    try std.testing.expectEqualStrings("two", remaining.items[0].line);
 }
 
 test "wm queued presentation status still updates during drain" {

@@ -35,6 +35,7 @@ const max_occlusion_pieces: usize = 64;
 const external_framebuffer_renderer_key: usize = 0x6b73_676c;
 const fullscreen_retained_placement_count: usize = 2;
 const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
+const frame_builder_log = std.log.scoped(.frame_builder);
 
 const compat_sdl_pixelformat_rgb565: u32 = 353701890;
 const compat_sdl_pixelformat_rgba4444: u32 = 356651010;
@@ -524,7 +525,9 @@ pub const FrameBuilder = struct {
 
     fn auditPlaceOne(self: *FrameBuilder, state: *RendererState, image_id: u32, placement_id: u32) void {
         if (!self.placement_audit_enabled or image_id == 0 or placement_id == 0) return;
-        state.placement_audit_live.put(.{ .image_id = image_id, .placement_id = placement_id }, {}) catch {};
+        state.placement_audit_live.put(.{ .image_id = image_id, .placement_id = placement_id }, {}) catch |err| {
+            frame_builder_log.warn("placement audit insert failed image={d} placement={d}: {s}", .{ image_id, placement_id, @errorName(err) });
+        };
     }
 
     fn auditDeleteComposite(self: *FrameBuilder, state: *RendererState, placement: CompositePlacement) void {
@@ -560,7 +563,7 @@ pub const FrameBuilder = struct {
     fn placementAuditConsistent(self: *FrameBuilder, state: *RendererState) !bool {
         var retained = std.AutoHashMap(PlacementKey, void).init(self.allocator);
         defer retained.deinit();
-        try self.collectRetainedPlacementKeys(state, &retained);
+        try collectRetainedPlacementKeys(state, &retained);
         if (retained.count() != state.placement_audit_live.count()) return false;
         var live_it = state.placement_audit_live.keyIterator();
         while (live_it.next()) |key| {
@@ -573,7 +576,7 @@ pub const FrameBuilder = struct {
         if (!self.placement_audit_enabled) return;
         var retained = std.AutoHashMap(PlacementKey, void).init(self.allocator);
         defer retained.deinit();
-        self.collectRetainedPlacementKeys(state, &retained) catch |err| {
+        collectRetainedPlacementKeys(state, &retained) catch |err| {
             logger.writeFmtScoped(.warn, .frame_builder, "placement audit collect failed op={s} renderer={x}: {any}", .{ op, renderer, err });
             return;
         };
@@ -622,7 +625,7 @@ pub const FrameBuilder = struct {
         );
     }
 
-    fn collectRetainedPlacementKeys(self: *FrameBuilder, state: *const RendererState, out: *std.AutoHashMap(PlacementKey, void)) !void {
+    fn collectRetainedPlacementKeys(state: *const RendererState, out: *std.AutoHashMap(PlacementKey, void)) !void {
         try collectCompositePlacementKeys(state.activeCompositePlacement(), out);
         var retained_index: usize = 0;
         while (retained_index < state.retained_fullscreen_placement_count) : (retained_index += 1) {
@@ -634,7 +637,6 @@ pub const FrameBuilder = struct {
                 try out.put(.{ .image_id = tile.image_id, .placement_id = tile.placement_id }, {});
             }
         }
-        _ = self;
     }
 
     fn collectCompositePlacementKeys(placement: CompositePlacement, out: *std.AutoHashMap(PlacementKey, void)) !void {
@@ -1605,6 +1607,8 @@ pub const FrameBuilder = struct {
         }
         state.composite_placement_count = piece_count;
         state.composite_placement_id = if (piece_count > 0) state.composite_placement_ids[0] else 0;
+        // Returning true is intentional for piece_count == 0: a fully occluded
+        // framebuffer may still have emitted deletes that need a flush.
         return true;
     }
 
@@ -1639,20 +1643,19 @@ pub const FrameBuilder = struct {
     }
 
     fn placeClippedBatch(self: *FrameBuilder, sink: *RenderBatchSink, dest: ts_types.CellRect, source: core.CoreRect, placement: kitty_protocol.Placement, placement_ids: *[max_occlusion_pieces]u32) !usize {
-        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), null);
+        var pieces_buf: [max_occlusion_pieces]ClippedPlacementPiece = undefined;
+        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), pieces_buf[0..]);
         if (piece_count == 0) return 0;
         var index: usize = 0;
         while (index < piece_count) : (index += 1) {
             if (placement_ids[index] == 0) placement_ids[index] = self.allocCompositePlacementId();
         }
-        return placeClippedBatchWithExistingIds(sink, dest, source, placement, placement_ids[0..piece_count]);
+        return placeClippedPieces(sink, placement, pieces_buf[0..piece_count], placement_ids[0..piece_count]);
     }
 
-    fn placeClippedBatchWithExistingIds(sink: *RenderBatchSink, dest: ts_types.CellRect, source: core.CoreRect, placement: kitty_protocol.Placement, placement_ids: []const u32) !usize {
-        var pieces_buf: [max_occlusion_pieces]ClippedPlacementPiece = undefined;
-        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), pieces_buf[0..]);
-        const count = @min(piece_count, placement_ids.len);
-        for (pieces_buf[0..count], 0..) |piece, index| {
+    fn placeClippedPieces(sink: *RenderBatchSink, placement: kitty_protocol.Placement, pieces: []const ClippedPlacementPiece, placement_ids: []const u32) !usize {
+        const count = @min(pieces.len, placement_ids.len);
+        for (pieces[0..count], 0..) |piece, index| {
             if (placement_ids[index] == 0) continue;
             var adjusted = placement;
             adjusted.placement_id = placement_ids[index];
@@ -1684,6 +1687,8 @@ pub const FrameBuilder = struct {
             const occ = ts_types.CellRect{ .row = occlusion.row, .col = occlusion.col, .w = occlusion.cols, .h = occlusion.rows };
             for (current[0..count]) |fragment| {
                 next_count = appendRectMinus(next, next_count, fragment, occ);
+                // 64 pieces is a hard cap; additional fragments are dropped,
+                // yielding partial rendering instead of unbounded placement work.
                 if (next_count >= max_occlusion_pieces) break;
             }
             count = next_count;
