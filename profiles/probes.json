@@ -33,6 +33,17 @@
       ],
       "target": "{repo}/zig-out/bin/basic-sdl-demo"
     },
+    "app.codexbar_sdl": {
+      "hidden": true,
+      "target": "{home}/dev/CodexBar/.build/debug/CodexBarSDL"
+    },
+    "probe.codexbar_sdl": {
+      "extends": [
+        "app.codexbar_sdl",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ]
+    },
     "app.vulkan_probe": {
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe"

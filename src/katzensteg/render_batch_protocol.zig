@@ -72,6 +72,7 @@ pub const AttachMessage = struct {
     aspect: PresentationAspect,
     z_base: i32 = 0,
     terminal: ?TerminalGeometry = null,
+    occlusion_rects: []PresentationRectCells = &.{},
     image_ids: IdRange,
     placement_ids: IdRange,
     upload: UploadPolicy,
@@ -83,6 +84,7 @@ pub const ViewportMessage = struct {
     aspect: PresentationAspect,
     z_base: i32 = 0,
     terminal: ?TerminalGeometry = null,
+    occlusion_rects: []PresentationRectCells = &.{},
 };
 
 pub const DetachMessage = struct {
@@ -229,6 +231,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
             .aspect = aspect,
             .z_base = z_base,
             .terminal = terminal,
+            .occlusion_rects = try parseOcclusionRects(allocator, root.get("occlusion_rects")),
         } };
     }
 
@@ -246,6 +249,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         .aspect = aspect,
         .z_base = z_base,
         .terminal = terminal,
+        .occlusion_rects = try parseOcclusionRects(allocator, root.get("occlusion_rects")),
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
@@ -255,16 +259,22 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 pub fn deinitAttachMessage(allocator: std.mem.Allocator, attach: *AttachMessage) void {
     if (attach.upload.path) |path| allocator.free(path);
     attach.upload.path = null;
+    if (attach.occlusion_rects.len > 0) allocator.free(attach.occlusion_rects);
+    attach.occlusion_rects = &.{};
 }
 
 pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessage) void {
     switch (control.*) {
         .attach => |*attach| deinitAttachMessage(allocator, attach),
+        .viewport => |*viewport| {
+            if (viewport.occlusion_rects.len > 0) allocator.free(viewport.occlusion_rects);
+            viewport.occlusion_rects = &.{};
+        },
         .input => |*input| {
             allocator.free(input.bytes);
             input.bytes = "";
         },
-        .viewport, .detach => {},
+        .detach => {},
         .shutdown => {},
     }
 }
@@ -329,6 +339,16 @@ fn parseTerminalGeometry(root: std.json.ObjectMap) !?TerminalGeometry {
         };
     } else null;
     return .{ .cells = cells, .pixels = pixels };
+}
+
+fn parseOcclusionRects(allocator: std.mem.Allocator, value: ?std.json.Value) ![]PresentationRectCells {
+    const occlusions = value orelse return &.{};
+    if (occlusions != .array) return error.InvalidMessage;
+    if (occlusions.array.items.len == 0) return &.{};
+    var out = try allocator.alloc(PresentationRectCells, occlusions.array.items.len);
+    errdefer allocator.free(out);
+    for (occlusions.array.items, 0..) |item, index| out[index] = try parseRect(item);
+    return out;
 }
 
 fn parseFirstIdRange(value: std.json.Value) !IdRange {
@@ -440,6 +460,25 @@ test "attach and viewport messages parse terminal geometry" {
         .cells = .{ .rows = 50, .cols = 160 },
         .pixels = .{ .w = 1280, .h = 1000 },
     }, control.viewport.terminal.?);
+}
+
+test "attach and viewport messages parse occlusion rectangles" {
+    const attach_msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","occlusion_rects":[{"row":1,"col":1,"rows":3,"cols":20},{"row":8,"col":30,"rows":5,"cols":12}],"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach = try parseAttachMessage(std.testing.allocator, attach_msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(usize, 2), attach.occlusion_rects.len);
+    try std.testing.expectEqual(PresentationRectCells{ .row = 1, .col = 1, .rows = 3, .cols = 20 }, attach.occlusion_rects[0]);
+    try std.testing.expectEqual(PresentationRectCells{ .row = 8, .col = 30, .rows = 5, .cols = 12 }, attach.occlusion_rects[1]);
+
+    const viewport_msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":6,"col":10,"rows":20,"cols":64},"aspect":"fit","occlusion_rects":[{"row":4,"col":5,"rows":6,"cols":7}]}
+    ;
+    var control = try parseControlMessage(std.testing.allocator, viewport_msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(@as(usize, 1), control.viewport.occlusion_rects.len);
+    try std.testing.expectEqual(PresentationRectCells{ .row = 4, .col = 5, .rows = 6, .cols = 7 }, control.viewport.occlusion_rects[0]);
 }
 
 test "attach message parses host-selected file upload policy" {

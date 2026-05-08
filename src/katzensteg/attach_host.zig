@@ -108,7 +108,7 @@ fn applyPeerStdout(allocator: std.mem.Allocator, stdout_file: std.fs.File, write
 fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8) !void {
     var batch = attach_protocol.parseFrameBatch(allocator, line) catch return;
     defer batch.deinit(allocator);
-    try terminal_batch_applier.applyFrameBatch(writer, .{
+    try terminal_batch_applier.applyFrameBatchCoalesced(allocator, writer, .{
         .deletes = batch.groups.deletes,
         .uploads = batch.groups.uploads,
         .placements = batch.groups.placements,

@@ -1383,6 +1383,11 @@ fn expandLauncherString(allocator: std.mem.Allocator, input: []const u8, expansi
             i += if (std.mem.startsWith(u8, input[i..], "{repo}")) "{repo}".len else "${ROOT}".len;
             continue;
         }
+        if (std.mem.startsWith(u8, input[i..], "{home}")) {
+            try out.appendSlice(allocator, expansion.home);
+            i += "{home}".len;
+            continue;
+        }
         if (std.mem.startsWith(u8, input[i..], "$ROOT")) {
             try out.appendSlice(allocator, expansion.repo);
             i += "$ROOT".len;
@@ -1747,6 +1752,10 @@ test "launcher expands home and repo placeholders" {
     const env_path = try expandLauncherString(std.testing.allocator, "$HOME/dev:$ROOT/bin:${HOME}/x:${ROOT}/y", expansion);
     defer std.testing.allocator.free(env_path);
     try std.testing.expectEqualStrings("/Users/test/dev:/repo/bin:/Users/test/x:/repo/y", env_path);
+
+    const home_placeholder_path = try expandLauncherString(std.testing.allocator, "{home}/dev/CodexBar", expansion);
+    defer std.testing.allocator.free(home_placeholder_path);
+    try std.testing.expectEqualStrings("/Users/test/dev/CodexBar", home_placeholder_path);
 }
 
 test "launcher expands path placeholders" {

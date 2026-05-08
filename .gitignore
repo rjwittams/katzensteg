@@ -5,6 +5,7 @@ zig-out/
 .codex-tmp/
 /.codex
 /.codex/
+.DS_Store
 
 __pycache__/
 *.pyc
