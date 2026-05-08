@@ -5,7 +5,6 @@ const launcher_exec = @import("launcher/exec.zig");
 const launcher_plan = @import("launcher/plan.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
-const wm_host = @import("wm_host.zig");
 
 const Command = enum {
     help,
@@ -20,10 +19,6 @@ const AttachArgs = struct {
     exec_argv: []const []const u8,
     rect_cells: ?@import("render_batch_protocol.zig").PresentationRectCells = null,
     aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit,
-};
-
-const WmArgs = struct {
-    profile_names: []const []const u8,
 };
 
 const ExpansionContext = launcher_context.ExpansionContext;
@@ -89,11 +84,7 @@ pub fn main() !void {
             std.process.exit(exit_code);
         },
         .wm => {
-            const wm = parseWmArgs(args) orelse {
-                std.debug.print("{s}", .{usageText()});
-                std.process.exit(64);
-            };
-            const exit_code = try wm_host.runProfiles(allocator, wm.profile_names);
+            const exit_code = try runWmBinary(allocator, args[2..]);
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -112,7 +103,7 @@ const usage_text =
     \\  katzensteg --help
     \\  katzensteg [options] <target>
     \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
-    \\  katzensteg wm [target...]
+    \\  katzensteg wm [wm-args...]
     \\  katzensteg
     \\
     \\Options:
@@ -140,20 +131,12 @@ fn isProxyExecutablePath(path: []const u8) bool {
 
 fn parseCommand(args: []const []const u8) Command {
     if (args.len <= 1) return .menu;
-    if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
+    if (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")) return .help;
     if (std.mem.eql(u8, args[1], "attach")) return if (parseAttachArgs(args) != null) .attach else .unknown;
-    if (std.mem.eql(u8, args[1], "wm")) return if (parseWmArgs(args) != null) .wm else .unknown;
+    if (std.mem.eql(u8, args[1], "wm")) return .wm;
+    if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
-}
-
-fn parseWmArgs(args: []const []const u8) ?WmArgs {
-    if (args.len < 2) return null;
-    if (!std.mem.eql(u8, args[1], "wm")) return null;
-    for (args[2..]) |arg| {
-        if (std.mem.startsWith(u8, arg, "-")) return null;
-    }
-    return .{ .profile_names = args[2..] };
 }
 
 fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
@@ -251,6 +234,44 @@ fn hasArg(args: []const []const u8, needle: []const u8) bool {
         if (std.mem.eql(u8, arg, needle)) return true;
     }
     return false;
+}
+
+fn runWmBinary(allocator: std.mem.Allocator, wm_args: []const []const u8) !u8 {
+    const wm_exe = try siblingExecutablePath(allocator, "katzensteg-wm");
+    defer allocator.free(wm_exe);
+
+    const argv = try buildWmArgv(allocator, wm_exe, wm_args);
+    defer allocator.free(argv);
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    return childTermExitCode(try child.spawnAndWait());
+}
+
+fn siblingExecutablePath(allocator: std.mem.Allocator, basename: []const u8) ![]const u8 {
+    const self_exe = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(self_exe);
+
+    const dir = std.fs.path.dirname(self_exe) orelse ".";
+    return std.fs.path.join(allocator, &.{ dir, basename });
+}
+
+fn buildWmArgv(allocator: std.mem.Allocator, wm_exe: []const u8, wm_args: []const []const u8) ![]const []const u8 {
+    var argv = try allocator.alloc([]const u8, 1 + wm_args.len);
+    argv[0] = wm_exe;
+    for (wm_args, 0..) |arg, i| argv[1 + i] = arg;
+    return argv;
+}
+
+fn childTermExitCode(term: std.process.Child.Term) u8 {
+    return switch (term) {
+        .Exited => |code| @intCast(@min(code, 255)),
+        .Signal => |sig| @as(u8, 128) + @as(u8, @intCast(@min(sig, 127))),
+        .Stopped => |sig| @as(u8, 128) + @as(u8, @intCast(@min(sig, 127))),
+        .Unknown => 1,
+    };
 }
 
 fn showProfiles(allocator: std.mem.Allocator) !void {
@@ -1464,24 +1485,24 @@ test "launcher command parser recognizes embed jsonl before target" {
 
 test "launcher command parser recognizes wm profile target" {
     try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }));
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "--session", "probe.embed.basic_sdl", "--", "arg" }));
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "--help" }));
 }
 
 test "launcher command parser recognizes wm without initial target" {
     try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm" }));
-    const wm = parseWmArgs(&.{ "katzensteg", "wm" }).?;
-    try std.testing.expectEqual(@as(usize, 0), wm.profile_names.len);
 }
 
-test "launcher parses wm target" {
-    const wm = parseWmArgs(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }).?;
-    try std.testing.expectEqualStrings("probe.embed.basic_sdl", wm.profile_names[0]);
-}
+test "launcher wm argv passes through arguments after wm" {
+    const argv = try buildWmArgv(std.testing.allocator, "katzensteg-wm", &.{ "--session", "sonic", "--", "rom.sfc" });
+    defer std.testing.allocator.free(argv);
 
-test "launcher parses multiple wm targets" {
-    const wm = parseWmArgs(&.{ "katzensteg", "wm", "sonic", "mi2" }).?;
-    try std.testing.expectEqual(@as(usize, 2), wm.profile_names.len);
-    try std.testing.expectEqualStrings("sonic", wm.profile_names[0]);
-    try std.testing.expectEqualStrings("mi2", wm.profile_names[1]);
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("katzensteg-wm", argv[0]);
+    try std.testing.expectEqualStrings("--session", argv[1]);
+    try std.testing.expectEqualStrings("sonic", argv[2]);
+    try std.testing.expectEqualStrings("--", argv[3]);
+    try std.testing.expectEqualStrings("rom.sfc", argv[4]);
 }
 
 test "launcher parses attach exec argv command" {
