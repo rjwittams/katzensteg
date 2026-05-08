@@ -474,6 +474,7 @@ pub fn build(b: *std.Build) void {
         .link_opengl = true,
     });
     addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-launcher-context-test", "src/katzensteg/launcher/context.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
         .link_libc = true,
