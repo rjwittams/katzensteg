@@ -1,11 +1,28 @@
 const std = @import("std");
 const kitty_protocol = @import("termscene").kitty.protocol;
+const blocking_trace = @import("blocking_trace.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const DirectTty = @import("direct_tty.zig").DirectTty;
+const upload_path = @import("upload_path.zig");
 
-const rotating_file_count = 256;
+const rotating_file_count = upload_path.rotating_file_count;
+const log = std.log.scoped(.render_batch_sink);
 
 pub const RenderBatchSink = struct {
+    const PlacementTrace = struct {
+        image_id: u32,
+        placement_id: u32,
+        row: i32 = 0,
+        col: i32 = 0,
+        rows: i32 = 0,
+        cols: i32 = 0,
+        src_x: i32 = 0,
+        src_y: i32 = 0,
+        src_w: i32 = 0,
+        src_h: i32 = 0,
+        z: i32 = 0,
+    };
+
     const FileUploadState = struct {
         file: std.fs.File,
         path: []u8,
@@ -33,6 +50,9 @@ pub const RenderBatchSink = struct {
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
     after: std.ArrayList([]u8) = .empty,
+    trace_placements: std.ArrayList(PlacementTrace) = .empty,
+    trace_deletes: std.ArrayList(PlacementTrace) = .empty,
+    trace_after_deletes: std.ArrayList(PlacementTrace) = .empty,
     attached: bool = false,
     rect_cells: render_batch_protocol.PresentationRectCells = .{ .row = 1, .col = 1, .rows = 1, .cols = 1 },
     aspect: render_batch_protocol.PresentationAspect = .fit,
@@ -40,6 +60,8 @@ pub const RenderBatchSink = struct {
     terminal: ?render_batch_protocol.TerminalGeometry = null,
     occlusion_rects: std.ArrayList(render_batch_protocol.PresentationRectCells) = .empty,
     upload: UploadState = .direct_apc,
+    placement_trace_enabled: bool = false,
+    blocking_trace_settings: blocking_trace.Settings = .{},
 
     pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
         return .{
@@ -58,7 +80,18 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
+        self.trace_placements.deinit(self.allocator);
+        self.trace_deletes.deinit(self.allocator);
+        self.trace_after_deletes.deinit(self.allocator);
         self.occlusion_rects.deinit(self.allocator);
+    }
+
+    pub fn enablePlacementTrace(self: *RenderBatchSink) void {
+        self.placement_trace_enabled = true;
+    }
+
+    pub fn enableBlockingTrace(self: *RenderBatchSink, settings: blocking_trace.Settings) void {
+        self.blocking_trace_settings = settings;
     }
 
     pub fn attach(self: *RenderBatchSink, rect_cells: render_batch_protocol.PresentationRectCells) void {
@@ -150,6 +183,7 @@ pub const RenderBatchSink = struct {
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
+        const upload_start_ns = self.traceBlockingStart();
         switch (self.upload) {
             .direct_apc => try kitty_protocol.writeTransmitRgba(out.writer(self.allocator), image_id, rgba, w, h),
             .file_whole => |*state| {
@@ -157,23 +191,32 @@ pub const RenderBatchSink = struct {
                 state.next_index = (state.next_index + 1) % state.paths.len;
                 var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
                 defer file.close();
+                const write_start_ns = self.traceBlockingStart();
                 try file.pwriteAll(rgba, 0);
+                self.traceBlockingWriteSince("upload_rgba_file_whole_pwrite", write_start_ns, rgba.len);
                 const rgba_len_u64: u64 = @intCast(rgba.len);
                 if (rgba_len_u64 > state.file_lens[index]) {
                     try file.setEndPos(rgba.len);
                     state.file_lens[index] = rgba_len_u64;
                 }
+                const sync_start_ns = self.traceBlockingStart();
                 try file.sync();
+                self.traceBlockingWriteSince("upload_rgba_file_whole_sync", sync_start_ns, rgba.len);
                 try kitty_protocol.writeTransmitRgbaFileWhole(out.writer(self.allocator), image_id, state.paths[index], w, h);
             },
             .file_offset_ring => |*state| {
                 const region = try reserveFileRegion(state, rgba.len);
+                const write_start_ns = self.traceBlockingStart();
                 try state.file.pwriteAll(rgba, region.offset);
+                self.traceBlockingWriteSince("upload_rgba_file_offset_pwrite", write_start_ns, rgba.len);
+                const sync_start_ns = self.traceBlockingStart();
                 try state.file.sync();
+                self.traceBlockingWriteSince("upload_rgba_file_offset_sync", sync_start_ns, rgba.len);
                 try kitty_protocol.writeTransmitRgbaFileRegion(out.writer(self.allocator), image_id, state.path, region.offset, rgba.len, w, h);
             },
         }
         try self.uploads.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        self.traceBlockingWriteSince("upload_rgba_total", upload_start_ns, rgba.len);
     }
 
     pub fn place(self: *RenderBatchSink, row: i32, col: i32, placement: kitty_protocol.Placement) !void {
@@ -183,13 +226,36 @@ pub const RenderBatchSink = struct {
         adjusted.z += self.z_base;
         try kitty_protocol.writePlace(out.writer(self.allocator), row, col, adjusted);
         try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        if (self.placement_trace_enabled) {
+            try self.trace_placements.append(self.allocator, .{
+                .image_id = adjusted.image_id,
+                .placement_id = adjusted.placement_id,
+                .row = row,
+                .col = col,
+                .rows = adjusted.rows,
+                .cols = adjusted.cols,
+                .src_x = adjusted.src_x,
+                .src_y = adjusted.src_y,
+                .src_w = adjusted.src_w,
+                .src_h = adjusted.src_h,
+                .z = adjusted.z,
+            });
+        }
     }
 
     pub fn deletePlacement(self: *RenderBatchSink, target: kitty_protocol.ExactPlacement) !void {
+        if (self.placement_trace_enabled) try self.trace_deletes.append(self.allocator, .{
+            .image_id = target.image_id,
+            .placement_id = target.placement_id,
+        });
         try self.deletePlacementInto(&self.deletes, target);
     }
 
     pub fn deletePlacementAfter(self: *RenderBatchSink, target: kitty_protocol.ExactPlacement) !void {
+        if (self.placement_trace_enabled) try self.trace_after_deletes.append(self.allocator, .{
+            .image_id = target.image_id,
+            .placement_id = target.placement_id,
+        });
         try self.deletePlacementInto(&self.after, target);
     }
 
@@ -216,7 +282,9 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {
+        const pending_bytes = self.pendingFrameBytes();
         self.seq += 1;
+        const start_ns = self.traceBlockingStart();
         try render_batch_protocol.writeFrameBatchJsonl(self.allocator, writer, .{
             .window_id = self.window_id,
             .seq = self.seq,
@@ -225,7 +293,81 @@ pub const RenderBatchSink = struct {
             .placements = self.placements.items,
             .after = self.after.items,
         });
+        self.traceBlockingWriteSince("flush_frame_jsonl", start_ns, pending_bytes);
         self.clearRetainingCapacity();
+    }
+
+    pub fn pendingFrameBytes(self: *const RenderBatchSink) usize {
+        return groupBytes(self.deletes.items) +
+            groupBytes(self.uploads.items) +
+            groupBytes(self.placements.items) +
+            groupBytes(self.after.items);
+    }
+
+    fn traceBlockingStart(self: *const RenderBatchSink) ?i128 {
+        return blocking_trace.start(self.blocking_trace_settings);
+    }
+
+    fn traceBlockingWriteSince(self: *const RenderBatchSink, comptime context: []const u8, start_ns: ?i128, payload_bytes: usize) void {
+        const duration_ns = blocking_trace.elapsedMaybe(start_ns) orelse return;
+        self.traceBlockingWrite(context, duration_ns, payload_bytes);
+    }
+
+    fn traceBlockingWrite(self: *const RenderBatchSink, comptime context: []const u8, duration_ns: i128, payload_bytes: usize) void {
+        const settings = self.blocking_trace_settings;
+        if (!blocking_trace.shouldLog(settings.enabled, duration_ns, settings.threshold_ns)) return;
+        log.info(
+            "blocking trace context={s} window={s} seq={d} duration_us={d} payload_bytes={d} deletes={d} uploads={d} placements={d} after={d}",
+            .{
+                context,
+                self.window_id,
+                self.seq,
+                blocking_trace.micros(duration_ns),
+                payload_bytes,
+                self.deletes.items.len,
+                self.uploads.items.len,
+                self.placements.items.len,
+                self.after.items.len,
+            },
+        );
+    }
+
+    pub fn tracePlacementFrame(self: *const RenderBatchSink, logger: anytype, comptime op: []const u8, renderer: u64) void {
+        if (!self.placement_trace_enabled) return;
+        logger.writeFmtScoped(
+            .info,
+            .frame_builder,
+            "placement trace op={s} renderer={x} window={s} next_seq={d} deletes={d} placements={d} after_deletes={d} occlusions={d} rect={d},{d} {d}x{d} z_base={d}",
+            .{
+                op,
+                renderer,
+                self.window_id,
+                self.seq + 1,
+                self.trace_deletes.items.len,
+                self.trace_placements.items.len,
+                self.trace_after_deletes.items.len,
+                self.occlusion_rects.items.len,
+                self.rect_cells.row,
+                self.rect_cells.col,
+                self.rect_cells.cols,
+                self.rect_cells.rows,
+                self.z_base,
+            },
+        );
+        for (self.trace_deletes.items) |entry| {
+            logger.writeFmtScoped(.info, .frame_builder, "placement trace delete op={s} renderer={x} image={d} placement={d}", .{ op, renderer, entry.image_id, entry.placement_id });
+        }
+        for (self.trace_placements.items) |entry| {
+            logger.writeFmtScoped(
+                .info,
+                .frame_builder,
+                "placement trace place op={s} renderer={x} image={d} placement={d} cell={d},{d} {d}x{d} src={d},{d} {d}x{d} z={d}",
+                .{ op, renderer, entry.image_id, entry.placement_id, entry.row, entry.col, entry.cols, entry.rows, entry.src_x, entry.src_y, entry.src_w, entry.src_h, entry.z },
+            );
+        }
+        for (self.trace_after_deletes.items) |entry| {
+            logger.writeFmtScoped(.info, .frame_builder, "placement trace after_delete op={s} renderer={x} image={d} placement={d}", .{ op, renderer, entry.image_id, entry.placement_id });
+        }
     }
 
     pub fn hasPendingBytes(self: *const RenderBatchSink) bool {
@@ -237,6 +379,9 @@ pub const RenderBatchSink = struct {
         self.clearGroup(&self.uploads);
         self.clearGroup(&self.placements);
         self.clearGroup(&self.after);
+        self.trace_placements.clearRetainingCapacity();
+        self.trace_deletes.clearRetainingCapacity();
+        self.trace_after_deletes.clearRetainingCapacity();
     }
 
     fn clearGroup(self: *RenderBatchSink, group: *std.ArrayList([]u8)) void {
@@ -263,13 +408,13 @@ pub const RenderBatchSink = struct {
             .direct_apc => {},
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
-                    std.fs.deleteFileAbsolute(path.*) catch {};
+                    upload_path.deleteBasePath(path.*);
                     self.allocator.free(path.*);
                 }
             },
             .file_offset_ring => |*state| {
                 state.file.close();
-                std.fs.deleteFileAbsolute(state.path) catch {};
+                upload_path.deleteBasePath(state.path);
                 self.allocator.free(state.path);
             },
         }
@@ -286,9 +431,9 @@ pub const RenderBatchSink = struct {
             }
         }
         for (&paths, 0..) |*path, index| {
-            path.* = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ base_path, index });
+            path.* = try upload_path.makeRotatingFilePath(allocator, base_path, index);
             initialized += 1;
-            std.fs.deleteFileAbsolute(path.*) catch {};
+            upload_path.deleteBasePath(path.*);
         }
         return .{
             .paths = paths,
@@ -334,6 +479,12 @@ fn clampU16(value: i32) u16 {
     return @intCast(std.math.clamp(value, 0, @as(i32, std.math.maxInt(u16))));
 }
 
+fn groupBytes(group: []const []u8) usize {
+    var total: usize = 0;
+    for (group) |item| total += item.len;
+    return total;
+}
+
 fn divRound(numerator: i32, denominator: i32) i32 {
     if (denominator <= 0) return numerator;
     return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
@@ -363,6 +514,50 @@ test "batch sink groups upload place and delete bytes" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"deletes\":[") != null);
+}
+
+test "batch sink reports pending frame byte count" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), sink.pendingFrameBytes());
+    try sink.deleteImageData(42);
+    try std.testing.expect(sink.pendingFrameBytes() > 0);
+}
+
+test "batch sink placement trace records and clears frame operations" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.enablePlacementTrace();
+
+    try sink.place(4, 1, .{
+        .image_id = 100000,
+        .placement_id = 200000,
+        .cols = 2,
+        .rows = 3,
+        .src_x = 0,
+        .src_y = 0,
+        .src_w = 20,
+        .src_h = 30,
+        .z = 100,
+    });
+    try sink.deletePlacement(.{ .image_id = 100000, .placement_id = 200001 });
+    try sink.deletePlacementAfter(.{ .image_id = 100000, .placement_id = 200002 });
+
+    try std.testing.expectEqual(@as(usize, 1), sink.trace_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 1), sink.trace_deletes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), sink.trace_after_deletes.items.len);
+    try std.testing.expectEqual(@as(u32, 200000), sink.trace_placements.items[0].placement_id);
+    try std.testing.expectEqual(@as(u32, 200001), sink.trace_deletes.items[0].placement_id);
+    try std.testing.expectEqual(@as(u32, 200002), sink.trace_after_deletes.items[0].placement_id);
+
+    try sink.flushFrame(out.writer(std.testing.allocator));
+
+    try std.testing.expectEqual(@as(usize, 0), sink.trace_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.trace_deletes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.trace_after_deletes.items.len);
 }
 
 test "batch sink viewport updates geometry without changing attach state" {

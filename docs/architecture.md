@@ -45,6 +45,12 @@ The runtime lives under `src/katzensteg/`. It owns:
 
 The runtime must not write diagnostics to stdout or stderr during a captured run, because those streams may be part of the terminal presentation.
 
+#### Producer Threading
+
+In queued batch mode, app threads may copy payloads and enqueue commands, but the queued replay worker owns `FrameBuilder`, `RenderBatchSink`, batch control application, placement/reproject/delete state, and presentation status writes. WM control messages (`attach`, `viewport`, `detach`, `shutdown`, and forwarded `input`) are consumed and applied from the worker path. App-side SDL input APIs read protected input state; they must not drain or apply batch control messages.
+
+OpenGL/Vulkan framebuffer capture may still run on the app render thread to perform GPU readback, but it should publish copied framebuffer payloads to the worker rather than mutate presentation state directly. Any new runtime state that is touched from both app threads and the worker needs an explicit owner, mutex, or atomic before use.
+
 ### Profiles
 
 Profiles are JSON files under `profiles/`. They define target commands, inheritance, platform-specific values, runtime policy, and local setup details.

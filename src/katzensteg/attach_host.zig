@@ -150,7 +150,10 @@ fn selectUploadPolicy(allocator: std.mem.Allocator, tty: std.fs.File) !render_ba
 
 fn deinitUploadPolicy(allocator: std.mem.Allocator, upload: *render_batch_protocol.UploadPolicy) void {
     if (upload.path) |path| {
-        std.fs.deleteFileAbsolute(path) catch {};
+        switch (upload.profile) {
+            .file_whole => upload_path_mod.deleteRotatingFileWholeArtifacts(allocator, path),
+            .file_offset_ring, .direct_apc => upload_path_mod.deleteBasePath(path),
+        }
         allocator.free(path);
     }
     upload.path = null;
