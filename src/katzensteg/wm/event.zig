@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// Early effect model for moving the WM host toward explicit event -> effect
+// processing instead of direct mutation from input/read callbacks.
 pub const TimerKind = enum {
     redraw,
     housekeeping,
@@ -25,7 +27,6 @@ pub const Effect = union(enum) {
 pub const Effects = struct {
     allocator: std.mem.Allocator,
     list: std.ArrayList(Effect) = .empty,
-    items: []const Effect = &.{},
 
     pub fn init(allocator: std.mem.Allocator) Effects {
         return .{ .allocator = allocator };
@@ -38,7 +39,10 @@ pub const Effects = struct {
 
     pub fn append(self: *Effects, effect: Effect) !void {
         try self.list.append(self.allocator, effect);
-        self.items = self.list.items;
+    }
+
+    pub fn items(self: *const Effects) []const Effect {
+        return self.list.items;
     }
 };
 
@@ -48,6 +52,6 @@ test "effects collect terminal write requests" {
 
     try effects.append(.{ .terminal_write = "abc" });
 
-    try std.testing.expectEqual(@as(usize, 1), effects.items.len);
-    try std.testing.expectEqualStrings("abc", effects.items[0].terminal_write);
+    try std.testing.expectEqual(@as(usize, 1), effects.items().len);
+    try std.testing.expectEqualStrings("abc", effects.items()[0].terminal_write);
 }

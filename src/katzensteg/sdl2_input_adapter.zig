@@ -240,6 +240,9 @@ fn readMouseStateProbe(probe: MouseStateProbe) void {
 }
 
 test "SDL input pop does not hold input mutex while queueing cursor position" {
+    // Timing-based regression: if cursor dispatch still happens under
+    // input_mutex, the mouse-state reader cannot complete while queue_mutex is
+    // held by the test.
     var rt = runtime_mod.Runtime.initShutdownStub();
     defer rt.deinit();
 

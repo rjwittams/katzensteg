@@ -600,6 +600,9 @@ const WmEventLoop = struct {
 };
 
 fn ttyXevPollSupported() bool {
+    // Keep this as a capability hook rather than inlining `true`; the main loop
+    // has a lifecycle-tick fallback for platforms where tty readiness polling
+    // later proves unreliable.
     return true;
 }
 
@@ -1521,10 +1524,6 @@ fn drainQueuedPeerLinesWithTrace(
         }
     }
     return true;
-}
-
-fn drainMainLoopPeerLines(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool)) !bool {
-    return drainQueuedPeerLines(allocator, peer_queue, writer, tty_lock, redraw_requested, 0);
 }
 
 fn drainMainLoopPeerLinesWithTrace(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool), trace_settings: blocking_trace.Settings, logger: *Logger) !bool {
@@ -2483,9 +2482,12 @@ test "wm main loop peer drain does not leave older queued frames behind input" {
     var tty_lock = std.Thread.Mutex{};
     var redraw_requested = std.atomic.Value(bool).init(false);
 
-    try std.testing.expect(try drainMainLoopPeerLines(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested));
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    try std.testing.expect(try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
     try std.testing.expectEqualStrings(expected.items, out.items);
-    try std.testing.expect(!try drainMainLoopPeerLines(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested));
+    try std.testing.expect(!try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
 }
 
 test "wm peer stdout polling queues complete lines and retains partial lines" {

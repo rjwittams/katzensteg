@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// Early model types for separating WM session lifecycle and transport policy
+// from the current stdio-only host implementation.
 pub const SessionId = u32;
 
 pub const OwnedChild = struct {

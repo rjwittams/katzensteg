@@ -1471,6 +1471,8 @@ fn readMouseStateForProbe(probe: MouseStateReadProbe) void {
 }
 
 test "app-side input state reads do not wait on presentation work" {
+    // Timing-based regression: if input state reads still share the
+    // presentation mutex, this thread remains blocked while the test holds it.
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 

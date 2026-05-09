@@ -1471,6 +1471,7 @@ test "launcher command parser recognizes help menu and run targets" {
     try std.testing.expectEqual(Command.menu, parseCommand(&.{"katzensteg"}));
     try std.testing.expectEqual(Command.help, parseCommand(&.{ "katzensteg", "--help" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "retroarch.sonic" }));
+    try std.testing.expectEqual(Command.help, parseCommand(&.{ "katzensteg", "retroarch.sonic", "--help" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "--dry-run", "retroarch.sonic" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "--", "--odd-command-name" }));
     try std.testing.expectEqual(Command.unknown, parseCommand(&.{ "katzensteg", "--dry-run" }));

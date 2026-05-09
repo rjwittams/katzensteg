@@ -75,7 +75,7 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
 fn freeSession(allocator: std.mem.Allocator, session: SessionSpec) void {
     allocator.free(session.profile_name);
     for (session.extra_args) |arg| allocator.free(arg);
-    if (session.extra_args.len > 0) allocator.free(session.extra_args);
+    allocator.free(session.extra_args);
 }
 
 test "wm cli parses one session with extra args" {
