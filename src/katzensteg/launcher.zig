@@ -1,8 +1,10 @@
 const std = @import("std");
 const attach_host = @import("attach_host.zig");
+const launcher_context = @import("launcher/context.zig");
+const launcher_exec = @import("launcher/exec.zig");
+const launcher_plan = @import("launcher/plan.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
-const wm_host = @import("wm_host.zig");
 
 const Command = enum {
     help,
@@ -19,112 +21,12 @@ const AttachArgs = struct {
     aspect: @import("render_batch_protocol.zig").PresentationAspect = .fit,
 };
 
-const WmArgs = struct {
-    profile_names: []const []const u8,
-};
-
-const ExpansionContext = struct {
-    home: []const u8,
-    repo: []const u8,
-    path: []const u8 = "",
-    owns_home: bool = false,
-    owns_repo: bool = false,
-    owns_path: bool = false,
-
-    fn init(allocator: std.mem.Allocator) !ExpansionContext {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
-            else => return err,
-        };
-        errdefer allocator.free(home);
-        const path = std.process.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
-            else => return err,
-        };
-        errdefer allocator.free(path);
-        const repo = try resolveRepoRoot(allocator);
-        return .{ .home = home, .repo = repo, .path = path, .owns_home = true, .owns_repo = true, .owns_path = true };
-    }
-
-    fn deinit(self: ExpansionContext, allocator: std.mem.Allocator) void {
-        if (self.owns_home) allocator.free(self.home);
-        if (self.owns_repo) allocator.free(self.repo);
-        if (self.owns_path) allocator.free(self.path);
-    }
-};
-
-const OutputSpec = union(enum) {
-    inherit,
-    ignore,
-    stdout,
-    file: []const u8,
-
-    fn deinit(self: OutputSpec, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .file => |path| allocator.free(path),
-            else => {},
-        }
-    }
-};
+const ExpansionContext = launcher_context.ExpansionContext;
+const OutputSpec = launcher_plan.OutputSpec;
+const ResolvedLaunchPlan = launcher_plan.ResolvedLaunchPlan;
+const RuntimeConfig = launcher_plan.RuntimeConfig;
 
 var embed_signal_child_pgid = std.atomic.Value(std.posix.pid_t).init(0);
-
-const ResolvedLaunchPlan = struct {
-    allocator: std.mem.Allocator,
-    profile_name: []const u8,
-    target: []const u8,
-    argv: [][]const u8,
-    cwd: ?[]const u8,
-    stdout: OutputSpec,
-    stderr: OutputSpec,
-    env: []profiles_mod.EnvVar,
-    seed_files: []profiles_mod.SeedFile,
-    runtime: @import("config.zig").RuntimeConfig,
-
-    fn fromProfile(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
-        var plan = ResolvedLaunchPlan{
-            .allocator = allocator,
-            .profile_name = try allocator.dupe(u8, profile.name),
-            .target = try expandLauncherString(allocator, profile.target, expansion),
-            .argv = &.{},
-            .cwd = null,
-            .stdout = .inherit,
-            .stderr = .inherit,
-            .env = &.{},
-            .seed_files = &.{},
-            .runtime = resolvedRuntimeConfig(profile),
-        };
-        errdefer plan.deinit();
-
-        plan.argv = try buildChildArgv(allocator, profile, expansion, extra_args);
-        if (profile.cwd) |raw| plan.cwd = try expandLauncherString(allocator, raw, expansion);
-        plan.stdout = try resolveProfileStdout(allocator, profile, expansion);
-        plan.stderr = try resolveProfileStderr(allocator, profile, expansion);
-        plan.env = try expandProfileEnv(allocator, profile.env, expansion);
-        plan.seed_files = try expandProfileSeedFiles(allocator, profile.seed_files, expansion);
-        return plan;
-    }
-
-    fn deinit(self: *ResolvedLaunchPlan) void {
-        self.allocator.free(self.profile_name);
-        self.allocator.free(self.target);
-        freeChildArgv(self.allocator, self.argv);
-        if (self.cwd) |cwd| self.allocator.free(cwd);
-        self.stdout.deinit(self.allocator);
-        self.stderr.deinit(self.allocator);
-        for (self.env) |entry| {
-            self.allocator.free(entry.name);
-            self.allocator.free(entry.value);
-        }
-        self.allocator.free(self.env);
-        for (self.seed_files) |entry| {
-            self.allocator.free(entry.path);
-            if (entry.source) |source| self.allocator.free(source);
-            if (entry.content) |content| self.allocator.free(content);
-        }
-        self.allocator.free(self.seed_files);
-    }
-};
 
 const FileSink = struct {
     file: std.fs.File,
@@ -182,11 +84,7 @@ pub fn main() !void {
             std.process.exit(exit_code);
         },
         .wm => {
-            const wm = parseWmArgs(args) orelse {
-                std.debug.print("{s}", .{usageText()});
-                std.process.exit(64);
-            };
-            const exit_code = try wm_host.runProfiles(allocator, wm.profile_names);
+            const exit_code = try runWmBinary(allocator, args[2..]);
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -205,7 +103,7 @@ const usage_text =
     \\  katzensteg --help
     \\  katzensteg [options] <target>
     \\  katzensteg attach [--rect x,y,w,h] [--aspect fit|stretch|cover] --exec -- <program> [args...]
-    \\  katzensteg wm [target...]
+    \\  katzensteg wm [wm-args...]
     \\  katzensteg
     \\
     \\Options:
@@ -233,20 +131,12 @@ fn isProxyExecutablePath(path: []const u8) bool {
 
 fn parseCommand(args: []const []const u8) Command {
     if (args.len <= 1) return .menu;
-    if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
+    if (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")) return .help;
     if (std.mem.eql(u8, args[1], "attach")) return if (parseAttachArgs(args) != null) .attach else .unknown;
-    if (std.mem.eql(u8, args[1], "wm")) return if (parseWmArgs(args) != null) .wm else .unknown;
+    if (std.mem.eql(u8, args[1], "wm")) return .wm;
+    if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) return .help;
     if (targetArgIndex(args) != null) return .run;
     return .unknown;
-}
-
-fn parseWmArgs(args: []const []const u8) ?WmArgs {
-    if (args.len < 2) return null;
-    if (!std.mem.eql(u8, args[1], "wm")) return null;
-    for (args[2..]) |arg| {
-        if (std.mem.startsWith(u8, arg, "-")) return null;
-    }
-    return .{ .profile_names = args[2..] };
 }
 
 fn parseAttachArgs(args: []const []const u8) ?AttachArgs {
@@ -344,6 +234,44 @@ fn hasArg(args: []const []const u8, needle: []const u8) bool {
         if (std.mem.eql(u8, arg, needle)) return true;
     }
     return false;
+}
+
+fn runWmBinary(allocator: std.mem.Allocator, wm_args: []const []const u8) !u8 {
+    const wm_exe = try siblingExecutablePath(allocator, "katzensteg-wm");
+    defer allocator.free(wm_exe);
+
+    const argv = try buildWmArgv(allocator, wm_exe, wm_args);
+    defer allocator.free(argv);
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    return childTermExitCode(try child.spawnAndWait());
+}
+
+fn siblingExecutablePath(allocator: std.mem.Allocator, basename: []const u8) ![]const u8 {
+    const self_exe = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(self_exe);
+
+    const dir = std.fs.path.dirname(self_exe) orelse ".";
+    return std.fs.path.join(allocator, &.{ dir, basename });
+}
+
+fn buildWmArgv(allocator: std.mem.Allocator, wm_exe: []const u8, wm_args: []const []const u8) ![]const []const u8 {
+    var argv = try allocator.alloc([]const u8, 1 + wm_args.len);
+    argv[0] = wm_exe;
+    for (wm_args, 0..) |arg, i| argv[1 + i] = arg;
+    return argv;
+}
+
+fn childTermExitCode(term: std.process.Child.Term) u8 {
+    return switch (term) {
+        .Exited => |code| @intCast(@min(code, 255)),
+        .Signal => |sig| @as(u8, 128) + @as(u8, @intCast(@min(sig, 127))),
+        .Stopped => |sig| @as(u8, 128) + @as(u8, @intCast(@min(sig, 127))),
+        .Unknown => 1,
+    };
 }
 
 fn showProfiles(allocator: std.mem.Allocator) !void {
@@ -648,96 +576,19 @@ fn loadProfileCatalog(allocator: std.mem.Allocator) !profiles_mod.ProfileCatalog
 }
 
 fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var dirs = std.ArrayList([]const u8).empty;
-    errdefer {
-        for (dirs.items) |dir| allocator.free(dir);
-        dirs.deinit(allocator);
-    }
-
-    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |raw| {
-        defer allocator.free(raw);
-        var it = std.mem.splitScalar(u8, raw, ':');
-        while (it.next()) |segment| {
-            const trimmed = std.mem.trim(u8, segment, " \t");
-            if (trimmed.len == 0) continue;
-            try dirs.append(allocator, try allocator.dupe(u8, trimmed));
-        }
-        if (dirs.items.len > 0) return dirs;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
-    }
-
-    const repo = try resolveRepoRoot(allocator);
-    defer allocator.free(repo);
-    try dirs.append(allocator, try std.fs.path.join(allocator, &.{ repo, "profiles" }));
-
-    if (try userConfigProfilesDir(allocator)) |user_dir| {
-        try dirs.append(allocator, user_dir);
-    }
-    return dirs;
-}
-
-fn userConfigProfilesDir(allocator: std.mem.Allocator) !?[]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
-        defer allocator.free(xdg);
-        if (xdg.len > 0) return try std.fs.path.join(allocator, &.{ xdg, "katzensteg", "profiles" });
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
-    }
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
-        defer allocator.free(home);
-        if (home.len > 0) return try std.fs.path.join(allocator, &.{ home, ".config", "katzensteg", "profiles" });
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
-    }
-    return null;
+    return launcher_context.resolveProfileDirs(allocator);
 }
 
 fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_REPO")) |repo| return repo else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
-    }
-
-    if (try cwdLooksLikeRepo()) return std.fs.cwd().realpathAlloc(allocator, ".");
-    return repoRootFromExecutable(allocator) catch std.fs.cwd().realpathAlloc(allocator, ".");
-}
-
-fn cwdLooksLikeRepo() !bool {
-    var dir = std.fs.cwd().openDir("profiles", .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return false,
-        else => return err,
-    };
-    dir.close();
-    return true;
-}
-
-fn repoRootFromExecutable(allocator: std.mem.Allocator) ![]const u8 {
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(exe_path);
-    return repoRootFromExecutablePath(allocator, exe_path);
+    return launcher_context.resolveRepoRoot(allocator);
 }
 
 fn repoRootFromExecutablePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
-    const bin_dir = std.fs.path.dirname(exe_path) orelse return error.InvalidExecutablePath;
-    const build_dir = std.fs.path.dirname(bin_dir) orelse return error.InvalidExecutablePath;
-    const repo = std.fs.path.dirname(build_dir) orelse return error.InvalidExecutablePath;
-    return allocator.dupe(u8, repo);
+    return launcher_context.repoRootFromExecutablePath(allocator, exe_path);
 }
 
 fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) ![][]const u8 {
-    var argv = std.ArrayList([]const u8).empty;
-    errdefer {
-        for (argv.items) |arg| allocator.free(arg);
-        argv.deinit(allocator);
-    }
-    try argv.append(allocator, try expandLauncherString(allocator, profile.target, expansion));
-    for (profile.args) |arg| try argv.append(allocator, try expandLauncherString(allocator, arg, expansion));
-    for (extra_args) |arg| try argv.append(allocator, try allocator.dupe(u8, arg));
-    return argv.toOwnedSlice(allocator);
+    return launcher_plan.buildChildArgv(allocator, profile, expansion, extra_args);
 }
 
 fn buildCommandArgv(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) ![][]const u8 {
@@ -751,72 +602,12 @@ fn buildCommandArgv(allocator: std.mem.Allocator, target: []const u8, extra_args
     return argv.toOwnedSlice(allocator);
 }
 
-fn expandProfileEnv(allocator: std.mem.Allocator, env: []const profiles_mod.EnvVar, expansion: ExpansionContext) ![]profiles_mod.EnvVar {
-    var out = std.ArrayList(profiles_mod.EnvVar).empty;
-    errdefer {
-        for (out.items) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.value);
-        }
-        out.deinit(allocator);
-    }
-    for (env) |entry| {
-        try out.append(allocator, .{
-            .name = try allocator.dupe(u8, entry.name),
-            .value = try expandLauncherString(allocator, entry.value, expansion),
-        });
-    }
-    return out.toOwnedSlice(allocator);
+fn defaultRuntimeConfig() RuntimeConfig {
+    return launcher_plan.defaultRuntimeConfig();
 }
 
-fn expandProfileSeedFiles(allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile, expansion: ExpansionContext) ![]profiles_mod.SeedFile {
-    var out = std.ArrayList(profiles_mod.SeedFile).empty;
-    errdefer {
-        for (out.items) |entry| {
-            allocator.free(entry.path);
-            if (entry.source) |source| allocator.free(source);
-            if (entry.content) |content| allocator.free(content);
-        }
-        out.deinit(allocator);
-    }
-    for (seed_files) |entry| {
-        try out.append(allocator, .{
-            .path = try expandLauncherString(allocator, entry.path, expansion),
-            .source = if (entry.source) |source| try expandLauncherString(allocator, source, expansion) else null,
-            .content = if (entry.content) |content| try expandLauncherString(allocator, content, expansion) else null,
-        });
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-fn defaultRuntimeConfig() @import("config.zig").RuntimeConfig {
-    return .{
-        .intercept_mode = .queued_replay,
-        .window_policy = .terminal_only,
-        .input_enabled = true,
-        .input_claimed = true,
-        .output_profile = .file_whole,
-    };
-}
-
-fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) @import("config.zig").RuntimeConfig {
-    var runtime = defaultRuntimeConfig();
-    const fields = profile.runtime_fields;
-    if (fields.composite_mode) runtime.composite_mode = profile.runtime.composite_mode;
-    if (fields.intercept_mode) runtime.intercept_mode = profile.runtime.intercept_mode;
-    if (fields.window_policy) runtime.window_policy = profile.runtime.window_policy;
-    if (fields.real_window) runtime.real_window_visibility = profile.runtime.real_window_visibility;
-    if (fields.present_fps) runtime.present_fps = profile.runtime.present_fps;
-    if (fields.input) runtime.input_enabled = profile.runtime.input_enabled;
-    if (fields.input_claim) runtime.input_claimed = profile.runtime.input_claimed;
-    if (fields.input_claim_focus) runtime.input_claim_focus = profile.runtime.input_claim_focus;
-    if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
-    if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
-    if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;
-    if (fields.presentation_sink) runtime.presentation_sink = profile.runtime.presentation_sink;
-    if (fields.presentation_fd) runtime.presentation_fd = profile.runtime.presentation_fd;
-    if (fields.presentation_control_fd) runtime.presentation_control_fd = profile.runtime.presentation_control_fd;
-    return runtime;
+fn resolvedRuntimeConfig(profile: *const profiles_mod.LaunchProfile) RuntimeConfig {
+    return launcher_plan.resolvedRuntimeConfig(profile);
 }
 
 const EmbedRuntimeFds = struct {
@@ -828,30 +619,10 @@ fn defaultEmbedRuntimeFds() EmbedRuntimeFds {
     return .{ .presentation_fd = 100, .control_fd = 101 };
 }
 
-fn applyEmbedJsonlRuntime(runtime: *@import("config.zig").RuntimeConfig, fds: EmbedRuntimeFds) void {
+fn applyEmbedJsonlRuntime(runtime: *RuntimeConfig, fds: EmbedRuntimeFds) void {
     runtime.presentation_sink = .jsonl_fd;
     runtime.presentation_fd = fds.presentation_fd;
     runtime.presentation_control_fd = fds.control_fd;
-}
-
-fn resolveProfileStdout(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
-    if (profile.stdout) |value| return resolveOutputSpec(allocator, value, expansion);
-    const log_name = try sanitizedProfileName(allocator, profile.name);
-    defer allocator.free(log_name);
-    return .{ .file = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-{s}.out", .{log_name}) };
-}
-
-fn resolveProfileStderr(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext) !OutputSpec {
-    if (profile.stderr) |value| return resolveOutputSpec(allocator, value, expansion);
-    return .stdout;
-}
-
-fn sanitizedProfileName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const out = try allocator.alloc(u8, name.len);
-    for (name, 0..) |c, i| {
-        out[i] = if (std.ascii.isAlphanumeric(c)) c else '-';
-    }
-    return out;
 }
 
 fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec) !std.process.Child.Term {
@@ -1183,43 +954,11 @@ fn createOutputFile(path: []const u8) !std.fs.File {
 }
 
 fn ensureSeedFiles(allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile) !void {
-    for (seed_files) |entry| {
-        if (try fileExists(entry.path)) continue;
-        const bytes = if (entry.content) |content|
-            content
-        else blk: {
-            const source = entry.source orelse return error.InvalidSeedFile;
-            break :blk try readWholeFile(allocator, source);
-        };
-        defer if (entry.content == null) allocator.free(bytes);
-        const file = try createOutputFile(entry.path);
-        defer file.close();
-        try file.writeAll(bytes);
-    }
-}
-
-fn fileExists(path: []const u8) !bool {
-    const file = if (std.fs.path.isAbsolute(path))
-        std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        }
-    else
-        std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
-    file.close();
-    return true;
+    return launcher_exec.ensureSeedFiles(allocator, seed_files);
 }
 
 fn readWholeFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
-        defer file.close();
-        return file.readToEndAlloc(allocator, 1024 * 1024);
-    }
-    return std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    return launcher_exec.readWholeFile(allocator, path);
 }
 
 fn reportOutputTail(allocator: std.mem.Allocator, stdout_spec: OutputSpec, stderr_spec: OutputSpec) void {
@@ -1346,85 +1085,22 @@ fn stdioForStderr(stdout_spec: OutputSpec, stderr_spec: OutputSpec) std.process.
 }
 
 fn resolveOutputSpec(allocator: std.mem.Allocator, value: ?[]const u8, expansion: ExpansionContext) !OutputSpec {
-    const raw = value orelse return .inherit;
-    if (std.mem.eql(u8, raw, "inherit")) return .inherit;
-    if (std.mem.eql(u8, raw, "ignore")) return .ignore;
-    if (std.mem.eql(u8, raw, "stdout")) return .stdout;
-    return .{ .file = try expandLauncherString(allocator, raw, expansion) };
+    return launcher_plan.resolveOutputSpec(allocator, value, expansion);
 }
 
 fn outputSpecLabel(spec: OutputSpec) []const u8 {
-    return switch (spec) {
-        .inherit => "inherit",
-        .ignore => "ignore",
-        .stdout => "stdout",
-        .file => |path| path,
-    };
+    return launcher_plan.outputSpecLabel(spec);
 }
 
 fn expandLauncherString(allocator: std.mem.Allocator, input: []const u8, expansion: ExpansionContext) ![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-
-    var i: usize = 0;
-    if (std.mem.eql(u8, input, "~")) {
-        try out.appendSlice(allocator, expansion.home);
-        return out.toOwnedSlice(allocator);
-    }
-    if (std.mem.startsWith(u8, input, "~/")) {
-        try out.appendSlice(allocator, expansion.home);
-        try out.appendSlice(allocator, input[1..]);
-        return out.toOwnedSlice(allocator);
-    }
-
-    while (i < input.len) {
-        if (std.mem.startsWith(u8, input[i..], "{repo}") or std.mem.startsWith(u8, input[i..], "${ROOT}")) {
-            try out.appendSlice(allocator, expansion.repo);
-            i += if (std.mem.startsWith(u8, input[i..], "{repo}")) "{repo}".len else "${ROOT}".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "{home}")) {
-            try out.appendSlice(allocator, expansion.home);
-            i += "{home}".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "$ROOT")) {
-            try out.appendSlice(allocator, expansion.repo);
-            i += "$ROOT".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "${PATH}")) {
-            try out.appendSlice(allocator, expansion.path);
-            i += "${PATH}".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "$PATH")) {
-            try out.appendSlice(allocator, expansion.path);
-            i += "$PATH".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "${HOME}")) {
-            try out.appendSlice(allocator, expansion.home);
-            i += "${HOME}".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, input[i..], "$HOME")) {
-            try out.appendSlice(allocator, expansion.home);
-            i += "$HOME".len;
-            continue;
-        }
-        try out.append(allocator, input[i]);
-        i += 1;
-    }
-    return out.toOwnedSlice(allocator);
+    return launcher_context.expandString(allocator, input, expansion);
 }
 
 fn freeChildArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
-    for (argv) |arg| allocator.free(arg);
-    allocator.free(argv);
+    launcher_plan.freeChildArgv(allocator, argv);
 }
 
-fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: @import("config.zig").RuntimeConfig) ![]const u8 {
+fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: RuntimeConfig) ![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-runtime-{d}.json", .{std.time.nanoTimestamp()});
     errdefer allocator.free(path);
     const file = try std.fs.createFileAbsolute(path, .{ .truncate = true, .read = true });
@@ -1435,7 +1111,7 @@ fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: @import("config.zig
     return path;
 }
 
-fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: @import("config.zig").RuntimeConfig) !void {
+fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: RuntimeConfig) !void {
     try writer.print(
         "{{\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"input_claim_focus\":{},\"output_profile\":",
         .{
@@ -1795,6 +1471,7 @@ test "launcher command parser recognizes help menu and run targets" {
     try std.testing.expectEqual(Command.menu, parseCommand(&.{"katzensteg"}));
     try std.testing.expectEqual(Command.help, parseCommand(&.{ "katzensteg", "--help" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "retroarch.sonic" }));
+    try std.testing.expectEqual(Command.help, parseCommand(&.{ "katzensteg", "retroarch.sonic", "--help" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "--dry-run", "retroarch.sonic" }));
     try std.testing.expectEqual(Command.run, parseCommand(&.{ "katzensteg", "--", "--odd-command-name" }));
     try std.testing.expectEqual(Command.unknown, parseCommand(&.{ "katzensteg", "--dry-run" }));
@@ -1809,24 +1486,24 @@ test "launcher command parser recognizes embed jsonl before target" {
 
 test "launcher command parser recognizes wm profile target" {
     try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }));
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "--session", "probe.embed.basic_sdl", "--", "arg" }));
+    try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm", "--help" }));
 }
 
 test "launcher command parser recognizes wm without initial target" {
     try std.testing.expectEqual(Command.wm, parseCommand(&.{ "katzensteg", "wm" }));
-    const wm = parseWmArgs(&.{ "katzensteg", "wm" }).?;
-    try std.testing.expectEqual(@as(usize, 0), wm.profile_names.len);
 }
 
-test "launcher parses wm target" {
-    const wm = parseWmArgs(&.{ "katzensteg", "wm", "probe.embed.basic_sdl" }).?;
-    try std.testing.expectEqualStrings("probe.embed.basic_sdl", wm.profile_names[0]);
-}
+test "launcher wm argv passes through arguments after wm" {
+    const argv = try buildWmArgv(std.testing.allocator, "katzensteg-wm", &.{ "--session", "sonic", "--", "rom.sfc" });
+    defer std.testing.allocator.free(argv);
 
-test "launcher parses multiple wm targets" {
-    const wm = parseWmArgs(&.{ "katzensteg", "wm", "sonic", "mi2" }).?;
-    try std.testing.expectEqual(@as(usize, 2), wm.profile_names.len);
-    try std.testing.expectEqualStrings("sonic", wm.profile_names[0]);
-    try std.testing.expectEqualStrings("mi2", wm.profile_names[1]);
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("katzensteg-wm", argv[0]);
+    try std.testing.expectEqualStrings("--session", argv[1]);
+    try std.testing.expectEqualStrings("sonic", argv[2]);
+    try std.testing.expectEqualStrings("--", argv[3]);
+    try std.testing.expectEqualStrings("rom.sfc", argv[4]);
 }
 
 test "launcher parses attach exec argv command" {
@@ -1860,7 +1537,7 @@ test "launcher embed jsonl overrides runtime presentation fds" {
     var runtime = defaultRuntimeConfig();
     const original_output_profile = runtime.output_profile;
     applyEmbedJsonlRuntime(&runtime, .{ .presentation_fd = 100, .control_fd = 101 });
-    try std.testing.expectEqual(@import("config.zig").PresentationSink.jsonl_fd, runtime.presentation_sink);
+    try std.testing.expectEqual(launcher_plan.PresentationSink.jsonl_fd, runtime.presentation_sink);
     try std.testing.expectEqual(@as(i32, 100), runtime.presentation_fd.?);
     try std.testing.expectEqual(@as(i32, 101), runtime.presentation_control_fd.?);
     try std.testing.expectEqual(original_output_profile, runtime.output_profile);

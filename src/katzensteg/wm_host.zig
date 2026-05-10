@@ -1,7 +1,9 @@
 const std = @import("std");
+const xev = @import("xev");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
+const blocking_trace = @import("blocking_trace.zig");
 const DirectTty = @import("direct_tty.zig").DirectTty;
 const Logger = @import("log.zig").Logger;
 const config_mod = @import("config.zig");
@@ -9,6 +11,7 @@ const upload_path_mod = @import("upload_path.zig");
 const ts_kitty = @import("termscene").kitty;
 
 const wm_peer_line_queue_max_entries: usize = 256;
+const wm_lifecycle_tick_ms: u64 = 20;
 
 pub const TerminalSize = struct {
     rows: i32,
@@ -402,12 +405,32 @@ fn divRoundI64(numerator: i64, denominator: i64) i64 {
     return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
 }
 
+pub const SessionLaunchSpec = struct {
+    profile_name: []const u8,
+    extra_args: []const []const u8 = &.{},
+};
+
 pub fn runProfile(allocator: std.mem.Allocator, profile_name: []const u8) !u8 {
-    return runProfiles(allocator, &.{profile_name});
+    return runSessionSpecs(allocator, &.{.{ .profile_name = profile_name }});
 }
 
 pub fn runProfiles(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
-    return runMultiProfile(allocator, profile_names);
+    var specs = try allocator.alloc(SessionLaunchSpec, profile_names.len);
+    defer allocator.free(specs);
+    for (profile_names, 0..) |profile_name, i| {
+        specs[i] = .{ .profile_name = profile_name };
+    }
+    return runSessionSpecs(allocator, specs);
+}
+
+pub fn runSessionSpecs(allocator: std.mem.Allocator, specs: []const SessionLaunchSpec) !u8 {
+    const exe = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe);
+    return runSessionSpecsWithProducerExe(allocator, exe, specs);
+}
+
+pub fn runSessionSpecsWithProducerExe(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
+    return runMultiProfile(allocator, producer_exe, specs);
 }
 
 const WmProducerSession = struct {
@@ -419,8 +442,11 @@ const WmProducerSession = struct {
     child: std.process.Child,
     child_stdin: ?std.fs.File = null,
     stdout_file: ?std.fs.File = null,
-    stdout_thread: ?std.Thread = null,
-    wait_thread: ?std.Thread = null,
+    stdout_buffer: std.ArrayList(u8) = .empty,
+    stdout_ready: bool = false,
+    stdout_poll_armed: bool = false,
+    stdout_poll_supported: bool = true,
+    stdout_poll_completion: xev.Completion = .{},
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
     control_open: bool = true,
@@ -445,6 +471,8 @@ const WmPeerLineQueue = struct {
     max_entries: usize = wm_peer_line_queue_max_entries,
     blocked_enqueue_count: usize = 0,
     closed: bool = false,
+    blocking_trace_settings: blocking_trace.Settings = .{},
+    blocking_trace_logger: ?*Logger = null,
 
     fn init(allocator: std.mem.Allocator) WmPeerLineQueue {
         return initWithMaxEntries(allocator, wm_peer_line_queue_max_entries);
@@ -453,6 +481,11 @@ const WmPeerLineQueue = struct {
     fn initWithMaxEntries(allocator: std.mem.Allocator, max_entries: usize) WmPeerLineQueue {
         std.debug.assert(max_entries > 0);
         return .{ .allocator = allocator, .max_entries = max_entries };
+    }
+
+    fn enableBlockingTrace(self: *WmPeerLineQueue, settings: blocking_trace.Settings, logger: *Logger) void {
+        self.blocking_trace_settings = settings;
+        self.blocking_trace_logger = logger;
     }
 
     fn close(self: *WmPeerLineQueue) void {
@@ -475,15 +508,36 @@ const WmPeerLineQueue = struct {
         const owned_line = try self.allocator.dupe(u8, line);
         errdefer self.allocator.free(owned_line);
 
+        const trace_enabled = self.blocking_trace_settings.enabled;
+        const lock_start_ns = if (trace_enabled) std.time.nanoTimestamp() else 0;
         self.mutex.lock();
+        const lock_duration_ns = if (trace_enabled) blocking_trace.elapsedSince(lock_start_ns) else 0;
         defer self.mutex.unlock();
+        self.traceBlocking("wm_peer_queue_lock", lock_duration_ns, line.len, self.entries.items.len - self.head);
+        var wait_duration_ns: i128 = 0;
         while (!self.closed and self.entries.items.len - self.head >= self.max_entries) {
             self.blocked_enqueue_count += 1;
+            const wait_start_ns = if (trace_enabled) std.time.nanoTimestamp() else 0;
             self.not_full.wait(&self.mutex);
+            if (trace_enabled) wait_duration_ns += blocking_trace.elapsedSince(wait_start_ns);
             self.blocked_enqueue_count -= 1;
         }
+        self.traceBlocking("wm_peer_queue_full_wait", wait_duration_ns, line.len, self.entries.items.len - self.head);
         if (self.closed) return error.QueueClosed;
         try self.entries.append(self.allocator, .{ .session = session, .line = owned_line });
+    }
+
+    fn traceBlocking(self: *WmPeerLineQueue, comptime context: []const u8, duration_ns: i128, line_bytes: usize, depth: usize) void {
+        const settings = self.blocking_trace_settings;
+        if (!blocking_trace.shouldLog(settings.enabled, duration_ns, settings.threshold_ns)) return;
+        if (self.blocking_trace_logger) |logger| {
+            logger.writeFmtScoped(.info, .wm, "blocking trace context={s} duration_us={d} line_bytes={d} queue_depth={d}", .{
+                context,
+                blocking_trace.micros(duration_ns),
+                line_bytes,
+                depth,
+            });
+        }
     }
 
     fn take(self: *WmPeerLineQueue, allocator: std.mem.Allocator, max_items: usize) !std.ArrayList(WmPeerLineQueueEntry) {
@@ -521,10 +575,116 @@ const WmPeerLineQueue = struct {
     }
 };
 
-fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const u8) !u8 {
-    const exe = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(exe);
+const WmEventLoop = struct {
+    loop: xev.Loop,
+    lifecycle_timer: xev.Timer,
+    tty_poll_completion: xev.Completion = .{},
+    lifecycle_timer_completion: xev.Completion = .{},
+    tty_ready: bool = false,
+    tty_poll_armed: bool = false,
+    tty_poll_supported: bool = ttyXevPollSupported(),
+    lifecycle_ready: bool = false,
+    lifecycle_timer_armed: bool = false,
 
+    fn init() !WmEventLoop {
+        return .{
+            .loop = try xev.Loop.init(.{}),
+            .lifecycle_timer = try xev.Timer.init(),
+        };
+    }
+
+    fn deinit(self: *WmEventLoop) void {
+        self.lifecycle_timer.deinit();
+        self.loop.deinit();
+    }
+};
+
+fn ttyXevPollSupported() bool {
+    // Keep this as a capability hook rather than inlining `true`; the main loop
+    // has a lifecycle-tick fallback for platforms where tty readiness polling
+    // later proves unreliable.
+    return true;
+}
+
+fn armWmEventSources(events: *WmEventLoop, tty: *DirectTty, sessions: []WmProducerSession) void {
+    armWmTtyRead(events, tty);
+    armWmLifecycleTick(events);
+    for (sessions) |*session| armWmSessionStdoutRead(events, session);
+}
+
+fn armWmTtyRead(events: *WmEventLoop, tty: *DirectTty) void {
+    if (!events.tty_poll_supported) return;
+    if (events.tty_ready or events.tty_poll_armed) return;
+    const file = xev.File.initFd(tty.file.handle);
+    file.poll(&events.loop, &events.tty_poll_completion, .read, WmEventLoop, events, onWmTtyReadable);
+    events.tty_poll_armed = true;
+}
+
+fn armWmLifecycleTick(events: *WmEventLoop) void {
+    if (events.lifecycle_ready or events.lifecycle_timer_armed) return;
+    events.lifecycle_timer.run(&events.loop, &events.lifecycle_timer_completion, wm_lifecycle_tick_ms, WmEventLoop, events, onWmLifecycleTick);
+    events.lifecycle_timer_armed = true;
+}
+
+fn armWmSessionStdoutRead(events: *WmEventLoop, session: *WmProducerSession) void {
+    if (!session.stdout_poll_supported) return;
+    if (session.stdout_ready or session.stdout_poll_armed) return;
+    const stdout_file = session.stdout_file orelse return;
+    const file = xev.File.initFd(stdout_file.handle);
+    file.poll(&events.loop, &session.stdout_poll_completion, .read, WmProducerSession, session, onWmSessionStdoutReadable);
+    session.stdout_poll_armed = true;
+}
+
+fn onWmTtyReadable(
+    events: ?*WmEventLoop,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const state = events orelse return .disarm;
+    _ = result catch {
+        state.tty_poll_armed = false;
+        state.tty_poll_supported = false;
+        return .disarm;
+    };
+    state.tty_ready = true;
+    state.tty_poll_armed = false;
+    return .disarm;
+}
+
+fn onWmLifecycleTick(
+    events: ?*WmEventLoop,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = result catch {};
+    const state = events orelse return .disarm;
+    state.lifecycle_ready = true;
+    state.lifecycle_timer_armed = false;
+    return .disarm;
+}
+
+fn onWmSessionStdoutReadable(
+    session: ?*WmProducerSession,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const producer = session orelse return .disarm;
+    _ = result catch {
+        producer.stdout_poll_armed = false;
+        producer.stdout_poll_supported = false;
+        return .disarm;
+    };
+    producer.stdout_ready = true;
+    producer.stdout_poll_armed = false;
+    return .disarm;
+}
+
+fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
     var tty = try DirectTty.init();
     defer tty.deinit();
 
@@ -536,9 +696,14 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     var redraw_requested = std.atomic.Value(bool).init(false);
     var peer_queue = WmPeerLineQueue.init(allocator);
     defer peer_queue.deinit();
+    const trace_blocking = blocking_trace.settingsFromEnv();
+    if (trace_blocking.enabled) {
+        logger.writeFmtScoped(.info, .wm, "blocking trace enabled threshold_ms={d}", .{@divTrunc(trace_blocking.threshold_ns, std.time.ns_per_ms)});
+        peer_queue.enableBlockingTrace(trace_blocking, &logger);
+    }
 
     const terminal = TerminalSize{ .rows = tty.rows, .cols = tty.cols, .pixel_width = tty.pixel_width, .pixel_height = tty.pixel_height };
-    const session_capacity = @max(profile_names.len, default_wm_session_capacity);
+    const session_capacity = @max(specs.len, default_wm_session_capacity);
     var sessions = try allocator.alloc(WmProducerSession, session_capacity);
     defer allocator.free(sessions);
     var z_order = try allocator.alloc(usize, session_capacity);
@@ -549,19 +714,18 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
         for (sessions[0..initialized]) |*session| {
             closeSessionControl(session);
             if (session.stdout_file) |file| file.close();
-            if (session.wait_thread) |thread| thread.join();
-            if (session.stdout_thread) |thread| thread.join();
+            session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(allocator, &session.upload);
             allocator.free(session.profile_name);
         }
     }
 
     try tty.enableInputCapture();
-    for (profile_names, 0..) |profile_name, i| {
+    for (specs, 0..) |spec, i| {
         z_order[i] = i;
-        sessions[i] = try launchProducerSession(allocator, exe, tty.file, terminal, profile_name, i, &event_log);
+        sessions[i] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, &event_log);
         initialized += 1;
-        try startSessionWaitThread(&sessions[i]);
+        try startSessionProcessPolling(&sessions[i]);
     }
 
     var focused_index: usize = 0;
@@ -569,23 +733,40 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     const writer = tty.file.deprecatedWriter();
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized]) |*session| {
-        try startSessionStdoutThread(allocator, session, &peer_queue);
+        try startSessionStdoutPolling(session);
     }
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
     var shutdown_sent = false;
-    const keep_alive_when_empty = profile_names.len == 0;
+    const keep_alive_when_empty = specs.len == 0;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
     var prompt_active = false;
+    var wm_events = try WmEventLoop.init();
+    defer wm_events.deinit();
     while (!shutdown_sent and (keep_alive_when_empty or !allSessionsDone(sessions[0..initialized]))) {
-        _ = try drainQueuedPeerLines(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 64);
-        const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
-        if (lifecycle.changed) {
-            if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+        armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
+        try wm_events.loop.run(.once);
+        for (sessions[0..initialized]) |*session| {
+            if (!session.stdout_ready) continue;
+            session.stdout_ready = false;
+            _ = try drainSessionStdoutChunk(allocator, session, &peer_queue);
+            _ = try drainMainLoopPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, trace_blocking, &logger);
+        }
+        if (wm_events.lifecycle_ready) {
+            wm_events.lifecycle_ready = false;
+            if (!wm_events.tty_poll_supported) wm_events.tty_ready = true;
+            for (sessions[0..initialized]) |*session| {
+                if (!session.stdout_poll_supported) session.stdout_ready = true;
+            }
+            _ = try pollSessionChildExits(sessions[0..initialized]);
+            const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
+            if (lifecycle.changed) {
+                if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+            }
         }
         if (redraw_requested.swap(false, .seq_cst)) {
             const initial_ready_changed = blk: {
@@ -598,7 +779,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
             }
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
-        if (prompt_active) {
+        if (prompt_active and wm_events.tty_ready) {
+            wm_events.tty_ready = false;
             const prompt = try readLaunchPromptInput(&tty, &input_buf, &launch_prompt, allocator);
             switch (prompt) {
                 .none => {},
@@ -621,13 +803,13 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     } else {
                         const new_index = initialized;
                         z_order[new_index] = new_index;
-                        sessions[new_index] = try launchProducerSession(allocator, exe, tty.file, terminal, launch_prompt.items, new_index, &event_log);
+                        sessions[new_index] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
                         initialized += 1;
-                        try startSessionWaitThread(&sessions[new_index]);
+                        try startSessionProcessPolling(&sessions[new_index]);
                         focused_index = new_index;
                         bringWindowToFront(z_order[0..initialized], focused_index);
                         mouse_state = .{};
-                        try startSessionStdoutThread(allocator, &sessions[new_index], &peer_queue);
+                        try startSessionStdoutPolling(&sessions[new_index]);
                         try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                         try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     }
@@ -635,10 +817,10 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
             }
-            std.Thread.sleep(20 * std.time.ns_per_ms);
             continue;
         }
-        if (!shutdown_sent) {
+        if (!shutdown_sent and wm_events.tty_ready) {
+            wm_events.tty_ready = false;
             const input = readInputForSessionsLocked(&tty_lock, &tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
             if (input.focus_changed) {
                 try event_log.record(.focus_changed, sessions[focused_index].profile_name);
@@ -725,27 +907,20 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
                 },
             }
         }
-        std.Thread.sleep(20 * std.time.ns_per_ms);
     }
 
     for (sessions[0..initialized]) |*session| {
         closeSessionControl(session);
     }
-    peer_queue.close();
     for (sessions[0..initialized]) |*session| {
-        if (session.wait_thread) |thread| {
-            thread.join();
-            session.wait_thread = null;
-        }
+        try waitForSessionChildExit(session);
         const already_recorded_exit = session.state == .exited;
         session.state = .exited;
-        if (session.stdout_thread) |thread| {
-            thread.join();
-            session.stdout_thread = null;
-        }
+        _ = try drainSessionStdoutAvailable(allocator, session, &peer_queue);
         if (!already_recorded_exit) try event_log.record(.process_exited, session.profile_name);
     }
-    while (try drainQueuedPeerLines(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0)) {}
+    peer_queue.close();
+    while (try drainQueuedPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0, trace_blocking, &logger)) {}
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     if (shutdown_sent) return 0;
     for (sessions[0..initialized]) |*session| {
@@ -755,14 +930,17 @@ fn runMultiProfile(allocator: std.mem.Allocator, profile_names: []const []const 
     return 0;
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, profile_name: []const u8, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
     var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
     errdefer deinitUploadPolicy(allocator, &upload);
 
-    const owned_profile_name = try allocator.dupe(u8, profile_name);
+    const owned_profile_name = try allocator.dupe(u8, spec.profile_name);
     errdefer allocator.free(owned_profile_name);
 
-    var child = std.process.Child.init(&.{ exe, "--embed-jsonl", owned_profile_name }, allocator);
+    const child_argv = try buildProducerArgv(allocator, producer_exe, owned_profile_name, spec.extra_args);
+    defer allocator.free(child_argv);
+
+    var child = std.process.Child.init(child_argv, allocator);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     // Producers run inside the terminal surface, so stderr must not inherit it.
@@ -798,35 +976,127 @@ fn launchProducerSession(allocator: std.mem.Allocator, exe: []const u8, tty_file
     return session;
 }
 
-fn startSessionStdoutThread(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
-    if (session.stdout_thread != null) return;
-    const stdout_file = session.stdout_file orelse return;
-    session.stdout_file = null;
-    session.stdout_thread = try std.Thread.spawn(.{}, applyPeerStdoutThread, .{ThreadApplyArgs{
-        .allocator = allocator,
-        .session = session,
-        .stdout_file = stdout_file,
-        .peer_queue = peer_queue,
-    }});
-}
-
-fn startSessionWaitThread(session: *WmProducerSession) !void {
-    if (session.wait_thread != null) return;
-    session.wait_thread = std.Thread.spawn(.{}, waitChildThread, .{ &session.child, &session.wait_state }) catch |err| {
-        terminateSessionAfterWaitThreadFailure(session);
-        return err;
-    };
-}
-
-fn terminateSessionAfterWaitThreadFailure(session: *WmProducerSession) void {
-    closeSessionControl(session);
-    if (session.stdout_file) |file| {
-        file.close();
-        session.stdout_file = null;
+fn buildProducerArgv(allocator: std.mem.Allocator, producer_exe: []const u8, profile_name: []const u8, extra_args: []const []const u8) ![]const []const u8 {
+    var argv = try allocator.alloc([]const u8, 3 + extra_args.len);
+    argv[0] = producer_exe;
+    argv[1] = "--embed-jsonl";
+    argv[2] = profile_name;
+    for (extra_args, 0..) |arg, i| {
+        argv[3 + i] = arg;
     }
-    session.wait_state.term = session.child.kill() catch session.child.wait() catch .{ .Unknown = 0 };
+    return argv;
+}
+
+fn startSessionStdoutPolling(session: *WmProducerSession) !void {
+    const stdout_file = session.stdout_file orelse return;
+    setNonBlocking(stdout_file.handle);
+}
+
+fn drainSessionStdoutAvailable(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+    var made_progress = false;
+    while (try drainSessionStdoutChunk(allocator, session, peer_queue)) {
+        made_progress = true;
+    }
+    return made_progress;
+}
+
+fn drainSessionStdoutChunk(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+    return drainSessionStdoutChunkWithLimit(allocator, session, peer_queue, 8192);
+}
+
+fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, max_bytes: usize) !bool {
+    const stdout_file = session.stdout_file orelse return false;
+
+    var buf: [8192]u8 = undefined;
+    const limit = @min(max_bytes, buf.len);
+    if (limit == 0) return false;
+    const n = stdout_file.read(buf[0..limit]) catch |err| switch (err) {
+        error.WouldBlock => return false,
+        else => {
+            stdout_file.close();
+            session.stdout_file = null;
+            try flushPeerStdoutBuffer(session, peer_queue);
+            return false;
+        },
+    };
+    if (n == 0) {
+        stdout_file.close();
+        session.stdout_file = null;
+        try flushPeerStdoutBuffer(session, peer_queue);
+        return true;
+    }
+    try queuePeerStdoutBytes(allocator, session, peer_queue, buf[0..n]);
+    return true;
+}
+
+fn queuePeerStdoutBytes(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, bytes: []const u8) !void {
+    for (bytes) |byte| {
+        if (byte == '\n') {
+            try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
+            session.stdout_buffer.clearRetainingCapacity();
+        } else if (byte != '\r') {
+            try session.stdout_buffer.append(allocator, byte);
+        }
+    }
+}
+
+fn flushPeerStdoutBuffer(session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
+    if (session.stdout_buffer.items.len == 0) return;
+    try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
+    session.stdout_buffer.clearRetainingCapacity();
+}
+
+fn setNonBlocking(fd: std.posix.fd_t) void {
+    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+    typed_flags.NONBLOCK = true;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
+}
+
+fn startSessionProcessPolling(session: *WmProducerSession) !void {
+    try session.child.waitForSpawn();
+}
+
+fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
+    var changed = false;
+    for (sessions) |*session| {
+        if (try pollSessionChildExit(session)) changed = true;
+    }
+    return changed;
+}
+
+fn pollSessionChildExit(session: *WmProducerSession) !bool {
+    if (session.wait_state.done.load(.seq_cst)) return false;
+    try session.child.waitForSpawn();
+
+    const result = std.posix.waitpid(session.child.id, std.posix.W.NOHANG);
+    if (result.pid == 0) return false;
+
+    markSessionChildExited(session, childTermFromStatus(result.status));
+    return true;
+}
+
+fn waitForSessionChildExit(session: *WmProducerSession) !void {
+    if (session.wait_state.done.load(.seq_cst)) return;
+    markSessionChildExited(session, session.child.wait() catch .{ .Unknown = 0 });
+}
+
+fn markSessionChildExited(session: *WmProducerSession, term: std.process.Child.Term) void {
+    session.child.term = term;
+    session.wait_state.term = term;
+    // term is safe to read after done is observed true; seq_cst releases the write.
     session.wait_state.done.store(true, .seq_cst);
-    session.state = .exited;
+}
+
+fn childTermFromStatus(status: u32) std.process.Child.Term {
+    return if (std.posix.W.IFEXITED(status))
+        .{ .Exited = std.posix.W.EXITSTATUS(status) }
+    else if (std.posix.W.IFSIGNALED(status))
+        .{ .Signal = std.posix.W.TERMSIG(status) }
+    else if (std.posix.W.IFSTOPPED(status))
+        .{ .Stopped = std.posix.W.STOPSIG(status) }
+    else
+        .{ .Unknown = status };
 }
 
 pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: anytype, options: RunExecOptions) !u8 {
@@ -916,6 +1186,7 @@ const LifecycleReconcileResult = struct {
 
 fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focused_index: *usize, mouse: *WmMouseInputState, events: *ProtocolEventLog, logger: *Logger) !LifecycleReconcileResult {
     var result = LifecycleReconcileResult{};
+    if (sessions.len == 0) return result;
     for (sessions, 0..) |*session, session_index| {
         if (session.state == .exited or !session.wait_state.done.load(.seq_cst)) continue;
 
@@ -1226,37 +1497,53 @@ fn applyPeerStdout(allocator: std.mem.Allocator, stdout_file: std.fs.File, write
     if (line.items.len > 0) try applyPeerLine(allocator, writer, line.items);
 }
 
-fn applyPeerStdoutQueued(allocator: std.mem.Allocator, stdout_file: std.fs.File, session: ?*WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
-    defer stdout_file.close();
-    var line = std.ArrayList(u8).empty;
-    defer line.deinit(allocator);
-
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = try stdout_file.read(&buf);
-        if (n == 0) break;
-        for (buf[0..n]) |byte| {
-            if (byte == '\n') {
-                try peer_queue.enqueueCopy(session, line.items);
-                line.clearRetainingCapacity();
-            } else if (byte != '\r') {
-                try line.append(allocator, byte);
-            }
-        }
-    }
-    if (line.items.len > 0) try peer_queue.enqueueCopy(session, line.items);
+fn drainQueuedPeerLines(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool), max_items: usize) !bool {
+    return drainQueuedPeerLinesWithTrace(allocator, peer_queue, writer, tty_lock, redraw_requested, max_items, .{}, null);
 }
 
-fn drainQueuedPeerLines(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool), max_items: usize) !bool {
+fn drainQueuedPeerLinesWithTrace(
+    allocator: std.mem.Allocator,
+    peer_queue: *WmPeerLineQueue,
+    writer: anytype,
+    tty_lock: *std.Thread.Mutex,
+    redraw_requested: ?*std.atomic.Value(bool),
+    max_items: usize,
+    trace_settings: blocking_trace.Settings,
+    logger: ?*Logger,
+) !bool {
     var batch = try peer_queue.take(allocator, max_items);
     defer batch.deinit(allocator);
     defer for (batch.items) |entry| allocator.free(entry.line);
 
     if (batch.items.len == 0) return false;
     for (batch.items) |entry| {
+        const start_ns = blocking_trace.start(trace_settings);
         try applyPeerLineLocked(allocator, writer, tty_lock, entry.session, redraw_requested, entry.line);
+        if (blocking_trace.elapsedMaybe(start_ns)) |duration_ns| {
+            traceWmBlocking(logger, trace_settings, "apply_peer_line_locked", duration_ns, entry.line.len);
+        }
     }
     return true;
+}
+
+fn drainMainLoopPeerLinesWithTrace(allocator: std.mem.Allocator, peer_queue: *WmPeerLineQueue, writer: anytype, tty_lock: *std.Thread.Mutex, redraw_requested: ?*std.atomic.Value(bool), trace_settings: blocking_trace.Settings, logger: *Logger) !bool {
+    const start_ns = blocking_trace.start(trace_settings);
+    const drained = try drainQueuedPeerLinesWithTrace(allocator, peer_queue, writer, tty_lock, redraw_requested, 0, trace_settings, logger);
+    if (blocking_trace.elapsedMaybe(start_ns)) |duration_ns| {
+        traceWmBlocking(logger, trace_settings, "drain_peer_lines", duration_ns, 0);
+    }
+    return drained;
+}
+
+fn traceWmBlocking(logger: ?*Logger, settings: blocking_trace.Settings, comptime context: []const u8, duration_ns: i128, bytes: usize) void {
+    if (!blocking_trace.shouldLog(settings.enabled, duration_ns, settings.threshold_ns)) return;
+    if (logger) |log_file| {
+        log_file.writeFmtScoped(.info, .wm, "blocking trace context={s} duration_us={d} bytes={d}", .{
+            context,
+            blocking_trace.micros(duration_ns),
+            bytes,
+        });
+    }
 }
 
 fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8) !void {
@@ -1562,7 +1849,10 @@ fn uploadPolicyForOutputProfile(path: []const u8, profile: config_mod.OutputProf
 
 fn deinitUploadPolicy(allocator: std.mem.Allocator, upload: *render_batch_protocol.UploadPolicy) void {
     if (upload.path) |path| {
-        std.fs.deleteFileAbsolute(path) catch {};
+        switch (upload.profile) {
+            .file_whole => upload_path_mod.deleteRotatingFileWholeArtifacts(allocator, path),
+            .file_offset_ring, .direct_apc => upload_path_mod.deleteBasePath(path),
+        }
         allocator.free(path);
     }
     upload.path = null;
@@ -1573,6 +1863,7 @@ fn uploadPolicyForSession(allocator: std.mem.Allocator, tty: std.fs.File, sessio
     errdefer deinitUploadPolicy(allocator, &upload);
     if (upload.path) |path| {
         upload.path = try sessionUploadPath(allocator, path, session_index);
+        upload_path_mod.deleteBasePath(path);
         allocator.free(path);
     }
     return upload;
@@ -1601,27 +1892,10 @@ fn childTermSummary(term: std.process.Child.Term) []const u8 {
     };
 }
 
-const ThreadApplyArgs = struct {
-    allocator: std.mem.Allocator,
-    session: *WmProducerSession,
-    stdout_file: std.fs.File,
-    peer_queue: *WmPeerLineQueue,
-};
-
-fn applyPeerStdoutThread(args: ThreadApplyArgs) void {
-    applyPeerStdoutQueued(args.allocator, args.stdout_file, args.session, args.peer_queue) catch {};
-}
-
 const ChildWaitState = struct {
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     term: std.process.Child.Term = .{ .Unknown = 0 },
 };
-
-fn waitChildThread(child: *std.process.Child, state: *ChildWaitState) void {
-    state.term = child.wait() catch .{ .Unknown = 0 };
-    // term is safe to read after done is observed true; seq_cst releases the write.
-    state.done.store(true, .seq_cst);
-}
 
 const InputAction = union(enum) {
     none,
@@ -2065,6 +2339,18 @@ test "wm status band renders host geometry and last event outside content" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "last=attach_sent main") != null);
 }
 
+test "wm producer argv includes profile arguments" {
+    const argv = try buildProducerArgv(std.testing.allocator, "katzensteg", "retroarch", &.{ "rom.sfc", "--fullscreen" });
+    defer std.testing.allocator.free(argv);
+
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("katzensteg", argv[0]);
+    try std.testing.expectEqualStrings("--embed-jsonl", argv[1]);
+    try std.testing.expectEqualStrings("retroarch", argv[2]);
+    try std.testing.expectEqualStrings("rom.sfc", argv[3]);
+    try std.testing.expectEqualStrings("--fullscreen", argv[4]);
+}
+
 test "wm status band renders producer presentation status" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(std.testing.allocator);
@@ -2164,6 +2450,150 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
 
     try std.testing.expectEqualStrings("DUPA", out.items);
     try std.testing.expect(!redraw_requested.load(.seq_cst));
+}
+
+test "wm main loop peer drain does not leave older queued frames behind input" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+    };
+
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    var expected = std.ArrayList(u8).empty;
+    defer expected.deinit(std.testing.allocator);
+    var index: usize = 0;
+    while (index < 65) : (index += 1) {
+        var line = std.ArrayList(u8).empty;
+        defer line.deinit(std.testing.allocator);
+        try line.writer(std.testing.allocator).print(
+            "{{\"type\":\"frame_batch\",\"window_id\":\"main\",\"seq\":{d},\"groups\":{{\"deletes\":[\"D{d}\"],\"uploads\":[],\"placements\":[],\"after\":[]}}}}",
+            .{ index + 1, index },
+        );
+        try queue.enqueueCopy(&session, line.items);
+        try expected.writer(std.testing.allocator).print("D{d}", .{index});
+    }
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var tty_lock = std.Thread.Mutex{};
+    var redraw_requested = std.atomic.Value(bool).init(false);
+
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    try std.testing.expect(try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
+    try std.testing.expectEqualStrings(expected.items, out.items);
+    try std.testing.expect(!try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
+}
+
+test "wm peer stdout polling queues complete lines and retains partial lines" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+    };
+    defer session.stdout_buffer.deinit(std.testing.allocator);
+
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    try queuePeerStdoutBytes(std.testing.allocator, &session, &queue, "one\ntwo");
+
+    var batch = try queue.take(std.testing.allocator, 0);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("one", batch.items[0].line);
+    try std.testing.expectEqualStrings("two", session.stdout_buffer.items);
+}
+
+test "wm peer stdout chunk drain reads a bounded amount" {
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(pipe[1]);
+
+    const writer = std.fs.File{ .handle = pipe[1] };
+    try writer.writeAll("one\ntwo\nthree\n");
+
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+        .stdout_file = std.fs.File{ .handle = pipe[0] },
+    };
+    defer if (session.stdout_file) |file| file.close();
+    defer session.stdout_buffer.deinit(std.testing.allocator);
+
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    try std.testing.expect(try drainSessionStdoutChunkWithLimit(std.testing.allocator, &session, &queue, 4));
+
+    var batch = try queue.take(std.testing.allocator, 0);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("one", batch.items[0].line);
+
+    try std.testing.expect(try drainSessionStdoutChunkWithLimit(std.testing.allocator, &session, &queue, 4));
+    var next_batch = try queue.take(std.testing.allocator, 0);
+    defer next_batch.deinit(std.testing.allocator);
+    defer for (next_batch.items) |entry| std.testing.allocator.free(entry.line);
+
+    try std.testing.expectEqual(@as(usize, 1), next_batch.items.len);
+    try std.testing.expectEqualStrings("two", next_batch.items[0].line);
+}
+
+test "wm tty poll error does not mark tty ready" {
+    var events = try WmEventLoop.init();
+    defer events.deinit();
+    events.tty_poll_armed = true;
+
+    const action = onWmTtyReadable(&events, undefined, undefined, undefined, error.Unexpected);
+
+    try std.testing.expectEqual(xev.CallbackAction.disarm, action);
+    try std.testing.expect(!events.tty_ready);
+    try std.testing.expect(!events.tty_poll_armed);
+    try std.testing.expect(!events.tty_poll_supported);
+}
+
+test "wm producer stdout poll error does not mark stdout ready" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = undefined,
+        .stdout_poll_armed = true,
+    };
+
+    const action = onWmSessionStdoutReadable(&session, undefined, undefined, undefined, error.Unexpected);
+
+    try std.testing.expectEqual(xev.CallbackAction.disarm, action);
+    try std.testing.expect(!session.stdout_ready);
+    try std.testing.expect(!session.stdout_poll_armed);
+    try std.testing.expect(!session.stdout_poll_supported);
+}
+
+test "wm reconcile empty session list is stable" {
+    var focused_index: usize = 0;
+    var mouse = WmMouseInputState{};
+    var log = try ProtocolEventLog.init(std.testing.allocator, 8);
+    defer log.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    const result = try reconcileExitedSessions(&.{}, &.{}, &focused_index, &mouse, &log, &logger);
+
+    try std.testing.expect(!result.changed);
+    try std.testing.expect(!result.focus_changed);
+    try std.testing.expect(!result.z_order_changed);
+    try std.testing.expectEqual(@as(usize, 0), focused_index);
 }
 
 fn enqueuePeerLineForQueueBoundTest(queue: *WmPeerLineQueue, done: *std.atomic.Value(bool)) void {
@@ -2461,6 +2891,43 @@ test "wm upload policy honors file profile choices without direct apc" {
     try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_whole, uploadPolicyForOutputProfile("/tmp/wm-upload", .file_whole).profile);
     try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_offset_ring, uploadPolicyForOutputProfile("/tmp/wm-upload", .file_offset_ring).profile);
     try std.testing.expectEqual(render_batch_protocol.UploadProfile.file_whole, uploadPolicyForOutputProfile("/tmp/wm-upload", .direct_apc).profile);
+}
+
+test "wm upload policy cleanup removes rotated file whole artifacts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "upload.session-2" });
+    const base_path_for_check = try std.testing.allocator.dupe(u8, path);
+    defer std.testing.allocator.free(base_path_for_check);
+
+    const first_rotated = try std.fmt.allocPrint(std.testing.allocator, "{s}.0", .{path});
+    defer std.testing.allocator.free(first_rotated);
+    const last_rotated = try std.fmt.allocPrint(std.testing.allocator, "{s}.255", .{path});
+    defer std.testing.allocator.free(last_rotated);
+
+    {
+        const file = try std.fs.createFileAbsolute(path, .{});
+        file.close();
+    }
+    {
+        const file = try std.fs.createFileAbsolute(first_rotated, .{});
+        file.close();
+    }
+    {
+        const file = try std.fs.createFileAbsolute(last_rotated, .{});
+        file.close();
+    }
+
+    var upload = render_batch_protocol.UploadPolicy{ .profile = .file_whole, .path = path };
+    deinitUploadPolicy(std.testing.allocator, &upload);
+
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(base_path_for_check, .{}));
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(first_rotated, .{}));
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(last_rotated, .{}));
+    try std.testing.expect(upload.path == null);
 }
 
 test "wm exec path renders chrome and applies fake peer frame batch" {
@@ -2836,6 +3303,28 @@ test "wm reconciles externally exited producer sessions" {
     try std.testing.expectEqual(@as(?WmMouseDrag, null), mouse.drag);
     try std.testing.expectEqual(EventKind.process_exited, log.at(0).?.kind);
     try std.testing.expectEqual(EventKind.focus_changed, log.at(1).?.kind);
+}
+
+test "wm child exit polling marks finished child without wait thread" {
+    var child = std.process.Child.init(&.{"/usr/bin/true"}, std.testing.allocator);
+    try child.spawn();
+
+    var session = WmProducerSession{
+        .profile_name = "done",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+        .upload = .{ .profile = .direct_apc },
+        .child = child,
+        .state = .running,
+    };
+
+    var timer = try std.time.Timer.start();
+    while (timer.read() < 5 * std.time.ns_per_s and !session.wait_state.done.load(.seq_cst)) {
+        _ = try pollSessionChildExit(&session);
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expect(session.wait_state.done.load(.seq_cst));
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, session.wait_state.term);
 }
 
 test "wm z order compacts exited sessions behind visible sessions" {

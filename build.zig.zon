@@ -1,0 +1,12 @@
+.{
+    .name = .katzensteg,
+    .version = "0.15.2",
+    .dependencies = .{
+        .libxev = .{
+            .url = "git+https://github.com/rjwittams/libxev.git#c42f332ac90f43b1f51ff5c5a8fa92cfc5c9e74f",
+            .hash = "libxev-0.0.0-86vtcxtAEwD5GPOPfluoppIVLre_F5_mMajQRK6AWUkS",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x7e82e13be4d2d340,
+}

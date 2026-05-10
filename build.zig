@@ -19,6 +19,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const xev_mod = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("xev");
 
     const katzensteg_sdl_mod = b.createModule(.{
         .root_source_file = b.path("src/katzensteg/sdl2.zig"),
@@ -367,6 +371,27 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_launcher.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(katzensteg_launcher);
+    const katzensteg_wm = b.addExecutable(.{
+        .name = "katzensteg-wm",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/katzensteg/wm/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_wm.root_module.addImport("termscene", termscene_mod);
+    const katzensteg_wm_host_mod = b.createModule(.{
+        .root_source_file = b.path("src/katzensteg/wm_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    katzensteg_wm_host_mod.addImport("termscene", termscene_mod);
+    katzensteg_wm_host_mod.addImport("xev", xev_mod);
+    katzensteg_wm.root_module.addImport("wm_host", katzensteg_wm_host_mod);
+    b.installArtifact(katzensteg_wm);
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
         .use_llvm = use_llvm,
@@ -449,6 +474,7 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
+        .xev = xev_mod,
         .link_libc = true,
     });
     addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, .{
@@ -465,6 +491,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .link_sdl2 = true,
     });
+    addUnitTest(b, test_step, "katzensteg-sdl2-input-adapter-test", "src/katzensteg/sdl2_input_adapter.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_build_options = test_preload_options.createModule(),
+        .link_libc = true,
+        .link_sdl2 = true,
+    });
     addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl_mod,
@@ -474,6 +507,10 @@ pub fn build(b: *std.Build) void {
         .link_opengl = true,
     });
     addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-launcher-context-test", "src/katzensteg/launcher/context.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-cli-test", "src/katzensteg/wm/cli.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-client-test", "src/katzensteg/wm/client.zig", target, optimize, use_llvm, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-event-test", "src/katzensteg/wm/event.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
         .link_libc = true,
@@ -485,6 +522,7 @@ pub fn build(b: *std.Build) void {
 
 const UnitTestOptions = struct {
     termscene: ?*std.Build.Module = null,
+    xev: ?*std.Build.Module = null,
     katzensteg_sdl: ?*std.Build.Module = null,
     katzensteg_build_options: ?*std.Build.Module = null,
     link_libc: bool = false,
@@ -513,6 +551,7 @@ fn addUnitTest(
         }),
     });
     if (options.termscene) |mod| unit_test.root_module.addImport("termscene", mod);
+    if (options.xev) |mod| unit_test.root_module.addImport("xev", mod);
     if (options.katzensteg_sdl) |mod| unit_test.root_module.addImport("katzensteg_sdl", mod);
     if (options.katzensteg_build_options) |mod| unit_test.root_module.addImport("katzensteg_build_options", mod);
     if (options.link_sdl2) {

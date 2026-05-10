@@ -1406,6 +1406,7 @@ pub const FrameBuilder = struct {
         self.last_inspect_summary = self.buildInspectSummary(state, job);
         self.deleteRetiredImagesBatch(logger, sink);
         self.auditCheckAndLog(logger, "present_batch", renderer, state, sink);
+        sink.tracePlacementFrame(logger, "present_batch", renderer);
         sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "render batch flush failed: {any}", .{err});
         if (self.stats.enabled) {
             self.stats.frame_count += 1;
@@ -1422,6 +1423,7 @@ pub const FrameBuilder = struct {
     pub fn flushBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, writer: anytype) void {
         self.queueBatchDeletesForPresentationReset(logger, sink);
         if (sink.hasPendingBytes()) {
+            sink.tracePlacementFrame(logger, "presentation_reset", 0);
             sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentation reset render batch flush failed: {any}", .{err});
         }
     }
@@ -1429,6 +1431,7 @@ pub const FrameBuilder = struct {
     pub fn flushBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle, writer: anytype) void {
         self.queueBatchDeletesForRenderer(logger, sink, renderer);
         if (sink.hasPendingBytes()) {
+            sink.tracePlacementFrame(logger, "renderer_cleanup", renderer);
             sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup render batch flush failed: {any}", .{err});
         }
     }
@@ -1487,6 +1490,7 @@ pub const FrameBuilder = struct {
             self.auditCheckAndLog(logger, "presentation_reproject", entry.key_ptr.*, state, sink);
         }
         if (sink.hasPendingBytes()) {
+            sink.tracePlacementFrame(logger, "presentation_reproject", 0);
             sink.flushFrame(writer) catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene placement reproject flush failed: {any}", .{err});
         }
         return reprojected;
@@ -4269,9 +4273,9 @@ test "frame builder renders external framebuffer to batch sink" {
     try sink.setUploadPolicy(.{ .profile = .file_whole, .path = "/tmp/katzensteg-external-fb-batch-test" });
 
     var pixels = [_]u8{
-        255, 0, 0, 255,
-        0, 255, 0, 255,
-        0, 0, 255, 255,
+        255, 0,   0,   255,
+        0,   255, 0,   255,
+        0,   0,   255, 255,
         255, 255, 255, 255,
     };
 

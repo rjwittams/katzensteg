@@ -16,6 +16,7 @@ const presentation_layout_mod = @import("presentation_layout.zig");
 const present_job_mod = @import("present_job.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const render_batch_sink_mod = @import("render_batch_sink.zig");
+const blocking_trace = @import("blocking_trace.zig");
 const upload_path_mod = @import("upload_path.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
@@ -34,6 +35,7 @@ const RenderBatchSink = render_batch_sink_mod.RenderBatchSink;
 const log = std.log.scoped(.runtime);
 
 const queue_compact_threshold = 4096;
+const worker_control_poll_interval_ns = 5 * std.time.ns_per_ms;
 const payload_pool_max_buffers = 64;
 const payload_pool_max_bytes = 64 * 1024 * 1024;
 
@@ -158,6 +160,13 @@ pub const Runtime = struct {
     batch_control: ?std.fs.File = null,
     batch_control_line: std.ArrayList(u8),
     batch_sink: ?RenderBatchSink = null,
+    // Serializes batch presentation state and terminal-input projection.
+    // In queued batch mode, control messages are applied from the worker path;
+    // app-side SDL input calls may read snapshots but must not drain control.
+    presentation_mutex: std.Thread.Mutex = .{},
+    // Protects terminal input parser state and mouse ownership without making
+    // app-side SDL input queries wait behind presentation/reproject work.
+    input_mutex: std.Thread.Mutex = .{},
     batch_presentation_reset_pending: bool = false,
     last_batch_presentation_status: ?render_batch_protocol.PresentationStatusView = null,
     frame_builder: FrameBuilder,
@@ -165,6 +174,7 @@ pub const Runtime = struct {
     bg_only: bool = false,
     stats: bool = false,
     debug_protocol_replies: bool = false,
+    blocking_trace_settings: blocking_trace.Settings = .{},
     image_gc: bool = false,
     input_enabled: bool = false,
     input_claimed: bool = false,
@@ -186,6 +196,7 @@ pub const Runtime = struct {
     inspect_resource_records: std.ArrayList(ResourceRecord),
     queue_head: usize = 0,
     pending_presents: usize = 0,
+    worker_frame_active: bool = false,
     worker_thread: ?std.Thread = null,
     whiskers_client: ?WhiskersClient = null,
     shutdown_worker: bool = false,
@@ -224,6 +235,7 @@ pub const Runtime = struct {
         const input_claim_focus = input_claimed and config.input_claim_focus;
         const dump_composites = config.dump_composites;
         const debug_composite = config.debug_composite;
+        const trace_blocking = blocking_trace.settingsFromEnv();
         var runtime = Runtime{
             .allocator = allocator,
             .logger = logger,
@@ -233,6 +245,7 @@ pub const Runtime = struct {
             .bg_only = bg_only,
             .stats = stats,
             .debug_protocol_replies = debug_protocol_replies,
+            .blocking_trace_settings = trace_blocking,
             .image_gc = image_gc,
             .input_enabled = input_enabled,
             .input_claimed = input_claimed,
@@ -259,6 +272,9 @@ pub const Runtime = struct {
         if (std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null) {
             runtime.frame_builder.enablePlacementAudit();
             log.info("placement invariant audit enabled", .{});
+        }
+        if (trace_blocking.enabled) {
+            log.info("blocking trace enabled threshold_ms={d}", .{@divTrunc(trace_blocking.threshold_ns, std.time.ns_per_ms)});
         }
         if (std.c.getenv("KATZENSTEG_WHISKERS_SOCKET")) |path_z| {
             var free_producer_hello = true;
@@ -373,7 +389,7 @@ pub const Runtime = struct {
         return runtime;
     }
 
-    fn initShutdownStub() Runtime {
+    pub fn initShutdownStub() Runtime {
         const allocator = std.heap.c_allocator;
         return .{
             .allocator = allocator,
@@ -435,7 +451,7 @@ pub const Runtime = struct {
         self.allocator.free(hello.cmdline);
     }
 
-    fn deinit(self: *Runtime) void {
+    pub fn deinit(self: *Runtime) void {
         self.queue_mutex.lock();
         self.shutdown_worker = true;
         self.queue_cond.signal();
@@ -479,6 +495,11 @@ pub const Runtime = struct {
         self.batch_control = std.fs.File{ .handle = @intCast(control_fd) };
         setNonblocking(self.batch_control.?.handle);
         self.batch_sink = RenderBatchSink.init(self.allocator, "main");
+        self.batch_sink.?.enableBlockingTrace(self.blocking_trace_settings);
+        if (std.c.getenv("KATZENSTEG_TRACE_PLACEMENTS") != null or std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null) {
+            self.batch_sink.?.enablePlacementTrace();
+            self.logger.writeScoped(.info, .runtime, "placement trace enabled");
+        }
         // Batch mode enables the parser so hosts can forward terminal_bytes.
         // Consumers that never send input control messages observe no events.
         self.input_enabled = true;
@@ -557,7 +578,6 @@ pub const Runtime = struct {
         if (!self.input_enabled) return;
         self.refreshTerminalSizeIfNeeded();
         const tty = &(self.tty orelse return);
-        var parser = &(self.input_parser orelse return);
         var buf: [256]u8 = undefined;
         while (true) {
             const n = std.posix.read(tty.file.handle, &buf) catch |err| {
@@ -570,23 +590,37 @@ pub const Runtime = struct {
                 }
             };
             if (n == 0) {
+                self.lockInput("poll_terminal_input_flush");
+                var parser = &(self.input_parser orelse {
+                    self.input_mutex.unlock();
+                    return;
+                });
                 parser.flushStandaloneEscape() catch |err| {
                     log.warn("terminal input escape flush failed: {any}", .{err});
                 };
+                self.input_mutex.unlock();
                 return;
             }
+            self.lockInput("poll_terminal_input_feed");
+            var parser = &(self.input_parser orelse {
+                self.input_mutex.unlock();
+                return;
+            });
             parser.feed(buf[0..n]) catch |err| {
                 log.warn("terminal input parse failed: {any}", .{err});
+                self.input_mutex.unlock();
                 return;
             };
             if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
+            self.input_mutex.unlock();
             if (n < buf.len) return;
         }
     }
 
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
-        self.pollBatchControl();
+        self.lockInput("terminal_mouse_state");
+        defer self.input_mutex.unlock();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
         return parser.mouseState();
@@ -594,13 +628,16 @@ pub const Runtime = struct {
 
     pub fn terminalRelativeMouseState(self: *Runtime) ?input_mod.MouseState {
         if (!self.input_enabled) return null;
-        self.pollBatchControl();
+        self.lockInput("terminal_relative_mouse_state");
+        defer self.input_mutex.unlock();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
         return self.relative_mouse_baseline.snap(parser.mouseState());
     }
 
     pub fn claimRealWindowMouse(self: *Runtime) void {
+        self.lockInput("claim_real_window_mouse");
+        defer self.input_mutex.unlock();
         self.mouse_ownership.claimRealWindow();
     }
 
@@ -628,9 +665,42 @@ pub const Runtime = struct {
         return self.real_window_visibility.restoreAction();
     }
 
+    fn lockPresentation(self: *Runtime, comptime context: []const u8) void {
+        self.lockTraced(&self.presentation_mutex, "presentation_mutex", context);
+    }
+
+    fn lockInput(self: *Runtime, comptime context: []const u8) void {
+        self.lockTraced(&self.input_mutex, "input_mutex", context);
+    }
+
+    fn lockQueue(self: *Runtime, comptime context: []const u8) void {
+        self.lockTraced(&self.queue_mutex, "queue_mutex", context);
+    }
+
+    fn lockTraced(self: *Runtime, mutex: *std.Thread.Mutex, comptime name: []const u8, comptime context: []const u8) void {
+        if (!self.blocking_trace_settings.enabled) {
+            mutex.lock();
+            return;
+        }
+        const start_ns = std.time.nanoTimestamp();
+        mutex.lock();
+        self.traceBlockingSpan(name, context, blocking_trace.elapsedSince(start_ns));
+    }
+
+    fn traceBlockingSpan(self: *Runtime, comptime area: []const u8, comptime context: []const u8, duration_ns: i128) void {
+        const settings = self.blocking_trace_settings;
+        if (!blocking_trace.shouldLog(settings.enabled, duration_ns, settings.threshold_ns)) return;
+        log.info("blocking trace area={s} context={s} duration_us={d}", .{
+            area,
+            context,
+            blocking_trace.micros(duration_ns),
+        });
+    }
+
     pub fn shouldCaptureExternalFrame(self: *Runtime) bool {
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
-            self.pollBatchControl();
+            self.lockPresentation("should_capture_external_frame");
+            defer self.presentation_mutex.unlock();
             if (!self.batch_sink.?.isAttached()) return false;
             if (!self.terminalRenderingEnabled()) {
                 self.notePresentationLayout(.{});
@@ -648,6 +718,9 @@ pub const Runtime = struct {
 
     pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
+            self.lockPresentation("present_external_framebuffer");
+            defer self.presentation_mutex.unlock();
+            if (!self.batch_sink.?.isAttached()) return;
             const start_ns = std.time.nanoTimestamp();
             self.queuePendingBatchPresentationReset();
             self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, self.batch_writer.?.deprecatedWriter());
@@ -656,6 +729,7 @@ pub const Runtime = struct {
             self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
             self.writeExternalFramebufferBatchPresentationStatus(width, height);
             const duration = std.time.nanoTimestamp() - start_ns;
+            self.traceBlockingSpan("batch_present", "present_external_framebuffer_locked", duration);
             self.notePresentDuration(duration);
             return;
         }
@@ -670,21 +744,32 @@ pub const Runtime = struct {
 
     pub fn createRenderer(self: *Runtime, window: core.CoreHandle, renderer: core.CoreHandle) void {
         if (self.batch_sink != null and self.batch_writer != null) {
+            self.lockPresentation("create_renderer");
+            defer self.presentation_mutex.unlock();
             self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+            self.frame_builder.onCreateRenderer(window, renderer);
+            return;
         }
         self.frame_builder.onCreateRenderer(window, renderer);
     }
 
     pub fn destroyRenderer(self: *Runtime, renderer: core.CoreHandle) void {
         if (self.batch_sink != null and self.batch_writer != null) {
+            self.lockPresentation("destroy_renderer");
+            defer self.presentation_mutex.unlock();
             self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+            self.frame_builder.onDestroyRenderer(renderer);
+            return;
         }
         self.frame_builder.onDestroyRenderer(renderer);
     }
 
     pub fn renderBatchPresent(self: *Runtime, renderer: core.CoreHandle) void {
         if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
-        self.pollBatchControl();
+        self.lockPresentation("render_batch_present");
+        defer self.presentation_mutex.unlock();
+        if (!(self.active and self.batch_sink != null and self.batch_writer != null)) return;
+        self.pollBatchControlLocked();
         self.waitForInitialBatchAttach();
         if (!self.shouldPresent()) return;
         if (!self.terminalRenderingEnabled()) {
@@ -706,6 +791,7 @@ pub const Runtime = struct {
         self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
         self.writeBatchPresentationStatus(renderer, &job);
         const duration = std.time.nanoTimestamp() - start_ns;
+        self.traceBlockingSpan("batch_present", "render_batch_present_locked", duration);
         self.notePresentDuration(duration);
     }
 
@@ -738,13 +824,15 @@ pub const Runtime = struct {
         const deadline = std.time.nanoTimestamp() + 100 * std.time.ns_per_ms;
         while (std.time.nanoTimestamp() < deadline) {
             std.Thread.sleep(std.time.ns_per_ms);
-            self.pollBatchControl();
+            self.pollBatchControlLocked();
             if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
         }
     }
 
     pub fn externalFramebufferUploadSize(self: *Runtime, source_w: i32, source_h: i32) PixelSize {
         if (self.batch_sink) |*sink| {
+            self.lockPresentation("external_framebuffer_upload_size");
+            defer self.presentation_mutex.unlock();
             const tty = sink.presentationTty();
             return self.frame_builder.externalFramebufferUploadSize(&tty, source_w, source_h);
         }
@@ -765,12 +853,20 @@ pub const Runtime = struct {
     }
 
     fn updateInputTarget(self: *Runtime) void {
+        self.lockInput("update_input_target");
+        defer self.input_mutex.unlock();
         var parser = &(self.input_parser orelse return);
         const tty = self.tty orelse return;
         parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, self.presentation_layout));
     }
 
     pub fn pollBatchControl(self: *Runtime) void {
+        self.lockPresentation("poll_batch_control");
+        defer self.presentation_mutex.unlock();
+        self.pollBatchControlLocked();
+    }
+
+    fn pollBatchControlLocked(self: *Runtime) void {
         const file = &(self.batch_control orelse return);
         var buf: [1024]u8 = undefined;
         while (true) {
@@ -900,6 +996,8 @@ pub const Runtime = struct {
             },
             .input => |input| {
                 if (!self.input_enabled) return;
+                self.lockInput("apply_batch_control_input");
+                defer self.input_mutex.unlock();
                 var parser = &(self.input_parser orelse return);
                 parser.feed(input.bytes) catch |err| {
                     log.warn("batch input parse failed: {any}", .{err});
@@ -962,6 +1060,8 @@ pub const Runtime = struct {
     }
 
     fn updateBatchInputTargetFromLayout(self: *Runtime, sink: *const RenderBatchSink, relative_layout: presentation_layout_mod.PresentationLayout) void {
+        self.lockInput("update_batch_input_target");
+        defer self.input_mutex.unlock();
         var parser = &(self.input_parser orelse return);
         const rect = sink.presentationRect();
         var layout = presentation_layout_mod.PresentationLayout{};
@@ -1037,7 +1137,7 @@ pub const Runtime = struct {
 
     pub fn rememberQueuedLock(self: *Runtime, texture: core.CoreHandle, rect: ?core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
         if (texture == 0) return;
-        self.queue_mutex.lock();
+        self.lockQueue("remember_queued_lock");
         defer self.queue_mutex.unlock();
         self.queued_lock_captures.put(texture, .{ .rect = rect, .pixels = pixels, .pitch = pitch }) catch |err| {
             log.warn("failed to remember queued lock capture: {any}", .{err});
@@ -1046,23 +1146,23 @@ pub const Runtime = struct {
 
     pub fn takeQueuedLock(self: *Runtime, texture: core.CoreHandle) ?QueuedLockCapture {
         if (texture == 0) return null;
-        self.queue_mutex.lock();
+        self.lockQueue("take_queued_lock");
         defer self.queue_mutex.unlock();
         if (self.queued_lock_captures.fetchRemove(texture)) |entry| return entry.value;
         return null;
     }
 
     pub fn currentQueueDepth(self: *Runtime) usize {
-        self.queue_mutex.lock();
+        self.lockQueue("current_queue_depth");
         defer self.queue_mutex.unlock();
         return self.queue.items.len - self.queue_head;
     }
 
     pub fn enqueueCommand(self: *Runtime, cmd: Command) void {
-        self.queue_mutex.lock();
+        self.lockQueue("enqueue_command");
         defer self.queue_mutex.unlock();
         var owned = cmd;
-        if (isPresentCommand(owned) and self.pending_presents > 0) {
+        if (isPresentCommand(owned) and self.pending_presents > 0 and !self.worker_frame_active) {
             self.dropQueuedFrameLocalsBeforeLatestPresent();
         }
         self.queue.append(self.allocator, owned) catch |err| {
@@ -1084,13 +1184,13 @@ pub const Runtime = struct {
     }
 
     pub fn acquirePayloadBuffer(self: *Runtime, len: usize) ![]u8 {
-        self.queue_mutex.lock();
+        self.lockQueue("acquire_payload_buffer");
         defer self.queue_mutex.unlock();
         return self.payload_pool.acquire(self.allocator, len);
     }
 
     pub fn recycleCommand(self: *Runtime, cmd: *Command) void {
-        self.queue_mutex.lock();
+        self.lockQueue("recycle_command");
         defer self.queue_mutex.unlock();
         self.recycleCommandLocked(cmd);
     }
@@ -1129,6 +1229,7 @@ pub const Runtime = struct {
     }
 
     fn dropQueuedFrameLocalsBeforeLatestPresent(self: *Runtime) void {
+        if (self.worker_frame_active) return;
         var last_present_idx: ?usize = null;
         for (self.queue.items[self.queue_head..], self.queue_head..) |cmd, idx| {
             if (isPresentCommand(cmd)) last_present_idx = idx;
@@ -1193,6 +1294,31 @@ test "external framebuffer present is a frame-local present command" {
     const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
     try std.testing.expect(isFrameLocalCommand(cmd));
     try std.testing.expect(isPresentCommand(cmd));
+}
+
+test "queued replay does not drop present for a frame already started by worker" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const renderer: core.CoreHandle = 0x7777;
+    try runtime.queue.append(runtime.allocator, .{ .render_copy = .{
+        .renderer = renderer,
+        .texture = 0x1234,
+        .src = null,
+        .dst = null,
+    } });
+    try runtime.queue.append(runtime.allocator, .{ .render_present = .{ .renderer = renderer } });
+    runtime.queue_head = 1;
+    runtime.pending_presents = 1;
+    runtime.worker_frame_active = true;
+
+    runtime.enqueueCommand(.{ .render_present = .{ .renderer = renderer } });
+
+    try std.testing.expectEqual(@as(usize, 3), runtime.queue.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runtime.queue_head);
+    try std.testing.expect(isPresentCommand(runtime.queue.items[1]));
+    try std.testing.expect(isPresentCommand(runtime.queue.items[2]));
+    try std.testing.expectEqual(@as(usize, 2), runtime.pending_presents);
 }
 
 test "sync dispatch recycles cloned external framebuffer payload" {
@@ -1307,6 +1433,59 @@ test "batch viewport marks presentation reset pending without immediate flush" {
     try std.testing.expect(runtime.batch_presentation_reset_pending);
     try std.testing.expect(runtime.batch_sink.?.hasPendingBytes() == false);
     try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 12, .rows = 28, .cols = 76 }, runtime.batch_sink.?.presentationRect());
+}
+
+test "app-side input state reads do not apply batch control messages" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[1]);
+    runtime.batch_control = .{ .handle = pipe[0] };
+    setNonblocking(pipe[0]);
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 6, .col = 11, .rows = 30, .cols = 80 });
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+
+    const control_writer = std.fs.File{ .handle = pipe[1] };
+    try control_writer.writeAll(
+        "{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":7,\"col\":12,\"rows\":28,\"cols\":76},\"aspect\":\"fit\"}\n",
+    );
+
+    _ = runtime.terminalMouseState();
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 6, .col = 11, .rows = 30, .cols = 80 }, runtime.batch_sink.?.presentationRect());
+
+    runtime.pollBatchControl();
+    try std.testing.expectEqual(render_batch_protocol.PresentationRectCells{ .row = 7, .col = 12, .rows = 28, .cols = 76 }, runtime.batch_sink.?.presentationRect());
+}
+
+const MouseStateReadProbe = struct {
+    runtime: *Runtime,
+    done: *std.atomic.Value(bool),
+};
+
+fn readMouseStateForProbe(probe: MouseStateReadProbe) void {
+    _ = probe.runtime.terminalMouseState();
+    probe.done.store(true, .release);
+}
+
+test "app-side input state reads do not wait on presentation work" {
+    // Timing-based regression: if input state reads still share the
+    // presentation mutex, this thread remains blocked while the test holds it.
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+
+    var done = std.atomic.Value(bool).init(false);
+    runtime.presentation_mutex.lock();
+    const thread = try std.Thread.spawn(.{}, readMouseStateForProbe, .{MouseStateReadProbe{ .runtime = &runtime, .done = &done }});
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try std.testing.expect(done.load(.acquire));
+    runtime.presentation_mutex.unlock();
+    thread.join();
 }
 
 test "batch viewport immediately reprojects retained presentation when writer is available" {
@@ -1437,6 +1616,27 @@ test "external framebuffer batch present reports presentation status" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40}") != null);
+}
+
+test "external framebuffer batch present skips detached sink" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
+    runtime.batch_sink.?.detach();
+
+    var pixels = [_]u8{255} ** (4 * 4 * 4);
+
+    setNonblocking(pipe[0]);
+    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
+
+    var buf: [128]u8 = undefined;
+    try std.testing.expectError(error.WouldBlock, std.posix.read(pipe[0], &buf));
 }
 
 test "batch present uses host terminal pixels for effective fitted rect" {
@@ -1622,9 +1822,15 @@ fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_
 fn workerMain(runtime: *Runtime) void {
     log.info("queued replay worker started", .{});
     while (true) {
-        runtime.queue_mutex.lock();
+        runtime.pollBatchControl();
+        runtime.lockQueue("worker_take_command");
         while (!runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
-            runtime.queue_cond.wait(&runtime.queue_mutex);
+            runtime.queue_cond.timedWait(&runtime.queue_mutex, worker_control_poll_interval_ns) catch {};
+            if (!runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
+                runtime.queue_mutex.unlock();
+                runtime.pollBatchControl();
+                runtime.lockQueue("worker_recheck_queue");
+            }
         }
         if (runtime.shutdown_worker and runtime.queue_head >= runtime.queue.items.len) {
             runtime.queue_mutex.unlock();
@@ -1632,12 +1838,22 @@ fn workerMain(runtime: *Runtime) void {
             return;
         }
         var cmd = runtime.queue.items[runtime.queue_head];
+        const cmd_is_present = isPresentCommand(cmd);
+        const cmd_is_frame_local = isFrameLocalCommand(cmd);
         runtime.queue_head += 1;
-        if (isPresentCommand(cmd) and runtime.pending_presents > 0) runtime.pending_presents -= 1;
+        if (cmd_is_present) {
+            if (runtime.pending_presents > 0) runtime.pending_presents -= 1;
+        }
+        if (cmd_is_frame_local) {
+            runtime.worker_frame_active = true;
+        }
         runtime.maybeCompactQueue();
         runtime.queue_mutex.unlock();
         core_dispatch.handleCommand(runtime, cmd);
-        runtime.recycleCommand(&cmd);
+        runtime.lockQueue("worker_recycle_command");
+        if (cmd_is_present) runtime.worker_frame_active = false;
+        runtime.recycleCommandLocked(&cmd);
+        runtime.queue_mutex.unlock();
     }
 }
 

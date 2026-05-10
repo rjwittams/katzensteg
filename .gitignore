@@ -22,3 +22,4 @@ test-results/
 /ks-min
 /feta-linux-handoff.md
 /katzensteg-linux-build.patch
+/vendor/libxev

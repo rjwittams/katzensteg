@@ -6,36 +6,57 @@ const real_sdl = @import("real_sdl.zig");
 
 pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
     if (!rt.input_enabled) return false;
-    rt.pollBatchControl();
-    var parser = &(rt.input_parser orelse return false);
-    const input_event = parser.pop() orelse return false;
-    if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
-    const out = event orelse return true;
-    fillSdlEvent(out, input_event);
-    noteCursorPositionFromSdlEvent(rt, out);
+    var cursor_event: ?sdl.SDL_Event = null;
+    const popped = blk: {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        var parser = &(rt.input_parser orelse break :blk false);
+        const input_event = parser.pop() orelse break :blk false;
+        if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
+        if (event) |out| {
+            fillSdlEvent(out, input_event);
+            cursor_event = out.*;
+        }
+        break :blk true;
+    };
+    if (!popped) return false;
+    if (cursor_event) |captured| noteCursorPositionFromSdlEvent(rt, &captured);
     return true;
 }
 
 pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, min_type: u32, max_type: u32) bool {
     if (!rt.input_enabled) return false;
-    rt.pollBatchControl();
-    var parser = &(rt.input_parser orelse return false);
-    const input_event = parser.popSdlRange(min_type, max_type) orelse return false;
-    if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
-    const out = event orelse return true;
-    fillSdlEvent(out, input_event);
-    noteCursorPositionFromSdlEvent(rt, out);
+    var cursor_event: ?sdl.SDL_Event = null;
+    const popped = blk: {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        var parser = &(rt.input_parser orelse break :blk false);
+        const input_event = parser.popSdlRange(min_type, max_type) orelse break :blk false;
+        if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
+        if (event) |out| {
+            fillSdlEvent(out, input_event);
+            cursor_event = out.*;
+        }
+        break :blk true;
+    };
+    if (!popped) return false;
+    if (cursor_event) |captured| noteCursorPositionFromSdlEvent(rt, &captured);
     return true;
 }
 
 pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void {
-    if (eventIsMouse(event.*)) rt.mouse_ownership.claimRealWindow();
+    if (eventIsMouse(event.*)) {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        rt.mouse_ownership.claimRealWindow();
+    }
     noteCursorPositionFromSdlEvent(rt, event);
 }
 
 pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, real_count: c_int, numkeys: ?*c_int) ?[*]const u8 {
     if (!rt.input_enabled) return real_state;
-    rt.pollBatchControl();
+    rt.input_mutex.lock();
+    defer rt.input_mutex.unlock();
     var parser = &(rt.input_parser orelse return real_state);
     @memset(&rt.keyboard_state, 0);
     if (real_state) |keys| {
@@ -195,4 +216,57 @@ test "claimed input keeps SDL window focused locally" {
     try std.testing.expect(shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_LEAVE));
     try std.testing.expect(!shouldSuppressClaimedWindowEvent(true, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_GAINED));
     try std.testing.expect(!shouldSuppressClaimedWindowEvent(false, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
+}
+
+const PopProbe = struct {
+    rt: *runtime_mod.Runtime,
+    done: *std.atomic.Value(bool),
+};
+
+fn popInputEventProbe(probe: PopProbe) void {
+    var event: sdl.SDL_Event = undefined;
+    _ = popInputEvent(probe.rt, &event);
+    probe.done.store(true, .release);
+}
+
+const MouseStateProbe = struct {
+    rt: *runtime_mod.Runtime,
+    done: *std.atomic.Value(bool),
+};
+
+fn readMouseStateProbe(probe: MouseStateProbe) void {
+    _ = probe.rt.terminalMouseState();
+    probe.done.store(true, .release);
+}
+
+test "SDL input pop does not hold input mutex while queueing cursor position" {
+    // Timing-based regression: if cursor dispatch still happens under
+    // input_mutex, the mouse-state reader cannot complete while queue_mutex is
+    // held by the test.
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+
+    rt.input_enabled = true;
+    rt.intercept_mode = .queued_replay;
+    rt.input_parser = input.TerminalInputParser.init(rt.allocator);
+    rt.input_parser.?.setTarget(.{ .cols = 80, .rows = 24, .w = 640, .h = 480 });
+    try rt.input_parser.?.feed("\x1b[<35;11;11M");
+
+    var pop_done = std.atomic.Value(bool).init(false);
+    var read_done = std.atomic.Value(bool).init(false);
+
+    rt.queue_mutex.lock();
+    const pop_thread = try std.Thread.spawn(.{}, popInputEventProbe, .{PopProbe{ .rt = &rt, .done = &pop_done }});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+
+    const read_thread = try std.Thread.spawn(.{}, readMouseStateProbe, .{MouseStateProbe{ .rt = &rt, .done = &read_done }});
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    const input_read_completed_while_queue_blocked = read_done.load(.acquire);
+
+    rt.queue_mutex.unlock();
+    pop_thread.join();
+    read_thread.join();
+
+    try std.testing.expect(pop_done.load(.acquire));
+    try std.testing.expect(input_read_completed_while_queue_blocked);
 }
