@@ -1108,7 +1108,12 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
     if (argv.len == 0) return 64;
 
     const outer = initialOuterRect(options.terminal);
-    try renderChrome(writer, .{ .outer = outer, .title = options.title, .focused = true, .terminal = options.terminal });
+    try renderChrome(writer, .{
+        .outer = outer,
+        .title = options.title,
+        .focused = true,
+        .terminal = windowAreaForTerminal(options.terminal),
+    });
 
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Pipe;
@@ -1759,14 +1764,17 @@ fn writeClipCellsField(writer: anytype, clip: ?render_batch_protocol.Presentatio
 /// visible intersection when partial. Returns a zero-sized rect when fully
 /// off-screen, which the producer interprets as "emit no placements".
 fn computeClipForRect(rect: render_batch_protocol.PresentationRectCells, terminal: TerminalSize) ?render_batch_protocol.PresentationRectCells {
+    // Use window-area bounds, not the full terminal: the status band reserves
+    // the bottom row, so window placements are clipped above it.
+    const max_rows = rowsForWindows(terminal);
     const rect_end_row = rect.row + rect.rows - 1;
     const rect_end_col = rect.col + rect.cols - 1;
-    if (rect.row >= 1 and rect.col >= 1 and rect_end_row <= terminal.rows and rect_end_col <= terminal.cols) {
+    if (rect.row >= 1 and rect.col >= 1 and rect_end_row <= max_rows and rect_end_col <= terminal.cols) {
         return null;
     }
     const top = @max(rect.row, 1);
     const left = @max(rect.col, 1);
-    const bottom = @min(rect_end_row, terminal.rows);
+    const bottom = @min(rect_end_row, max_rows);
     const right = @min(rect_end_col, terminal.cols);
     if (bottom < top or right < left) {
         return render_batch_protocol.PresentationRectCells{ .row = 1, .col = 1, .rows = 0, .cols = 0 };
@@ -2231,7 +2239,7 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
             .outer = session.window.outer,
             .title = session.profile_name,
             .focused = session_index == focused_index,
-            .terminal = terminal,
+            .terminal = windowAreaForTerminal(terminal),
         });
     }
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
@@ -2327,18 +2335,34 @@ pub fn contentRectForOuter(outer: Rect) Rect {
     };
 }
 
+/// Effective rows available for window placement: the bottom terminal row is
+/// reserved for the status band, so windows are bounded to rows 1..term.rows-1.
+pub fn rowsForWindows(term: TerminalSize) i32 {
+    return @max(1, term.rows - 1);
+}
+
+/// Same as the input terminal but with `rows` reduced to the window area.
+/// Use this when handing a "terminal" bound to anything that should respect
+/// the status band reservation (chrome clipping, etc.).
+pub fn windowAreaForTerminal(term: TerminalSize) TerminalSize {
+    var result = term;
+    result.rows = rowsForWindows(term);
+    return result;
+}
+
 pub fn clampOuterRect(rect: Rect, terminal: TerminalSize) Rect {
     var out = rect;
-    out.rows = std.math.clamp(out.rows, 1, @max(1, terminal.rows));
+    const max_rows = rowsForWindows(terminal);
+    out.rows = std.math.clamp(out.rows, 1, max_rows);
     out.cols = std.math.clamp(out.cols, 1, @max(1, terminal.cols));
 
     // Allow the window to extend past terminal edges, but keep at least one
     // visible row and one visible col so the user can still grab it.
-    // Top-left must be ≤ terminal.{rows,cols}; bottom-right (row+rows-1,
+    // Top-left must be ≤ window-area.{rows,cols}; bottom-right (row+rows-1,
     // col+cols-1) must be ≥ 1.
     const min_row = 2 - out.rows;
     const min_col = 2 - out.cols;
-    out.row = std.math.clamp(out.row, min_row, terminal.rows);
+    out.row = std.math.clamp(out.row, min_row, max_rows);
     out.col = std.math.clamp(out.col, min_col, terminal.cols);
     return out;
 }
@@ -2431,6 +2455,20 @@ test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":2,\"rows\":8,\"cols\":30}") != null);
 }
 
+test "wm reserves the status band row for windows" {
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+    // The window-area excludes the status band row.
+    try std.testing.expectEqual(@as(i32, 23), rowsForWindows(terminal));
+    // A window whose top is pushed below the window area gets clamped at the
+    // last window-area row (its bottom extends off-screen, where clip_cells
+    // and chrome clipping take over).
+    const clamped = clampOuterRect(.{ .row = 100, .col = 1, .rows = 5, .cols = 20 }, terminal);
+    try std.testing.expect(clamped.row <= 23);
+    // clip_cells stops at the window area (max row 23), not at terminal.rows (24).
+    const clip = computeClipForRect(.{ .row = 23, .col = 1, .rows = 5, .cols = 20 }, terminal).?;
+    try std.testing.expect(clip.row + clip.rows - 1 <= 23);
+}
+
 test "wm computes clip_cells for partly-off-screen rect" {
     const terminal = TerminalSize{ .rows = 24, .cols = 80 };
 
@@ -2446,9 +2484,10 @@ test "wm computes clip_cells for partly-off-screen rect" {
         computeClipForRect(.{ .row = -1, .col = 2, .rows = 10, .cols = 30 }, terminal),
     );
 
-    // Bottom partly off-screen.
+    // Bottom partly off-screen — bottom row of terminal is reserved for status
+    // band, so the visible bottom is row 23 (terminal.rows - 1).
     try std.testing.expectEqual(
-        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 20, .col = 2, .rows = 5, .cols = 30 }),
+        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 20, .col = 2, .rows = 4, .cols = 30 }),
         computeClipForRect(.{ .row = 20, .col = 2, .rows = 10, .cols = 30 }, terminal),
     );
 
