@@ -91,7 +91,37 @@ git add src/katzensteg/render_batch_sink.zig src/katzensteg/frame_builder.zig sr
 git commit -m "render_batch_sink+frame_builder: apply optional clip_cells to placement emission"
 ```
 
-### Task 3: Use `clip_cells` in the WM
+### Task 3: Relax `clampOuterRect` to allow partly-off-screen windows
+
+**Files:**
+- Modify: `src/katzensteg/wm_host.zig`
+
+Prerequisite for clip_cells to be meaningful: today `clampOuterRect` constrains every window to fit *entirely* inside the terminal, so partial-off-screen geometry never exists.
+
+- [ ] **Step 1: Write the failing test**
+
+`wm_host_test`: assert that `clampOuterRect({row: -3, col: -2, rows: 10, cols: 20}, terminal=24x80)` keeps a partial off-screen position (e.g. `row` clamped only so at least 1 row remains visible, not pushed back to `row = 1`).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `zig build test`. Expected: fail.
+
+- [ ] **Step 3: Relax the clamp**
+
+Replace the "must fit fully" rule with a "minimum 1 row + 1 col visible" rule. The window's bottom-right edge must satisfy `row + rows - 1 >= 1` and `col + cols - 1 >= 1`; the top-left must satisfy `row <= terminal.rows` and `col <= terminal.cols`. Size clamps stay (rows/cols still ≤ terminal dimensions, ≥ 1).
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `zig build test`. Expected: pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/katzensteg/wm_host.zig
+git commit -m "wm_host: allow windows to be partly off-screen (clip_cells prereq)"
+```
+
+### Task 4: Use `clip_cells` in the WM
 
 **Files:**
 - Modify: `src/katzensteg/wm_host.zig`

@@ -1610,6 +1610,7 @@ const AttachOptions = struct {
     z_base: i32 = 0,
     terminal: ?TerminalSize = null,
     occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
     upload: render_batch_protocol.UploadPolicy,
@@ -1626,6 +1627,7 @@ fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writeTerminalGeometryFields(writer, options.terminal);
     try writeOcclusionRectsField(writer, options.occlusion_rects);
+    try writeClipCellsField(writer, options.clip_cells);
     try writer.writeAll(",\"id_ranges\":{\"image\":[[");
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
@@ -1647,6 +1649,7 @@ const ViewportOptions = struct {
     z_base: i32 = 0,
     terminal: ?TerminalSize = null,
     occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
 };
 
 fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
@@ -1659,6 +1662,7 @@ fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
     if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writeTerminalGeometryFields(writer, options.terminal);
     try writeOcclusionRectsField(writer, options.occlusion_rects);
+    try writeClipCellsField(writer, options.clip_cells);
     try writer.writeAll("}\n");
 }
 
@@ -1679,6 +1683,11 @@ fn writeOcclusionRectsField(writer: anytype, occlusion_rects: []const render_bat
         try writer.print("{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
     }
     try writer.writeAll("]");
+}
+
+fn writeClipCellsField(writer: anytype, clip: ?render_batch_protocol.PresentationRectCells) !void {
+    const rect = clip orelse return;
+    try writer.print(",\"clip_cells\":{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
 }
 
 fn tryWriteViewportControl(writer: anytype, options: ViewportOptions) bool {
