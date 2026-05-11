@@ -984,19 +984,28 @@ pub const Runtime = struct {
                     return;
                 };
                 sink.setClipCells(viewport.clip_cells);
+                var reprojected_flag = false;
                 if (presentation_changed) {
                     if (self.batch_writer) |writer| {
                         if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
                             self.batch_presentation_reset_pending = false;
+                            reprojected_flag = true;
                         }
                     }
                 }
                 const applied = sink.presentationRect();
                 self.updateBatchInputTarget(sink);
-                log.info(
-                    "batch viewport applied rect=({d},{d} {d}x{d}) aspect={s}",
-                    .{ applied.row, applied.col, applied.cols, applied.rows, @tagName(sink.presentationAspect()) },
-                );
+                if (viewport.clip_cells) |clip| {
+                    log.info(
+                        "batch viewport applied rect=({d},{d} {d}x{d}) clip=({d},{d} {d}x{d}) reproject={any}",
+                        .{ applied.row, applied.col, applied.cols, applied.rows, clip.row, clip.col, clip.cols, clip.rows, reprojected_flag },
+                    );
+                } else {
+                    log.info(
+                        "batch viewport applied rect=({d},{d} {d}x{d}) clip=none reproject={any}",
+                        .{ applied.row, applied.col, applied.cols, applied.rows, reprojected_flag },
+                    );
+                }
             },
             .input => |input| {
                 if (!self.input_enabled) return;

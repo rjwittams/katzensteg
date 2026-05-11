@@ -4,7 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type MessageHandle, type OverlayHandle, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type MessageHandle, type OverlayHandle, type SurfaceRect, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	FRAME_OVERHEAD_COLS,
+	FRAME_OVERHEAD_ROWS,
+	VIEWPORT_COL_OFFSET,
+	VIEWPORT_ROW_OFFSET,
+	clipCellsForBody,
+	messageLogicalBodyRect,
+	type RectCells,
+	statusLineVisible,
+} from "./katzensteg-geometry.js";
 
 const WINDOW_ID = "main" as const;
 // Each producer needs its own kitty image/placement id range — the terminal's
@@ -41,10 +51,6 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const DEFAULT_UPLOAD_HIGH_WATER = 10 * 1024 * 1024;
 const DEBUG_LOG_PATH = "/tmp/katzensteg-pi-extension.log";
 
-const VIEWPORT_ROW_OFFSET = 3; // top border + title + status
-const VIEWPORT_COL_OFFSET = 1; // left border
-const FRAME_OVERHEAD_ROWS = 4; // top border + title + status + bottom border
-const FRAME_OVERHEAD_COLS = 2; // left/right borders
 const PANEL_MARGIN = 1;
 const PANEL_ASPECT: Aspect = "fit";
 // Katzensteg's full-frame composite uses z=100. For inline panels we neutralize
@@ -78,14 +84,18 @@ interface PanelDetails {
 	size: SizePresetName;
 }
 
-interface RectCells {
-	row: number;
-	col: number;
+type OverlayRect = SurfaceRect;
+
+interface TerminalCells {
 	rows: number;
 	cols: number;
 }
 
-interface OverlayRect extends RectCells {}
+interface ViewportSync {
+	rect: RectCells;
+	clip: RectCells | undefined;
+	terminal: TerminalCells;
+}
 
 interface SizePreset {
 	name: SizePresetName;
@@ -113,6 +123,8 @@ interface DetachedMessage {
 interface AttachOptions {
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
+	clipCells?: RectCells;
+	terminalCells?: TerminalCells;
 	aspect: Aspect;
 	zBase: number;
 	imageIds: [number, number];
@@ -123,6 +135,8 @@ interface AttachOptions {
 interface ViewportOptions {
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
+	clipCells?: RectCells;
+	terminalCells?: TerminalCells;
 	aspect: Aspect;
 	zBase: number;
 }
@@ -252,6 +266,7 @@ class PanelController {
 	private closeTimer: NodeJS.Timeout | undefined;
 	private latestOverlayRect: OverlayRect | undefined;
 	private latestViewport: RectCells | undefined;
+	private latestSync: ViewportSync | undefined;
 	private status = "starting";
 	private error: string | undefined;
 
@@ -299,7 +314,7 @@ class PanelController {
 		this.producer = this.createProducer(profile);
 		this.producer.start();
 		this.overlay?.invalidate();
-		if (this.latestViewport) this.scheduleViewportSync(this.currentGeneration, this.latestViewport);
+		if (this.latestSync) this.scheduleViewportSync(this.currentGeneration, this.latestSync);
 	}
 
 	render(width: number, theme: Theme): string[] {
@@ -311,30 +326,45 @@ class PanelController {
 			viewport: this.latestViewport,
 			status: this.status,
 			error: this.error,
-			panelRows: this.latestOverlayRect?.rows ?? fallbackPanelRowsForSize(this.size),
+			panelRows: this.latestOverlayRect?.totalRows ?? fallbackPanelRowsForSize(this.size),
 			zBase: FLOATING_Z_BASE,
 		});
 	}
 
 	onOverlayRect(generation: number, rect: OverlayRect | undefined): void {
 		if (this.closed || this.closing || generation !== this.currentGeneration || !rect) return;
-		const viewport = innerViewport(rect);
-		debugLog(`overlay.rect gen=${generation} raw=${formatRect(rect)} viewport=${formatRect(viewport)}`);
-		if (!viewport) return;
+		const body = messageLogicalBodyRect(rect);
+		if (!body) return;
+		const clip = clipCellsForBody(body, rect);
+		debugLog(`overlay.rect gen=${generation} raw=${formatRect(rect)} body=${formatRect(body)} clip=${formatRect(clip)}`);
 		this.latestOverlayRect = rect;
-		this.latestViewport = viewport;
+		this.latestViewport = body;
 		this.overlay?.invalidate();
-		this.scheduleViewportSync(generation, viewport);
+		const sync: ViewportSync = {
+			rect: body,
+			clip,
+			// terminal_cells.rows here is an approximation (overlay bottom edge,
+			// not the actual terminal height) — PanelController doesn't carry a
+			// TUI reference. This is benign in practice: the producer only uses
+			// terminal_cells.rows to derive a pixel-per-cell hint via
+			// scaledPixelExtent, and only when terminal_px is also supplied. We
+			// don't send terminal_px, so the field is decorative for floating
+			// overlays. If we ever start sending terminal_px (or scaling becomes
+			// terminal-relative for other reasons), wire the real height through.
+			terminal: { rows: rect.row + rect.rows, cols: rect.cols },
+		};
+		this.latestSync = sync;
+		this.scheduleViewportSync(generation, sync);
 	}
 
-	private scheduleViewportSync(generation: number, viewport: RectCells): void {
+	private scheduleViewportSync(generation: number, sync: ViewportSync): void {
 		this.overlay?.afterNextRender(() => {
 			if (this.closed || this.closing || generation !== this.currentGeneration) {
 				debugLog(`viewport.sync stale gen=${generation} current=${this.currentGeneration}`);
 				return;
 			}
-			debugLog(`viewport.sync gen=${generation} viewport=${formatRect(viewport)}`);
-			this.producer.setViewport(viewport);
+			debugLog(`viewport.sync gen=${generation} viewport=${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
+			this.producer.setViewport(sync);
 		});
 	}
 
@@ -569,6 +599,11 @@ interface InlinePanelTui {
 	writeRaw(data: string): void;
 	afterNextRender(callback: () => void): void;
 	requestRender(): void;
+	// Pi's TUI exposes terminal dimensions on its public `terminal` property.
+	// We need the row count to compute clip_cells correctly when an inline
+	// message is partially or fully scrolled out of the viewport; rect.cols
+	// already mirrors terminal.columns.
+	terminal: { rows: number; columns: number };
 }
 
 class InlinePanelController implements ActivePanel {
@@ -581,6 +616,7 @@ class InlinePanelController implements ActivePanel {
 	private cleanupSeen = false;
 	private latestRect: OverlayRect | undefined;
 	private latestViewport: RectCells | undefined;
+	private latestSync: ViewportSync | undefined;
 	private status = "starting";
 	private error: string | undefined;
 	private closeTimer: NodeJS.Timeout | undefined;
@@ -604,7 +640,12 @@ class InlinePanelController implements ActivePanel {
 			this.startScheduled = true;
 			this.tui.afterNextRender(() => this.start());
 		}
-		const panelRows = this.latestRect?.rows ?? fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]);
+		// The inline component's line count must be stable across rect changes:
+		// pi-tui handles scroll clipping itself, and rendering fewer lines when
+		// the message partly scrolls off the top would shrink the buffered
+		// surface (and the producer's body rect with it). Use the configured
+		// preset height, never the visible rect height.
+		const panelRows = fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]);
 		return renderPanelChrome(width, this.theme, {
 			mode: this.details.mode,
 			profile: this.details.profile,
@@ -648,19 +689,49 @@ class InlinePanelController implements ActivePanel {
 	private onRectChange(rect: OverlayRect | undefined): void {
 		if (this.closed || this.closing) return;
 		if (!rect) {
+			// Surface scrolled fully off-screen. If we already attached, send a
+			// zero-clip at the last known logical body so the producer stops
+			// emitting placements; otherwise just clear our render state.
 			this.latestRect = undefined;
 			this.latestViewport = undefined;
+			if (this.latestSync) {
+				// row/col on a zero-sized clip are irrelevant — the producer
+				// emits no placements either way — but we anchor at the body's
+				// own origin to match the convention used elsewhere (the WM's
+				// computeClipForRect does the same).
+				const zeroSync: ViewportSync = {
+					rect: this.latestSync.rect,
+					clip: { row: this.latestSync.rect.row, col: this.latestSync.rect.col, rows: 0, cols: 0 },
+					terminal: this.latestSync.terminal,
+				};
+				this.latestSync = zeroSync;
+				// Captured `zeroSync` is intentionally the value at scheduling
+				// time. afterNextRender callbacks fire in scheduling order, so
+				// if a subsequent onRectChange schedules another setViewport
+				// before this one fires, the producer ends up at the latest
+				// state regardless (KatzenstegProducer.setViewport dedupes via
+				// sameSync against latestSyncSent, so any intermediate replay
+				// of a stale value is also a cheap no-op write).
+				this.tui.afterNextRender(() => {
+					if (this.closed || this.closing) return;
+					this.producer.setViewport(zeroSync);
+				});
+			}
 			this.tui.requestRender();
 			return;
 		}
-		const viewport = innerViewport(rect);
-		if (!viewport) return;
+		const body = messageLogicalBodyRect(rect);
+		if (!body) return;
+		const clip = clipCellsForBody(body, rect);
+		const terminal: TerminalCells = { rows: this.tui.terminal.rows, cols: this.tui.terminal.columns };
+		const sync: ViewportSync = { rect: body, clip, terminal };
 		this.latestRect = rect;
-		this.latestViewport = viewport;
-		debugLog(`inline.rect ${formatRect(rect)} viewport=${formatRect(viewport)}`);
+		this.latestViewport = body;
+		this.latestSync = sync;
+		debugLog(`inline.rect ${formatRect(rect)} body=${formatRect(body)} clip=${formatRect(clip)}`);
 		this.tui.afterNextRender(() => {
 			if (this.closed || this.closing) return;
-			this.producer.setViewport(viewport);
+			this.producer.setViewport(sync);
 		});
 		this.tui.requestRender();
 	}
@@ -678,10 +749,27 @@ class InlinePanelController implements ActivePanel {
 			this.tui.requestRender();
 			return;
 		}
-		this.status = `streaming #${batch.seq}`;
 		const bytes = orderedTerminalChunks(batch).join("");
+		debugLog(
+			`inline.frame seq=${batch.seq} d=${batch.groups.deletes.length} u=${batch.groups.uploads.length} p=${batch.groups.placements.length} a=${batch.groups.after.length} bytes=${bytes.length} clip=${formatRect(this.latestSync?.clip)}`,
+		);
+		// Always flush producer bytes — they go via writeRaw and bypass pi-tui's
+		// buffer, so they never trigger redraws.
 		if (bytes.length > 0) this.tui.writeRaw(bytes);
-		this.tui.requestRender();
+		// Only mutate the status line (chrome row 2) and request a re-render
+		// when the status line is actually inside the viewport. If it's scrolled
+		// above the top, changing it causes pi-tui's diff to land at
+		// firstChanged < viewportTop, which forces a clearing full redraw — and
+		// the screen clear takes every kitty placement on screen with it,
+		// causing all producers' images to flicker.
+		if (this.statusLineVisible()) {
+			this.status = `streaming #${batch.seq}`;
+			this.tui.requestRender();
+		}
+	}
+
+	private statusLineVisible(): boolean {
+		return statusLineVisible(this.latestRect);
 	}
 
 	private onDetached(message: DetachedMessage): void {
@@ -730,12 +818,12 @@ interface ProducerCallbacks {
 
 interface ProducerConnection {
 	start(): void;
-	setViewport(viewport: RectCells): void;
+	setViewport(sync: ViewportSync): void;
 	stop(reason: string): void;
 }
 
 class LayoutOnlyProducer implements ProducerConnection {
-	private lastViewport: RectCells | undefined;
+	private latestSync: ViewportSync | undefined;
 
 	constructor(private readonly callbacks: ProducerCallbacks) {}
 
@@ -744,11 +832,11 @@ class LayoutOnlyProducer implements ProducerConnection {
 		this.callbacks.onStatus("layout-only");
 	}
 
-	setViewport(viewport: RectCells): void {
-		if (sameRect(this.lastViewport, viewport)) return;
-		this.lastViewport = viewport;
-		debugLog(`producer.layout.viewport ${formatRect(viewport)}`);
-		this.callbacks.onStatus(`layout viewport ${formatRect(viewport)}`);
+	setViewport(sync: ViewportSync): void {
+		if (sameSync(this.latestSync, sync)) return;
+		this.latestSync = sync;
+		debugLog(`producer.layout.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
+		this.callbacks.onStatus(`layout viewport ${formatRect(sync.rect)}`);
 	}
 
 	stop(reason: string): void {
@@ -760,7 +848,7 @@ class KatzenstegProducer implements ProducerConnection {
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private carry = "";
 	private attached = false;
-	private lastViewportSent: RectCells | undefined;
+	private latestSyncSent: ViewportSync | undefined;
 	private killTimer: NodeJS.Timeout | undefined;
 	private readonly uploadDir = mkdtempSync(path.join(os.tmpdir(), "katzensteg-pi-"));
 	private readonly uploadPath = path.join(this.uploadDir, "embed-upload.rgba");
@@ -800,21 +888,23 @@ class KatzenstegProducer implements ProducerConnection {
 			if (this.killTimer) clearTimeout(this.killTimer);
 			this.child = undefined;
 			this.attached = false;
-			this.lastViewportSent = undefined;
+			this.latestSyncSent = undefined;
 			this.callbacks.onStatus(signal ? `exited ${signal}` : `exited ${code ?? 0}`);
 		});
 	}
 
-	setViewport(viewport: RectCells): void {
+	setViewport(sync: ViewportSync): void {
 		if (!this.child?.stdin) {
-			debugLog(`producer.live.viewport skipped no child viewport=${formatRect(viewport)}`);
+			debugLog(`producer.live.viewport skipped no child viewport=${formatRect(sync.rect)}`);
 			return;
 		}
 		if (!this.attached) {
-			debugLog(`producer.live.attach ${formatRect(viewport)}`);
+			debugLog(`producer.live.attach ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
 			this.writeControl(makeAttachMessage({
 				windowId: WINDOW_ID,
-				rectCells: viewport,
+				rectCells: sync.rect,
+				clipCells: sync.clip,
+				terminalCells: sync.terminal,
 				aspect: PANEL_ASPECT,
 				zBase: this.zBase,
 				imageIds: this.imageIds,
@@ -822,17 +912,24 @@ class KatzenstegProducer implements ProducerConnection {
 				upload: { profile: "file_whole", path: this.uploadPath, highWater: DEFAULT_UPLOAD_HIGH_WATER },
 			}));
 			this.attached = true;
-			this.lastViewportSent = viewport;
+			this.latestSyncSent = sync;
 			this.callbacks.onStatus("attached");
 			return;
 		}
-		if (sameRect(this.lastViewportSent, viewport)) {
-			debugLog(`producer.live.viewport no-op ${formatRect(viewport)}`);
+		if (sameSync(this.latestSyncSent, sync)) {
+			debugLog(`producer.live.viewport no-op ${formatRect(sync.rect)}`);
 			return;
 		}
-		debugLog(`producer.live.viewport ${formatRect(viewport)}`);
-		this.writeControl(makeViewportMessage({ windowId: WINDOW_ID, rectCells: viewport, aspect: PANEL_ASPECT, zBase: this.zBase }));
-		this.lastViewportSent = viewport;
+		debugLog(`producer.live.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
+		this.writeControl(makeViewportMessage({
+			windowId: WINDOW_ID,
+			rectCells: sync.rect,
+			clipCells: sync.clip,
+			terminalCells: sync.terminal,
+			aspect: PANEL_ASPECT,
+			zBase: this.zBase,
+		}));
+		this.latestSyncSent = sync;
 		this.callbacks.onStatus("viewport");
 	}
 
@@ -855,7 +952,7 @@ class KatzenstegProducer implements ProducerConnection {
 			}, 1000);
 		}
 		this.attached = false;
-		this.lastViewportSent = undefined;
+		this.latestSyncSent = undefined;
 	}
 
 	private writeControl(message: string): void {
@@ -950,20 +1047,13 @@ function fallbackPanelRowsForSize(size: SizePreset): number {
 	return typeof size.height === "number" ? size.height : 20;
 }
 
-function innerViewport(rect: OverlayRect): RectCells | undefined {
-	const row = rect.row + 1 + VIEWPORT_ROW_OFFSET;
-	const col = rect.col + 1 + VIEWPORT_COL_OFFSET;
-	const rows = rect.rows - FRAME_OVERHEAD_ROWS;
-	const cols = rect.cols - FRAME_OVERHEAD_COLS;
-	if (rows < 2 || cols < 2) return undefined;
-	return { row, col, rows, cols };
-}
-
 function makeAttachMessage(options: AttachOptions): string {
 	return JSON.stringify({
 		type: "attach",
 		window_id: options.windowId,
 		rect_cells: options.rectCells,
+		...(options.clipCells === undefined ? {} : { clip_cells: options.clipCells }),
+		...(options.terminalCells === undefined ? {} : { terminal_cells: options.terminalCells }),
 		aspect: options.aspect,
 		z_base: options.zBase,
 		id_ranges: { image: [options.imageIds], placement: [options.placementIds] },
@@ -980,6 +1070,8 @@ function makeViewportMessage(options: ViewportOptions): string {
 		type: "viewport",
 		window_id: options.windowId,
 		rect_cells: options.rectCells,
+		...(options.clipCells === undefined ? {} : { clip_cells: options.clipCells }),
+		...(options.terminalCells === undefined ? {} : { terminal_cells: options.terminalCells }),
 		aspect: options.aspect,
 		z_base: options.zBase,
 	}) + "\n";
@@ -1056,8 +1148,22 @@ function nonEmptyEnv(value: string | undefined): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function sameRect(a: RectCells | undefined, b: RectCells): boolean {
-	return !!a && a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+function sameRect(a: RectCells, b: RectCells): boolean {
+	return a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+}
+
+function sameOptionalRect(a: RectCells | undefined, b: RectCells | undefined): boolean {
+	if (!a && !b) return true;
+	if (!a || !b) return false;
+	return sameRect(a, b);
+}
+
+function sameSync(a: ViewportSync | undefined, b: ViewportSync): boolean {
+	if (!a) return false;
+	return sameRect(a.rect, b.rect)
+		&& sameOptionalRect(a.clip, b.clip)
+		&& a.terminal.rows === b.terminal.rows
+		&& a.terminal.cols === b.terminal.cols;
 }
 
 function formatRect(rect: RectCells | undefined): string {

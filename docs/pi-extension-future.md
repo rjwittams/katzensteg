@@ -16,35 +16,33 @@ Currently, real SDL windows are visible per the producer profile. We want the de
 2. **Phase 2**: resize real windows to the "presented" cell-derived pixel size so the producer renders at exactly the size we display. Avoids wasting GPU on offscreen pixels.
 3. **Phase 3**: render entirely offscreen (Vulkan headless / OpenGL FBO). Requires producer-side support.
 
-## Placement issues at viewport edges
+## Resolved: placement at viewport edges
 
-### Top-edge partial clip
+The protocol now carries `clip_cells` (and `terminal_cells`) alongside `rect_cells` for both `attach` and `viewport` messages (PR #24, then applied in pi-extension on the `pi-clip-cells` branch). `rect_cells` is the full unclipped logical body; `clip_cells` is the visible intersection; a zero-sized `clip_cells` means "emit no placements". The producer composes at the full body size and crops to the clip — no scaling, no chrome-offset accounting when the chrome has scrolled off.
 
-When an inline message scrolls so that its top is past viewport row 0, `MessageHandle.onRectChange` delivers a `SurfaceRect` with `rect.rows < rect.totalRows` and `rect.row == 0`.
+Inline panels in `katzensteg-panel.ts` derive both rects from `SurfaceRect.rows`/`totalRows`/`row` and emit a zero-clip when the rect goes undefined. The floating overlay path uses the same machinery (clip is `undefined` in practice since overlays don't scroll).
 
-Current `innerViewport()` in `tools/pi-extension/extensions/katzensteg-panel.ts` computes:
+## Open gaps
 
-```ts
-const row = rect.row + 1 + VIEWPORT_ROW_OFFSET;
-const rows = rect.rows - FRAME_OVERHEAD_ROWS;
-```
+### Occlusions between inline / floating panels
 
-The `+ VIEWPORT_ROW_OFFSET` and `- FRAME_OVERHEAD_ROWS` assume the panel chrome (top border + title + status, 3 rows) is on-screen. When the chrome has scrolled off, this still subtracts chrome overhead. The producer ends up rendering its image into a viewport smaller than the panel's true body, scaling the image down.
+The pi-extension does not send `occlusion_rects` to producers, so a floating overlay covering part of an inline panel is invisible to the inline panel's producer — it still emits placements behind the overlay. Kitty's z-ordering hides the worst symptoms, but the producer is wasting work and the layering is not declared.
 
-What we'd want: the producer keeps rendering at the full body size, the placement crops to whatever is currently visible at the viewport edge.
+What we want: pi-extension computes per-producer occlusion rects from the set of other higher-z surfaces overlapping its rect, and includes them in `viewport`/`attach` messages. Existing protocol field is `occlusion_rects` (already plumbed through the producer); pi-side just needs to populate it.
 
-Two possible mechanisms:
+### Image alignment within the bounding box
 
-1. **Negative row in `rect_cells`** — `render_batch_protocol.zig` uses `i32` for rect fields, so negative is representable. Need to check whether `runtime.zig` / `frame_builder.zig` handle `row < 0` correctly (probably needs a small fix; today's code likely uses unsigned arithmetic somewhere along the kitty-placement path).
-2. **Explicit clip rect in attach/viewport** — add a `clip_cells` field that bounds the visible portion of `rect_cells`. The producer composes at `rect_cells` size, places only the `clip_cells` intersection. The existing `occlusion_rects` is the opposite direction (parts to *avoid*) so it could be expressed as occlusion of (`rect_cells` minus `clip_cells`), but a positive clip is clearer.
+Producer's `aspect: "fit"` centers the image inside `rect_cells`. For an inline panel the cell-grid bounding box is usually wider than tall and the centered placement leaves visible gutters on either side that look awkward in chat flow. Left-alignment would read better; potentially top-alignment too for tall panels.
 
-### Off-screen entirely
+What we want: an `align` (or `gravity`) hint on `attach`/`viewport`, with values like `center` (current), `start` (left/top), `end`. Producer's `batchFitCellRect` in `frame_builder.zig` is the implementation site.
 
-When the message scrolls past the top, `rect` goes undefined. `onRectChange` early-returns without sending the producer anything. The producer's last known viewport was when the message was barely visible at the top edge, so it keeps emitting placements there. Pi keeps the producer running (correct), but the producer thinks it should still be drawing at the top edge.
+### pi-tui clearing full redraw wipes graphics
 
-What we'd want: an explicit "detach / hidden" signal to the producer when the rect goes undefined, so it stops emitting placements. The producer can keep running (avoid restart cost) but suppress placements until a new rect arrives.
+When `firstChanged < prevViewportTop` (a `previousLines` line above the viewport changed), pi-tui takes its `differential-fullrender` branch, which emits `\x1b[2J\x1b[H\x1b[3J`. Both kitty and ghostty delete all graphics placements on `2J`, so every inline image on screen flickers as producers re-place on their next frame batch.
 
-The protocol already has `type:"detach"` and `type:"shutdown"` messages. A new `type:"hide"` or a zero-sized rect message would express "you exist but you have no visible viewport right now" cleanly.
+Current mitigation in `InlinePanelController.onFrame` is narrow: don't mutate the chrome status line (and don't `requestRender()`) when the status row is above the viewport. This stops the panel from causing the redraw itself. It does not protect against other above-viewport mutations (e.g. assistant token streaming above a clipped panel) — those still trigger the same path.
+
+A real fix would land in pi-tui — likely making the off-viewport branch update `previousLines` in memory without a clearing terminal write. That branch is defending something about scrollback contents whose exact intent isn't documented; needs a conversation with pi-tui owners before changing.
 
 ## Future: lifecycle policies for off-screen producers
 

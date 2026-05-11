@@ -7,6 +7,12 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "tsx --test extensions/*.test.ts"
+  },
   "pi": {
     "extensions": ["./extensions"]
   }
