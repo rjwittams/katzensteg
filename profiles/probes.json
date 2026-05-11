@@ -60,7 +60,6 @@
       ]
     },
     "probe.embed.luchs_interactive": {
-      "hidden": true,
       "extends": [
         "adapter.sdl2_preload",
         "runtime.fullscreen_file"
