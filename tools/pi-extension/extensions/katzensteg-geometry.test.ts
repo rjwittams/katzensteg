@@ -72,10 +72,12 @@ test("messageLogicalBodyRect: zero-sized clip when body rows < 2 after chrome", 
 });
 
 test("clipCellsForBody: zero-sized when nothing visible", () => {
-	// Message is fully off-screen above the body: visTop=1, visBottom=0 → empty.
+	// pi-tui's contract is rect.rows >= 1 when a rect is delivered (no rect at
+	// all is reported as undefined, see deliverTrackedRect). This rows=0 test
+	// is a regression guard for the arithmetic, not a spec for supported inputs
+	// — the function should degrade to a zero-sized clip rather than misbehave
+	// if the contract is ever violated upstream.
 	const r = rect({ row: 0, rows: 0 });
-	// messageLogicalBodyRect won't be called with rows=0 in practice, but the
-	// clip function should still handle the no-intersection case cleanly.
 	const body = { row: 4, col: 2, rows: 16, cols: 78 };
 	const clip = clipCellsForBody(body, r);
 	assert.deepEqual(clip, { row: 4, col: 2, rows: 0, cols: 0 });

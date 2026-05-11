@@ -705,6 +705,13 @@ class InlinePanelController implements ActivePanel {
 					terminal: this.latestSync.terminal,
 				};
 				this.latestSync = zeroSync;
+				// Captured `zeroSync` is intentionally the value at scheduling
+				// time. afterNextRender callbacks fire in scheduling order, so
+				// if a subsequent onRectChange schedules another setViewport
+				// before this one fires, the producer ends up at the latest
+				// state regardless (KatzenstegProducer.setViewport dedupes via
+				// sameSync against latestSyncSent, so any intermediate replay
+				// of a stale value is also a cheap no-op write).
 				this.tui.afterNextRender(() => {
 					if (this.closed || this.closing) return;
 					this.producer.setViewport(zeroSync);
@@ -1141,14 +1148,14 @@ function nonEmptyEnv(value: string | undefined): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function sameRect(a: RectCells | undefined, b: RectCells): boolean {
-	return !!a && a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+function sameRect(a: RectCells, b: RectCells): boolean {
+	return a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
 }
 
 function sameOptionalRect(a: RectCells | undefined, b: RectCells | undefined): boolean {
 	if (!a && !b) return true;
 	if (!a || !b) return false;
-	return a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+	return sameRect(a, b);
 }
 
 function sameSync(a: ViewportSync | undefined, b: ViewportSync): boolean {
