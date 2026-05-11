@@ -549,6 +549,10 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-launcher-test", "src/katzensteg/launcher.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
     });
+    addUnitTest(b, test_step, "luchs-test", "tools/luchs/src/main.zig", target, optimize, use_llvm, .{
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .link_sdl2 = true,
+    });
 }
 
 const UnitTestOptions = struct {

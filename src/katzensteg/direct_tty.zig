@@ -49,6 +49,10 @@ pub const DirectTty = struct {
 
     pub fn enableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
+        // Disable the legacy urxvt/SGR-pixel mouse-encoding modes (?1015, ?1016)
+        // before enabling SGR (?1006) and tracking modes (?1000/1002/1003).
+        // Terminals can have multiple encoders enabled simultaneously; resetting
+        // the alternates first avoids stray reports in non-SGR formats.
         try writer.interface.writeAll("\x1b[?1015l\x1b[?1016l\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
         try writer.interface.flush();
     }

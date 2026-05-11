@@ -1462,6 +1462,8 @@ const ChromeEmitter = struct {
 
     /// Emit up to `max_cells` bytes from `bytes`, treating each byte as one cell.
     /// Matches the existing byte-truncate behaviour the chrome title used.
+    /// Callers must ensure input is ASCII; multi-byte UTF-8 would be miscounted
+    /// (each byte would advance the column by one, splitting glyphs).
     fn bytes(self: *ChromeEmitter, writer: anytype, source: []const u8, max_cells: usize) !usize {
         const n = @min(source.len, max_cells);
         var i: usize = 0;
@@ -1777,7 +1779,10 @@ fn computeClipForRect(rect: render_batch_protocol.PresentationRectCells, termina
     const bottom = @min(rect_end_row, max_rows);
     const right = @min(rect_end_col, terminal.cols);
     if (bottom < top or right < left) {
-        return render_batch_protocol.PresentationRectCells{ .row = 1, .col = 1, .rows = 0, .cols = 0 };
+        // Anchor the zero-sized sentinel at the surface's own origin so it
+        // matches the field semantics ("visible portion in terminal cell
+        // coords") even when nothing is visible.
+        return render_batch_protocol.PresentationRectCells{ .row = rect.row, .col = rect.col, .rows = 0, .cols = 0 };
     }
     return render_batch_protocol.PresentationRectCells{
         .row = top,
@@ -2359,7 +2364,9 @@ pub fn clampOuterRect(rect: Rect, terminal: TerminalSize) Rect {
     // Allow the window to extend past terminal edges, but keep at least one
     // visible row and one visible col so the user can still grab it.
     // Top-left must be ≤ window-area.{rows,cols}; bottom-right (row+rows-1,
-    // col+cols-1) must be ≥ 1.
+    // col+cols-1) must be ≥ 1. The col bound is `terminal.cols` (not
+    // `terminal.cols - 1`) because the status band only reserves the bottom
+    // row — columns are not asymmetric.
     const min_row = 2 - out.rows;
     const min_col = 2 - out.cols;
     out.row = std.math.clamp(out.row, min_row, max_rows);

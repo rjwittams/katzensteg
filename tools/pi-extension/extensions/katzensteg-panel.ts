@@ -10,6 +10,14 @@ const WINDOW_ID = "main" as const;
 // Each producer needs its own kitty image/placement id range — the terminal's
 // kitty graphics state is shared, so two producers using the same id range
 // would clobber each other's uploads.
+//
+// Counters do not recycle: each new producer takes the next IMAGE_RANGE_SIZE
+// slot regardless of whether older producers are still alive. In a long-lived
+// pi session this means the counter monotonically advances. The kitty image-id
+// space is 32-bit (4_294_967_296 possible ids); with IMAGE_RANGE_SIZE=10000
+// that's ~430k producers per pi process. Process restart resets the counters,
+// so practical exhaustion is unrealistic — but if it ever matters, switch to
+// a freelist of returned ranges.
 const IMAGE_RANGE_BASE = 100000;
 const PLACEMENT_RANGE_BASE = 200000;
 const IMAGE_RANGE_SIZE = 10000;
@@ -626,7 +634,10 @@ class InlinePanelController implements ActivePanel {
 	}
 
 	private start(): void {
-		if (this.started || this.closed) return;
+		// Guard against `closing` too: close() may run synchronously before the
+		// afterNextRender callback that calls start(); without this we'd kick
+		// off the producer during the close-drain phase.
+		if (this.started || this.closed || this.closing) return;
 		this.started = true;
 		this.startScheduled = false;
 		debugLog(`inline.start mode=${this.details.mode} profile=${this.details.profile}`);

@@ -464,6 +464,7 @@ pub fn main() !void {
         _ = sdl.SDL_RenderClear(renderer);
         _ = sdl.SDL_RenderCopy(renderer, texture, null, null);
         sdl.SDL_RenderPresent(renderer);
-        sdl.SDL_Delay(16);
+        // vsync is enabled on the renderer (presentvsync flag at creation), so
+        // SDL_RenderPresent already blocks until the next frame interval.
     }
 }

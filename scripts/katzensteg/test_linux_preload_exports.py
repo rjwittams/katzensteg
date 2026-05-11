@@ -130,12 +130,14 @@ class LinuxPreloadExportsTests(unittest.TestCase):
         fragment = retroarch["profiles"]["adapter.sdl2_preload"]
         env = fragment["env"]
 
+        # Preload env vars are now platform-scoped: macos→DYLD_INSERT_LIBRARIES,
+        # linux→LD_PRELOAD. Each platform only sees the relevant variable.
         self.assertEqual(
-            "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib",
+            {"macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib"},
             env["DYLD_INSERT_LIBRARIES"],
         )
         self.assertEqual(
-            "{repo}/zig-out/lib/libkatzensteg-sdl2.so",
+            {"linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so"},
             env["LD_PRELOAD"],
         )
 

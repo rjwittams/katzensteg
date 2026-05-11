@@ -388,6 +388,11 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
         let stride = width * 4
         var pixels = [UInt8](repeating: 0, count: stride * height)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
+        // Pixels are emitted as RGBA bytes with premultiplied alpha. The Zig
+        // consumer currently treats them as straight RGBA; for fully opaque
+        // pages this is invisible, but pages with CSS transparency will read
+        // slightly darker than expected. Switch this to non-premultiplied
+        // (`.last`) if accurate alpha is needed downstream.
         let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
         pixels.withUnsafeMutableBytes { raw in
             guard let context = CGContext(
