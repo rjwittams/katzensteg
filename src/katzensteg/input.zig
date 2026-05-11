@@ -131,6 +131,12 @@ pub const TerminalInputParser = struct {
     last_mouse_y: i32 = 0,
     mouse_buttons: u32 = 0,
     mouse_activity: bool = false,
+    // Set after an ESC/CSI sequence is consumed without producing a valid
+    // event. Causes the next parseOne call to look for an orphan-mouse-tail
+    // (e.g. residual `4;47;44M` bytes left after a partial mouse CSI).
+    // Cleared after that one lookup, so arbitrary printable input that happens
+    // to look like a mouse tail isn't silently captured.
+    expect_orphan_mouse_tail: bool = false,
     keyboard_state: [sdl_num_scancodes]u8 = [_]u8{0} ** sdl_num_scancodes,
     keyboard_deadline_ns: [sdl_num_scancodes]i128 = [_]i128{0} ** sdl_num_scancodes,
 
@@ -205,6 +211,10 @@ pub const TerminalInputParser = struct {
         if (self.pending.items.len == 1 and self.pending.items[0] == 0x1b) {
             try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
             self.pending.clearRetainingCapacity();
+            // If a partial mouse CSI was fragmented across reads, the tail
+            // bytes could arrive after this flush — let the next parseOne
+            // pass try to consume them as an orphan-mouse-tail cleanup.
+            self.expect_orphan_mouse_tail = true;
         }
     }
 
@@ -220,15 +230,27 @@ pub const TerminalInputParser = struct {
     fn parseOne(self: *TerminalInputParser, bytes: []const u8) !usize {
         const first = bytes[0];
         if (first == 0x1b) {
-            if (try self.parseEscape(bytes)) |consumed| return consumed;
+            if (try self.parseEscape(bytes)) |consumed| {
+                self.expect_orphan_mouse_tail = false;
+                return consumed;
+            }
             if (isIncompleteEscape(bytes)) return 0;
             try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+            self.expect_orphan_mouse_tail = true;
             return 1;
         }
         if (first == 0x9b) {
-            if (try self.parseCsi(bytes, 1)) |consumed| return consumed;
+            if (try self.parseCsi(bytes, 1)) |consumed| {
+                self.expect_orphan_mouse_tail = false;
+                return consumed;
+            }
             if (isIncompleteCsi(bytes, 1)) return 0;
+            self.expect_orphan_mouse_tail = true;
             return 1;
+        }
+        if (self.expect_orphan_mouse_tail) {
+            self.expect_orphan_mouse_tail = false;
+            if (try self.parseOrphanMouseTail(bytes)) |consumed| return consumed;
         }
         if (first == '\r' or first == '\n') {
             try self.emitKey(.{ .keycode = '\r', .scancode = 40 });
@@ -242,7 +264,6 @@ pub const TerminalInputParser = struct {
             try self.emitKey(.{ .keycode = 0x08, .scancode = 42 });
             return 1;
         }
-        if (try self.parseOrphanMouseTail(bytes)) |consumed| return consumed;
         if (first >= 0x20) {
             const key = asciiKey(first);
             try self.emitTextAndKey(bytes[0..1], key);
@@ -702,16 +723,39 @@ test "terminal input parser preserves split c1 sgr mouse wheel sequence" {
     try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 440, .mouse_y = 376 } }, parser.pop().?);
 }
 
-test "terminal input parser suppresses orphaned mouse report tails" {
+test "terminal input parser consumes orphan mouse tail only after an unparseable CSI" {
     var parser = TerminalInputParser.init(std.testing.allocator);
     defer parser.deinit();
     parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
 
-    try parser.feed("4;47;44M;44M5;47;44M");
+    // Simulate a fragmented mouse CSI: the lone ESC is flushed, which sets
+    // the orphan-tail flag; the next feed delivers the tail and is parsed as
+    // a wheel event.
+    try parser.feed("\x1b");
+    try parser.flushStandaloneEscape();
+    // Drain the synthesized ESC key (down+up) the flush emits.
+    _ = parser.pop();
+    _ = parser.pop();
 
-    try std.testing.expectEqual(@as(usize, 2), parser.pendingCount());
+    try parser.feed("4;47;44M");
     try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 368, .mouse_y = 344 } }, parser.pop().?);
-    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = -1, .mouse_x = 368, .mouse_y = 344 } }, parser.pop().?);
+}
+
+test "terminal input parser treats stray mouse-shaped bytes as text without preceding CSI" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    // No preceding ESC/CSI: literal "4;47;44M" the user types must not get
+    // silently rewritten as a wheel event.
+    try parser.feed("4;47;44M");
+
+    // First emitted event should be the '4' text/key, not a mouse_wheel.
+    const first = parser.pop().?;
+    switch (first) {
+        .mouse_wheel => try std.testing.expect(false),
+        else => {},
+    }
 }
 
 test "terminal input parser preserves split escape sgr mouse wheel sequence" {

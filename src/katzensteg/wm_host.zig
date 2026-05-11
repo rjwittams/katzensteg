@@ -1421,9 +1421,17 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     try emitter.cell(writer, text_box.bottom_right);
 
     const content = contentRectForOuter(options.outer);
-    // Park the cursor at content's top-left only if visible; out-of-bounds
-    // cursor moves are themselves harmlessly clamped by the terminal.
-    try moveCursor(writer, content.row, content.col);
+    // Park the cursor at content's top-left, clamped to a visible terminal
+    // cell. Partly-off-screen windows can produce content.row/col <= 0; emitting
+    // those literally would write malformed CSI like ESC[-5;0H that some
+    // terminals interpret unpredictably.
+    if (options.terminal) |term| {
+        const safe_row = std.math.clamp(content.row, 1, @max(1, term.rows));
+        const safe_col = std.math.clamp(content.col, 1, @max(1, term.cols));
+        try moveCursor(writer, safe_row, safe_col);
+    } else {
+        try moveCursor(writer, @max(1, content.row), @max(1, content.col));
+    }
 }
 
 const ChromeEmitter = struct {
@@ -2307,7 +2315,11 @@ fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWind
         .events = events,
     });
     const content = contentRectForOuter(window.outer);
-    try moveCursor(writer, content.row, content.col);
+    // Clamp to a visible cell: partly-off-screen windows can yield content.row/col
+    // <= 0, which would emit malformed cursor-position CSI.
+    const safe_row = std.math.clamp(content.row, 1, @max(1, terminal.rows));
+    const safe_col = std.math.clamp(content.col, 1, @max(1, terminal.cols));
+    try moveCursor(writer, safe_row, safe_col);
 }
 
 fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *const ProtocolEventLog) !void {
