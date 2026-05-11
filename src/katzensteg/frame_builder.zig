@@ -1649,7 +1649,7 @@ pub const FrameBuilder = struct {
 
     fn placeClippedBatch(self: *FrameBuilder, sink: *RenderBatchSink, dest: ts_types.CellRect, source: core.CoreRect, placement: kitty_protocol.Placement, placement_ids: *[max_occlusion_pieces]u32) !usize {
         var pieces_buf: [max_occlusion_pieces]ClippedPlacementPiece = undefined;
-        const piece_count = clippedPlacementPieces(dest, source, sink.occlusionRects(), pieces_buf[0..]);
+        const piece_count = clippedPlacementPieces(dest, source, sink.clipCells(), sink.occlusionRects(), pieces_buf[0..]);
         if (piece_count == 0) return 0;
         var index: usize = 0;
         while (index < piece_count) : (index += 1) {
@@ -1680,10 +1680,17 @@ pub const FrameBuilder = struct {
         source: core.CoreRect,
     };
 
-    fn clippedPlacementPieces(dest: ts_types.CellRect, source: core.CoreRect, occlusions: []const render_batch_protocol.PresentationRectCells, out: ?[]ClippedPlacementPiece) usize {
+    fn clippedPlacementPieces(dest: ts_types.CellRect, source: core.CoreRect, clip: ?render_batch_protocol.PresentationRectCells, occlusions: []const render_batch_protocol.PresentationRectCells, out: ?[]ClippedPlacementPiece) usize {
         var fragments_a: [max_occlusion_pieces]ts_types.CellRect = undefined;
         var fragments_b: [max_occlusion_pieces]ts_types.CellRect = undefined;
-        fragments_a[0] = dest;
+        // Apply the visible clip first. The source rect mapping below still uses
+        // the original `dest`, so each fragment's source pixels are computed
+        // proportionally to the unclipped placement region — cropping, not scaling.
+        const initial = if (clip) |clip_rect| blk: {
+            const clip_cell = ts_types.CellRect{ .row = clip_rect.row, .col = clip_rect.col, .w = clip_rect.cols, .h = clip_rect.rows };
+            break :blk intersectCellRect(dest, clip_cell) orelse return 0;
+        } else dest;
+        fragments_a[0] = initial;
         var count: usize = 1;
         var current = fragments_a[0..];
         var next = fragments_b[0..];
@@ -4469,6 +4476,72 @@ test "frame builder batch placement contains source inside attached rect" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;5H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
+}
+
+test "frame builder batch framebuffer restricts placement to clip_cells" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2003;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    // 4x4 rect, clip restricts to top-left 2x2.
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+    sink.setClipCells(.{ .row = 1, .col = 1, .rows = 2, .cols = 2 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    // Single placement at row=1,col=1 covering exactly 2x2 cells (not the full 4x4).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "r=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=4") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200001") == null);
+}
+
+test "frame builder batch framebuffer emits nothing when clip_cells misses rect" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
+    builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
+
+    const renderer: core.CoreHandle = 0x2004;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
+
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
+    // Clip is entirely outside the rect — no placements should be emitted.
+    sink.setClipCells(.{ .row = 100, .col = 100, .rows = 4, .cols = 4 });
+
+    const rgba = try std.testing.allocator.alloc(u8, 4 * 4 * 4);
+    defer std.testing.allocator.free(rgba);
+    @memset(rgba, 255);
+    var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") == null);
 }
 
 test "frame builder batch framebuffer splits placement around occlusion" {

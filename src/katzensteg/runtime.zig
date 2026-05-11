@@ -923,6 +923,7 @@ pub const Runtime = struct {
                     log.warn("batch occlusion policy failed: {any}", .{err});
                     return;
                 };
+                sink.setClipCells(attach.clip_cells);
                 sink.setUploadPolicy(attach.upload) catch |err| {
                     log.warn("batch upload policy failed: {any}", .{err});
                     return;
@@ -949,6 +950,7 @@ pub const Runtime = struct {
                 const previous_z_base = sink.presentationZBase();
                 const previous_terminal = sink.terminalGeometry();
                 const previous_occlusions = sink.occlusionRects();
+                const previous_clip = sink.clipCells();
                 log.info(
                     "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
@@ -969,7 +971,8 @@ pub const Runtime = struct {
                 );
                 const terminal_changed = if (viewport.terminal) |terminal| previous_terminal == null or !std.meta.eql(previous_terminal.?, terminal) else false;
                 const occlusions_changed = !presentationRectsEqual(previous_occlusions, viewport.occlusion_rects);
-                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed or occlusions_changed;
+                const clip_changed = !std.meta.eql(previous_clip, viewport.clip_cells);
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed or occlusions_changed or clip_changed;
                 if (presentation_changed) {
                     self.batch_presentation_reset_pending = true;
                     self.last_batch_presentation_status = null;
@@ -980,6 +983,7 @@ pub const Runtime = struct {
                     log.warn("batch viewport occlusion policy failed: {any}", .{err});
                     return;
                 };
+                sink.setClipCells(viewport.clip_cells);
                 if (presentation_changed) {
                     if (self.batch_writer) |writer| {
                         if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
