@@ -2239,13 +2239,15 @@ pub fn clampOuterRect(rect: Rect, terminal: TerminalSize) Rect {
     var out = rect;
     out.rows = std.math.clamp(out.rows, 1, @max(1, terminal.rows));
     out.cols = std.math.clamp(out.cols, 1, @max(1, terminal.cols));
-    out.row = @max(1, out.row);
-    out.col = @max(1, out.col);
 
-    const max_row = @max(1, terminal.rows - out.rows + 1);
-    const max_col = @max(1, terminal.cols - out.cols + 1);
-    out.row = @min(out.row, max_row);
-    out.col = @min(out.col, max_col);
+    // Allow the window to extend past terminal edges, but keep at least one
+    // visible row and one visible col so the user can still grab it.
+    // Top-left must be ≤ terminal.{rows,cols}; bottom-right (row+rows-1,
+    // col+cols-1) must be ≥ 1.
+    const min_row = 2 - out.rows;
+    const min_col = 2 - out.cols;
+    out.row = std.math.clamp(out.row, min_row, terminal.rows);
+    out.col = std.math.clamp(out.col, min_col, terminal.cols);
     return out;
 }
 
@@ -2255,15 +2257,35 @@ test "wm window derives content rect inside text chrome" {
     try std.testing.expectEqual(Rect{ .row = 4, .col = 2, .rows = 16, .cols = 78 }, content);
 }
 
-test "wm window clamps outer rect to terminal" {
-    const clamped = clampOuterRect(
-        .{ .row = 20, .col = 75, .rows = 10, .cols = 20 },
+test "wm clampOuterRect allows partly-off-screen windows" {
+    // Window dragged with its top-left above/left of the terminal viewport
+    // should keep its negative row/col rather than getting snapped back inside.
+    const partial = clampOuterRect(
+        .{ .row = -3, .col = -2, .rows = 10, .cols = 20 },
         .{ .rows = 24, .cols = 80 },
     );
-    try std.testing.expect(clamped.row >= 1);
-    try std.testing.expect(clamped.col >= 1);
-    try std.testing.expect(clamped.row + clamped.rows - 1 <= 24);
-    try std.testing.expect(clamped.col + clamped.cols - 1 <= 80);
+    try std.testing.expectEqual(@as(i32, -3), partial.row);
+    try std.testing.expectEqual(@as(i32, -2), partial.col);
+    try std.testing.expectEqual(@as(i32, 10), partial.rows);
+    try std.testing.expectEqual(@as(i32, 20), partial.cols);
+
+    // At least 1 row + 1 col must remain visible — pushing further off should
+    // be clamped so the bottom-right edge stays at terminal row/col >= 1.
+    const too_far = clampOuterRect(
+        .{ .row = -9, .col = -19, .rows = 10, .cols = 20 },
+        .{ .rows = 24, .cols = 80 },
+    );
+    try std.testing.expect(too_far.row + too_far.rows - 1 >= 1);
+    try std.testing.expect(too_far.col + too_far.cols - 1 >= 1);
+
+    // Symmetrically on the bottom-right: pushing the window past the bottom-right
+    // edge should stop with at least 1 row + 1 col visible.
+    const past_bottom = clampOuterRect(
+        .{ .row = 100, .col = 100, .rows = 10, .cols = 20 },
+        .{ .rows = 24, .cols = 80 },
+    );
+    try std.testing.expect(past_bottom.row <= 24);
+    try std.testing.expect(past_bottom.col <= 80);
 }
 
 test "wm content rect converts to presentation cells" {
