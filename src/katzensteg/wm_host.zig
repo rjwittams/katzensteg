@@ -958,11 +958,13 @@ fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8,
     session.child_stdin = session.child.stdin.?;
     session.child.stdin = null;
     const ranges = idRangesForSession(session_index);
+    const session_rect = session.focusedContent().toPresentationRectCells();
     try writeInitialControl(session.child_stdin.?.deprecatedWriter(), .{
-        .rect_cells = session.focusedContent().toPresentationRectCells(),
+        .rect_cells = session_rect,
         .aspect = .fit,
         .z_base = zBaseForSlot(session_index),
         .terminal = terminal,
+        .clip_cells = computeClipForRect(session_rect, terminal),
         .image_ids = ranges.image,
         .placement_ids = ranges.placement,
         .upload = session.upload,
@@ -1113,10 +1115,12 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
 
     if (child.stdin) |stdin_file| {
         child.stdin = null;
+        const exec_rect = contentRectForOuter(outer).toPresentationRectCells();
         try writeInitialControl(stdin_file.deprecatedWriter(), .{
-            .rect_cells = contentRectForOuter(outer).toPresentationRectCells(),
+            .rect_cells = exec_rect,
             .aspect = options.aspect,
             .terminal = options.terminal,
+            .clip_cells = computeClipForRect(exec_rect, options.terminal),
             .upload = options.upload,
         });
         stdin_file.close();
@@ -1690,6 +1694,32 @@ fn writeClipCellsField(writer: anytype, clip: ?render_batch_protocol.Presentatio
     try writer.print(",\"clip_cells\":{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
 }
 
+/// Compute the clip rect to send to the producer for `rect` given the current
+/// terminal viewport. Returns null when `rect` is fully inside the terminal —
+/// the producer treats absent clip as "no clipping required". Returns the
+/// visible intersection when partial. Returns a zero-sized rect when fully
+/// off-screen, which the producer interprets as "emit no placements".
+fn computeClipForRect(rect: render_batch_protocol.PresentationRectCells, terminal: TerminalSize) ?render_batch_protocol.PresentationRectCells {
+    const rect_end_row = rect.row + rect.rows - 1;
+    const rect_end_col = rect.col + rect.cols - 1;
+    if (rect.row >= 1 and rect.col >= 1 and rect_end_row <= terminal.rows and rect_end_col <= terminal.cols) {
+        return null;
+    }
+    const top = @max(rect.row, 1);
+    const left = @max(rect.col, 1);
+    const bottom = @min(rect_end_row, terminal.rows);
+    const right = @min(rect_end_col, terminal.cols);
+    if (bottom < top or right < left) {
+        return render_batch_protocol.PresentationRectCells{ .row = 1, .col = 1, .rows = 0, .cols = 0 };
+    }
+    return render_batch_protocol.PresentationRectCells{
+        .row = top,
+        .col = left,
+        .rows = bottom - top + 1,
+        .cols = right - left + 1,
+    };
+}
+
 fn tryWriteViewportControl(writer: anytype, options: ViewportOptions) bool {
     writeViewportControl(writer, options) catch return false;
     return true;
@@ -1765,12 +1795,14 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
 fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!session.control_open or !sessionIsVisible(session)) return;
     const content = session.focusedContent();
+    const content_rect = content.toPresentationRectCells();
     if (tryWriteViewportControl(session.child_stdin.?.deprecatedWriter(), .{
-        .rect_cells = content.toPresentationRectCells(),
+        .rect_cells = content_rect,
         .aspect = aspect,
         .z_base = z_base,
         .terminal = terminal,
         .occlusion_rects = occlusion_rects,
+        .clip_cells = computeClipForRect(content_rect, terminal),
     })) {
         try events.record(.viewport_sent, session.profile_name);
         logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d}) z_base={d}", .{ session.profile_name, content.row, content.col, content.cols, content.rows, z_base });
@@ -2286,6 +2318,49 @@ test "wm clampOuterRect allows partly-off-screen windows" {
     );
     try std.testing.expect(past_bottom.row <= 24);
     try std.testing.expect(past_bottom.col <= 80);
+}
+
+test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    const rect = render_batch_protocol.PresentationRectCells{ .row = -1, .col = 2, .rows = 10, .cols = 30 };
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+    try writeViewportControl(out.writer(std.testing.allocator), .{
+        .rect_cells = rect,
+        .aspect = .fit,
+        .terminal = terminal,
+        .clip_cells = computeClipForRect(rect, terminal),
+    });
+
+    // row=-1 with 10 rows in a 24-row terminal → visible rows are 1..8 (8 rows).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":2,\"rows\":8,\"cols\":30}") != null);
+}
+
+test "wm computes clip_cells for partly-off-screen rect" {
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+
+    // Fully on-screen → no clip needed.
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, null),
+        computeClipForRect(.{ .row = 2, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Top partly off-screen (row = -1, height = 10 → visible rows = top.row=1, rows=8).
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 1, .col = 2, .rows = 8, .cols = 30 }),
+        computeClipForRect(.{ .row = -1, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Bottom partly off-screen.
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 20, .col = 2, .rows = 5, .cols = 30 }),
+        computeClipForRect(.{ .row = 20, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Fully off-screen → zero-sized clip (signal: nothing visible).
+    const clip = computeClipForRect(.{ .row = -100, .col = 2, .rows = 5, .cols = 30 }, terminal).?;
+    try std.testing.expect(clip.rows == 0 or clip.cols == 0);
 }
 
 test "wm content rect converts to presentation cells" {
