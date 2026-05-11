@@ -3,12 +3,30 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
-import { type OverlayHandle, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type MessageHandle, type OverlayHandle, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const WINDOW_ID = "main" as const;
-const IMAGE_IDS: [number, number] = [100000, 199999];
-const PLACEMENT_IDS: [number, number] = [200000, 299999];
+// Each producer needs its own kitty image/placement id range — the terminal's
+// kitty graphics state is shared, so two producers using the same id range
+// would clobber each other's uploads.
+const IMAGE_RANGE_BASE = 100000;
+const PLACEMENT_RANGE_BASE = 200000;
+const IMAGE_RANGE_SIZE = 10000;
+const PLACEMENT_RANGE_SIZE = 10000;
+let nextImageRangeBase = IMAGE_RANGE_BASE;
+let nextPlacementRangeBase = PLACEMENT_RANGE_BASE;
+
+function allocateIdRanges(): { imageIds: [number, number]; placementIds: [number, number] } {
+	const imageStart = nextImageRangeBase;
+	nextImageRangeBase += IMAGE_RANGE_SIZE;
+	const placementStart = nextPlacementRangeBase;
+	nextPlacementRangeBase += PLACEMENT_RANGE_SIZE;
+	return {
+		imageIds: [imageStart, imageStart + IMAGE_RANGE_SIZE - 1],
+		placementIds: [placementStart, placementStart + PLACEMENT_RANGE_SIZE - 1],
+	};
+}
 const DEFAULT_PROFILE = process.env.KATZENSTEG_PI_PROFILE || "sonic";
 const DEFAULT_MODE = parseMode(process.env.KATZENSTEG_PANEL_MODE);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -21,12 +39,13 @@ const FRAME_OVERHEAD_ROWS = 4; // top border + title + status + bottom border
 const FRAME_OVERHEAD_COLS = 2; // left/right borders
 const PANEL_MARGIN = 1;
 const PANEL_ASPECT: Aspect = "fit";
-// Katzensteg's full-frame composite uses z=100. In a Pi overlay the host text
-// chrome should remain readable, so neutralize that by default and let callers
-// override when debugging terminal z behaviour.
-const PANEL_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_Z_BASE, -100);
-const DEFAULT_WINDOW_POLICY = process.env.KATZENSTEG_PANEL_WINDOW_POLICY || process.env.KATZENSTEG_WINDOW_POLICY || "mirror";
-const DEFAULT_REAL_WINDOW = process.env.KATZENSTEG_PANEL_REAL_WINDOW || process.env.KATZENSTEG_REAL_WINDOW || "show";
+// Katzensteg's full-frame composite uses z=100. For inline panels we neutralize
+// that (effective z=0) so host text chrome stays readable. The floating panel
+// should sit on top of any inline panels, so it keeps katzensteg's native z.
+const INLINE_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_Z_BASE, -100);
+const FLOATING_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_FLOATING_Z_BASE, 0);
+const PANEL_WINDOW_POLICY = nonEmptyEnv(process.env.KATZENSTEG_PANEL_WINDOW_POLICY);
+const PANEL_REAL_WINDOW = nonEmptyEnv(process.env.KATZENSTEG_PANEL_REAL_WINDOW);
 // The launcher gives an embed producer 1500ms after shutdown before SIGTERM.
 // Keep the panel alive longer than that so producer-authored delete batches can
 // drain instead of leaving stale kitty placements behind.
@@ -42,7 +61,14 @@ type PanelCommand =
 	| { kind: "open"; profile?: string }
 	| { kind: "close" }
 	| { kind: "size"; size: SizePresetName }
-	| { kind: "profile"; profile: string };
+	| { kind: "profile"; profile: string }
+	| { kind: "inline"; profile?: string };
+
+interface PanelDetails {
+	mode: PanelMode;
+	profile: string;
+	size: SizePresetName;
+}
 
 interface RectCells {
 	row: number;
@@ -99,15 +125,45 @@ const SIZE_PRESETS: Record<SizePresetName, SizePreset> = {
 	large: { name: "large", width: "50%", height: "85%" },
 };
 
-let activeController: PanelController | undefined;
+interface ActivePanel {
+	close(reason: string): void;
+}
+
+let activeController: ActivePanel | undefined;
+const inlinePanels = new Set<InlinePanelController>();
 let preferredProfile = DEFAULT_PROFILE;
 let preferredSize: SizePresetName = "medium";
+let globalChunkSeq = 0;
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		debugLog("session_shutdown");
 		activeController?.close("session_shutdown");
 		activeController = undefined;
+		for (const panel of inlinePanels) panel.close("session_shutdown");
+		inlinePanels.clear();
+	});
+
+	// Event loop lag heartbeat: schedule setImmediate every 100ms, measure how long
+	// it actually takes to fire. Spikes mean the event loop was busy with something.
+	let heartbeatPrev = process.hrtime.bigint();
+	const heartbeat = (): void => {
+		const now = process.hrtime.bigint();
+		const elapsedMs = Number((now - heartbeatPrev) / 1_000_000n);
+		heartbeatPrev = now;
+		if (elapsedMs > 150) debugLog(`pi.event_loop_lag_ms=${elapsedMs}`);
+		setTimeout(() => setImmediate(heartbeat), 100);
+	};
+	setImmediate(heartbeat);
+
+	pi.registerMessageRenderer<PanelDetails>("katzensteg-panel", (message, options, theme) => {
+		const details = message.details;
+		const tui = options.tui;
+		const handle = options.handle;
+		if (!details || !tui || !handle) return undefined;
+		const controller = new InlinePanelController(tui, theme, handle, details);
+		inlinePanels.add(controller);
+		return controller;
 	});
 
 	pi.registerCommand("katzensteg-panel", {
@@ -128,6 +184,9 @@ export default function (pi: ExtensionAPI) {
 				case "open":
 					openPanel(ctx, command.profile ?? preferredProfile, preferredSize);
 					break;
+				case "inline":
+					sendInlinePanel(pi, command.profile ?? preferredProfile, preferredSize);
+					break;
 				case "close":
 					if (!activeController) {
 						ctx.ui.notify("Katzensteg panel is not open", "warning");
@@ -139,16 +198,27 @@ export default function (pi: ExtensionAPI) {
 					break;
 				case "size":
 					preferredSize = command.size;
-					if (activeController) activeController.setSize(SIZE_PRESETS[command.size]);
+					if (activeController instanceof PanelController) activeController.setSize(SIZE_PRESETS[command.size]);
 					else ctx.ui.notify(`Set Katzensteg panel size to ${command.size}`, "info");
 					break;
 				case "profile":
 					preferredProfile = command.profile;
-					if (activeController) activeController.setProfile(command.profile);
+					if (activeController instanceof PanelController) activeController.setProfile(command.profile);
 					else openPanel(ctx, command.profile, preferredSize);
 					break;
 			}
 		},
+	});
+}
+
+function sendInlinePanel(pi: ExtensionAPI, profile: string, sizeName: SizePresetName): void {
+	preferredProfile = profile;
+	preferredSize = sizeName;
+	pi.sendMessage<PanelDetails>({
+		customType: "katzensteg-panel",
+		content: `Katzensteg panel · ${profile} · ${sizeName}`,
+		display: true,
+		details: { mode: DEFAULT_MODE, profile, size: sizeName },
 	});
 }
 
@@ -225,24 +295,17 @@ class PanelController {
 	}
 
 	render(width: number, theme: Theme): string[] {
-		const innerWidth = Math.max(1, width - 2);
-		const row = (content: string) => theme.fg("border", "│") + fitCellText(content, innerWidth) + theme.fg("border", "│");
-		const lines: string[] = [];
-		const title = ` 🐈 Katzensteg · ${this.mode} · ${this.profile} · ${this.size.name}`;
-		const status = this.error ? theme.fg("error", ` ${this.error}`) : theme.fg("dim", ` ${this.status}`);
-		const rectLine = this.latestOverlayRect
-			? ` overlay ${formatRect(this.latestOverlayRect)} viewport ${formatRect(this.latestViewport)} z=${PANEL_Z_BASE}`
-			: " waiting for overlay rect";
-
-		const panelRows = this.latestOverlayRect?.rows ?? fallbackPanelRowsForSize(this.size);
-		const bodyRows = Math.max(2, panelRows - FRAME_OVERHEAD_ROWS);
-
-		lines.push(theme.fg("border", `╭${"─".repeat(innerWidth)}╮`));
-		lines.push(row(theme.fg("accent", title)));
-		lines.push(row(this.mode === "layout" ? theme.fg("dim", rectLine) : status));
-		for (let i = 0; i < bodyRows; i++) lines.push(row(""));
-		lines.push(theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
-		return lines;
+		return renderPanelChrome(width, theme, {
+			mode: this.mode,
+			profile: this.profile,
+			sizeName: this.size.name,
+			rect: this.latestOverlayRect,
+			viewport: this.latestViewport,
+			status: this.status,
+			error: this.error,
+			panelRows: this.latestOverlayRect?.rows ?? fallbackPanelRowsForSize(this.size),
+			zBase: FLOATING_Z_BASE,
+		});
 	}
 
 	onOverlayRect(generation: number, rect: OverlayRect | undefined): void {
@@ -288,14 +351,12 @@ class PanelController {
 	}
 
 	private createProducer(profile: string): ProducerConnection {
-		return this.mode === "live"
-			? new KatzenstegProducer(profile, {
-				onFrame: (batch) => this.onFrame(batch),
-				onDetached: (message) => this.onDetached(message),
-				onStatus: (status) => this.setStatus(status),
-				onError: (error) => this.setError(error),
-			})
-			: new LayoutOnlyProducer({ onStatus: (status) => this.setStatus(status) });
+		return createProducer(this.mode, profile, {
+			onFrame: (batch) => this.onFrame(batch),
+			onDetached: (message) => this.onDetached(message),
+			onStatus: (status) => this.setStatus(status),
+			onError: (error) => this.setError(error),
+		}, FLOATING_Z_BASE);
 	}
 
 	private onFrame(batch: FrameBatch): void {
@@ -462,6 +523,193 @@ class PanelComponent {
 	}
 }
 
+interface PanelChromeArgs {
+	mode: PanelMode;
+	profile: string;
+	sizeName: SizePresetName;
+	rect: OverlayRect | undefined;
+	viewport: RectCells | undefined;
+	status: string;
+	error: string | undefined;
+	panelRows: number;
+	zBase: number;
+}
+
+function renderPanelChrome(width: number, theme: Theme, args: PanelChromeArgs): string[] {
+	const innerWidth = Math.max(1, width - 2);
+	const row = (content: string) => theme.fg("border", "│") + fitCellText(content, innerWidth) + theme.fg("border", "│");
+	const lines: string[] = [];
+	const title = ` 🐈 Katzensteg · ${args.mode} · ${args.profile} · ${args.sizeName}`;
+	const status = args.error ? theme.fg("error", ` ${args.error}`) : theme.fg("dim", ` ${args.status}`);
+	const rectLine = args.rect
+		? ` rect ${formatRect(args.rect)} viewport ${formatRect(args.viewport)} z=${args.zBase}`
+		: " waiting for rect";
+	const bodyRows = Math.max(2, args.panelRows - FRAME_OVERHEAD_ROWS);
+	lines.push(theme.fg("border", `╭${"─".repeat(innerWidth)}╮`));
+	lines.push(row(theme.fg("accent", title)));
+	lines.push(row(args.mode === "layout" ? theme.fg("dim", rectLine) : status));
+	for (let i = 0; i < bodyRows; i++) lines.push(row(""));
+	lines.push(theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
+	return lines;
+}
+
+function createProducer(mode: PanelMode, profile: string, callbacks: ProducerCallbacks, zBase: number): ProducerConnection {
+	return mode === "live" ? new KatzenstegProducer(profile, callbacks, zBase) : new LayoutOnlyProducer(callbacks);
+}
+
+interface InlinePanelTui {
+	writeRaw(data: string): void;
+	afterNextRender(callback: () => void): void;
+	requestRender(): void;
+}
+
+class InlinePanelController implements ActivePanel {
+	private readonly producer: ProducerConnection;
+	private unsubscribe: (() => void) | undefined;
+	private started = false;
+	private startScheduled = false;
+	private closing = false;
+	private closed = false;
+	private cleanupSeen = false;
+	private latestRect: OverlayRect | undefined;
+	private latestViewport: RectCells | undefined;
+	private status = "starting";
+	private error: string | undefined;
+	private closeTimer: NodeJS.Timeout | undefined;
+
+	constructor(
+		private readonly tui: InlinePanelTui,
+		private readonly theme: Theme,
+		private readonly handle: MessageHandle,
+		private readonly details: PanelDetails,
+	) {
+		this.producer = createProducer(details.mode, details.profile, {
+			onFrame: (batch) => this.onFrame(batch),
+			onDetached: (message) => this.onDetached(message),
+			onStatus: (status) => this.setStatus(status),
+			onError: (error) => this.setError(error),
+		}, INLINE_Z_BASE);
+	}
+
+	render(width: number): string[] {
+		if (!this.started && !this.startScheduled && !this.closed) {
+			this.startScheduled = true;
+			this.tui.afterNextRender(() => this.start());
+		}
+		const panelRows = this.latestRect?.rows ?? fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]);
+		return renderPanelChrome(width, this.theme, {
+			mode: this.details.mode,
+			profile: this.details.profile,
+			sizeName: this.details.size,
+			rect: this.latestRect,
+			viewport: this.latestViewport,
+			status: this.status,
+			error: this.error,
+			panelRows,
+			zBase: INLINE_Z_BASE,
+		});
+	}
+
+	invalidate(): void {}
+
+	close(reason: string): void {
+		if (this.closed || this.closing) return;
+		debugLog(`inline.close reason=${reason}`);
+		this.closing = true;
+		this.cleanupSeen = false;
+		this.status = "closing";
+		this.unsubscribe?.();
+		this.unsubscribe = undefined;
+		this.producer.stop(reason);
+		this.scheduleCloseFinish(reason, CLOSE_DRAIN_MS);
+		this.tui.requestRender();
+	}
+
+	private start(): void {
+		if (this.started || this.closed) return;
+		this.started = true;
+		this.startScheduled = false;
+		debugLog(`inline.start mode=${this.details.mode} profile=${this.details.profile}`);
+		this.producer.start();
+		this.unsubscribe = this.handle.onRectChange((rect) => this.onRectChange(rect));
+	}
+
+	private onRectChange(rect: OverlayRect | undefined): void {
+		if (this.closed || this.closing) return;
+		if (!rect) {
+			this.latestRect = undefined;
+			this.latestViewport = undefined;
+			this.tui.requestRender();
+			return;
+		}
+		const viewport = innerViewport(rect);
+		if (!viewport) return;
+		this.latestRect = rect;
+		this.latestViewport = viewport;
+		debugLog(`inline.rect ${formatRect(rect)} viewport=${formatRect(viewport)}`);
+		this.tui.afterNextRender(() => {
+			if (this.closed || this.closing) return;
+			this.producer.setViewport(viewport);
+		});
+		this.tui.requestRender();
+	}
+
+	private onFrame(batch: FrameBatch): void {
+		if (this.closed) return;
+		if (this.closing) {
+			this.status = `closing #${batch.seq}`;
+			const bytes = cleanupTerminalChunks(batch).join("");
+			if (bytes.length > 0) {
+				this.cleanupSeen = true;
+				this.tui.writeRaw(bytes);
+				if (isCleanupOnlyBatch(batch)) this.scheduleCloseFinish("cleanup-drained", CLOSE_AFTER_CLEANUP_MS);
+			}
+			this.tui.requestRender();
+			return;
+		}
+		this.status = `streaming #${batch.seq}`;
+		const bytes = orderedTerminalChunks(batch).join("");
+		if (bytes.length > 0) this.tui.writeRaw(bytes);
+		this.tui.requestRender();
+	}
+
+	private onDetached(message: DetachedMessage): void {
+		debugLog(`inline.detached window=${message.window_id} closing=${this.closing}`);
+		if (this.closed) return;
+		if (this.closing) this.scheduleCloseFinish("detached", 0);
+		else this.status = "detached";
+		this.tui.requestRender();
+	}
+
+	private scheduleCloseFinish(reason: string, delayMs: number): void {
+		if (this.closeTimer) clearTimeout(this.closeTimer);
+		this.closeTimer = setTimeout(() => this.finishClose(reason), delayMs);
+	}
+
+	private finishClose(reason: string): void {
+		if (this.closed) return;
+		debugLog(`inline.finishClose reason=${reason} cleanupSeen=${this.cleanupSeen}`);
+		this.closed = true;
+		this.closing = false;
+		if (this.closeTimer) {
+			clearTimeout(this.closeTimer);
+			this.closeTimer = undefined;
+		}
+		inlinePanels.delete(this);
+	}
+
+	private setStatus(status: string): void {
+		this.status = status;
+		this.error = undefined;
+		this.tui.requestRender();
+	}
+
+	private setError(error: string): void {
+		this.error = error;
+		this.tui.requestRender();
+	}
+}
+
 interface ProducerCallbacks {
 	onFrame?: (batch: FrameBatch) => void;
 	onDetached?: (message: DetachedMessage) => void;
@@ -505,11 +753,18 @@ class KatzenstegProducer implements ProducerConnection {
 	private killTimer: NodeJS.Timeout | undefined;
 	private readonly uploadDir = mkdtempSync(path.join(os.tmpdir(), "katzensteg-pi-"));
 	private readonly uploadPath = path.join(this.uploadDir, "embed-upload.rgba");
+	private readonly imageIds: [number, number];
+	private readonly placementIds: [number, number];
 
 	constructor(
 		private readonly profile: string,
 		private readonly callbacks: ProducerCallbacks,
-	) {}
+		private readonly zBase: number,
+	) {
+		const ranges = allocateIdRanges();
+		this.imageIds = ranges.imageIds;
+		this.placementIds = ranges.placementIds;
+	}
 
 	start(): void {
 		if (this.child) return;
@@ -550,9 +805,9 @@ class KatzenstegProducer implements ProducerConnection {
 				windowId: WINDOW_ID,
 				rectCells: viewport,
 				aspect: PANEL_ASPECT,
-				zBase: PANEL_Z_BASE,
-				imageIds: IMAGE_IDS,
-				placementIds: PLACEMENT_IDS,
+				zBase: this.zBase,
+				imageIds: this.imageIds,
+				placementIds: this.placementIds,
 				upload: { profile: "file_whole", path: this.uploadPath, highWater: DEFAULT_UPLOAD_HIGH_WATER },
 			}));
 			this.attached = true;
@@ -565,7 +820,7 @@ class KatzenstegProducer implements ProducerConnection {
 			return;
 		}
 		debugLog(`producer.live.viewport ${formatRect(viewport)}`);
-		this.writeControl(makeViewportMessage({ windowId: WINDOW_ID, rectCells: viewport, aspect: PANEL_ASPECT, zBase: PANEL_Z_BASE }));
+		this.writeControl(makeViewportMessage({ windowId: WINDOW_ID, rectCells: viewport, aspect: PANEL_ASPECT, zBase: this.zBase }));
 		this.lastViewportSent = viewport;
 		this.callbacks.onStatus("viewport");
 	}
@@ -604,19 +859,30 @@ class KatzenstegProducer implements ProducerConnection {
 	}
 
 	private onStdout(chunk: string): void {
+		const start = process.hrtime.bigint();
+		const seq = ++globalChunkSeq;
 		this.carry += chunk;
+		let lines = 0;
+		let frames = 0;
 		for (;;) {
 			const newline = this.carry.indexOf("\n");
 			if (newline < 0) break;
 			const line = this.carry.slice(0, newline);
 			this.carry = this.carry.slice(newline + 1);
+			lines++;
 			const message = parseProducerLine(line);
 			if (!message) {
 				debugLog(`producer.live.stdout ignored ${line.slice(0, 160)}`);
 				continue;
 			}
-			if (message.type === "frame_batch") this.callbacks.onFrame?.(message);
-			else this.callbacks.onDetached?.(message);
+			if (message.type === "frame_batch") {
+				frames++;
+				this.callbacks.onFrame?.(message);
+			} else this.callbacks.onDetached?.(message);
+		}
+		const us = Number((process.hrtime.bigint() - start) / 1000n);
+		if (us >= 1000 || lines > 0) {
+			debugLog(`producer.live.chunk seq=${seq} profile=${this.profile} bytes=${chunk.length} lines=${lines} frames=${frames} us=${us}`);
 		}
 	}
 
@@ -638,16 +904,21 @@ class KatzenstegProducer implements ProducerConnection {
 }
 
 function producerEnv(): NodeJS.ProcessEnv {
-	return {
+	const env: NodeJS.ProcessEnv = {
 		...process.env,
-		KATZENSTEG_WINDOW_POLICY: DEFAULT_WINDOW_POLICY,
-		KATZENSTEG_REAL_WINDOW: DEFAULT_REAL_WINDOW,
 	};
+	if (PANEL_WINDOW_POLICY) env.KATZENSTEG_WINDOW_POLICY = PANEL_WINDOW_POLICY;
+	if (PANEL_REAL_WINDOW) env.KATZENSTEG_REAL_WINDOW = PANEL_REAL_WINDOW;
+	debugLog(
+		`producer.env trace_blocking=${env.KATZENSTEG_TRACE_BLOCKING ?? "(unset)"} threshold_ms=${env.KATZENSTEG_TRACE_BLOCKING_THRESHOLD_MS ?? "(unset)"} window_policy=${env.KATZENSTEG_WINDOW_POLICY ?? "(profile)"} real_window=${env.KATZENSTEG_REAL_WINDOW ?? "(profile)"}`,
+	);
+	return env;
 }
 
 function parseCommand(args: string): PanelCommand {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
 	if (parts.length === 0) return { kind: "toggle" };
+	if (parts[0] === "inline") return { kind: "inline", profile: parts.slice(1).join(" ") || undefined };
 	if (parts[0] === "open") return { kind: "open", profile: parts.slice(1).join(" ") || undefined };
 	if (parts[0] === "close") return { kind: "close" };
 	if (parts[0] === "size" && isSizePreset(parts[1])) return { kind: "size", size: parts[1] };
@@ -766,6 +1037,12 @@ function parseIntegerEnv(value: string | undefined, fallback: number): number {
 	if (value === undefined || value.trim().length === 0) return fallback;
 	const parsed = Number.parseInt(value, 10);
 	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function nonEmptyEnv(value: string | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function sameRect(a: RectCells | undefined, b: RectCells): boolean {
