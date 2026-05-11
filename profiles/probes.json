@@ -44,6 +44,34 @@
         "runtime.fullscreen_file"
       ]
     },
+    "probe.embed.luchs_static": {
+      "hidden": true,
+      "extends": [
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "target": "{repo}/zig-out/bin/luchs",
+      "args": [
+        {
+          "macos": "--renderer=native-webview"
+        },
+        "--frames=180",
+        "{repo}/tools/luchs/testdata/static.html"
+      ]
+    },
+    "probe.embed.luchs_interactive": {
+      "extends": [
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "target": "{repo}/zig-out/bin/luchs",
+      "args": [
+        {
+          "macos": "--renderer=native-webview"
+        },
+        "{repo}/tools/luchs/testdata/interactive.html"
+      ]
+    },
     "app.vulkan_probe": {
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe"

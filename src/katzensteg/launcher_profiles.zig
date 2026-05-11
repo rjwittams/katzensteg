@@ -1207,6 +1207,21 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
     try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
 }
 
+test "bundled SDL2 preload adapter resolves platform preload environment" {
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    defer linux_catalog.deinit();
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer macos_catalog.deinit();
+
+    const linux_profile = linux_catalog.find("adapter.sdl2_preload").?;
+    const macos_profile = macos_catalog.find("adapter.sdl2_preload").?;
+
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.so", envValue(linux_profile, "LD_PRELOAD").?);
+    try std.testing.expect(envValue(linux_profile, "DYLD_INSERT_LIBRARIES") == null);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
+    try std.testing.expect(envValue(macos_profile, "LD_PRELOAD") == null);
+}
+
 test "bundled profiles include experimental macOS SDL2 rebind adapter" {
     var catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
     defer catalog.deinit();
@@ -1264,6 +1279,36 @@ test "bundled profiles include embed basic SDL probe" {
     const profile = catalog.find("probe.embed.basic_sdl").?;
     try std.testing.expect(!profile.isBroken());
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/basic-sdl-demo", profile.target);
+    try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+}
+
+test "bundled profiles include embed luchs static probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.embed.luchs_static").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/luchs", profile.target);
+    try std.testing.expect(profile.args.len >= 1);
+    try std.testing.expectEqualStrings("--frames=180", profile.args[profile.args.len - 2]);
+    try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+}
+
+test "bundled profiles include embed luchs interactive probe" {
+    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    defer catalog.deinit();
+
+    const profile = catalog.find("probe.embed.luchs_interactive").?;
+    try std.testing.expect(!profile.isBroken());
+    try std.testing.expect(!profile.hidden);
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/luchs", profile.target);
+    try std.testing.expect(profile.args.len >= 1);
+    for (profile.args) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "--frames=0"));
+    }
+    try std.testing.expectEqualStrings("{repo}/tools/luchs/testdata/interactive.html", profile.args[profile.args.len - 1]);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
     try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
 }

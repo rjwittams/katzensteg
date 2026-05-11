@@ -127,6 +127,20 @@ class EnvScrubTests(unittest.TestCase):
 
         self.assertIsNone(self.c_getenv("KATZENSTEG_TEST_LIST"))
 
+    def test_scrub_colon_env_entry_removes_same_file_with_redundant_slash(self):
+        lib_path = pathlib.Path(self.tmpdir.name) / "libkatzensteg-unlinked.so"
+        lib_path.touch()
+        redundant_path = f"{lib_path.parent}//{lib_path.name}"
+        keep_path = str(pathlib.Path(self.tmpdir.name) / "keep.so")
+        os.environ["KATZENSTEG_TEST_LIST"] = f"{keep_path}:{redundant_path}"
+
+        self.env_lib.ks_scrub_colon_env_entry(
+            b"KATZENSTEG_TEST_LIST",
+            str(lib_path).encode(),
+        )
+
+        self.assertEqual(keep_path, self.c_getenv("KATZENSTEG_TEST_LIST"))
+
     def test_vulkan_layer_latches_flags_before_scrubbing_child_env(self):
         os.environ["KATZENSTEG_VULKAN_CAPTURE"] = "1"
         os.environ["KATZENSTEG_TRACE_VULKAN"] = "1"

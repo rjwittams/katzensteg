@@ -312,6 +312,33 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_gl_probe);
 
+    const luchs = b.addExecutable(.{
+        .name = "luchs",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/luchs/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    luchs.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    if (is_macos) luchs.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    luchs.linkSystemLibrary("SDL2");
+    const install_luchs = b.addInstallArtifact(luchs, .{});
+    b.getInstallStep().dependOn(&install_luchs.step);
+    var install_luchs_helper_step: ?*std.Build.Step = null;
+    if (is_macos and builtin.os.tag == .macos) {
+        const luchs_helper_cmd = b.addSystemCommand(&.{"swiftc"});
+        luchs_helper_cmd.addArgs(&.{ "-O", "-parse-as-library", "-framework", "Cocoa", "-framework", "WebKit" });
+        luchs_helper_cmd.addFileArg(b.path("tools/luchs/native/macos/LuchsWebviewCapture.swift"));
+        luchs_helper_cmd.addArg("-o");
+        const luchs_helper_bin = luchs_helper_cmd.addOutputFileArg("luchs-webview-capture");
+        const install_luchs_helper = b.addInstallBinFile(luchs_helper_bin, "luchs-webview-capture");
+        install_luchs_helper_step = &install_luchs_helper.step;
+        b.getInstallStep().dependOn(&install_luchs_helper.step);
+    }
+
     if (enable_vulkan) {
         const katzensteg_vulkan_layer = b.addLibrary(.{
             .linkage = .dynamic,
@@ -466,6 +493,10 @@ pub fn build(b: *std.Build) void {
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
 
+    const luchs_build_step = b.step("luchs", "Build the SDL-backed web fragment viewer");
+    luchs_build_step.dependOn(&install_luchs.step);
+    if (install_luchs_helper_step) |step| luchs_build_step.dependOn(step);
+
     addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-log-test", "src/katzensteg/log.zig", target, optimize, use_llvm, .{});
@@ -517,6 +548,10 @@ pub fn build(b: *std.Build) void {
     });
     addUnitTest(b, test_step, "katzensteg-launcher-test", "src/katzensteg/launcher.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
+    });
+    addUnitTest(b, test_step, "luchs-test", "tools/luchs/src/main.zig", target, optimize, use_llvm, .{
+        .katzensteg_sdl = katzensteg_sdl_mod,
+        .link_sdl2 = true,
     });
 }
 

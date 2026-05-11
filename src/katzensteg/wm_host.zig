@@ -230,6 +230,9 @@ pub const ChromeOptions = struct {
     outer: Rect,
     title: []const u8,
     focused: bool = true,
+    // When set, chrome writes outside the terminal viewport are clipped so a
+    // window dragged off the edge doesn't wrap onto the wrong terminal row.
+    terminal: ?TerminalSize = null,
 };
 
 pub const StatusBandOptions = struct {
@@ -958,11 +961,13 @@ fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8,
     session.child_stdin = session.child.stdin.?;
     session.child.stdin = null;
     const ranges = idRangesForSession(session_index);
+    const session_rect = session.focusedContent().toPresentationRectCells();
     try writeInitialControl(session.child_stdin.?.deprecatedWriter(), .{
-        .rect_cells = session.focusedContent().toPresentationRectCells(),
+        .rect_cells = session_rect,
         .aspect = .fit,
         .z_base = zBaseForSlot(session_index),
         .terminal = terminal,
+        .clip_cells = computeClipForRect(session_rect, terminal),
         .image_ids = ranges.image,
         .placement_ids = ranges.placement,
         .upload = session.upload,
@@ -1103,7 +1108,12 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
     if (argv.len == 0) return 64;
 
     const outer = initialOuterRect(options.terminal);
-    try renderChrome(writer, .{ .outer = outer, .title = options.title, .focused = true });
+    try renderChrome(writer, .{
+        .outer = outer,
+        .title = options.title,
+        .focused = true,
+        .terminal = windowAreaForTerminal(options.terminal),
+    });
 
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Pipe;
@@ -1113,10 +1123,12 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
 
     if (child.stdin) |stdin_file| {
         child.stdin = null;
+        const exec_rect = contentRectForOuter(outer).toPresentationRectCells();
         try writeInitialControl(stdin_file.deprecatedWriter(), .{
-            .rect_cells = contentRectForOuter(outer).toPresentationRectCells(),
+            .rect_cells = exec_rect,
             .aspect = options.aspect,
             .terminal = options.terminal,
+            .clip_cells = computeClipForRect(exec_rect, options.terminal),
             .upload = options.upload,
         });
         stdin_file.close();
@@ -1352,57 +1364,123 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     defer writer.writeAll("\x1b[0m") catch {};
 
     const horizontal_len: usize = @intCast(@max(0, options.outer.cols - 2));
-    try moveCursor(writer, options.outer.row, options.outer.col);
-    try writer.writeAll(text_box.top_left);
-    if (horizontal_len > 1) {
-        try writer.writeAll(text_box.horizontal);
-        try writer.writeAll(text_box.tee_down);
-        try writeRepeated(writer, text_box.horizontal, horizontal_len - 2);
-    } else {
-        try writeRepeated(writer, text_box.horizontal, horizontal_len);
-    }
-    try writer.writeAll(text_box.top_right);
+    var emitter = ChromeEmitter{ .terminal = options.terminal };
 
-    try moveCursor(writer, options.outer.row + 1, options.outer.col);
-    try writer.writeAll(text_box.vertical);
-    try writer.writeAll("╳");
-    try writer.writeAll(text_box.vertical);
-    try writer.writeAll(" ");
+    // Top border
+    emitter.startRow(options.outer.row, options.outer.col);
+    try emitter.cell(writer, text_box.top_left);
+    if (horizontal_len > 1) {
+        try emitter.cell(writer, text_box.horizontal);
+        try emitter.cell(writer, text_box.tee_down);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len - 2);
+    } else {
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len);
+    }
+    try emitter.cell(writer, text_box.top_right);
+
+    // Title row: left vertical, ╳, vertical, space, label/title, padding, right vertical.
+    // Preserves the existing byte-truncate semantics (each ASCII byte = one cell).
+    emitter.startRow(options.outer.row + 1, options.outer.col);
+    try emitter.cell(writer, text_box.vertical);
+    try emitter.cell(writer, "╳");
+    try emitter.cell(writer, text_box.vertical);
+    try emitter.cell(writer, " ");
     const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
     var written: usize = @min(3, title_space);
-    written += try writeTruncated(writer, label_prefix, title_space -| written);
-    written += try writeTruncated(writer, options.title, title_space -| written);
-    if (written < title_space) try writer.writeByteNTimes(' ', title_space - written);
-    try writer.writeAll(text_box.vertical);
+    written += try emitter.bytes(writer, label_prefix, title_space -| written);
+    written += try emitter.bytes(writer, options.title, title_space -| written);
+    if (written < title_space) try emitter.repeat(writer, " ", title_space - written);
+    try emitter.cell(writer, text_box.vertical);
 
-    try moveCursor(writer, options.outer.row + 2, options.outer.col);
-    try writer.writeAll(text_box.tee_left);
+    // Separator row
+    emitter.startRow(options.outer.row + 2, options.outer.col);
+    try emitter.cell(writer, text_box.tee_left);
     if (horizontal_len > 1) {
-        try writer.writeAll(text_box.horizontal);
-        try writer.writeAll(text_box.tee_up);
-        try writeRepeated(writer, text_box.horizontal, horizontal_len - 2);
+        try emitter.cell(writer, text_box.horizontal);
+        try emitter.cell(writer, text_box.tee_up);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len - 2);
     } else {
-        try writeRepeated(writer, text_box.horizontal, horizontal_len);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len);
     }
-    try writer.writeAll(text_box.tee_right);
+    try emitter.cell(writer, text_box.tee_right);
 
+    // Side rows: only the two vertical bars.
     var row = options.outer.row + 3;
     while (row < options.outer.row + options.outer.rows - 1) : (row += 1) {
-        try moveCursor(writer, row, options.outer.col);
-        try writer.writeAll(text_box.vertical);
-        try moveCursor(writer, row, options.outer.col + options.outer.cols - 1);
-        try writer.writeAll(text_box.vertical);
+        emitter.startRow(row, options.outer.col);
+        try emitter.cell(writer, text_box.vertical);
+        emitter.startRow(row, options.outer.col + options.outer.cols - 1);
+        try emitter.cell(writer, text_box.vertical);
     }
 
-    try moveCursor(writer, options.outer.row + options.outer.rows - 1, options.outer.col);
-    try writer.writeAll(text_box.bottom_left);
-    try writeRepeated(writer, text_box.horizontal, horizontal_len);
-    try writer.writeAll(text_box.bottom_right);
+    // Bottom border
+    emitter.startRow(options.outer.row + options.outer.rows - 1, options.outer.col);
+    try emitter.cell(writer, text_box.bottom_left);
+    try emitter.repeat(writer, text_box.horizontal, horizontal_len);
+    try emitter.cell(writer, text_box.bottom_right);
 
     const content = contentRectForOuter(options.outer);
-    try moveCursor(writer, content.row, content.col);
+    // Park the cursor at content's top-left, clamped to a visible terminal
+    // cell. Partly-off-screen windows can produce content.row/col <= 0; emitting
+    // those literally would write malformed CSI like ESC[-5;0H that some
+    // terminals interpret unpredictably.
+    if (options.terminal) |term| {
+        const safe_row = std.math.clamp(content.row, 1, @max(1, term.rows));
+        const safe_col = std.math.clamp(content.col, 1, @max(1, term.cols));
+        try moveCursor(writer, safe_row, safe_col);
+    } else {
+        try moveCursor(writer, @max(1, content.row), @max(1, content.col));
+    }
 }
+
+const ChromeEmitter = struct {
+    terminal: ?TerminalSize,
+    row: i32 = 0,
+    col: i32 = 0,
+    in_run: bool = false,
+
+    fn startRow(self: *ChromeEmitter, row: i32, col: i32) void {
+        self.row = row;
+        self.col = col;
+        self.in_run = false;
+    }
+
+    fn cell(self: *ChromeEmitter, writer: anytype, glyph: []const u8) !void {
+        const visible = if (self.terminal) |term|
+            self.row >= 1 and self.row <= term.rows and self.col >= 1 and self.col <= term.cols
+        else
+            true;
+        if (visible) {
+            if (!self.in_run) {
+                try moveCursor(writer, self.row, self.col);
+                self.in_run = true;
+            }
+            try writer.writeAll(glyph);
+        } else {
+            self.in_run = false;
+        }
+        self.col += 1;
+    }
+
+    fn repeat(self: *ChromeEmitter, writer: anytype, glyph: []const u8, count: usize) !void {
+        var i: usize = 0;
+        while (i < count) : (i += 1) try self.cell(writer, glyph);
+    }
+
+    /// Emit up to `max_cells` bytes from `bytes`, treating each byte as one cell.
+    /// Matches the existing byte-truncate behaviour the chrome title used.
+    /// Callers must ensure input is ASCII; multi-byte UTF-8 would be miscounted
+    /// (each byte would advance the column by one, splitting glyphs).
+    fn bytes(self: *ChromeEmitter, writer: anytype, source: []const u8, max_cells: usize) !usize {
+        const n = @min(source.len, max_cells);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            try self.cell(writer, source[i .. i + 1]);
+        }
+        return n;
+    }
+};
 
 pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
     if (options.terminal.rows < 1 or options.terminal.cols < 1) return;
@@ -1610,6 +1688,7 @@ const AttachOptions = struct {
     z_base: i32 = 0,
     terminal: ?TerminalSize = null,
     occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
     upload: render_batch_protocol.UploadPolicy,
@@ -1626,6 +1705,7 @@ fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writeTerminalGeometryFields(writer, options.terminal);
     try writeOcclusionRectsField(writer, options.occlusion_rects);
+    try writeClipCellsField(writer, options.clip_cells);
     try writer.writeAll(",\"id_ranges\":{\"image\":[[");
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
@@ -1647,6 +1727,7 @@ const ViewportOptions = struct {
     z_base: i32 = 0,
     terminal: ?TerminalSize = null,
     occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
 };
 
 fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
@@ -1659,6 +1740,7 @@ fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
     if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
     try writeTerminalGeometryFields(writer, options.terminal);
     try writeOcclusionRectsField(writer, options.occlusion_rects);
+    try writeClipCellsField(writer, options.clip_cells);
     try writer.writeAll("}\n");
 }
 
@@ -1679,6 +1761,43 @@ fn writeOcclusionRectsField(writer: anytype, occlusion_rects: []const render_bat
         try writer.print("{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
     }
     try writer.writeAll("]");
+}
+
+fn writeClipCellsField(writer: anytype, clip: ?render_batch_protocol.PresentationRectCells) !void {
+    const rect = clip orelse return;
+    try writer.print(",\"clip_cells\":{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
+}
+
+/// Compute the clip rect to send to the producer for `rect` given the current
+/// terminal viewport. Returns null when `rect` is fully inside the terminal —
+/// the producer treats absent clip as "no clipping required". Returns the
+/// visible intersection when partial. Returns a zero-sized rect when fully
+/// off-screen, which the producer interprets as "emit no placements".
+fn computeClipForRect(rect: render_batch_protocol.PresentationRectCells, terminal: TerminalSize) ?render_batch_protocol.PresentationRectCells {
+    // Use window-area bounds, not the full terminal: the status band reserves
+    // the bottom row, so window placements are clipped above it.
+    const max_rows = rowsForWindows(terminal);
+    const rect_end_row = rect.row + rect.rows - 1;
+    const rect_end_col = rect.col + rect.cols - 1;
+    if (rect.row >= 1 and rect.col >= 1 and rect_end_row <= max_rows and rect_end_col <= terminal.cols) {
+        return null;
+    }
+    const top = @max(rect.row, 1);
+    const left = @max(rect.col, 1);
+    const bottom = @min(rect_end_row, max_rows);
+    const right = @min(rect_end_col, terminal.cols);
+    if (bottom < top or right < left) {
+        // Anchor the zero-sized sentinel at the surface's own origin so it
+        // matches the field semantics ("visible portion in terminal cell
+        // coords") even when nothing is visible.
+        return render_batch_protocol.PresentationRectCells{ .row = rect.row, .col = rect.col, .rows = 0, .cols = 0 };
+    }
+    return render_batch_protocol.PresentationRectCells{
+        .row = top,
+        .col = left,
+        .rows = bottom - top + 1,
+        .cols = right - left + 1,
+    };
 }
 
 fn tryWriteViewportControl(writer: anytype, options: ViewportOptions) bool {
@@ -1756,12 +1875,14 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
 fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!session.control_open or !sessionIsVisible(session)) return;
     const content = session.focusedContent();
+    const content_rect = content.toPresentationRectCells();
     if (tryWriteViewportControl(session.child_stdin.?.deprecatedWriter(), .{
-        .rect_cells = content.toPresentationRectCells(),
+        .rect_cells = content_rect,
         .aspect = aspect,
         .z_base = z_base,
         .terminal = terminal,
         .occlusion_rects = occlusion_rects,
+        .clip_cells = computeClipForRect(content_rect, terminal),
     })) {
         try events.record(.viewport_sent, session.profile_name);
         logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d}) z_base={d}", .{ session.profile_name, content.row, content.col, content.cols, content.rows, z_base });
@@ -2131,6 +2252,7 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
             .outer = session.window.outer,
             .title = session.profile_name,
             .focused = session_index == focused_index,
+            .terminal = windowAreaForTerminal(terminal),
         });
     }
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
@@ -2193,7 +2315,11 @@ fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWind
         .events = events,
     });
     const content = contentRectForOuter(window.outer);
-    try moveCursor(writer, content.row, content.col);
+    // Clamp to a visible cell: partly-off-screen windows can yield content.row/col
+    // <= 0, which would emit malformed cursor-position CSI.
+    const safe_row = std.math.clamp(content.row, 1, @max(1, terminal.rows));
+    const safe_col = std.math.clamp(content.col, 1, @max(1, terminal.cols));
+    try moveCursor(writer, safe_row, safe_col);
 }
 
 fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *const ProtocolEventLog) !void {
@@ -2226,17 +2352,37 @@ pub fn contentRectForOuter(outer: Rect) Rect {
     };
 }
 
+/// Effective rows available for window placement: the bottom terminal row is
+/// reserved for the status band, so windows are bounded to rows 1..term.rows-1.
+pub fn rowsForWindows(term: TerminalSize) i32 {
+    return @max(1, term.rows - 1);
+}
+
+/// Same as the input terminal but with `rows` reduced to the window area.
+/// Use this when handing a "terminal" bound to anything that should respect
+/// the status band reservation (chrome clipping, etc.).
+pub fn windowAreaForTerminal(term: TerminalSize) TerminalSize {
+    var result = term;
+    result.rows = rowsForWindows(term);
+    return result;
+}
+
 pub fn clampOuterRect(rect: Rect, terminal: TerminalSize) Rect {
     var out = rect;
-    out.rows = std.math.clamp(out.rows, 1, @max(1, terminal.rows));
+    const max_rows = rowsForWindows(terminal);
+    out.rows = std.math.clamp(out.rows, 1, max_rows);
     out.cols = std.math.clamp(out.cols, 1, @max(1, terminal.cols));
-    out.row = @max(1, out.row);
-    out.col = @max(1, out.col);
 
-    const max_row = @max(1, terminal.rows - out.rows + 1);
-    const max_col = @max(1, terminal.cols - out.cols + 1);
-    out.row = @min(out.row, max_row);
-    out.col = @min(out.col, max_col);
+    // Allow the window to extend past terminal edges, but keep at least one
+    // visible row and one visible col so the user can still grab it.
+    // Top-left must be ≤ window-area.{rows,cols}; bottom-right (row+rows-1,
+    // col+cols-1) must be ≥ 1. The col bound is `terminal.cols` (not
+    // `terminal.cols - 1`) because the status band only reserves the bottom
+    // row — columns are not asymmetric.
+    const min_row = 2 - out.rows;
+    const min_col = 2 - out.cols;
+    out.row = std.math.clamp(out.row, min_row, max_rows);
+    out.col = std.math.clamp(out.col, min_col, terminal.cols);
     return out;
 }
 
@@ -2246,15 +2392,127 @@ test "wm window derives content rect inside text chrome" {
     try std.testing.expectEqual(Rect{ .row = 4, .col = 2, .rows = 16, .cols = 78 }, content);
 }
 
-test "wm window clamps outer rect to terminal" {
-    const clamped = clampOuterRect(
-        .{ .row = 20, .col = 75, .rows = 10, .cols = 20 },
+test "wm clampOuterRect allows partly-off-screen windows" {
+    // Window dragged with its top-left above/left of the terminal viewport
+    // should keep its negative row/col rather than getting snapped back inside.
+    const partial = clampOuterRect(
+        .{ .row = -3, .col = -2, .rows = 10, .cols = 20 },
         .{ .rows = 24, .cols = 80 },
     );
-    try std.testing.expect(clamped.row >= 1);
-    try std.testing.expect(clamped.col >= 1);
-    try std.testing.expect(clamped.row + clamped.rows - 1 <= 24);
-    try std.testing.expect(clamped.col + clamped.cols - 1 <= 80);
+    try std.testing.expectEqual(@as(i32, -3), partial.row);
+    try std.testing.expectEqual(@as(i32, -2), partial.col);
+    try std.testing.expectEqual(@as(i32, 10), partial.rows);
+    try std.testing.expectEqual(@as(i32, 20), partial.cols);
+
+    // At least 1 row + 1 col must remain visible — pushing further off should
+    // be clamped so the bottom-right edge stays at terminal row/col >= 1.
+    const too_far = clampOuterRect(
+        .{ .row = -9, .col = -19, .rows = 10, .cols = 20 },
+        .{ .rows = 24, .cols = 80 },
+    );
+    try std.testing.expect(too_far.row + too_far.rows - 1 >= 1);
+    try std.testing.expect(too_far.col + too_far.cols - 1 >= 1);
+
+    // Symmetrically on the bottom-right: pushing the window past the bottom-right
+    // edge should stop with at least 1 row + 1 col visible.
+    const past_bottom = clampOuterRect(
+        .{ .row = 100, .col = 100, .rows = 10, .cols = 20 },
+        .{ .rows = 24, .cols = 80 },
+    );
+    try std.testing.expect(past_bottom.row <= 24);
+    try std.testing.expect(past_bottom.col <= 80);
+}
+
+test "wm renderChrome clips writes to terminal bounds when window extends past edge" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    // Window with right edge past terminal cols=20. Without clipping, the top
+    // border would have repeated horizontal chars beyond col 20 and the
+    // terminal would wrap to the next row.
+    try renderChrome(out.writer(std.testing.allocator), .{
+        .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 40 },
+        .title = "probe",
+        .focused = true,
+        .terminal = .{ .rows = 24, .cols = 20 },
+    });
+
+    // No moveCursor sequence with a column outside [1, 20] should appear.
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out.items, idx, "\x1b[")) |start| {
+        // Match \e[<row>;<col>H
+        const remainder = out.items[start + 2 ..];
+        const h_pos = std.mem.indexOfScalar(u8, remainder, 'H') orelse break;
+        const semi_pos = std.mem.indexOfScalar(u8, remainder[0..h_pos], ';') orelse {
+            idx = start + 2 + h_pos + 1;
+            continue;
+        };
+        const col_str = remainder[semi_pos + 1 .. h_pos];
+        const col = std.fmt.parseInt(i32, col_str, 10) catch {
+            idx = start + 2 + h_pos + 1;
+            continue;
+        };
+        try std.testing.expect(col >= 1 and col <= 20);
+        idx = start + 2 + h_pos + 1;
+    }
+}
+
+test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    const rect = render_batch_protocol.PresentationRectCells{ .row = -1, .col = 2, .rows = 10, .cols = 30 };
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+    try writeViewportControl(out.writer(std.testing.allocator), .{
+        .rect_cells = rect,
+        .aspect = .fit,
+        .terminal = terminal,
+        .clip_cells = computeClipForRect(rect, terminal),
+    });
+
+    // row=-1 with 10 rows in a 24-row terminal → visible rows are 1..8 (8 rows).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":2,\"rows\":8,\"cols\":30}") != null);
+}
+
+test "wm reserves the status band row for windows" {
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+    // The window-area excludes the status band row.
+    try std.testing.expectEqual(@as(i32, 23), rowsForWindows(terminal));
+    // A window whose top is pushed below the window area gets clamped at the
+    // last window-area row (its bottom extends off-screen, where clip_cells
+    // and chrome clipping take over).
+    const clamped = clampOuterRect(.{ .row = 100, .col = 1, .rows = 5, .cols = 20 }, terminal);
+    try std.testing.expect(clamped.row <= 23);
+    // clip_cells stops at the window area (max row 23), not at terminal.rows (24).
+    const clip = computeClipForRect(.{ .row = 23, .col = 1, .rows = 5, .cols = 20 }, terminal).?;
+    try std.testing.expect(clip.row + clip.rows - 1 <= 23);
+}
+
+test "wm computes clip_cells for partly-off-screen rect" {
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
+
+    // Fully on-screen → no clip needed.
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, null),
+        computeClipForRect(.{ .row = 2, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Top partly off-screen (row = -1, height = 10 → visible rows = top.row=1, rows=8).
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 1, .col = 2, .rows = 8, .cols = 30 }),
+        computeClipForRect(.{ .row = -1, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Bottom partly off-screen — bottom row of terminal is reserved for status
+    // band, so the visible bottom is row 23 (terminal.rows - 1).
+    try std.testing.expectEqual(
+        @as(?render_batch_protocol.PresentationRectCells, .{ .row = 20, .col = 2, .rows = 4, .cols = 30 }),
+        computeClipForRect(.{ .row = 20, .col = 2, .rows = 10, .cols = 30 }, terminal),
+    );
+
+    // Fully off-screen → zero-sized clip (signal: nothing visible).
+    const clip = computeClipForRect(.{ .row = -100, .col = 2, .rows = 5, .cols = 30 }, terminal).?;
+    try std.testing.expect(clip.rows == 0 or clip.cols == 0);
 }
 
 test "wm content rect converts to presentation cells" {

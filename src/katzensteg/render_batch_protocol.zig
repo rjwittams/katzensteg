@@ -73,6 +73,11 @@ pub const AttachMessage = struct {
     z_base: i32 = 0,
     terminal: ?TerminalGeometry = null,
     occlusion_rects: []PresentationRectCells = &.{},
+    // Visible portion of the surface in terminal cell coords. When set, the
+    // producer composes at full rect_cells size but only emits placements for
+    // the intersection of rect_cells and clip_cells. Null = no clipping (the
+    // whole rect_cells is the placement target).
+    clip_cells: ?PresentationRectCells = null,
     image_ids: IdRange,
     placement_ids: IdRange,
     upload: UploadPolicy,
@@ -85,6 +90,7 @@ pub const ViewportMessage = struct {
     z_base: i32 = 0,
     terminal: ?TerminalGeometry = null,
     occlusion_rects: []PresentationRectCells = &.{},
+    clip_cells: ?PresentationRectCells = null,
 };
 
 pub const DetachMessage = struct {
@@ -223,6 +229,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
     const aspect = parseAspect(aspect_value.string) orelse return error.InvalidMessage;
     const z_base: i32 = if (root.get("z_base")) |z_value| try jsonI32(z_value) else 0;
     const terminal = try parseTerminalGeometry(root);
+    const clip: ?PresentationRectCells = if (root.get("clip_cells")) |clip_value| try parseRect(clip_value) else null;
 
     if (std.mem.eql(u8, type_value.string, "viewport")) {
         return .{ .viewport = .{
@@ -232,6 +239,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
             .z_base = z_base,
             .terminal = terminal,
             .occlusion_rects = try parseOcclusionRects(allocator, root.get("occlusion_rects")),
+            .clip_cells = clip,
         } };
     }
 
@@ -250,6 +258,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         .z_base = z_base,
         .terminal = terminal,
         .occlusion_rects = try parseOcclusionRects(allocator, root.get("occlusion_rects")),
+        .clip_cells = clip,
         .image_ids = image_ids,
         .placement_ids = placement_ids,
         .upload = upload,
@@ -460,6 +469,29 @@ test "attach and viewport messages parse terminal geometry" {
         .cells = .{ .rows = 50, .cols = 160 },
         .pixels = .{ .w = 1280, .h = 1000 },
     }, control.viewport.terminal.?);
+}
+
+test "attach and viewport messages parse optional clip rectangle" {
+    const attach_msg =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":-2,"col":1,"rows":10,"cols":20},"aspect":"fit","clip_cells":{"row":1,"col":1,"rows":8,"cols":20},"id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach = try parseAttachMessage(std.testing.allocator, attach_msg);
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(?PresentationRectCells, PresentationRectCells{ .row = 1, .col = 1, .rows = 8, .cols = 20 }), attach.clip_cells);
+
+    const viewport_msg =
+        \\{"type":"viewport","window_id":"main","rect_cells":{"row":-1,"col":2,"rows":10,"cols":20},"aspect":"fit","clip_cells":{"row":1,"col":2,"rows":9,"cols":20}}
+    ;
+    var control = try parseControlMessage(std.testing.allocator, viewport_msg);
+    defer deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(@as(?PresentationRectCells, PresentationRectCells{ .row = 1, .col = 2, .rows = 9, .cols = 20 }), control.viewport.clip_cells);
+
+    const attach_no_clip =
+        \\{"type":"attach","window_id":"main","rect_cells":{"row":4,"col":1,"rows":24,"cols":80},"aspect":"fit","id_ranges":{"image":[[100000,199999]],"placement":[[200000,299999]]}}
+    ;
+    var attach2 = try parseAttachMessage(std.testing.allocator, attach_no_clip);
+    defer deinitAttachMessage(std.testing.allocator, &attach2);
+    try std.testing.expectEqual(@as(?PresentationRectCells, null), attach2.clip_cells);
 }
 
 test "attach and viewport messages parse occlusion rectangles" {

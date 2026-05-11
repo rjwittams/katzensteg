@@ -59,6 +59,10 @@ pub const RenderBatchSink = struct {
     z_base: i32 = 0,
     terminal: ?render_batch_protocol.TerminalGeometry = null,
     occlusion_rects: std.ArrayList(render_batch_protocol.PresentationRectCells) = .empty,
+    // Optional visible clip in terminal cell coords. When set, placements are
+    // emitted only for the intersection of rect_cells and clip_cells. Null
+    // means no clip (whole rect_cells is the placement target).
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     upload: UploadState = .direct_apc,
     placement_trace_enabled: bool = false,
     blocking_trace_settings: blocking_trace.Settings = .{},
@@ -161,6 +165,14 @@ pub const RenderBatchSink = struct {
 
     pub fn occlusionRects(self: *const RenderBatchSink) []const render_batch_protocol.PresentationRectCells {
         return self.occlusion_rects.items;
+    }
+
+    pub fn setClipCells(self: *RenderBatchSink, clip: ?render_batch_protocol.PresentationRectCells) void {
+        self.clip_cells = clip;
+    }
+
+    pub fn clipCells(self: *const RenderBatchSink) ?render_batch_protocol.PresentationRectCells {
+        return self.clip_cells;
     }
 
     pub fn presentationTty(self: *const RenderBatchSink) DirectTty {

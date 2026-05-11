@@ -10,6 +10,7 @@ pub const AttachOptions = struct {
     window_id: []const u8 = "main",
     rect_cells: render_batch_protocol.PresentationRectCells,
     aspect: render_batch_protocol.PresentationAspect = .fit,
+    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
     placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
     upload: render_batch_protocol.UploadPolicy = .{ .profile = .direct_apc },
@@ -28,6 +29,11 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
     try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
     try writer.writeAll("},\"aspect\":");
     try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
+    if (options.clip_cells) |clip| {
+        try writer.writeAll(",\"clip_cells\":{");
+        try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ clip.row, clip.col, clip.rows, clip.cols });
+        try writer.writeAll("}");
+    }
     try writer.writeAll(",\"id_ranges\":{\"image\":[[");
     try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
     try writer.writeAll("]],\"placement\":[[");
@@ -173,6 +179,29 @@ test "attach host writes hello and attach control messages" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"hello\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"attach\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aspect\":\"fit\"") != null);
+}
+
+test "attach host emits clip_cells when set" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writeInitialControl(out.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = -2, .col = 1, .rows = 10, .cols = 20 },
+        .clip_cells = .{ .row = 1, .col = 1, .rows = 8, .cols = 20 },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":1,\"rows\":8,\"cols\":20}") != null);
+}
+
+test "attach host omits clip_cells when not set" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try writeInitialControl(out.writer(std.testing.allocator), .{
+        .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\"") == null);
 }
 
 test "attach host advertises file upload policy" {

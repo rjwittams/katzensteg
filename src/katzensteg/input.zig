@@ -131,6 +131,12 @@ pub const TerminalInputParser = struct {
     last_mouse_y: i32 = 0,
     mouse_buttons: u32 = 0,
     mouse_activity: bool = false,
+    // Set after an ESC/CSI sequence is consumed without producing a valid
+    // event. Causes the next parseOne call to look for an orphan-mouse-tail
+    // (e.g. residual `4;47;44M` bytes left after a partial mouse CSI).
+    // Cleared after that one lookup, so arbitrary printable input that happens
+    // to look like a mouse tail isn't silently captured.
+    expect_orphan_mouse_tail: bool = false,
     keyboard_state: [sdl_num_scancodes]u8 = [_]u8{0} ** sdl_num_scancodes,
     keyboard_deadline_ns: [sdl_num_scancodes]i128 = [_]i128{0} ** sdl_num_scancodes,
 
@@ -205,6 +211,10 @@ pub const TerminalInputParser = struct {
         if (self.pending.items.len == 1 and self.pending.items[0] == 0x1b) {
             try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
             self.pending.clearRetainingCapacity();
+            // If a partial mouse CSI was fragmented across reads, the tail
+            // bytes could arrive after this flush — let the next parseOne
+            // pass try to consume them as an orphan-mouse-tail cleanup.
+            self.expect_orphan_mouse_tail = true;
         }
     }
 
@@ -220,10 +230,27 @@ pub const TerminalInputParser = struct {
     fn parseOne(self: *TerminalInputParser, bytes: []const u8) !usize {
         const first = bytes[0];
         if (first == 0x1b) {
-            if (try self.parseEscape(bytes)) |consumed| return consumed;
-            if (bytes.len == 1) return 0;
+            if (try self.parseEscape(bytes)) |consumed| {
+                self.expect_orphan_mouse_tail = false;
+                return consumed;
+            }
+            if (isIncompleteEscape(bytes)) return 0;
             try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+            self.expect_orphan_mouse_tail = true;
             return 1;
+        }
+        if (first == 0x9b) {
+            if (try self.parseCsi(bytes, 1)) |consumed| {
+                self.expect_orphan_mouse_tail = false;
+                return consumed;
+            }
+            if (isIncompleteCsi(bytes, 1)) return 0;
+            self.expect_orphan_mouse_tail = true;
+            return 1;
+        }
+        if (self.expect_orphan_mouse_tail) {
+            self.expect_orphan_mouse_tail = false;
+            if (try self.parseOrphanMouseTail(bytes)) |consumed| return consumed;
         }
         if (first == '\r' or first == '\n') {
             try self.emitKey(.{ .keycode = '\r', .scancode = 40 });
@@ -250,45 +277,79 @@ pub const TerminalInputParser = struct {
         if (bytes[1] != '[') return null;
         if (bytes.len < 3) return null;
 
-        switch (bytes[2]) {
+        return try self.parseCsi(bytes, 2);
+    }
+
+    fn parseCsi(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
+        if (bytes.len <= start) return null;
+
+        switch (bytes[start]) {
             'A' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82 });
-                return 3;
+                return start + 1;
             },
             'B' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(81), .scancode = 81 });
-                return 3;
+                return start + 1;
             },
             'C' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(79), .scancode = 79 });
-                return 3;
+                return start + 1;
             },
             'D' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(80), .scancode = 80 });
-                return 3;
+                return start + 1;
             },
             'H' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(74), .scancode = 74 });
-                return 3;
+                return start + 1;
             },
             'F' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(77), .scancode = 77 });
-                return 3;
+                return start + 1;
             },
-            '<' => return try self.parseSgrMouse(bytes),
+            '<' => return try self.parseSgrMouse(bytes, start),
+            'M' => return try self.parseLegacyMouse(bytes, start),
             else => {},
         }
 
-        if (std.mem.startsWith(u8, bytes, "\x1b[3~")) {
-            try self.emitKey(.{ .keycode = 0x7f, .scancode = 76 });
-            return 4;
+        if (std.ascii.isDigit(bytes[start])) {
+            if (try self.parseUrxvtMouse(bytes, start)) |consumed| return consumed;
         }
+
+        if (bytes[start] == '3' and bytes.len > start + 1 and bytes[start + 1] == '~') {
+            try self.emitKey(.{ .keycode = 0x7f, .scancode = 76 });
+            return start + 2;
+        }
+        if (csiFinalIndex(bytes, start)) |final| return final + 1;
         return null;
     }
 
-    fn parseSgrMouse(self: *TerminalInputParser, bytes: []const u8) !?usize {
+    fn parseLegacyMouse(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
+        if (bytes.len < start + 4) return null;
+        const consumed = start + 4;
+        const b = decodeLegacyMouseByte(bytes[start + 1]) orelse return consumed;
+        const cell_x = decodeLegacyMouseByte(bytes[start + 2]) orelse return consumed;
+        const cell_y = decodeLegacyMouseByte(bytes[start + 3]) orelse return consumed;
+        const pressed = (b & 3) != 3;
+        try self.emitMouseCode(b, cell_x, cell_y, pressed);
+        return consumed;
+    }
+
+    fn parseUrxvtMouse(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
+        const final = csiFinalIndex(bytes, start) orelse return null;
+        if (bytes[final] != 'M') return null;
+        var fields = std.mem.splitScalar(u8, bytes[start..final], ';');
+        const b = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
+        const cell_x = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
+        const cell_y = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
+        try self.emitMouseCode(b, cell_x, cell_y, true);
+        return final + 1;
+    }
+
+    fn parseSgrMouse(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
         var end: ?usize = null;
-        var i: usize = 3;
+        var i: usize = start + 1;
         while (i < bytes.len) : (i += 1) {
             if (bytes[i] == 'M' or bytes[i] == 'm') {
                 end = i;
@@ -296,23 +357,48 @@ pub const TerminalInputParser = struct {
             }
         }
         const final = end orelse return null;
-        var fields = std.mem.splitScalar(u8, bytes[3..final], ';');
+        var fields = std.mem.splitScalar(u8, bytes[start + 1 .. final], ';');
         const b = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_x = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_y = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const pressed = bytes[final] == 'M';
+        try self.emitMouseCode(b, cell_x, cell_y, pressed);
+        return final + 1;
+    }
+
+    fn parseOrphanMouseTail(self: *TerminalInputParser, bytes: []const u8) !?usize {
+        if (bytes.len == 0) return null;
+        if (bytes[0] == ';') {
+            if (orphanTailFinalIndex(bytes)) |final| return final + 1;
+            return null;
+        }
+        if (!std.ascii.isDigit(bytes[0])) return null;
+        const final = orphanTailFinalIndex(bytes) orelse return null;
+        var fields = std.mem.splitScalar(u8, bytes[0..final], ';');
+        const b = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
+        const cell_x = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
+        const cell_y = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
+        if (fields.next() != null) return null;
+        if (b == 4 or b == 5 or (b & 64) != 0) {
+            try self.emitMouseCode(b, cell_x, cell_y, true);
+            return final + 1;
+        }
+        return null;
+    }
+
+    fn emitMouseCode(self: *TerminalInputParser, b: i32, cell_x: i32, cell_y: i32, pressed: bool) !void {
         const point = self.mapCellToSdl(cell_x, cell_y) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
             // button state and last mouse position unchanged until region
             // routing can synthesize enter/leave or chrome-owned events.
-            return final + 1;
+            return;
         };
         const x = point.x;
         const y = point.y;
         const xrel = x - self.last_mouse_x;
         const yrel = y - self.last_mouse_y;
 
-        if ((b & 64) != 0) {
+        if ((b & 64) != 0 or b == 4 or b == 5) {
             try self.queue.append(self.allocator, .{ .mouse_wheel = .{
                 .x = 0,
                 .y = if ((b & 1) == 0) 1 else -1,
@@ -331,6 +417,8 @@ pub const TerminalInputParser = struct {
             const button = terminalButtonToSdl(@intCast(b & 3));
             if (pressed) {
                 self.mouse_buttons |= sdlButtonMask(button);
+            } else if ((b & 3) == 3) {
+                self.mouse_buttons = 0;
             } else {
                 self.mouse_buttons &= ~sdlButtonMask(button);
             }
@@ -345,7 +433,6 @@ pub const TerminalInputParser = struct {
         self.last_mouse_x = x;
         self.last_mouse_y = y;
         self.mouse_activity = true;
-        return final + 1;
     }
 
     fn emitTextAndKey(self: *TerminalInputParser, bytes: []const u8, key: KeyEvent) !void {
@@ -407,6 +494,43 @@ fn terminalButtonToSdl(button: u2) u8 {
         2 => 3,
         else => 1,
     };
+}
+
+fn decodeLegacyMouseByte(byte: u8) ?i32 {
+    if (byte < 32) return null;
+    return @as(i32, byte) - 32;
+}
+
+fn isIncompleteEscape(bytes: []const u8) bool {
+    if (bytes.len == 1) return true;
+    if (bytes[1] != '[') return false;
+    if (bytes.len == 2) return true;
+    return isIncompleteCsi(bytes, 2);
+}
+
+fn isIncompleteCsi(bytes: []const u8, start: usize) bool {
+    if (bytes.len <= start) return true;
+    if (bytes[start] == 'M') return bytes.len < start + 4;
+    return csiFinalIndex(bytes, start) == null;
+}
+
+fn csiFinalIndex(bytes: []const u8, start: usize) ?usize {
+    if (bytes.len <= start) return null;
+    var i: usize = start;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] >= 0x40 and bytes[i] <= 0x7e) return i;
+    }
+    return null;
+}
+
+fn orphanTailFinalIndex(bytes: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const b = bytes[i];
+        if (b == 'M' or b == 'm') return i;
+        if (!(std.ascii.isDigit(b) or b == ';')) return null;
+    }
+    return null;
 }
 
 fn asciiKey(byte: u8) KeyEvent {
@@ -496,6 +620,16 @@ test "terminal input parser emits arrow key transitions" {
     try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82, .mods = 0 } }, parser.pop().?);
 }
 
+test "terminal input parser emits c1 delete key" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    try parser.feed("\x9b3~");
+
+    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
+    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
+}
+
 test "terminal input parser flushes standalone escape" {
     var parser = TerminalInputParser.init(std.testing.allocator);
     defer parser.deinit();
@@ -519,6 +653,137 @@ test "terminal input parser emits SGR mouse motion in SDL coordinates" {
 
     try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
     try std.testing.expectEqual(InputEvent{ .mouse_motion = .{ .x = 400, .y = 200, .xrel = 400, .yrel = 200, .buttons = 0 } }, parser.pop().?);
+}
+
+test "terminal input parser emits legacy mouse wheel without text leakage" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x1b[M`S:");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 400, .mouse_y = 200 } }, parser.pop().?);
+}
+
+test "terminal input parser emits urxvt mouse wheel without text leakage" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x1b[64;51;26M");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 400, .mouse_y = 200 } }, parser.pop().?);
+}
+
+test "terminal input parser emits c1 csi mouse wheel without text leakage" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x9b64;9;39M");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 64, .mouse_y = 304 } }, parser.pop().?);
+}
+
+test "terminal input parser drops unknown CSI controls without text leakage" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    try parser.feed("\x1b[?1006h\x9b?1006l");
+
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+}
+
+test "terminal input parser emits c1 sgr wheel buttons without text leakage" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x9b<4;56;48M\x9b<5;56;48M");
+
+    try std.testing.expectEqual(@as(usize, 2), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 440, .mouse_y = 376 } }, parser.pop().?);
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = -1, .mouse_x = 440, .mouse_y = 376 } }, parser.pop().?);
+}
+
+test "terminal input parser preserves split c1 sgr mouse wheel sequence" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x9b<4;56;");
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+
+    try parser.feed("48M");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 440, .mouse_y = 376 } }, parser.pop().?);
+}
+
+test "terminal input parser consumes orphan mouse tail only after an unparseable CSI" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    // Simulate a fragmented mouse CSI: the lone ESC is flushed, which sets
+    // the orphan-tail flag; the next feed delivers the tail and is parsed as
+    // a wheel event.
+    try parser.feed("\x1b");
+    try parser.flushStandaloneEscape();
+    // Drain the synthesized ESC key (down+up) the flush emits.
+    _ = parser.pop();
+    _ = parser.pop();
+
+    try parser.feed("4;47;44M");
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 368, .mouse_y = 344 } }, parser.pop().?);
+}
+
+test "terminal input parser treats stray mouse-shaped bytes as text without preceding CSI" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    // No preceding ESC/CSI: literal "4;47;44M" the user types must not get
+    // silently rewritten as a wheel event.
+    try parser.feed("4;47;44M");
+
+    // First emitted event should be the '4' text/key, not a mouse_wheel.
+    const first = parser.pop().?;
+    switch (first) {
+        .mouse_wheel => try std.testing.expect(false),
+        else => {},
+    }
+}
+
+test "terminal input parser preserves split escape sgr mouse wheel sequence" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x1b");
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+
+    try parser.feed("[<4;56;48M");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 440, .mouse_y = 376 } }, parser.pop().?);
+}
+
+test "terminal input parser preserves split SGR mouse wheel sequence" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.feed("\x1b[<64;");
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+
+    try parser.feed("51;26M");
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 400, .mouse_y = 200 } }, parser.pop().?);
 }
 
 test "terminal input parser maps mouse through presentation layout" {
