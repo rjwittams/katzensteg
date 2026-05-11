@@ -52,9 +52,11 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
 
         startInputReader()
         view.loadFileURL(fileURL, allowingReadAccessTo: fileURL.deletingLastPathComponent())
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            if self?.loaded == false {
-                fail("timed out loading \(self?.fileURL.path ?? "html")")
+        if frameCount > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                if self?.loaded == false {
+                    fail("timed out loading \(self?.fileURL.path ?? "html")")
+                }
             }
         }
         NSApplication.shared.run()

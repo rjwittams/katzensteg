@@ -188,7 +188,7 @@ const NativeWebviewStream = struct {
         var child = std.process.Child.init(&argv, allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
+        child.stderr_behavior = .Inherit;
 
         try child.spawn();
         errdefer _ = child.kill() catch {};

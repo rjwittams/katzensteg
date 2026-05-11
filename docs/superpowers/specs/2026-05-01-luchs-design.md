@@ -8,21 +8,21 @@ The name is intentionally broader than "webview" so the tool can later become a 
 
 ## Direction
 
-`luchs` should be split internally into a renderer backend and a presenter backend.
+`luchs` should keep a renderer/presenter split internally, while using SDL as the main presenter for as long as that remains practical. SDL is valuable because it gives the same tool a normal-window mode outside Katzensteg and a capture path inside Katzensteg.
 
 Renderer backends produce raw frames and input/event hooks:
 
-- `test-pattern`: current bring-up renderer, useful for SDL/Katzensteg smoke tests.
-- `native-webview`: macOS `WKWebView` helper process first, producing raw RGBA frames.
+- `test-pattern`: bring-up renderer, useful for SDL/Katzensteg smoke tests.
+- `native-webview`: current macOS `WKWebView` helper process, producing raw RGBA frames.
 - Future Linux WebKitGTK renderer when dependencies and snapshot mechanics are settled.
 - Future CEF renderer if we need a heavier, debuggable browser backend with real DevTools support.
 
 Presenter backends consume raw frames:
 
-- `sdl`: first presenter. It creates a normal SDL window, uploads frames to an SDL texture, and calls `SDL_RenderPresent`. Katzensteg can intercept this today through the SDL adapter, and the tool still works as a real window without Katzensteg.
-- `katzensteg-core`: future presenter. This should call a proper app-facing Katzensteg API once the core can initialize outside preload, select a presentation sink, and batch/embed external framebuffers.
+- `sdl`: current and preferred presenter for the prototype. It creates a normal SDL window, uploads frames to an SDL texture, and calls `SDL_RenderPresent`. Katzensteg can intercept this today through the SDL adapter, and the tool still works as a real window without Katzensteg.
+- `katzensteg-core`: possible later presenter. This should wait until a proper app-facing Katzensteg API is useful enough to justify bypassing SDL. It needs non-preload initialization, sink selection, lifecycle hooks, and input/resize routing that do not assume SDL interposition.
 
-This split lets `luchs` drive the evolution of Katzensteg core without blocking the immediate viewer on that API work.
+This split keeps `luchs` useful now and lets it pressure Katzensteg core later without forcing a premature API.
 
 ## Why Not CDP Screenshotting
 
@@ -30,23 +30,23 @@ CDP screenshot and screencast APIs deliver encoded images, usually base64 PNG/JP
 
 If Chromium becomes interesting later, it should be through a deeper embedded-browser backend such as CEF, not a JavaScript bridge plus screenshot stream. Playwright/CDP can still be useful for tests or automation, but it should not be a `luchs` renderer backend.
 
-## First Slice
+## Current Slice
 
-The first command remains:
+The default renderer is still the synthetic test pattern:
 
 ```bash
 luchs path/to/fragment.html
 ```
 
-Current behavior presents a synthetic SDL frame source. The next useful slice is:
+The useful HTML path on macOS is:
 
 ```bash
 luchs --renderer=native-webview path/to/fragment.html
 ```
 
-That should load one local HTML file through the native WebView backend and stream raw frames into the SDL presenter.
+That loads one local HTML file through the native WebView backend and streams raw frames into the SDL presenter.
 
-The native WebView path should run unbounded by default. Bounded frame counts are useful for smoke profiles and tests, but interactive profiles must not require an explicit `--frames=0` escape hatch. The first native WebView slice does not need a manifest, persistent stdio protocol, hot reload, browser selection UI, or a direct Katzensteg core presenter.
+The native WebView path runs unbounded by default. Bounded frame counts are useful for smoke profiles and tests, but interactive profiles must not require an explicit `--frames=0` escape hatch. The current slice intentionally does not include a manifest, persistent stdio protocol, hot reload, browser selection UI, multi-window content islands, or a direct Katzensteg core presenter.
 
 ## Data Flow
 
@@ -63,17 +63,28 @@ HTML file
 
 ## Katzensteg Core Evolution
 
-The merged core split is a useful foundation, but the current exported external framebuffer functions still assume the existing terminal runtime. They require active tty, scene engine, and kitty backend state, and external framebuffer presentation does not yet have the batch/embed path that renderer presents have.
+The merged core split is a useful foundation, and external framebuffer presentation now has a batch/embed path. That removes one blocker for a direct core presenter, but it does not make that presenter the immediate priority.
 
 For a direct `luchs -> libkatzensteg-core` presenter, core needs:
 
 - explicit runtime initialization for non-preload tools
 - presentation sink selection, including direct tty and batch/embed sinks
-- external framebuffer presentation through batch/embed
 - lifecycle/shutdown hooks for an owning application
 - input and resize routing that does not assume SDL interposition
 
-Until those exist, SDL is the practical presenter boundary.
+Until those exist, SDL remains the practical presenter boundary.
+
+## Resize And Embedding
+
+`luchs` currently uses a fixed WebView viewport and SDL window size. Katzensteg can scale the presented surface down, but that is a poor long-term answer for text-heavy content.
+
+Embed hosts need a resize model that can handle both cooperative and non-cooperative children:
+
+- cooperative content can receive a resize/reflow signal and produce a new surface size
+- non-cooperative content can be scaled, letterboxed, cropped, or opened externally
+- text-oriented fragments should prefer reflow over bitmap scaling where possible
+
+This should probably be explored in window-manager mode after the current refactor settles.
 
 ## App Channel
 
@@ -87,11 +98,21 @@ Reserved envelope names:
 {"type":"app_stdout","stream":"stderr","data":"..."}
 ```
 
-`luchs` does not need this in the first file-based invocation. Later, `luchs` can opt in and interpret `app_stdin` messages as `set_html`, `load_file`, `eval`, resize, or input commands, while sending DOM/application events back as `app_stdout` payloads.
+`luchs` does not need this in the current file-based invocation. Later, `luchs` can opt in and interpret `app_stdin` messages as `set_html`, `load_file`, `eval`, resize, or input commands, while sending DOM/application events back as `app_stdout` payloads.
+
+In an agent attach mode, content should probably be identified independently from how it is presented. An agent might provide fragments such as HTML, React, Markdown, Mermaid, images, or generated UI state, then request one or more presentations of the same content:
+
+- inline reflow with terminal text and placeholders
+- expanded side panel inside the Katzensteg window manager
+- another terminal pane
+- a real SDL/WebKit window
+- the system browser
+
+This keeps room for multiple content islands and for unloaded/tab-like fragments that are retained but not actively rendered.
 
 ## Input And Interactivity
 
-The first native WebView slice may be view-only. If input is added early, it should use the SDL event path:
+The native WebView path uses the SDL event path:
 
 ```text
 terminal input
@@ -104,6 +125,8 @@ terminal input
 
 This keeps Katzensteg as the terminal input owner and avoids exposing a premature Katzensteg API. Mouse coordinate mapping should use the SDL window dimensions as the WebView viewport dimensions.
 
+The current WebView input bridge is intentionally approximate. It covers basic click, hover, wheel, key, text input, and a synthetic caret well enough for the prototype, but it is not a full browser input stack. Modifier state, selection gestures, IME/composition, clipboard, drag/drop, trusted browser events, and precise text caret behavior remain open.
+
 ## Testing
 
 Focused tests should cover:
@@ -112,13 +135,15 @@ Focused tests should cover:
 - unsupported backend errors
 - raw frame metadata validation
 - SDL presenter smoke through the existing synthetic renderer
-- native WebView helper tests around file loading and frame metadata once introduced
+- native WebView helper tests around file loading, frame metadata, and basic input
 - manual input checks through `tools/luchs/testdata/interactive.html`
-- future core presenter tests around external framebuffer batch/embed behavior
+- future core presenter tests around app-facing initialization, sink selection, lifecycle, and non-SDL input/resize routing
 
 End-to-end visual verification can start as a manual smoke because the value is proving the renderer-to-presenter-to-Katzensteg path. Once stable, add a script that checks logs or embed JSONL for at least one frame batch.
 
 ## Open Questions
 
 - What is the minimum raw-frame transport that avoids extra copies without overbuilding IPC?
-- Should the direct core presenter be built only after external framebuffer batch/embed exists, or should `luchs` introduce that core work as its next milestone?
+- What resize contract should embed hosts offer to cooperative and non-cooperative children?
+- What is the right unit of identity for agent-provided content fragments versus their presentations?
+- How long can SDL remain the main presenter before a direct Katzensteg core presenter is worth the complexity?
