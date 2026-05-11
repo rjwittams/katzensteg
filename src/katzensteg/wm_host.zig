@@ -230,6 +230,9 @@ pub const ChromeOptions = struct {
     outer: Rect,
     title: []const u8,
     focused: bool = true,
+    // When set, chrome writes outside the terminal viewport are clipped so a
+    // window dragged off the edge doesn't wrap onto the wrong terminal row.
+    terminal: ?TerminalSize = null,
 };
 
 pub const StatusBandOptions = struct {
@@ -1105,7 +1108,7 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
     if (argv.len == 0) return 64;
 
     const outer = initialOuterRect(options.terminal);
-    try renderChrome(writer, .{ .outer = outer, .title = options.title, .focused = true });
+    try renderChrome(writer, .{ .outer = outer, .title = options.title, .focused = true, .terminal = options.terminal });
 
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Pipe;
@@ -1356,57 +1359,113 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     defer writer.writeAll("\x1b[0m") catch {};
 
     const horizontal_len: usize = @intCast(@max(0, options.outer.cols - 2));
-    try moveCursor(writer, options.outer.row, options.outer.col);
-    try writer.writeAll(text_box.top_left);
-    if (horizontal_len > 1) {
-        try writer.writeAll(text_box.horizontal);
-        try writer.writeAll(text_box.tee_down);
-        try writeRepeated(writer, text_box.horizontal, horizontal_len - 2);
-    } else {
-        try writeRepeated(writer, text_box.horizontal, horizontal_len);
-    }
-    try writer.writeAll(text_box.top_right);
+    var emitter = ChromeEmitter{ .terminal = options.terminal };
 
-    try moveCursor(writer, options.outer.row + 1, options.outer.col);
-    try writer.writeAll(text_box.vertical);
-    try writer.writeAll("╳");
-    try writer.writeAll(text_box.vertical);
-    try writer.writeAll(" ");
+    // Top border
+    emitter.startRow(options.outer.row, options.outer.col);
+    try emitter.cell(writer, text_box.top_left);
+    if (horizontal_len > 1) {
+        try emitter.cell(writer, text_box.horizontal);
+        try emitter.cell(writer, text_box.tee_down);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len - 2);
+    } else {
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len);
+    }
+    try emitter.cell(writer, text_box.top_right);
+
+    // Title row: left vertical, ╳, vertical, space, label/title, padding, right vertical.
+    // Preserves the existing byte-truncate semantics (each ASCII byte = one cell).
+    emitter.startRow(options.outer.row + 1, options.outer.col);
+    try emitter.cell(writer, text_box.vertical);
+    try emitter.cell(writer, "╳");
+    try emitter.cell(writer, text_box.vertical);
+    try emitter.cell(writer, " ");
     const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
     var written: usize = @min(3, title_space);
-    written += try writeTruncated(writer, label_prefix, title_space -| written);
-    written += try writeTruncated(writer, options.title, title_space -| written);
-    if (written < title_space) try writer.writeByteNTimes(' ', title_space - written);
-    try writer.writeAll(text_box.vertical);
+    written += try emitter.bytes(writer, label_prefix, title_space -| written);
+    written += try emitter.bytes(writer, options.title, title_space -| written);
+    if (written < title_space) try emitter.repeat(writer, " ", title_space - written);
+    try emitter.cell(writer, text_box.vertical);
 
-    try moveCursor(writer, options.outer.row + 2, options.outer.col);
-    try writer.writeAll(text_box.tee_left);
+    // Separator row
+    emitter.startRow(options.outer.row + 2, options.outer.col);
+    try emitter.cell(writer, text_box.tee_left);
     if (horizontal_len > 1) {
-        try writer.writeAll(text_box.horizontal);
-        try writer.writeAll(text_box.tee_up);
-        try writeRepeated(writer, text_box.horizontal, horizontal_len - 2);
+        try emitter.cell(writer, text_box.horizontal);
+        try emitter.cell(writer, text_box.tee_up);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len - 2);
     } else {
-        try writeRepeated(writer, text_box.horizontal, horizontal_len);
+        try emitter.repeat(writer, text_box.horizontal, horizontal_len);
     }
-    try writer.writeAll(text_box.tee_right);
+    try emitter.cell(writer, text_box.tee_right);
 
+    // Side rows: only the two vertical bars.
     var row = options.outer.row + 3;
     while (row < options.outer.row + options.outer.rows - 1) : (row += 1) {
-        try moveCursor(writer, row, options.outer.col);
-        try writer.writeAll(text_box.vertical);
-        try moveCursor(writer, row, options.outer.col + options.outer.cols - 1);
-        try writer.writeAll(text_box.vertical);
+        emitter.startRow(row, options.outer.col);
+        try emitter.cell(writer, text_box.vertical);
+        emitter.startRow(row, options.outer.col + options.outer.cols - 1);
+        try emitter.cell(writer, text_box.vertical);
     }
 
-    try moveCursor(writer, options.outer.row + options.outer.rows - 1, options.outer.col);
-    try writer.writeAll(text_box.bottom_left);
-    try writeRepeated(writer, text_box.horizontal, horizontal_len);
-    try writer.writeAll(text_box.bottom_right);
+    // Bottom border
+    emitter.startRow(options.outer.row + options.outer.rows - 1, options.outer.col);
+    try emitter.cell(writer, text_box.bottom_left);
+    try emitter.repeat(writer, text_box.horizontal, horizontal_len);
+    try emitter.cell(writer, text_box.bottom_right);
 
     const content = contentRectForOuter(options.outer);
+    // Park the cursor at content's top-left only if visible; out-of-bounds
+    // cursor moves are themselves harmlessly clamped by the terminal.
     try moveCursor(writer, content.row, content.col);
 }
+
+const ChromeEmitter = struct {
+    terminal: ?TerminalSize,
+    row: i32 = 0,
+    col: i32 = 0,
+    in_run: bool = false,
+
+    fn startRow(self: *ChromeEmitter, row: i32, col: i32) void {
+        self.row = row;
+        self.col = col;
+        self.in_run = false;
+    }
+
+    fn cell(self: *ChromeEmitter, writer: anytype, glyph: []const u8) !void {
+        const visible = if (self.terminal) |term|
+            self.row >= 1 and self.row <= term.rows and self.col >= 1 and self.col <= term.cols
+        else
+            true;
+        if (visible) {
+            if (!self.in_run) {
+                try moveCursor(writer, self.row, self.col);
+                self.in_run = true;
+            }
+            try writer.writeAll(glyph);
+        } else {
+            self.in_run = false;
+        }
+        self.col += 1;
+    }
+
+    fn repeat(self: *ChromeEmitter, writer: anytype, glyph: []const u8, count: usize) !void {
+        var i: usize = 0;
+        while (i < count) : (i += 1) try self.cell(writer, glyph);
+    }
+
+    /// Emit up to `max_cells` bytes from `bytes`, treating each byte as one cell.
+    /// Matches the existing byte-truncate behaviour the chrome title used.
+    fn bytes(self: *ChromeEmitter, writer: anytype, source: []const u8, max_cells: usize) !usize {
+        const n = @min(source.len, max_cells);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            try self.cell(writer, source[i .. i + 1]);
+        }
+        return n;
+    }
+};
 
 pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
     if (options.terminal.rows < 1 or options.terminal.cols < 1) return;
@@ -2172,6 +2231,7 @@ fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, termina
             .outer = session.window.outer,
             .title = session.profile_name,
             .focused = session_index == focused_index,
+            .terminal = terminal,
         });
     }
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
@@ -2318,6 +2378,40 @@ test "wm clampOuterRect allows partly-off-screen windows" {
     );
     try std.testing.expect(past_bottom.row <= 24);
     try std.testing.expect(past_bottom.col <= 80);
+}
+
+test "wm renderChrome clips writes to terminal bounds when window extends past edge" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    // Window with right edge past terminal cols=20. Without clipping, the top
+    // border would have repeated horizontal chars beyond col 20 and the
+    // terminal would wrap to the next row.
+    try renderChrome(out.writer(std.testing.allocator), .{
+        .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 40 },
+        .title = "probe",
+        .focused = true,
+        .terminal = .{ .rows = 24, .cols = 20 },
+    });
+
+    // No moveCursor sequence with a column outside [1, 20] should appear.
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out.items, idx, "\x1b[")) |start| {
+        // Match \e[<row>;<col>H
+        const remainder = out.items[start + 2 ..];
+        const h_pos = std.mem.indexOfScalar(u8, remainder, 'H') orelse break;
+        const semi_pos = std.mem.indexOfScalar(u8, remainder[0..h_pos], ';') orelse {
+            idx = start + 2 + h_pos + 1;
+            continue;
+        };
+        const col_str = remainder[semi_pos + 1 .. h_pos];
+        const col = std.fmt.parseInt(i32, col_str, 10) catch {
+            idx = start + 2 + h_pos + 1;
+            continue;
+        };
+        try std.testing.expect(col >= 1 and col <= 20);
+        idx = start + 2 + h_pos + 1;
+    }
 }
 
 test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
