@@ -16,11 +16,27 @@ static int entry_equals(const char *start, size_t len, const char *entry) {
     return strlen(entry) == len && strncmp(start, entry, len) == 0;
 }
 
+static int entry_resolves_to(const char *start, size_t len, const char *resolved_entry) {
+    if (!resolved_entry || !*resolved_entry || len >= PATH_MAX) return 0;
+
+    char segment[PATH_MAX];
+    memcpy(segment, start, len);
+    segment[len] = '\0';
+
+    char resolved_segment[PATH_MAX];
+    if (!realpath(segment, resolved_segment)) return 0;
+
+    return strcmp(resolved_segment, resolved_entry) == 0;
+}
+
 KS_ENV_SCRUB_API void ks_scrub_colon_env_entry(const char *name, const char *entry) {
     if (!name || !*name || !entry || !*entry) return;
 
     const char *value = getenv(name);
     if (!value || !*value) return;
+
+    char resolved_entry[PATH_MAX];
+    const char *resolved_entry_ptr = realpath(entry, resolved_entry) ? resolved_entry : NULL;
 
     const size_t value_len = strlen(value);
     char *next = malloc(value_len + 1);
@@ -32,7 +48,7 @@ KS_ENV_SCRUB_API void ks_scrub_colon_env_entry(const char *name, const char *ent
     while (1) {
         const char *end = strchr(segment, ':');
         const size_t len = end ? (size_t)(end - segment) : strlen(segment);
-        if (len > 0 && entry_equals(segment, len, entry)) {
+        if (len > 0 && (entry_equals(segment, len, entry) || entry_resolves_to(segment, len, resolved_entry_ptr))) {
             removed = 1;
         } else if (len > 0) {
             if (write > 0) next[write++] = ':';
