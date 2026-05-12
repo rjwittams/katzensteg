@@ -745,11 +745,11 @@ class InlinePanelController implements ActivePanel {
 		));
 	}
 
-	// Called by PanelComponent when pi-tui delivers a keystroke to a focused
-	// inline component. We pass the raw terminal bytes through unchanged via
-	// the existing `terminal_bytes` input variant — the producer's
-	// TerminalInputParser already knows how to interpret them.
-	forwardKeystroke(data: string): void {
+	// Called from this.handleInput when pi-tui delivers a keystroke to the
+	// focused inline component. We pass the raw terminal bytes through
+	// unchanged via the existing `terminal_bytes` input variant — the
+	// producer's TerminalInputParser already knows how to interpret them.
+	private forwardKeystroke(data: string): void {
 		if (this.closed || this.closing) return;
 		this.producer.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
 	}
