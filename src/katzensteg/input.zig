@@ -1,5 +1,6 @@
 const std = @import("std");
 const presentation_layout = @import("presentation_layout.zig");
+const render_batch_protocol = @import("render_batch_protocol.zig");
 
 const max_pending_bytes = 256;
 const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
@@ -386,6 +387,59 @@ pub const TerminalInputParser = struct {
         return null;
     }
 
+    // Inject a structured pointer event (delivered over embed-jsonl by a host
+    // that already has parsed input — e.g. the pi-extension getting events from
+    // pi-tui). Bypasses the SGR parser entirely; produces the same InputEvent
+    // variants as emitMouseCode so downstream code is identical.
+    //
+    // Convention note: the wire format uses DOM/pi-tui sign for deltas
+    // (deltaY positive = scroll down, deltaX positive = scroll right). SDL's
+    // mouse_wheel.y is opposite (positive = away from user = up), so deltaY is
+    // negated when translating. deltaX maps directly.
+    pub fn injectPointer(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload) !void {
+        const point = self.mapCellToSdl(event.col, event.row) orelse return;
+        const x = point.x;
+        const y = point.y;
+        const xrel = x - self.last_mouse_x;
+        const yrel = y - self.last_mouse_y;
+
+        switch (event.kind) {
+            .wheel => {
+                try self.queue.append(self.allocator, .{ .mouse_wheel = .{
+                    .x = roundWheelDelta(event.delta_x),
+                    .y = -roundWheelDelta(event.delta_y),
+                    .mouse_x = x,
+                    .mouse_y = y,
+                } });
+            },
+            .pointermove => {
+                self.mouse_buttons = event.buttons;
+                try self.queue.append(self.allocator, .{ .mouse_motion = .{
+                    .x = x,
+                    .y = y,
+                    .xrel = xrel,
+                    .yrel = yrel,
+                    .buttons = self.mouse_buttons,
+                } });
+            },
+            .pointerdown, .pointerup => {
+                if (event.button < 0) return;
+                const sdl_button = sdlButtonFromPointerIndex(@intCast(event.button));
+                self.mouse_buttons = event.buttons;
+                try self.queue.append(self.allocator, .{ .mouse_button = .{
+                    .x = x,
+                    .y = y,
+                    .button = sdl_button,
+                    .pressed = event.kind == .pointerdown,
+                    .buttons = self.mouse_buttons,
+                } });
+            },
+        }
+        self.last_mouse_x = x;
+        self.last_mouse_y = y;
+        self.mouse_activity = true;
+    }
+
     fn emitMouseCode(self: *TerminalInputParser, b: i32, cell_x: i32, cell_y: i32, pressed: bool) !void {
         const point = self.mapCellToSdl(cell_x, cell_y) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
@@ -494,6 +548,24 @@ fn terminalButtonToSdl(button: u2) u8 {
         2 => 3,
         else => 1,
     };
+}
+
+// Map a pointer-event button index (0=left, 1=middle, 2=right, 3=back, 4=forward)
+// to SDL's mouse button enum (1=left, 2=middle, 3=right, 4=X1, 5=X2).
+fn sdlButtonFromPointerIndex(button: u8) u8 {
+    return switch (button) {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        else => 1,
+    };
+}
+
+fn roundWheelDelta(v: f64) i32 {
+    if (v >= 0) return @intFromFloat(v + 0.5);
+    return @intFromFloat(v - 0.5);
 }
 
 fn decodeLegacyMouseByte(byte: u8) ?i32 {

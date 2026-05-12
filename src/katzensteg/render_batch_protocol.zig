@@ -97,9 +97,64 @@ pub const DetachMessage = struct {
     window_id: []const u8,
 };
 
+pub const PointerEventKind = enum {
+    pointerdown,
+    pointermove,
+    pointerup,
+    wheel,
+};
+
+pub const PointerType = enum {
+    mouse,
+    pen,
+    touch,
+};
+
+pub const DeltaMode = enum {
+    pixel,
+    line,
+    page,
+};
+
+pub const PointerModifiers = struct {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+    meta: bool = false,
+};
+
+// Structured pointer event payload, mirroring DOM PointerEvent / WheelEvent
+// shape but using terminal cells (1-indexed, matching rect_cells) as the
+// canonical coordinate. Hosts that have pixel-precision data (SGR mode 1016
+// today, pi-tui-with-pixel-mouse later) populate pixel_x/pixel_y so producers
+// can prefer pixels when they need sub-cell precision.
+//
+// button is -1 for events with no specific button (pointermove, wheel);
+// otherwise 0=left, 1=middle, 2=right, 3=back, 4=forward. The `buttons`
+// bitmask uses the same numbering (bit N = button N currently held).
+pub const PointerEventPayload = struct {
+    kind: PointerEventKind,
+    row: i32,
+    col: i32,
+    pixel_x: ?i32 = null,
+    pixel_y: ?i32 = null,
+    button: i32,
+    buttons: u32,
+    delta_x: f64 = 0,
+    delta_y: f64 = 0,
+    delta_mode: DeltaMode = .line,
+    modifiers: PointerModifiers = .{},
+    pointer_type: PointerType = .mouse,
+};
+
+pub const InputPayload = union(enum) {
+    terminal_bytes: []const u8,
+    pointer: PointerEventPayload,
+};
+
 pub const InputMessage = struct {
     window_id: []const u8,
-    bytes: []const u8,
+    payload: InputPayload,
 };
 
 pub const ControlMessage = union(enum) {
@@ -214,13 +269,22 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 
     if (std.mem.eql(u8, type_value.string, "input")) {
         const event_value = root.get("event") orelse return error.InvalidMessage;
-        if (event_value != .string or !std.mem.eql(u8, event_value.string, "terminal_bytes")) return error.InvalidMessage;
-        const bytes_value = root.get("bytes") orelse return error.InvalidMessage;
-        if (bytes_value != .string) return error.InvalidMessage;
-        return .{ .input = .{
-            .window_id = "main",
-            .bytes = try allocator.dupe(u8, bytes_value.string),
-        } };
+        if (event_value != .string) return error.InvalidMessage;
+        if (std.mem.eql(u8, event_value.string, "terminal_bytes")) {
+            const bytes_value = root.get("bytes") orelse return error.InvalidMessage;
+            if (bytes_value != .string) return error.InvalidMessage;
+            return .{ .input = .{
+                .window_id = "main",
+                .payload = .{ .terminal_bytes = try allocator.dupe(u8, bytes_value.string) },
+            } };
+        }
+        if (std.mem.eql(u8, event_value.string, "pointer")) {
+            return .{ .input = .{
+                .window_id = "main",
+                .payload = .{ .pointer = try parsePointerEvent(root) },
+            } };
+        }
+        return error.InvalidMessage;
     }
 
     const rect = try parseRect(root.get("rect_cells") orelse return error.InvalidMessage);
@@ -279,9 +343,12 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
             if (viewport.occlusion_rects.len > 0) allocator.free(viewport.occlusion_rects);
             viewport.occlusion_rects = &.{};
         },
-        .input => |*input| {
-            allocator.free(input.bytes);
-            input.bytes = "";
+        .input => |*input| switch (input.payload) {
+            .terminal_bytes => |bytes| {
+                allocator.free(bytes);
+                input.payload = .{ .terminal_bytes = "" };
+            },
+            .pointer => {},
         },
         .detach => {},
         .shutdown => {},
@@ -360,6 +427,64 @@ fn parseOcclusionRects(allocator: std.mem.Allocator, value: ?std.json.Value) ![]
     return out;
 }
 
+fn parsePointerEvent(root: std.json.ObjectMap) !PointerEventPayload {
+    const kind_value = root.get("kind") orelse return error.InvalidMessage;
+    if (kind_value != .string) return error.InvalidMessage;
+    const kind = parsePointerKind(kind_value.string) orelse return error.InvalidMessage;
+
+    var payload = PointerEventPayload{
+        .kind = kind,
+        .row = try jsonI32(root.get("row") orelse return error.InvalidMessage),
+        .col = try jsonI32(root.get("col") orelse return error.InvalidMessage),
+        .button = try jsonI32(root.get("button") orelse return error.InvalidMessage),
+        .buttons = try jsonU32(root.get("buttons") orelse return error.InvalidMessage),
+    };
+    if (root.get("pixel_x")) |v| payload.pixel_x = try jsonI32(v);
+    if (root.get("pixel_y")) |v| payload.pixel_y = try jsonI32(v);
+    if (root.get("delta_x")) |v| payload.delta_x = try jsonF64(v);
+    if (root.get("delta_y")) |v| payload.delta_y = try jsonF64(v);
+    if (root.get("delta_mode")) |v| {
+        if (v != .string) return error.InvalidMessage;
+        payload.delta_mode = parseDeltaMode(v.string) orelse return error.InvalidMessage;
+    }
+    if (root.get("pointer_type")) |v| {
+        if (v != .string) return error.InvalidMessage;
+        payload.pointer_type = parsePointerType(v.string) orelse return error.InvalidMessage;
+    }
+    if (root.get("modifiers")) |v| {
+        if (v != .object) return error.InvalidMessage;
+        payload.modifiers = .{
+            .shift = try jsonBool(v.object.get("shift") orelse .{ .bool = false }),
+            .ctrl = try jsonBool(v.object.get("ctrl") orelse .{ .bool = false }),
+            .alt = try jsonBool(v.object.get("alt") orelse .{ .bool = false }),
+            .meta = try jsonBool(v.object.get("meta") orelse .{ .bool = false }),
+        };
+    }
+    return payload;
+}
+
+fn parsePointerKind(value: []const u8) ?PointerEventKind {
+    if (std.mem.eql(u8, value, "pointerdown")) return .pointerdown;
+    if (std.mem.eql(u8, value, "pointermove")) return .pointermove;
+    if (std.mem.eql(u8, value, "pointerup")) return .pointerup;
+    if (std.mem.eql(u8, value, "wheel")) return .wheel;
+    return null;
+}
+
+fn parseDeltaMode(value: []const u8) ?DeltaMode {
+    if (std.mem.eql(u8, value, "pixel")) return .pixel;
+    if (std.mem.eql(u8, value, "line")) return .line;
+    if (std.mem.eql(u8, value, "page")) return .page;
+    return null;
+}
+
+fn parsePointerType(value: []const u8) ?PointerType {
+    if (std.mem.eql(u8, value, "mouse")) return .mouse;
+    if (std.mem.eql(u8, value, "pen")) return .pen;
+    if (std.mem.eql(u8, value, "touch")) return .touch;
+    return null;
+}
+
 fn parseFirstIdRange(value: std.json.Value) !IdRange {
     if (value != .array or value.array.items.len == 0) return error.InvalidMessage;
     const first = value.array.items[0];
@@ -386,6 +511,21 @@ fn jsonU64(value: std.json.Value) !u64 {
     if (value != .integer) return error.InvalidMessage;
     if (value.integer < 0 or value.integer > std.math.maxInt(u64)) return error.InvalidMessage;
     return @intCast(value.integer);
+}
+
+fn jsonF64(value: std.json.Value) !f64 {
+    return switch (value) {
+        .float => |v| v,
+        .integer => |v| @floatFromInt(v),
+        else => error.InvalidMessage,
+    };
+}
+
+fn jsonBool(value: std.json.Value) !bool {
+    return switch (value) {
+        .bool => |v| v,
+        else => error.InvalidMessage,
+    };
 }
 
 test "frame batch JSON escapes terminal control bytes" {
@@ -573,7 +713,38 @@ test "control message parses terminal input bytes" {
 
     const input = control.input;
     try std.testing.expectEqualStrings("main", input.window_id);
-    try std.testing.expectEqualStrings("\x1b[<35;11;6M", input.bytes);
+    try std.testing.expectEqualStrings("\x1b[<35;11;6M", input.payload.terminal_bytes);
+}
+
+test "control message parses structured pointerdown" {
+    var control = try parseControlMessage(
+        std.testing.allocator,
+        \\{"type":"input","window_id":"main","event":"pointer","kind":"pointerdown","row":5,"col":10,"button":0,"buttons":1,"modifiers":{"shift":true,"ctrl":false,"alt":false,"meta":false}}
+    );
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    const payload = control.input.payload.pointer;
+    try std.testing.expectEqual(PointerEventKind.pointerdown, payload.kind);
+    try std.testing.expectEqual(@as(i32, 5), payload.row);
+    try std.testing.expectEqual(@as(i32, 10), payload.col);
+    try std.testing.expectEqual(@as(i32, 0), payload.button);
+    try std.testing.expectEqual(@as(u32, 1), payload.buttons);
+    try std.testing.expect(payload.modifiers.shift);
+    try std.testing.expect(!payload.modifiers.ctrl);
+}
+
+test "control message parses structured wheel with delta fields" {
+    var control = try parseControlMessage(
+        std.testing.allocator,
+        \\{"type":"input","window_id":"main","event":"pointer","kind":"wheel","row":3,"col":4,"button":-1,"buttons":0,"delta_x":0,"delta_y":-1,"delta_mode":"line"}
+    );
+    defer deinitControlMessage(std.testing.allocator, &control);
+
+    const payload = control.input.payload.pointer;
+    try std.testing.expectEqual(PointerEventKind.wheel, payload.kind);
+    try std.testing.expectEqual(@as(i32, -1), payload.button);
+    try std.testing.expectEqual(@as(f64, -1), payload.delta_y);
+    try std.testing.expectEqual(DeltaMode.line, payload.delta_mode);
 }
 
 test "control message parses detach" {
