@@ -576,8 +576,14 @@ fn sdlButtonFromPointerIndex(button: u8) u8 {
 }
 
 fn roundWheelDelta(v: f64) i32 {
-    if (v >= 0) return @intFromFloat(v + 0.5);
-    return @intFromFloat(v - 0.5);
+    // Clamp before @intFromFloat to avoid a checked-cast panic on hostile or
+    // misbehaving wire values (delta_x/delta_y are i32-rounded f64s parsed from
+    // JSON; a value like 1e18 would otherwise abort the producer). Real wheels
+    // emit ±1–5 ticks per notch; ±1000 is well above any plausible host input
+    // and well below the i32 overflow range.
+    const clamped = std.math.clamp(v, -1000.0, 1000.0);
+    if (clamped >= 0) return @intFromFloat(clamped + 0.5);
+    return @intFromFloat(clamped - 0.5);
 }
 
 fn decodeLegacyMouseByte(byte: u8) ?i32 {
@@ -1098,6 +1104,26 @@ test "injectPointer wheel flips delta_y sign to SDL convention" {
         InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 400, .mouse_y = 200 } },
         parser.pop().?,
     );
+}
+
+test "injectPointer wheel clamps absurdly large deltas without panicking" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 26,
+        .col = 51,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = 1e18,
+    });
+
+    const event = parser.pop().?;
+    // Clamp at ±1000 lines; delta_y sign is flipped to SDL convention, so a
+    // huge positive deltaY → SDL y = -1000.
+    try std.testing.expectEqual(@as(i32, -1000), event.mouse_wheel.y);
 }
 
 test "injectPointer wheel drops non-line delta_mode events" {
