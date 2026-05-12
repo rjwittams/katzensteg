@@ -4,7 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type MessageHandle, type OverlayHandle, type SurfaceRect, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type MessageHandle,
+	type OverlayHandle,
+	type PointerEvent,
+	type SurfaceRect,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	FRAME_OVERHEAD_COLS,
 	FRAME_OVERHEAD_ROWS,
@@ -15,6 +22,10 @@ import {
 	type RectCells,
 	statusLineVisible,
 } from "./katzensteg-geometry.js";
+import {
+	makePointerInputMessage,
+	makeTerminalBytesInputMessage,
+} from "./katzensteg-input.js";
 
 const WINDOW_ID = "main" as const;
 // Each producer needs its own kitty image/placement id range — the terminal's
@@ -267,6 +278,7 @@ class PanelController {
 	private latestOverlayRect: OverlayRect | undefined;
 	private latestViewport: RectCells | undefined;
 	private latestSync: ViewportSync | undefined;
+	private overlayHandle: OverlayHandle | undefined;
 	private status = "starting";
 	private error: string | undefined;
 
@@ -328,7 +340,12 @@ class PanelController {
 			error: this.error,
 			panelRows: this.latestOverlayRect?.totalRows ?? fallbackPanelRowsForSize(this.size),
 			zBase: FLOATING_Z_BASE,
+			focused: this.overlayHandle?.isFocused() ?? false,
 		});
+	}
+
+	setHandle(handle: OverlayHandle | undefined): void {
+		this.overlayHandle = handle;
 	}
 
 	onOverlayRect(generation: number, rect: OverlayRect | undefined): void {
@@ -459,11 +476,21 @@ class PanelController {
 	getSize(): SizePreset {
 		return this.size;
 	}
+
+	forwardKeystroke(data: string): void {
+		if (this.closed || this.closing) return;
+		this.producer.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
+	}
+
+	forwardPointer(event: PointerEvent): void {
+		if (this.closed || this.closing) return;
+		this.producer.sendInput(makePointerInputMessage(WINDOW_ID, event));
+	}
 }
 
 class OverlayRun {
 	private handle: OverlayHandle | undefined;
-	private unsubscribe: (() => void) | undefined;
+	private unsubscribes: (() => void)[] = [];
 	private done: (() => void) | undefined;
 	private component: PanelComponent | undefined;
 	private finishedResolve!: () => void;
@@ -496,15 +523,21 @@ class OverlayRun {
 					},
 					onHandle: (handle) => {
 						this.handle = handle;
+						this.controller.setHandle(handle);
 						debugLog(`overlay.handle gen=${this.generation}`);
-						this.unsubscribe = handle.onRectChange((rect) => this.controller.onOverlayRect(this.generation, rect));
+						this.unsubscribes.push(handle.onRectChange((rect) => this.controller.onOverlayRect(this.generation, rect)));
+						this.unsubscribes.push(handle.onPointer(
+							(event) => this.controller.forwardPointer(event),
+							{ wheel: true, hover: true },
+						));
 					},
 				},
 			);
 		} finally {
 			debugLog(`overlay.finally gen=${this.generation}`);
-			this.unsubscribe?.();
-			this.unsubscribe = undefined;
+			for (const unsub of this.unsubscribes) unsub();
+			this.unsubscribes = [];
+			this.controller.setHandle(undefined);
 			this.finishedResolve();
 		}
 	}
@@ -559,6 +592,10 @@ class PanelComponent {
 	writeRaw(data: string): void {
 		this.tui.writeRaw(data);
 	}
+
+	handleInput(data: string): void {
+		this.controller.forwardKeystroke(data);
+	}
 }
 
 interface PanelChromeArgs {
@@ -571,23 +608,29 @@ interface PanelChromeArgs {
 	error: string | undefined;
 	panelRows: number;
 	zBase: number;
+	focused: boolean;
 }
 
 function renderPanelChrome(width: number, theme: Theme, args: PanelChromeArgs): string[] {
 	const innerWidth = Math.max(1, width - 2);
-	const row = (content: string) => theme.fg("border", "│") + fitCellText(content, innerWidth) + theme.fg("border", "│");
+	// Border color tracks focus state (matches terminal-surface-demo). Border
+	// cell-color when focused → accent; otherwise → border. Plus a [focused]
+	// suffix in the title so it's legible even when colors are subtle.
+	const borderColor: "accent" | "border" = args.focused ? "accent" : "border";
+	const row = (content: string) => theme.fg(borderColor, "│") + fitCellText(content, innerWidth) + theme.fg(borderColor, "│");
 	const lines: string[] = [];
-	const title = ` 🐈 Katzensteg · ${args.mode} · ${args.profile} · ${args.sizeName}`;
+	const focusedSuffix = args.focused ? " [focused]" : "";
+	const title = ` 🐈 Katzensteg · ${args.mode} · ${args.profile} · ${args.sizeName}${focusedSuffix}`;
 	const status = args.error ? theme.fg("error", ` ${args.error}`) : theme.fg("dim", ` ${args.status}`);
 	const rectLine = args.rect
 		? ` rect ${formatRect(args.rect)} viewport ${formatRect(args.viewport)} z=${args.zBase}`
 		: " waiting for rect";
 	const bodyRows = Math.max(2, args.panelRows - FRAME_OVERHEAD_ROWS);
-	lines.push(theme.fg("border", `╭${"─".repeat(innerWidth)}╮`));
+	lines.push(theme.fg(borderColor, `╭${"─".repeat(innerWidth)}╮`));
 	lines.push(row(theme.fg("accent", title)));
 	lines.push(row(args.mode === "layout" ? theme.fg("dim", rectLine) : status));
 	for (let i = 0; i < bodyRows; i++) lines.push(row(""));
-	lines.push(theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
+	lines.push(theme.fg(borderColor, `╰${"─".repeat(innerWidth)}╯`));
 	return lines;
 }
 
@@ -608,7 +651,7 @@ interface InlinePanelTui {
 
 class InlinePanelController implements ActivePanel {
 	private readonly producer: ProducerConnection;
-	private unsubscribe: (() => void) | undefined;
+	private unsubscribes: (() => void)[] = [];
 	private started = false;
 	private startScheduled = false;
 	private closing = false;
@@ -656,10 +699,17 @@ class InlinePanelController implements ActivePanel {
 			error: this.error,
 			panelRows,
 			zBase: INLINE_Z_BASE,
+			focused: this.handle.isFocused(),
 		});
 	}
 
 	invalidate(): void {}
+
+	// pi-tui delivers raw key bytes here only while this surface is focused.
+	// Esc is intercepted by pi-tui (it releases focus) and never reaches us.
+	handleInput(data: string): void {
+		this.forwardKeystroke(data);
+	}
 
 	close(reason: string): void {
 		if (this.closed || this.closing) return;
@@ -667,8 +717,8 @@ class InlinePanelController implements ActivePanel {
 		this.closing = true;
 		this.cleanupSeen = false;
 		this.status = "closing";
-		this.unsubscribe?.();
-		this.unsubscribe = undefined;
+		for (const unsub of this.unsubscribes) unsub();
+		this.unsubscribes = [];
 		this.producer.stop(reason);
 		this.scheduleCloseFinish(reason, CLOSE_DRAIN_MS);
 		this.tui.requestRender();
@@ -683,7 +733,30 @@ class InlinePanelController implements ActivePanel {
 		this.startScheduled = false;
 		debugLog(`inline.start mode=${this.details.mode} profile=${this.details.profile}`);
 		this.producer.start();
-		this.unsubscribe = this.handle.onRectChange((rect) => this.onRectChange(rect));
+		this.unsubscribes.push(this.handle.onRectChange((rect) => this.onRectChange(rect)));
+		// Forward pointer events to the producer as structured `pointer` input
+		// messages. Wheel and hover are opted in — we want producers (web /
+		// SDL / pygame / love2d) to see the same set of events the host
+		// terminal can plausibly deliver; if a producer can't make sense of a
+		// kind, it just ignores it.
+		this.unsubscribes.push(this.handle.onPointer(
+			(event) => this.forwardPointer(event),
+			{ wheel: true, hover: true },
+		));
+	}
+
+	// Called by PanelComponent when pi-tui delivers a keystroke to a focused
+	// inline component. We pass the raw terminal bytes through unchanged via
+	// the existing `terminal_bytes` input variant — the producer's
+	// TerminalInputParser already knows how to interpret them.
+	forwardKeystroke(data: string): void {
+		if (this.closed || this.closing) return;
+		this.producer.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
+	}
+
+	private forwardPointer(event: PointerEvent): void {
+		if (this.closed || this.closing) return;
+		this.producer.sendInput(makePointerInputMessage(WINDOW_ID, event));
 	}
 
 	private onRectChange(rect: OverlayRect | undefined): void {
@@ -819,6 +892,7 @@ interface ProducerCallbacks {
 interface ProducerConnection {
 	start(): void;
 	setViewport(sync: ViewportSync): void;
+	sendInput(message: object): void;
 	stop(reason: string): void;
 }
 
@@ -837,6 +911,10 @@ class LayoutOnlyProducer implements ProducerConnection {
 		this.latestSync = sync;
 		debugLog(`producer.layout.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
 		this.callbacks.onStatus(`layout viewport ${formatRect(sync.rect)}`);
+	}
+
+	sendInput(message: object): void {
+		debugLog(`producer.layout.input ${JSON.stringify(message)}`);
 	}
 
 	stop(reason: string): void {
@@ -931,6 +1009,15 @@ class KatzenstegProducer implements ProducerConnection {
 		}));
 		this.latestSyncSent = sync;
 		this.callbacks.onStatus("viewport");
+	}
+
+	sendInput(message: object): void {
+		// Only the live producer needs to forward input to the actual katzensteg
+		// child; layout-only is a debug stand-in. Drop silently when the child
+		// is gone (panel closing) — no need to spam logs in that case.
+		if (!this.child?.stdin || this.child.stdin.destroyed) return;
+		if (!this.attached) return;
+		this.writeControl(JSON.stringify(message) + "\n");
 	}
 
 	stop(reason: string): void {
