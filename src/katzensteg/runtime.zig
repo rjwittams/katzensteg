@@ -1012,10 +1012,20 @@ pub const Runtime = struct {
                 self.lockInput("apply_batch_control_input");
                 defer self.input_mutex.unlock();
                 var parser = &(self.input_parser orelse return);
-                parser.feed(input.bytes) catch |err| {
-                    log.warn("batch input parse failed: {any}", .{err});
-                    return;
-                };
+                switch (input.payload) {
+                    .terminal_bytes => |bytes| {
+                        parser.feed(bytes) catch |err| {
+                            log.warn("batch input parse failed: {any}", .{err});
+                            return;
+                        };
+                    },
+                    .pointer => |event| {
+                        parser.injectPointer(event) catch |err| {
+                            log.warn("batch input pointer inject failed: {any}", .{err});
+                            return;
+                        };
+                    },
+                }
                 if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             },
             .detach => {

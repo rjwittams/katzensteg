@@ -1,5 +1,6 @@
 const std = @import("std");
 const presentation_layout = @import("presentation_layout.zig");
+const render_batch_protocol = @import("render_batch_protocol.zig");
 
 const max_pending_bytes = 256;
 const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
@@ -386,6 +387,71 @@ pub const TerminalInputParser = struct {
         return null;
     }
 
+    // Inject a structured pointer event (delivered over embed-jsonl by a host
+    // that already has parsed input — e.g. the pi-extension getting events from
+    // pi-tui). Bypasses the SGR parser entirely; produces the same InputEvent
+    // variants as emitMouseCode so downstream code is identical.
+    //
+    // Convention note: the wire format uses DOM/pi-tui sign for deltas
+    // (deltaY positive = scroll down, deltaX positive = scroll right). SDL's
+    // mouse_wheel.y is opposite (positive = away from user = up), so deltaY is
+    // negated when translating. deltaX maps directly.
+    pub fn injectPointer(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload) !void {
+        const point = self.mapCellToSdl(event.col, event.row) orelse return;
+        const x = point.x;
+        const y = point.y;
+
+        switch (event.kind) {
+            .wheel => {
+                // Only line-mode deltas are normalised today. Pixel- and page-mode
+                // wheel events would need scaling (e.g. pixel/100 → line) to avoid
+                // emitting hundreds of wheel ticks per notch from a high-resolution
+                // wheel. The only current host (pi-extension) always emits line mode;
+                // when a producer needs pixel or page support we add the translation
+                // here rather than letting wrong deltas through silently.
+                if (event.delta_mode != .line) return;
+                try self.queue.append(self.allocator, .{ .mouse_wheel = .{
+                    .x = roundWheelDelta(event.delta_x),
+                    .y = -roundWheelDelta(event.delta_y),
+                    .mouse_x = x,
+                    .mouse_y = y,
+                } });
+            },
+            .pointermove => {
+                const xrel = x - self.last_mouse_x;
+                const yrel = y - self.last_mouse_y;
+                self.mouse_buttons = event.buttons;
+                try self.queue.append(self.allocator, .{ .mouse_motion = .{
+                    .x = x,
+                    .y = y,
+                    .xrel = xrel,
+                    .yrel = yrel,
+                    .buttons = self.mouse_buttons,
+                } });
+            },
+            .pointerdown, .pointerup => {
+                // event.button is i32 from the wire. The lower bound rejects -1
+                // ("no button" sentinel used for motion/wheel). The upper bound
+                // prevents @intCast panicking on out-of-range values; any value
+                // beyond the known pointer indices is rejected outright rather
+                // than mapped to a default button.
+                if (event.button < 0 or event.button > 255) return;
+                const sdl_button = sdlButtonFromPointerIndex(@intCast(event.button));
+                self.mouse_buttons = event.buttons;
+                try self.queue.append(self.allocator, .{ .mouse_button = .{
+                    .x = x,
+                    .y = y,
+                    .button = sdl_button,
+                    .pressed = event.kind == .pointerdown,
+                    .buttons = self.mouse_buttons,
+                } });
+            },
+        }
+        self.last_mouse_x = x;
+        self.last_mouse_y = y;
+        self.mouse_activity = true;
+    }
+
     fn emitMouseCode(self: *TerminalInputParser, b: i32, cell_x: i32, cell_y: i32, pressed: bool) !void {
         const point = self.mapCellToSdl(cell_x, cell_y) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
@@ -494,6 +560,30 @@ fn terminalButtonToSdl(button: u2) u8 {
         2 => 3,
         else => 1,
     };
+}
+
+// Map a pointer-event button index (0=left, 1=middle, 2=right, 3=back, 4=forward)
+// to SDL's mouse button enum (1=left, 2=middle, 3=right, 4=X1, 5=X2).
+fn sdlButtonFromPointerIndex(button: u8) u8 {
+    return switch (button) {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        else => 1,
+    };
+}
+
+fn roundWheelDelta(v: f64) i32 {
+    // Clamp before @intFromFloat to avoid a checked-cast panic on hostile or
+    // misbehaving wire values (delta_x/delta_y are i32-rounded f64s parsed from
+    // JSON; a value like 1e18 would otherwise abort the producer). Real wheels
+    // emit ±1–5 ticks per notch; ±1000 is well above any plausible host input
+    // and well below the i32 overflow range.
+    const clamped = std.math.clamp(v, -1000.0, 1000.0);
+    if (clamped >= 0) return @intFromFloat(clamped + 0.5);
+    return @intFromFloat(clamped - 0.5);
 }
 
 fn decodeLegacyMouseByte(byte: u8) ?i32 {
@@ -883,4 +973,182 @@ test "terminal input parser reports mouse activity once" {
 
     try std.testing.expect(parser.takeMouseActivity());
     try std.testing.expect(!parser.takeMouseActivity());
+}
+
+test "injectPointer pointerdown emits SDL mouse_button with mapped index" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .pointerdown,
+        .row = 26,
+        .col = 51,
+        .button = 0,
+        .buttons = 1,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), parser.pendingCount());
+    try std.testing.expectEqual(
+        InputEvent{ .mouse_button = .{ .x = 400, .y = 200, .button = 1, .pressed = true, .buttons = 1 } },
+        parser.pop().?,
+    );
+}
+
+test "injectPointer pointerup with right button (index 2) emits SDL button 3 release" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .pointerup,
+        .row = 26,
+        .col = 51,
+        .button = 2,
+        .buttons = 0,
+    });
+
+    const event = parser.pop().?;
+    try std.testing.expectEqual(@as(u8, 3), event.mouse_button.button);
+    try std.testing.expectEqual(false, event.mouse_button.pressed);
+    try std.testing.expectEqual(@as(u32, 0), event.mouse_button.buttons);
+}
+
+test "injectPointer pointerdown rejects out-of-range button without panicking" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .pointerdown,
+        .row = 1,
+        .col = 1,
+        .button = -1,
+        .buttons = 0,
+    });
+    try parser.injectPointer(.{
+        .kind = .pointerdown,
+        .row = 1,
+        .col = 1,
+        .button = 256,
+        .buttons = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+}
+
+test "injectPointer pointermove emits SDL mouse_motion with xrel/yrel from last position" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    // First move parks the cursor at cell (2,2) → SDL (8, 8) with the 8-pixel
+    // cell stride implied by the target. Then move to cell (51,26) → SDL
+    // (400, 200). xrel/yrel are the deltas: 400-8=392, 200-8=192.
+    try parser.injectPointer(.{
+        .kind = .pointermove,
+        .row = 2,
+        .col = 2,
+        .button = -1,
+        .buttons = 0,
+    });
+    _ = parser.pop();
+
+    try parser.injectPointer(.{
+        .kind = .pointermove,
+        .row = 26,
+        .col = 51,
+        .button = -1,
+        .buttons = 1,
+    });
+
+    const event = parser.pop().?;
+    try std.testing.expectEqual(@as(i32, 400), event.mouse_motion.x);
+    try std.testing.expectEqual(@as(i32, 200), event.mouse_motion.y);
+    try std.testing.expectEqual(@as(i32, 392), event.mouse_motion.xrel);
+    try std.testing.expectEqual(@as(i32, 192), event.mouse_motion.yrel);
+    try std.testing.expectEqual(@as(u32, 1), event.mouse_motion.buttons);
+}
+
+test "injectPointer wheel flips delta_y sign to SDL convention" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    // DOM/pi-tui: positive deltaY = scroll down. SDL: positive y = scroll up.
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 26,
+        .col = 51,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = 1,
+    });
+
+    try std.testing.expectEqual(
+        InputEvent{ .mouse_wheel = .{ .x = 0, .y = -1, .mouse_x = 400, .mouse_y = 200 } },
+        parser.pop().?,
+    );
+
+    // Negative deltaY (scroll up in DOM) → positive SDL y.
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 26,
+        .col = 51,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = -1,
+    });
+
+    try std.testing.expectEqual(
+        InputEvent{ .mouse_wheel = .{ .x = 0, .y = 1, .mouse_x = 400, .mouse_y = 200 } },
+        parser.pop().?,
+    );
+}
+
+test "injectPointer wheel clamps absurdly large deltas without panicking" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 26,
+        .col = 51,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = 1e18,
+    });
+
+    const event = parser.pop().?;
+    // Clamp at ±1000 lines; delta_y sign is flipped to SDL convention, so a
+    // huge positive deltaY → SDL y = -1000.
+    try std.testing.expectEqual(@as(i32, -1000), event.mouse_wheel.y);
+}
+
+test "injectPointer wheel drops non-line delta_mode events" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400 });
+
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 1,
+        .col = 1,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = 120,
+        .delta_mode = .pixel,
+    });
+    try parser.injectPointer(.{
+        .kind = .wheel,
+        .row = 1,
+        .col = 1,
+        .button = -1,
+        .buttons = 0,
+        .delta_y = 1,
+        .delta_mode = .page,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
 }
