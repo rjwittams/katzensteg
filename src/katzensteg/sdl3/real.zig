@@ -3,11 +3,6 @@ const build_options = @import("katzensteg_build_options");
 const sdl = @import("katzensteg_sdl");
 
 const use_c_real = build_options.use_c_real_sdl and !builtin.is_test;
-const has_texture_query_compat = @hasDecl(sdl, "SDL_GetTextureSize") and
-    @hasDecl(sdl, "SDL_GetTextureProperties") and
-    @hasDecl(sdl, "SDL_GetNumberProperty") and
-    @hasDecl(sdl, "SDL_PROP_TEXTURE_FORMAT_NUMBER") and
-    @hasDecl(sdl, "SDL_PROP_TEXTURE_ACCESS_NUMBER");
 
 extern fn ks_real_SDL_Init(flags: sdl.Uint32) c_int;
 extern fn ks_real_SDL_InitSubSystem(flags: sdl.Uint32) c_int;
@@ -109,32 +104,7 @@ pub const SDL_RenderCopy = if (use_c_real) ks_real_SDL_RenderCopy else sdl.SDL_R
 pub const SDL_RenderCopyEx = if (use_c_real) ks_real_SDL_RenderCopyEx else sdl.SDL_RenderCopyEx;
 pub const SDL_RenderGeometryRaw = if (use_c_real) ks_real_SDL_RenderGeometryRaw else sdl.SDL_RenderGeometryRaw;
 pub const SDL_RenderPresent = if (use_c_real) ks_real_SDL_RenderPresent else sdl.SDL_RenderPresent;
-pub fn SDL_QueryTexture(texture: ?*sdl.SDL_Texture, format: ?*sdl.Uint32, access: ?*c_int, w: ?*c_int, h: ?*c_int) c_int {
-    if (use_c_real) return ks_real_SDL_QueryTexture(texture, format, access, w, h);
-    if (comptime has_texture_query_compat) {
-        const tex = texture orelse return -1;
-        var width: f32 = 0;
-        var height: f32 = 0;
-        if (!sdl.SDL_GetTextureSize(tex, &width, &height)) return -1;
-
-        if (w) |out| out.* = @intFromFloat(width);
-        if (h) |out| out.* = @intFromFloat(height);
-        if (format) |out| out.* = 0;
-        if (access) |out| out.* = 0;
-
-        const props = sdl.SDL_GetTextureProperties(tex);
-        if (props != 0) {
-            if (format) |out| {
-                out.* = @intCast(sdl.SDL_GetNumberProperty(props, sdl.SDL_PROP_TEXTURE_FORMAT_NUMBER, out.*));
-            }
-            if (access) |out| {
-                out.* = @intCast(sdl.SDL_GetNumberProperty(props, sdl.SDL_PROP_TEXTURE_ACCESS_NUMBER, out.*));
-            }
-        }
-        return 0;
-    }
-    return sdl.SDL_QueryTexture(texture, format, access, w, h);
-}
+pub const SDL_QueryTexture = if (use_c_real) ks_real_SDL_QueryTexture else sdl.SDL_QueryTexture;
 pub const SDL_RenderFillRect = if (use_c_real) ks_real_SDL_RenderFillRect else sdl.SDL_RenderFillRect;
 pub const SDL_RenderDrawPoint = if (use_c_real) ks_real_SDL_RenderDrawPoint else sdl.SDL_RenderDrawPoint;
 pub const SDL_RenderDrawLine = if (use_c_real) ks_real_SDL_RenderDrawLine else sdl.SDL_RenderDrawLine;

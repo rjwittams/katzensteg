@@ -24,8 +24,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("xev");
 
-    const katzensteg_sdl_mod = b.createModule(.{
+    const katzensteg_sdl2_mod = b.createModule(.{
         .root_source_file = b.path("src/katzensteg/sdl2.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const katzensteg_sdl3_mod = b.createModule(.{
+        .root_source_file = b.path("src/katzensteg/sdl3.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -123,7 +128,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_sdl2_lib.root_module.addImport("termscene", termscene_mod);
-    katzensteg_sdl2_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_sdl2_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
     katzensteg_sdl2_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_sdl2_lib.root_module.strip = false;
     katzensteg_sdl2_lib.root_module.omit_frame_pointer = false;
@@ -145,6 +150,41 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_sdl2_lib);
 
+    const katzensteg_sdl3_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "katzensteg-sdl3",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/katzensteg/preload_sdl3.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_sdl3_lib.root_module.addImport("termscene", termscene_mod);
+    katzensteg_sdl3_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
+    katzensteg_sdl3_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
+    katzensteg_sdl3_lib.root_module.strip = false;
+    katzensteg_sdl3_lib.root_module.omit_frame_pointer = false;
+    katzensteg_sdl3_lib.linker_allow_shlib_undefined = true;
+    if (is_macos) {
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_sdl3_macos.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_macos.c") });
+        katzensteg_sdl3_lib.linkFramework("Accelerate");
+        katzensteg_sdl3_lib.linkFramework("OpenGL");
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_sdl3_linux.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
+        katzensteg_sdl3_lib.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_linux.c") });
+        katzensteg_sdl3_lib.version_script = b.path("src/katzensteg/katzensteg_sdl3_linux.map");
+        katzensteg_sdl3_lib.linkSystemLibrary("yuv");
+    }
+    b.installArtifact(katzensteg_sdl3_lib);
+
     if (is_macos) {
         const katzensteg_sdl2_rebind_lib = b.addLibrary(.{
             .linkage = .dynamic,
@@ -158,7 +198,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         katzensteg_sdl2_rebind_lib.root_module.addImport("termscene", termscene_mod);
-        katzensteg_sdl2_rebind_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+        katzensteg_sdl2_rebind_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
         katzensteg_sdl2_rebind_lib.root_module.addImport("katzensteg_build_options", rebind_preload_options.createModule());
         katzensteg_sdl2_rebind_lib.root_module.strip = false;
         katzensteg_sdl2_rebind_lib.root_module.omit_frame_pointer = false;
@@ -186,7 +226,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_lib.root_module.addImport("termscene", termscene_mod);
-    katzensteg_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
     katzensteg_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_lib.root_module.strip = false;
     katzensteg_lib.root_module.omit_frame_pointer = false;
@@ -221,7 +261,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_unlinked_lib.root_module.addImport("termscene", termscene_mod);
-    katzensteg_unlinked_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    katzensteg_unlinked_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
     katzensteg_unlinked_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
     katzensteg_unlinked_lib.root_module.strip = false;
     katzensteg_unlinked_lib.root_module.omit_frame_pointer = false;
@@ -262,16 +302,30 @@ pub fn build(b: *std.Build) void {
         .name = "basic-sdl-demo",
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/probes/basic_sdl_demo.zig"),
+            .root_source_file = b.path("examples/probes/sdl2/basic_demo.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
     });
-    basic_sdl_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    basic_sdl_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
     if (is_macos) basic_sdl_demo.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     basic_sdl_demo.linkSystemLibrary("SDL2");
     b.installArtifact(basic_sdl_demo);
+    const basic_sdl3_demo = b.addExecutable(.{
+        .name = "basic-sdl3-demo",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/probes/sdl3/basic_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    basic_sdl3_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
+    if (is_macos) basic_sdl3_demo.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    basic_sdl3_demo.linkSystemLibrary("SDL3");
+    b.installArtifact(basic_sdl3_demo);
 
     const katzensteg_input_probe = b.addExecutable(.{
         .name = "katzensteg-input-probe",
@@ -282,13 +336,28 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_input_probe.addCSourceFile(.{ .file = b.path("examples/probes/input_probe.c") });
+    katzensteg_input_probe.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/input_probe.c") });
     if (is_macos) {
         katzensteg_input_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
         katzensteg_input_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     }
     katzensteg_input_probe.linkSystemLibrary("SDL2");
     b.installArtifact(katzensteg_input_probe);
+
+    const katzensteg_input_probe_sdl3 = b.addExecutable(.{
+        .name = "katzensteg-input-probe-sdl3",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/probes/sdl3/input_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_input_probe_sdl3.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
+    if (is_macos) katzensteg_input_probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    katzensteg_input_probe_sdl3.linkSystemLibrary("SDL3");
+    b.installArtifact(katzensteg_input_probe_sdl3);
 
     const katzensteg_gl_probe = b.addExecutable(.{
         .name = "katzensteg-gl-probe",
@@ -299,7 +368,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    katzensteg_gl_probe.addCSourceFile(.{ .file = b.path("examples/probes/gl_probe.c") });
+    katzensteg_gl_probe.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/gl_probe.c") });
     if (is_macos) {
         katzensteg_gl_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
         katzensteg_gl_probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -311,6 +380,27 @@ pub fn build(b: *std.Build) void {
         katzensteg_gl_probe.linkSystemLibrary("GL");
     }
     b.installArtifact(katzensteg_gl_probe);
+    const katzensteg_gl_probe_sdl3 = b.addExecutable(.{
+        .name = "katzensteg-gl-probe-sdl3",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_gl_probe_sdl3.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/gl_probe.c") });
+    if (is_macos) {
+        katzensteg_gl_probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        katzensteg_gl_probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    }
+    katzensteg_gl_probe_sdl3.linkSystemLibrary("SDL3");
+    if (is_macos) {
+        katzensteg_gl_probe_sdl3.linkFramework("OpenGL");
+    } else {
+        katzensteg_gl_probe_sdl3.linkSystemLibrary("GL");
+    }
+    b.installArtifact(katzensteg_gl_probe_sdl3);
 
     const luchs = b.addExecutable(.{
         .name = "luchs",
@@ -322,7 +412,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    luchs.root_module.addImport("katzensteg_sdl", katzensteg_sdl_mod);
+    luchs.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
     if (is_macos) luchs.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     luchs.linkSystemLibrary("SDL2");
     const install_luchs = b.addInstallArtifact(luchs, .{});
@@ -364,7 +454,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("examples/probes/vulkan_probe.c") });
+        katzensteg_vulkan_probe.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/vulkan_probe.c") });
         if (is_macos) {
             katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
             katzensteg_vulkan_probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
@@ -374,16 +464,40 @@ pub fn build(b: *std.Build) void {
         katzensteg_vulkan_probe.linkSystemLibrary("vulkan");
         b.installArtifact(katzensteg_vulkan_probe);
 
+        const katzensteg_vulkan_probe_sdl3 = b.addExecutable(.{
+            .name = "katzensteg-vulkan-probe-sdl3",
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_vulkan_probe_sdl3.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/vulkan_probe.c") });
+        if (is_macos) {
+            katzensteg_vulkan_probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            katzensteg_vulkan_probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        }
+        katzensteg_vulkan_probe_sdl3.linkSystemLibrary("SDL3");
+        katzensteg_vulkan_probe_sdl3.linkSystemLibrary("vulkan");
+        b.installArtifact(katzensteg_vulkan_probe_sdl3);
+
         const katzensteg_vulkan_layer_build_step = b.step("katzensteg-vulkan-layer", "Build the Vulkan capture layer used by Katzensteg");
         katzensteg_vulkan_layer_build_step.dependOn(&katzensteg_vulkan_layer.step);
 
         const katzensteg_vulkan_probe_build_step = b.step("katzensteg-vulkan-probe", "Build the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
         katzensteg_vulkan_probe_build_step.dependOn(&katzensteg_vulkan_probe.step);
+        const katzensteg_vulkan_probe_sdl3_build_step = b.step("katzensteg-vulkan-probe-sdl3", "Build the SDL3 Vulkan probe used for Katzensteg Vulkan capture work");
+        katzensteg_vulkan_probe_sdl3_build_step.dependOn(&katzensteg_vulkan_probe_sdl3.step);
 
         const katzensteg_vulkan_probe_cmd = b.addRunArtifact(katzensteg_vulkan_probe);
         if (b.args) |args| katzensteg_vulkan_probe_cmd.addArgs(args);
         const katzensteg_vulkan_probe_step = b.step("run-katzensteg-vulkan-probe", "Run the SDL2 Vulkan probe used for Katzensteg Vulkan capture work");
         katzensteg_vulkan_probe_step.dependOn(&katzensteg_vulkan_probe_cmd.step);
+        const katzensteg_vulkan_probe_sdl3_cmd = b.addRunArtifact(katzensteg_vulkan_probe_sdl3);
+        if (b.args) |args| katzensteg_vulkan_probe_sdl3_cmd.addArgs(args);
+        const katzensteg_vulkan_probe_sdl3_step = b.step("run-katzensteg-vulkan-probe-sdl3", "Run the SDL3 Vulkan probe used for Katzensteg Vulkan capture work");
+        katzensteg_vulkan_probe_sdl3_step.dependOn(&katzensteg_vulkan_probe_sdl3_cmd.step);
     }
 
     const katzensteg_launcher = b.addExecutable(.{
@@ -476,22 +590,38 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| basic_sdl_demo_cmd.addArgs(args);
     const basic_sdl_demo_step = b.step("basic-sdl-demo", "Run the basic SDL2 demo used for Katzensteg bring-up");
     basic_sdl_demo_step.dependOn(&basic_sdl_demo_cmd.step);
+    const basic_sdl3_demo_cmd = b.addRunArtifact(basic_sdl3_demo);
+    if (b.args) |args| basic_sdl3_demo_cmd.addArgs(args);
+    const basic_sdl3_demo_step = b.step("basic-sdl3-demo", "Run the basic SDL3 demo used for Katzensteg bring-up");
+    basic_sdl3_demo_step.dependOn(&basic_sdl3_demo_cmd.step);
 
     const katzensteg_input_probe_build_step = b.step("katzensteg-input-probe", "Build the SDL2 input probe used for Katzensteg input injection work");
     katzensteg_input_probe_build_step.dependOn(&katzensteg_input_probe.step);
+    const katzensteg_input_probe_sdl3_build_step = b.step("katzensteg-input-probe-sdl3", "Build the SDL3 input probe used for Katzensteg input injection work");
+    katzensteg_input_probe_sdl3_build_step.dependOn(&katzensteg_input_probe_sdl3.step);
 
     const katzensteg_input_probe_cmd = b.addRunArtifact(katzensteg_input_probe);
     if (b.args) |args| katzensteg_input_probe_cmd.addArgs(args);
     const katzensteg_input_probe_step = b.step("run-katzensteg-input-probe", "Run the SDL2 input probe used for Katzensteg input injection work");
     katzensteg_input_probe_step.dependOn(&katzensteg_input_probe_cmd.step);
+    const katzensteg_input_probe_sdl3_cmd = b.addRunArtifact(katzensteg_input_probe_sdl3);
+    if (b.args) |args| katzensteg_input_probe_sdl3_cmd.addArgs(args);
+    const katzensteg_input_probe_sdl3_step = b.step("run-katzensteg-input-probe-sdl3", "Run the SDL3 input probe used for Katzensteg input injection work");
+    katzensteg_input_probe_sdl3_step.dependOn(&katzensteg_input_probe_sdl3_cmd.step);
 
     const katzensteg_gl_probe_build_step = b.step("katzensteg-gl-probe", "Build the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_build_step.dependOn(&katzensteg_gl_probe.step);
+    const katzensteg_gl_probe_sdl3_build_step = b.step("katzensteg-gl-probe-sdl3", "Build the SDL3 OpenGL probe used for Katzensteg GL capture work");
+    katzensteg_gl_probe_sdl3_build_step.dependOn(&katzensteg_gl_probe_sdl3.step);
 
     const katzensteg_gl_probe_cmd = b.addRunArtifact(katzensteg_gl_probe);
     if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
     const katzensteg_gl_probe_step = b.step("run-katzensteg-gl-probe", "Run the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_step.dependOn(&katzensteg_gl_probe_cmd.step);
+    const katzensteg_gl_probe_sdl3_cmd = b.addRunArtifact(katzensteg_gl_probe_sdl3);
+    if (b.args) |args| katzensteg_gl_probe_sdl3_cmd.addArgs(args);
+    const katzensteg_gl_probe_sdl3_step = b.step("run-katzensteg-gl-probe-sdl3", "Run the SDL3 OpenGL probe used for Katzensteg GL capture work");
+    katzensteg_gl_probe_sdl3_step.dependOn(&katzensteg_gl_probe_sdl3_cmd.step);
 
     const luchs_build_step = b.step("luchs", "Build the SDL-backed web fragment viewer");
     luchs_build_step.dependOn(&install_luchs.step);
@@ -513,25 +643,32 @@ pub fn build(b: *std.Build) void {
     });
     addUnitTest(b, test_step, "katzensteg-frame-builder-test", "src/katzensteg/frame_builder.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
-        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_libc = true,
     });
     addUnitTest(b, test_step, "katzensteg-runtime-test", "src/katzensteg/runtime.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
-        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_libc = true,
         .link_sdl2 = true,
     });
     addUnitTest(b, test_step, "katzensteg-sdl2-input-adapter-test", "src/katzensteg/sdl2_input_adapter.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
-        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_sdl = katzensteg_sdl2_mod,
+        .katzensteg_build_options = test_preload_options.createModule(),
+        .link_libc = true,
+        .link_sdl2 = true,
+    });
+    addUnitTest(b, test_step, "katzensteg-sdl3-input-adapter-test", "src/katzensteg/sdl3_input_adapter.zig", target, optimize, use_llvm, .{
+        .termscene = termscene_mod,
+        .katzensteg_sdl = katzensteg_sdl3_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
         .link_sdl2 = true,
     });
     addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
-        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_sdl = katzensteg_sdl2_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
         .link_sdl2 = true,
@@ -550,7 +687,7 @@ pub fn build(b: *std.Build) void {
         .termscene = termscene_mod,
     });
     addUnitTest(b, test_step, "luchs-test", "tools/luchs/src/main.zig", target, optimize, use_llvm, .{
-        .katzensteg_sdl = katzensteg_sdl_mod,
+        .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_sdl2 = true,
     });
 }

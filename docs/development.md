@@ -13,6 +13,7 @@ There is no `build.zig.zon` yet. Install system dependencies through the host OS
 Common dependencies:
 
 - SDL2 development headers and libraries
+- SDL3 development headers and libraries
 - libyuv on Linux
 - Vulkan loader and headers when working on Vulkan capture
 
@@ -80,6 +81,21 @@ zig build
 ```
 
 If that works, move on to real app profiles only after checking `docs/external-projects.md`.
+
+## Probe Dry-Run Checks
+
+Use dry-runs to confirm probe wiring and adapter selection before interactive runs.
+
+```sh
+./zig-out/bin/katzensteg --dry-run probe.embed.basic_sdl
+./zig-out/bin/katzensteg --dry-run probe.embed.basic_sdl3
+./zig-out/bin/katzensteg --dry-run probe.input
+./zig-out/bin/katzensteg --dry-run probe.input.sdl3
+./zig-out/bin/katzensteg --dry-run probe.gl
+./zig-out/bin/katzensteg --dry-run probe.gl.sdl3
+./zig-out/bin/katzensteg --dry-run probe.vulkan
+./zig-out/bin/katzensteg --dry-run probe.vulkan.sdl3
+```
 
 ## Git Hooks
 

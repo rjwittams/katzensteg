@@ -7,6 +7,13 @@
         "--log-events"
       ]
     },
+    "app.input_probe_sdl3": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-input-probe-sdl3",
+      "args": [
+        "--log-events"
+      ]
+    },
     "probe.input": {
       "extends": [
         "app.input_probe",
@@ -25,6 +32,24 @@
         "--custom-cursor"
       ]
     },
+    "probe.input.sdl3": {
+      "extends": [
+        "app.input_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ]
+    },
+    "probe.input.sdl3.cursor": {
+      "extends": [
+        "app.input_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--log-events",
+        "--custom-cursor"
+      ]
+    },
     "probe.embed.basic_sdl": {
       "hidden": true,
       "extends": [
@@ -32,6 +57,36 @@
         "runtime.fullscreen_file"
       ],
       "target": "{repo}/zig-out/bin/basic-sdl-demo"
+    },
+    "probe.embed.basic_sdl3": {
+      "hidden": true,
+      "extends": [
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "target": "{repo}/zig-out/bin/basic-sdl3-demo"
+    },
+    "app.gl_probe": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-gl-probe"
+    },
+    "app.gl_probe_sdl3": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-gl-probe-sdl3"
+    },
+    "probe.gl": {
+      "extends": [
+        "app.gl_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ]
+    },
+    "probe.gl.sdl3": {
+      "extends": [
+        "app.gl_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ]
     },
     "app.codexbar_sdl": {
       "hidden": true,
@@ -76,6 +131,10 @@
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe"
     },
+    "app.vulkan_probe_sdl3": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-vulkan-probe-sdl3"
+    },
     "app.gamescope": {
       "hidden": true,
       "target": "$HOME/dev/gamescope/build-sdl/src/gamescope",
@@ -116,6 +175,17 @@
       "extends": [
         "app.vulkan_probe",
         "adapter.sdl2_preload",
+        "runtime.fullscreen_file",
+        "capture.vulkan"
+      ],
+      "runtime": {
+        "vulkan_capture": true
+      }
+    },
+    "probe.vulkan.sdl3": {
+      "extends": [
+        "app.vulkan_probe_sdl3",
+        "adapter.sdl3_preload",
         "runtime.fullscreen_file",
         "capture.vulkan"
       ],
