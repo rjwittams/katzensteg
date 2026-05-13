@@ -1,5 +1,10 @@
 const std = @import("std");
 const sdl = @import("katzensteg_sdl");
+const c = @cImport({
+    @cInclude("SDL3/SDL.h");
+    @cInclude("SDL3/SDL_gamepad.h");
+    @cInclude("SDL3/SDL_joystick.h");
+});
 
 const usage =
     \\usage: katzensteg-input-probe-sdl3 [--log-events] [--custom-cursor] [--frames N]
@@ -63,6 +68,35 @@ pub fn main() !void {
     var custom_cursor_surface: ?*sdl.SDL_Surface = null;
     var custom_cursor_handle: ?*sdl.SDL_Cursor = null;
     var custom_cursor_pixels: [16 * 16 * 4]u8 = undefined;
+    var opened_gamepad: ?*c.SDL_Gamepad = null;
+    var opened_joystick: ?*c.SDL_Joystick = null;
+
+    if (!c.SDL_InitSubSystem(c.SDL_INIT_JOYSTICK | c.SDL_INIT_GAMEPAD) and log_events) {
+        std.debug.print("SDL_InitSubSystem(JOYSTICK|GAMEPAD) failed: {s}\n", .{sdl.sdlError()});
+    }
+    defer c.SDL_QuitSubSystem(c.SDL_INIT_GAMEPAD | c.SDL_INIT_JOYSTICK);
+
+    var gamepad_count: c_int = 0;
+    var joystick_count: c_int = 0;
+    const gamepad_ids = c.SDL_GetGamepads(&gamepad_count);
+    defer if (gamepad_ids != null) c.SDL_free(gamepad_ids);
+    const joystick_ids = c.SDL_GetJoysticks(&joystick_count);
+    defer if (joystick_ids != null) c.SDL_free(joystick_ids);
+    if (gamepad_ids != null and gamepad_count > 0) {
+        opened_gamepad = c.SDL_OpenGamepad(gamepad_ids.?[0]);
+    } else if (joystick_ids != null and joystick_count > 0) {
+        opened_joystick = c.SDL_OpenJoystick(joystick_ids.?[0]);
+    }
+    defer {
+        if (opened_gamepad) |gamepad| c.SDL_CloseGamepad(gamepad);
+        if (opened_joystick) |joystick| c.SDL_CloseJoystick(joystick);
+    }
+    if (log_events) {
+        std.debug.print(
+            "SDL_HasJoystick={} SDL_HasGamepad={} joysticks={d} gamepads={d} opened_gamepad={} opened_joystick={}\n",
+            .{ c.SDL_HasJoystick(), c.SDL_HasGamepad(), joystick_count, gamepad_count, opened_gamepad != null, opened_joystick != null },
+        );
+    }
 
     try expectSdlTrue("SDL_StartTextInput", sdl.SDL_StartTextInput(window));
     try expectCondition("SDL_TextInputActive after start", sdl.SDL_TextInputActive(window));
@@ -154,6 +188,8 @@ pub fn main() !void {
     var frame: i32 = 0;
     var event: sdl.SDL_Event = undefined;
     var peek_events: [8]sdl.SDL_Event = undefined;
+    var joystick_events: u32 = 0;
+    var gamepad_events: u32 = 0;
 
     while (running and frame < max_frames) : (frame += 1) {
         sdl.SDL_PumpEvents();
@@ -163,6 +199,12 @@ pub fn main() !void {
             if (log_events) std.debug.print("event type=0x{x}\n", .{event.type});
             if (event.type == sdl.SDL_QUIT or event.type == sdl.SDL_WINDOWEVENT_CLOSE) {
                 running = false;
+            }
+            if (event.type >= @as(u32, @intCast(c.SDL_EVENT_JOYSTICK_AXIS_MOTION)) and event.type <= @as(u32, @intCast(c.SDL_EVENT_JOYSTICK_UPDATE_COMPLETE))) {
+                joystick_events += 1;
+            }
+            if (event.type >= @as(u32, @intCast(c.SDL_EVENT_GAMEPAD_AXIS_MOTION)) and event.type <= @as(u32, @intCast(c.SDL_EVENT_GAMEPAD_STEAM_HANDLE_UPDATED))) {
+                gamepad_events += 1;
             }
         }
 
@@ -183,6 +225,7 @@ pub fn main() !void {
                 "frame={d} peep={d} key_count={d} mouse={d:.1},{d:.1} buttons=0x{x} global={d:.1},{d:.1} global_buttons=0x{x} rel={d:.1},{d:.1} rel_buttons=0x{x}\n",
                 .{ frame, peep_count, key_count, mouse_x, mouse_y, mouse_buttons, global_mouse_x, global_mouse_y, global_mouse_buttons, rel_x, rel_y, rel_buttons },
             );
+            std.debug.print("input-devices joystick_events={d} gamepad_events={d}\n", .{ joystick_events, gamepad_events });
         }
 
         _ = sdl.SDL_SetRenderDrawColor(renderer, 10, 18, 34, 255);
