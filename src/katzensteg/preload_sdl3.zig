@@ -386,7 +386,7 @@ fn surfaceSummary(surface: ?*sdl.SDL_Surface) struct { ptr: usize, w: i32, h: i3
 }
 
 fn copySurfaceToRgba(allocator: std.mem.Allocator, surface: ?*sdl.SDL_Surface) ?struct { width: i32, height: i32, rgba: []u8 } {
-    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse return null;
+    const converted = real_sdl.SDL_ConvertSurface(surface, sdl.SDL_PIXELFORMAT_ABGR8888) orelse return null;
     defer real_sdl.SDL_FreeSurface(converted);
 
     const view: *const SurfaceTraceView = @ptrCast(@alignCast(converted));
@@ -906,7 +906,7 @@ pub export fn ks_dlopen(path: ?[*:0]const u8, mode: c_int) callconv(.c) ?*anyopa
 fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct { w: c_int, h: c_int, len: usize } {
     var w: c_int = 0;
     var h: c_int = 0;
-    real_sdl.SDL_GL_GetDrawableSize(window, &w, &h);
+    if (!real_sdl.SDL_GetWindowSizeInPixels(window, &w, &h)) return null;
     if (w <= 0 or h <= 0) return null;
     if (!rt.shouldCaptureExternalFrame()) return null;
     return .{ .w = w, .h = h, .len = @as(usize, @intCast(w)) * @as(usize, @intCast(h)) * 4 };

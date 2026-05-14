@@ -47,7 +47,7 @@ extern fn ks_real_SDL_RenderSetViewport(renderer: ?*sdl.SDL_Renderer, rect: ?*co
 extern fn ks_real_SDL_RenderSetClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const sdl.SDL_Rect) c_int;
 extern fn ks_real_SDL_GL_CreateContext(window: ?*sdl.SDL_Window) sdl.SDL_GLContext;
 extern fn ks_real_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_GLContext) c_int;
-extern fn ks_real_SDL_GL_GetDrawableSize(window: ?*sdl.SDL_Window, w: *c_int, h: *c_int) void;
+extern fn ks_real_SDL_GetWindowSizeInPixels(window: ?*sdl.SDL_Window, w: *c_int, h: *c_int) sdl.SDL_bool;
 extern fn ks_real_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) void;
 extern fn ks_real_SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) c_int;
 extern fn ks_real_SDL_PumpEvents() void;
@@ -58,9 +58,9 @@ extern fn ks_real_SDL_GetMouseFocus() ?*sdl.SDL_Window;
 extern fn ks_real_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) sdl.Uint32;
 extern fn ks_real_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) sdl.Uint32;
 extern fn ks_real_SDL_GetTicks() sdl.Uint32;
-extern fn ks_real_SDL_ConvertSurfaceFormat(surface: ?*sdl.SDL_Surface, pixel_format: sdl.Uint32, flags: sdl.Uint32) ?*sdl.SDL_Surface;
-extern fn ks_real_SDL_FreeSurface(surface: ?*sdl.SDL_Surface) void;
-extern fn ks_real_SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*sdl.SDL_Rect) c_int;
+extern fn ks_real_SDL_ConvertSurface(surface: ?*sdl.SDL_Surface, pixel_format: sdl.Uint32) ?*sdl.SDL_Surface;
+extern fn ks_real_SDL_DestroySurface(surface: ?*sdl.SDL_Surface) void;
+extern fn ks_real_SDL_BlitSurface(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*const sdl.SDL_Rect) sdl.SDL_bool;
 extern fn ks_real_SDL_CreateColorCursor(surface: ?*sdl.SDL_Surface, hot_x: c_int, hot_y: c_int) ?*sdl.SDL_Cursor;
 extern fn ks_real_SDL_SetCursor(cursor: ?*sdl.SDL_Cursor) void;
 extern fn ks_real_SDL_ShowCursor(toggle: c_int) c_int;
@@ -112,7 +112,7 @@ pub const SDL_RenderSetViewport = if (use_c_real) ks_real_SDL_RenderSetViewport 
 pub const SDL_RenderSetClipRect = if (use_c_real) ks_real_SDL_RenderSetClipRect else sdl.SDL_RenderSetClipRect;
 pub const SDL_GL_CreateContext = if (use_c_real) ks_real_SDL_GL_CreateContext else sdl.SDL_GL_CreateContext;
 pub const SDL_GL_MakeCurrent = if (use_c_real) ks_real_SDL_GL_MakeCurrent else sdl.SDL_GL_MakeCurrent;
-pub const SDL_GL_GetDrawableSize = if (use_c_real) ks_real_SDL_GL_GetDrawableSize else sdl.SDL_GL_GetDrawableSize;
+pub const SDL_GetWindowSizeInPixels = if (use_c_real) ks_real_SDL_GetWindowSizeInPixels else sdl.SDL_GetWindowSizeInPixels;
 pub const SDL_GL_SwapWindow = if (use_c_real) ks_real_SDL_GL_SwapWindow else sdl.SDL_GL_SwapWindow;
 pub const SDL_Vulkan_LoadLibrary = if (use_c_real) ks_real_SDL_Vulkan_LoadLibrary else sdl.SDL_Vulkan_LoadLibrary;
 pub const SDL_PumpEvents = if (use_c_real) ks_real_SDL_PumpEvents else sdl.SDL_PumpEvents;
@@ -123,9 +123,13 @@ pub const SDL_GetMouseFocus = if (use_c_real) ks_real_SDL_GetMouseFocus else sdl
 pub const SDL_GetMouseState = if (use_c_real) ks_real_SDL_GetMouseState else sdl.SDL_GetMouseState;
 pub const SDL_GetRelativeMouseState = if (use_c_real) ks_real_SDL_GetRelativeMouseState else sdl.SDL_GetRelativeMouseState;
 pub const SDL_GetTicks = if (use_c_real) ks_real_SDL_GetTicks else sdl.SDL_GetTicks;
-pub const SDL_ConvertSurfaceFormat = if (use_c_real) ks_real_SDL_ConvertSurfaceFormat else sdl.SDL_ConvertSurfaceFormat;
-pub const SDL_FreeSurface = if (use_c_real) ks_real_SDL_FreeSurface else sdl.SDL_FreeSurface;
-pub const SDL_UpperBlit = if (use_c_real) ks_real_SDL_UpperBlit else sdl.SDL_UpperBlit;
+pub const SDL_ConvertSurface = if (use_c_real) ks_real_SDL_ConvertSurface else sdl.SDL_ConvertSurface;
+pub const SDL_FreeSurface = if (use_c_real) ks_real_SDL_DestroySurface else sdl.SDL_FreeSurface;
+pub fn SDL_UpperBlit(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*sdl.SDL_Rect) c_int {
+    if (use_c_real) return if (ks_real_SDL_BlitSurface(src, srcrect, dst, if (dstrect) |r| @ptrCast(r) else null)) 0 else -1;
+    const dstrect_const: ?*const sdl.SDL_Rect = if (dstrect) |r| @ptrCast(r) else null;
+    return if (sdl.SDL_BlitSurface(src, srcrect, dst, dstrect_const)) 0 else -1;
+}
 pub const SDL_CreateColorCursor = if (use_c_real) ks_real_SDL_CreateColorCursor else sdl.SDL_CreateColorCursor;
 pub const SDL_SetCursor = if (use_c_real) ks_real_SDL_SetCursor else sdl.SDL_SetCursor;
 pub const SDL_ShowCursor = if (use_c_real) ks_real_SDL_ShowCursor else sdl.SDL_ShowCursor;

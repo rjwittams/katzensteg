@@ -153,7 +153,14 @@ pub const SDL_GetMouseFocus = if (use_c_real) ks_real_SDL_GetMouseFocus else sdl
 pub const SDL_GetMouseState = if (use_c_real) ks_real_SDL_GetMouseState else sdl.SDL_GetMouseState;
 pub const SDL_GetRelativeMouseState = if (use_c_real) ks_real_SDL_GetRelativeMouseState else sdl.SDL_GetRelativeMouseState;
 pub const SDL_GetTicks = if (use_c_real) ks_real_SDL_GetTicks else sdl.SDL_GetTicks;
-pub const SDL_ConvertSurfaceFormat = if (use_c_real) ks_real_SDL_ConvertSurfaceFormat else sdl.SDL_ConvertSurfaceFormat;
+pub fn SDL_ConvertSurfaceFormat(surface: ?*sdl.SDL_Surface, pixel_format: sdl.Uint32, _flags: sdl.Uint32) ?*sdl.SDL_Surface {
+    if (use_c_real) return ks_real_SDL_ConvertSurfaceFormat(surface, pixel_format, _flags);
+    if (comptime @hasDecl(sdl, "SDL_ConvertSurfaceFormat")) {
+        return sdl.SDL_ConvertSurfaceFormat(surface, pixel_format, _flags);
+    } else {
+        return sdl.SDL_ConvertSurface(surface, pixel_format);
+    }
+}
 pub const SDL_FreeSurface = if (use_c_real) ks_real_SDL_FreeSurface else sdl.SDL_FreeSurface;
 pub const SDL_UpperBlit = if (use_c_real) ks_real_SDL_UpperBlit else sdl.SDL_UpperBlit;
 pub const SDL_CreateColorCursor = if (use_c_real) ks_real_SDL_CreateColorCursor else sdl.SDL_CreateColorCursor;

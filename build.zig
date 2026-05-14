@@ -348,14 +348,16 @@ pub fn build(b: *std.Build) void {
         .name = "katzensteg-input-probe-sdl3",
         .use_llvm = use_llvm,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/probes/sdl3/input_probe.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
     });
-    katzensteg_input_probe_sdl3.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
-    if (is_macos) katzensteg_input_probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    katzensteg_input_probe_sdl3.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/input_probe.c") });
+    if (is_macos) {
+        katzensteg_input_probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        katzensteg_input_probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    }
     katzensteg_input_probe_sdl3.linkSystemLibrary("SDL3");
     b.installArtifact(katzensteg_input_probe_sdl3);
 

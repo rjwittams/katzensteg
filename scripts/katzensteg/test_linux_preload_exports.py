@@ -224,6 +224,42 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertIn(symbol, adapter_text)
 
+    def test_sdl3_gl_drawable_size_uses_window_pixels_api(self):
+        # SDL3 exposes drawable size through SDL_GetWindowSizeInPixels.
+        # Keep SDL2-only SDL_GL_GetDrawableSize out of SDL3 frontend paths.
+        for rel in (
+            "src/katzensteg/preload_sdl3.zig",
+            "src/katzensteg/real_sdl3.zig",
+            "src/katzensteg/sdl3.zig",
+            "src/katzensteg/sdl3/abi.zig",
+            "src/katzensteg/sdl3/real.zig",
+            "src/katzensteg/real_sdl3_macos.c",
+            "src/katzensteg/real_sdl3_linux.c",
+        ):
+            text = (ROOT / rel).read_text()
+            with self.subTest(path=rel, symbol="SDL_GL_GetDrawableSize"):
+                self.assertNotIn("SDL_GL_GetDrawableSize", text)
+            with self.subTest(path=rel, symbol="SDL_GetWindowSizeInPixels"):
+                self.assertIn("SDL_GetWindowSizeInPixels", text)
+
+    def test_sdl3_surface_conversion_uses_convert_surface_symbol(self):
+        # SDL3 runtime exports SDL_ConvertSurface; SDL_ConvertSurfaceFormat is
+        # an old-name compatibility macro in headers, not a stable runtime ABI.
+        for rel in (
+            "src/katzensteg/preload_sdl3.zig",
+            "src/katzensteg/real_sdl3.zig",
+            "src/katzensteg/sdl3.zig",
+            "src/katzensteg/sdl3/abi.zig",
+            "src/katzensteg/sdl3/real.zig",
+            "src/katzensteg/real_sdl3_macos.c",
+            "src/katzensteg/real_sdl3_linux.c",
+        ):
+            text = (ROOT / rel).read_text()
+            with self.subTest(path=rel, symbol="SDL_ConvertSurfaceFormat"):
+                self.assertNotIn("SDL_ConvertSurfaceFormat", text)
+            with self.subTest(path=rel, symbol="SDL_ConvertSurface"):
+                self.assertIn("SDL_ConvertSurface", text)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF core export test")
     def test_core_library_exports_core_abi_symbols(self):
         lib_path = self.core_path()

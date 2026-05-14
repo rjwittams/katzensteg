@@ -206,7 +206,7 @@ pub extern fn SDL_UpdateNVTexture(texture: ?*SDL_Texture, rect: ?*const SDL_Rect
 pub extern fn SDL_LockTexture(texture: ?*SDL_Texture, rect: ?*const SDL_Rect, pixels: *?*anyopaque, pitch: *c_int) c_int;
 pub extern fn SDL_UnlockTexture(texture: ?*SDL_Texture) void;
 pub extern fn SDL_CreateSurfaceFrom(width: c_int, height: c_int, format: Uint32, pixels: ?*anyopaque, pitch: c_int) ?*SDL_Surface;
-pub extern fn SDL_ConvertSurfaceFormat(surface: ?*SDL_Surface, pixel_format: Uint32, flags: Uint32) ?*SDL_Surface;
+pub extern fn SDL_ConvertSurface(surface: ?*SDL_Surface, pixel_format: Uint32) ?*SDL_Surface;
 pub extern fn SDL_DestroySurface(surface: ?*SDL_Surface) void;
 pub extern fn SDL_UpperBlit(src: ?*SDL_Surface, srcrect: ?*const SDL_Rect, dst: ?*SDL_Surface, dstrect: ?*SDL_Rect) c_int;
 pub extern fn SDL_CreateColorCursor(surface: ?*SDL_Surface, hot_x: c_int, hot_y: c_int) ?*SDL_Cursor;
@@ -231,7 +231,7 @@ pub extern fn SDL_RenderSetClipRect(renderer: ?*SDL_Renderer, rect: ?*const SDL_
 pub extern fn SDL_RenderGetViewport(renderer: ?*SDL_Renderer, rect: *SDL_Rect) void;
 pub extern fn SDL_GL_CreateContext(window: ?*SDL_Window) SDL_GLContext;
 pub extern fn SDL_GL_MakeCurrent(window: ?*SDL_Window, context: SDL_GLContext) c_int;
-pub extern fn SDL_GL_GetDrawableSize(window: ?*SDL_Window, w: *c_int, h: *c_int) void;
+pub extern fn SDL_GetWindowSizeInPixels(window: ?*SDL_Window, w: *c_int, h: *c_int) SDL_bool;
 pub extern fn SDL_GL_SwapWindow(window: ?*SDL_Window) void;
 pub extern fn SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) c_int;
 pub extern fn SDL_PumpEvents() void;
