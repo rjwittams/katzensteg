@@ -260,6 +260,40 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             with self.subTest(path=rel, symbol="SDL_ConvertSurface"):
                 self.assertIn("SDL_ConvertSurface", text)
 
+    def test_sdl3_input_probe_window_event_coverage_matches_sdl2_shape(self):
+        text = (ROOT / "examples" / "probes" / "sdl3" / "input_probe.c").read_text()
+        for symbol in (
+            "SDL_EVENT_WINDOW_SHOWN",
+            "SDL_EVENT_WINDOW_HIDDEN",
+            "SDL_EVENT_WINDOW_EXPOSED",
+            "SDL_EVENT_WINDOW_MOVED",
+            "SDL_EVENT_WINDOW_RESIZED",
+            "SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED",
+            "SDL_EVENT_WINDOW_MINIMIZED",
+            "SDL_EVENT_WINDOW_MAXIMIZED",
+            "SDL_EVENT_WINDOW_RESTORED",
+            "SDL_EVENT_WINDOW_MOUSE_ENTER",
+            "SDL_EVENT_WINDOW_MOUSE_LEAVE",
+            "SDL_EVENT_WINDOW_FOCUS_GAINED",
+            "SDL_EVENT_WINDOW_FOCUS_LOST",
+            "SDL_EVENT_WINDOW_CLOSE_REQUESTED",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, text)
+
+    def test_sdl3_input_probe_filters_sdl3_only_noise_events(self):
+        text = (ROOT / "examples" / "probes" / "sdl3" / "input_probe.c").read_text()
+        for symbol in (
+            "SDL_EVENT_KEYBOARD_ADDED",
+            "SDL_EVENT_KEYBOARD_REMOVED",
+            "SDL_EVENT_MOUSE_ADDED",
+            "SDL_EVENT_MOUSE_REMOVED",
+            "SDL_EVENT_JOYSTICK_UPDATE_COMPLETE",
+            "SDL_EVENT_GAMEPAD_UPDATE_COMPLETE",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, text)
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux ELF core export test")
     def test_core_library_exports_core_abi_symbols(self):
         lib_path = self.core_path()

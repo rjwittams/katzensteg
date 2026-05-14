@@ -159,6 +159,20 @@ static const char *window_event_name(uint32_t event)
     }
 }
 
+static uint32_t renderer_texture_format_count(SDL_Renderer *renderer)
+{
+    const SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
+    if (props == 0) return 0;
+    const SDL_PixelFormat *formats = (const SDL_PixelFormat *)SDL_GetPointerProperty(
+        props, SDL_PROP_RENDERER_TEXTURE_FORMATS_POINTER, NULL);
+    if (formats == NULL) return 0;
+    uint32_t count = 0;
+    while (formats[count] != SDL_PIXELFORMAT_UNKNOWN) {
+        count++;
+    }
+    return count;
+}
+
 static void push_summary(ProbeState *state, const char *summary)
 {
     if (state->summary_count < MAX_EVENTS) {
@@ -417,6 +431,15 @@ static void handle_event(SDL_Window *window, ProbeState *state, const SDL_Event 
         push_summary(state, summary);
         break;
 
+    case SDL_EVENT_WINDOW_SHOWN:
+    case SDL_EVENT_WINDOW_HIDDEN:
+    case SDL_EVENT_WINDOW_EXPOSED:
+    case SDL_EVENT_WINDOW_MOVED:
+    case SDL_EVENT_WINDOW_MINIMIZED:
+    case SDL_EVENT_WINDOW_MAXIMIZED:
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_MOUSE_ENTER:
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE:
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_FOCUS_LOST:
     case SDL_EVENT_WINDOW_RESIZED:
@@ -443,6 +466,16 @@ static void handle_event(SDL_Window *window, ProbeState *state, const SDL_Event 
                  event->window.data1,
                  event->window.data2);
         push_summary(state, summary);
+        break;
+
+    case SDL_EVENT_KEYBOARD_ADDED:
+    case SDL_EVENT_KEYBOARD_REMOVED:
+    case SDL_EVENT_MOUSE_ADDED:
+    case SDL_EVENT_MOUSE_REMOVED:
+    case SDL_EVENT_JOYSTICK_UPDATE_COMPLETE:
+    case SDL_EVENT_GAMEPAD_UPDATE_COMPLETE:
+        // These are frequent SDL3 lifecycle/update signals and add noise
+        // relative to the SDL2 probe output.
         break;
 
     default:
@@ -702,7 +735,11 @@ int main(int argc, char **argv)
 
     if (state.log_events) {
         const char *renderer_name = SDL_GetRendererName(renderer);
-        fprintf(stderr, "renderer=%s\n", renderer_name ? renderer_name : "unknown");
+        const uint32_t formats = renderer_texture_format_count(renderer);
+        fprintf(stderr, "renderer=%s flags=0x%x formats=%u\n",
+                renderer_name ? renderer_name : "unknown",
+                0u,
+                formats);
     }
 
     SDL_StartTextInput(window);
