@@ -1,3 +1,6 @@
+// Staging area for a future SDL3 module split. The active production SDL3 path
+// is still the flat sdl3.zig / real_sdl3.zig / sdl3_input_adapter.zig set;
+// Python symbol checks read this file, but it is not compiled by build.zig yet.
 const std = @import("std");
 
 pub const Sint32 = i32;
