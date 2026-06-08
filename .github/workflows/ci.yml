@@ -25,17 +25,30 @@ jobs:
             binutils \
             build-essential \
             ca-certificates \
+            cmake \
+            git \
             libvulkan-dev \
             libyuv-dev \
             libsdl2-dev \
-            libsdl3-dev \
+            ninja-build \
             pkg-config \
             python3
+
+      - name: Build SDL3
+        run: |
+          git clone --depth 1 --branch release-3.2.30 https://github.com/libsdl-org/SDL.git /tmp/SDL3
+          cmake -S /tmp/SDL3 -B /tmp/SDL3-build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_TESTS=OFF \
+            -DSDL_EXAMPLES=OFF
+          cmake --build /tmp/SDL3-build
+          sudo cmake --install /tmp/SDL3-build
+          sudo ldconfig
 
       - name: Verify Linux headers
         run: |
           test -f /usr/include/vulkan/vulkan.h
-          test -f /usr/include/SDL3/SDL.h
+          test -f /usr/local/include/SDL3/SDL.h
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

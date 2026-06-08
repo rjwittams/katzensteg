@@ -127,7 +127,7 @@ KS_REAL(SDL_ConvertSurface, struct SDL_Surface *, (struct SDL_Surface *surface, 
 KS_REAL_VOID(SDL_DestroySurface, (struct SDL_Surface *surface), (surface))
 KS_REAL(SDL_BlitSurface, _Bool, (struct SDL_Surface *src, const struct SDL_Rect *srcrect, struct SDL_Surface *dst, const struct SDL_Rect *dstrect), (src, srcrect, dst, dstrect))
 KS_REAL(SDL_CreateColorCursor, struct SDL_Cursor *, (struct SDL_Surface *surface, int hot_x, int hot_y), (surface, hot_x, hot_y))
-KS_REAL_VOID(SDL_SetCursor, (struct SDL_Cursor *cursor), (cursor))
+KS_REAL(SDL_SetCursor, _Bool, (struct SDL_Cursor *cursor), (cursor))
 KS_REAL(SDL_ShowCursor, _Bool, (void), ())
 KS_REAL(SDL_HideCursor, _Bool, (void), ())
 KS_REAL_VOID(SDL_DestroyCursor, (struct SDL_Cursor *cursor), (cursor))
