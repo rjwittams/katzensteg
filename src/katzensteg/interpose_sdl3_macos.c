@@ -177,7 +177,7 @@ extern int SDL_InitSubSystem(unsigned int);
 extern int SDL_SetHint(const char *, const char *);
 extern void SDL_QuitSubSystem(unsigned int);
 extern void SDL_Quit(void);
-extern unsigned int SDL_GetWindowFlags(struct SDL_Window *);
+extern unsigned long long SDL_GetWindowFlags(struct SDL_Window *);
 extern void *dlopen(const char *, int);
 
 DYLD_INTERPOSE(ks_SDL_Init, SDL_Init)

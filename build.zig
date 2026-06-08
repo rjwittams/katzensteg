@@ -373,6 +373,7 @@ pub fn build(b: *std.Build) void {
     if (is_macos) {
         katzensteg_dlopen_probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
     } else if (target.result.os.tag == .linux) {
+        katzensteg_dlopen_probe_sdl3.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
         katzensteg_dlopen_probe_sdl3.linkSystemLibrary("dl");
     }
     b.installArtifact(katzensteg_dlopen_probe_sdl3);
