@@ -74,6 +74,20 @@
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-gl-probe-sdl3"
     },
+    "app.dlopen_probe_sdl3": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-dlopen-probe-sdl3"
+    },
+    "app.love_probe_sdl3": {
+      "hidden": true,
+      "target": {
+        "macos": "$HOME/dev/love/build-xcode/Build/Products/Release/love.app/Contents/MacOS/love",
+        "linux": "love"
+      },
+      "args": [
+        "{repo}/examples/probes/sdl3/love_smoke"
+      ]
+    },
     "probe.gl": {
       "extends": [
         "app.gl_probe",
@@ -87,6 +101,66 @@
         "adapter.sdl3_preload",
         "runtime.fullscreen_file"
       ]
+    },
+    "probe.dlopen.sdl3": {
+      "extends": [
+        "app.dlopen_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "env": {
+        "DYLD_INSERT_LIBRARIES": {
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl3.dylib:/opt/homebrew/lib/libSDL3.0.dylib"
+        }
+      }
+    },
+    "probe.love.sdl3": {
+      "extends": [
+        "app.love_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ]
+    },
+    "app.love_probe_sdl3.opengl": {
+      "hidden": true,
+      "extends": [
+        "app.love_probe_sdl3"
+      ],
+      "args": [
+        "--renderers",
+        "opengl",
+        "{repo}/examples/probes/sdl3/love_smoke"
+      ]
+    },
+    "probe.love.sdl3.opengl": {
+      "extends": [
+        "app.love_probe_sdl3.opengl",
+        "adapter.sdl3_preload",
+        "capture.gl_pbo",
+        "runtime.fullscreen_file"
+      ]
+    },
+    "app.love_probe_sdl3.vulkan": {
+      "hidden": true,
+      "extends": [
+        "app.love_probe_sdl3"
+      ],
+      "args": [
+        "--renderers",
+        "vulkan",
+        "{repo}/examples/probes/sdl3/love_smoke"
+      ]
+    },
+    "probe.love.sdl3.vulkan": {
+      "extends": [
+        "app.love_probe_sdl3.vulkan",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file",
+        "capture.vulkan"
+      ],
+      "runtime": {
+        "vulkan_capture": true
+      }
     },
     "app.codexbar_sdl": {
       "hidden": true,

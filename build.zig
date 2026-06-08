@@ -360,6 +360,22 @@ pub fn build(b: *std.Build) void {
     }
     katzensteg_input_probe_sdl3.linkSystemLibrary("SDL3");
     b.installArtifact(katzensteg_input_probe_sdl3);
+    const katzensteg_dlopen_probe_sdl3 = b.addExecutable(.{
+        .name = "katzensteg-dlopen-probe-sdl3",
+        .use_llvm = use_llvm,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_dlopen_probe_sdl3.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/dlopen_probe.c") });
+    if (is_macos) {
+        katzensteg_dlopen_probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    } else if (target.result.os.tag == .linux) {
+        katzensteg_dlopen_probe_sdl3.linkSystemLibrary("dl");
+    }
+    b.installArtifact(katzensteg_dlopen_probe_sdl3);
 
     const katzensteg_gl_probe = b.addExecutable(.{
         .name = "katzensteg-gl-probe",
@@ -601,6 +617,8 @@ pub fn build(b: *std.Build) void {
     katzensteg_input_probe_build_step.dependOn(&katzensteg_input_probe.step);
     const katzensteg_input_probe_sdl3_build_step = b.step("katzensteg-input-probe-sdl3", "Build the SDL3 input probe used for Katzensteg input injection work");
     katzensteg_input_probe_sdl3_build_step.dependOn(&katzensteg_input_probe_sdl3.step);
+    const katzensteg_dlopen_probe_sdl3_build_step = b.step("katzensteg-dlopen-probe-sdl3", "Build the SDL3 dlopen probe used for Katzensteg dynamic SDL loading coverage");
+    katzensteg_dlopen_probe_sdl3_build_step.dependOn(&katzensteg_dlopen_probe_sdl3.step);
 
     const katzensteg_input_probe_cmd = b.addRunArtifact(katzensteg_input_probe);
     if (b.args) |args| katzensteg_input_probe_cmd.addArgs(args);
@@ -610,6 +628,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_input_probe_sdl3_cmd.addArgs(args);
     const katzensteg_input_probe_sdl3_step = b.step("run-katzensteg-input-probe-sdl3", "Run the SDL3 input probe used for Katzensteg input injection work");
     katzensteg_input_probe_sdl3_step.dependOn(&katzensteg_input_probe_sdl3_cmd.step);
+    const katzensteg_dlopen_probe_sdl3_cmd = b.addRunArtifact(katzensteg_dlopen_probe_sdl3);
+    if (b.args) |args| katzensteg_dlopen_probe_sdl3_cmd.addArgs(args);
+    const katzensteg_dlopen_probe_sdl3_step = b.step("run-katzensteg-dlopen-probe-sdl3", "Run the SDL3 dlopen probe used for Katzensteg dynamic SDL loading coverage");
+    katzensteg_dlopen_probe_sdl3_step.dependOn(&katzensteg_dlopen_probe_sdl3_cmd.step);
 
     const katzensteg_gl_probe_build_step = b.step("katzensteg-gl-probe", "Build the SDL2 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_build_step.dependOn(&katzensteg_gl_probe.step);
