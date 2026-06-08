@@ -28,11 +28,14 @@ jobs:
             libvulkan-dev \
             libyuv-dev \
             libsdl2-dev \
+            libsdl3-dev \
             pkg-config \
             python3
 
       - name: Verify Linux headers
-        run: test -f /usr/include/vulkan/vulkan.h
+        run: |
+          test -f /usr/include/vulkan/vulkan.h
+          test -f /usr/include/SDL3/SDL.h
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

@@ -244,7 +244,7 @@ pub extern fn SDL_GetMouseFocus() ?*SDL_Window;
 pub extern fn SDL_GetMouseState(x: ?*c_int, y: ?*c_int) Uint32;
 pub extern fn SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) Uint32;
 pub extern fn SDL_Delay(ms: Uint32) void;
-pub extern fn SDL_GetTicks() Uint32;
+pub extern fn SDL_GetTicks() Uint64;
 pub extern fn SDL_GetError() [*:0]const u8;
 
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;

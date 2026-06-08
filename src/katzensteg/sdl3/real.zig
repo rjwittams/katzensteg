@@ -57,7 +57,7 @@ extern fn ks_real_SDL_GetKeyboardState(numkeys: ?*c_int) ?[*]const sdl.Uint8;
 extern fn ks_real_SDL_GetMouseFocus() ?*sdl.SDL_Window;
 extern fn ks_real_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) sdl.Uint32;
 extern fn ks_real_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) sdl.Uint32;
-extern fn ks_real_SDL_GetTicks() sdl.Uint32;
+extern fn ks_real_SDL_GetTicks() sdl.Uint64;
 extern fn ks_real_SDL_ConvertSurface(surface: ?*sdl.SDL_Surface, pixel_format: sdl.Uint32) ?*sdl.SDL_Surface;
 extern fn ks_real_SDL_DestroySurface(surface: ?*sdl.SDL_Surface) void;
 extern fn ks_real_SDL_BlitSurface(src: ?*sdl.SDL_Surface, srcrect: ?*const sdl.SDL_Rect, dst: ?*sdl.SDL_Surface, dstrect: ?*const sdl.SDL_Rect) sdl.SDL_bool;

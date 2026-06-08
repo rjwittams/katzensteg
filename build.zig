@@ -688,7 +688,7 @@ pub fn build(b: *std.Build) void {
         .katzensteg_sdl = katzensteg_sdl3_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
-        .link_sdl2 = true,
+        .link_sdl3 = true,
     });
     addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
         .termscene = termscene_mod,
@@ -723,6 +723,7 @@ const UnitTestOptions = struct {
     katzensteg_build_options: ?*std.Build.Module = null,
     link_libc: bool = false,
     link_sdl2: bool = false,
+    link_sdl3: bool = false,
     link_opengl: bool = false,
 };
 
@@ -753,6 +754,10 @@ fn addUnitTest(
     if (options.link_sdl2) {
         if (target.result.os.tag == .macos) unit_test.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         unit_test.linkSystemLibrary("SDL2");
+    }
+    if (options.link_sdl3) {
+        if (target.result.os.tag == .macos) unit_test.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        unit_test.linkSystemLibrary("SDL3");
     }
     if (options.link_opengl) {
         if (target.result.os.tag == .macos) {

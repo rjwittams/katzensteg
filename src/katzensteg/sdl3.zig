@@ -299,7 +299,7 @@ pub extern fn SDL_SetWindowRelativeMouseMode(window: ?*SDL_Window, enabled: SDL_
 pub extern fn SDL_GetWindowRelativeMouseMode(window: ?*SDL_Window) SDL_bool;
 pub extern fn SDL_CaptureMouse(enabled: SDL_bool) SDL_bool;
 pub extern fn SDL_Delay(ms: Uint32) void;
-pub extern fn SDL_GetTicks() Uint32;
+pub extern fn SDL_GetTicks() Uint64;
 pub extern fn SDL_GetError() [*:0]const u8;
 
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;
