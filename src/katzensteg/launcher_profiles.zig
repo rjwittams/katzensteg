@@ -1222,6 +1222,38 @@ test "bundled SDL2 preload adapter resolves platform preload environment" {
     try std.testing.expect(envValue(macos_profile, "LD_PRELOAD") == null);
 }
 
+test "bundled SDL3 preload adapter resolves platform preload environment" {
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    defer linux_catalog.deinit();
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer macos_catalog.deinit();
+
+    const linux_profile = linux_catalog.find("adapter.sdl3_preload").?;
+    const macos_profile = macos_catalog.find("adapter.sdl3_preload").?;
+
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", envValue(linux_profile, "LD_PRELOAD").?);
+    try std.testing.expect(envValue(linux_profile, "DYLD_INSERT_LIBRARIES") == null);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
+    try std.testing.expect(envValue(macos_profile, "LD_PRELOAD") == null);
+}
+
+test "bundled SDL3 input probe profile resolves SDL3 probe target and preload" {
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    defer linux_catalog.deinit();
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer macos_catalog.deinit();
+
+    const linux_profile = linux_catalog.find("probe.input.sdl3").?;
+    const macos_profile = macos_catalog.find("probe.input.sdl3").?;
+
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/katzensteg-input-probe-sdl3", linux_profile.target);
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/katzensteg-input-probe-sdl3", macos_profile.target);
+    try std.testing.expectEqual(config.InterceptMode.queued_replay, linux_profile.runtime.intercept_mode);
+    try std.testing.expectEqual(config.InterceptMode.queued_replay, macos_profile.runtime.intercept_mode);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", envValue(linux_profile, "LD_PRELOAD").?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
+}
+
 test "bundled profiles include experimental macOS SDL2 rebind adapter" {
     var catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
     defer catalog.deinit();

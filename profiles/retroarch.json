@@ -77,6 +77,17 @@
         }
       }
     },
+    "adapter.sdl3_preload": {
+      "hidden": true,
+      "env": {
+        "DYLD_INSERT_LIBRARIES": {
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl3.dylib"
+        },
+        "LD_PRELOAD": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl3.so"
+        }
+      }
+    },
     "adapter.sdl2_rebind_preload": {
       "hidden": true,
       "env": {
