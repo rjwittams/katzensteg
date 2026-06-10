@@ -771,9 +771,7 @@ fn addUnitTest(
     test_step.dependOn(&run_unit_test.step);
 }
 
-/// Run dsymutil on a dylib and install the resulting `<dylib>.dSYM` bundle next to
-/// it under `zig-out/lib`. The bundle name matches the dylib so Instruments / lldb
-/// find it by UUID. Wired into both the default install step and `katzensteg-dsym`.
+/// Install a UUID-matched `<dylib>.dSYM` next to the dylib for Instruments/lldb; wired into both the default install and the `katzensteg-dsym` step.
 fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Build.Step) void {
     const bundle_name = b.fmt("{s}.dSYM", .{lib.out_filename});
     const dsym_cmd = b.addSystemCommand(&.{"dsymutil"});
