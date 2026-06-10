@@ -37,6 +37,15 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
 
+    // On macOS, Zig emits debug-map binaries (no inline __DWARF); a UUID-matched
+    // .dSYM bundle must sit next to each dylib for Instruments / lldb to symbolicate
+    // it. Generate one for every Katzensteg dylib a profile may preload, not just one
+    // variant. dsymutil is a host tool, so this only runs when building on macOS.
+    const dsym_step: ?*std.Build.Step = if (is_macos and builtin.os.tag == .macos)
+        b.step("katzensteg-dsym", "Generate and install dSYMs for Katzensteg dylibs (macOS symbolication)")
+    else
+        null;
+
     const exe = b.addExecutable(.{
         .name = "ttytris",
         .use_llvm = use_llvm,
@@ -115,6 +124,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_core_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_core_lib);
+    if (dsym_step) |s| installDsym(b, katzensteg_core_lib, s);
 
     const katzensteg_sdl2_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -149,6 +159,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl2_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_sdl2_lib);
+    if (dsym_step) |s| installDsym(b, katzensteg_sdl2_lib, s);
 
     const katzensteg_sdl3_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -184,6 +195,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl3_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_sdl3_lib);
+    if (dsym_step) |s| installDsym(b, katzensteg_sdl3_lib, s);
 
     if (is_macos) {
         const katzensteg_sdl2_rebind_lib = b.addLibrary(.{
@@ -212,6 +224,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl2_rebind_lib.linkFramework("Accelerate");
         katzensteg_sdl2_rebind_lib.linkFramework("OpenGL");
         b.installArtifact(katzensteg_sdl2_rebind_lib);
+        if (dsym_step) |s| installDsym(b, katzensteg_sdl2_rebind_lib, s);
     }
 
     const katzensteg_lib = b.addLibrary(.{
@@ -248,6 +261,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_lib);
+    if (dsym_step) |s| installDsym(b, katzensteg_lib, s);
 
     const katzensteg_unlinked_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -282,21 +296,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_unlinked_lib.linkSystemLibrary("yuv");
     }
     b.installArtifact(katzensteg_unlinked_lib);
-    if (is_macos and builtin.os.tag == .macos) {
-        const katzensteg_unlinked_dsym_cmd = b.addSystemCommand(&.{"dsymutil"});
-        katzensteg_unlinked_dsym_cmd.addFileArg(katzensteg_unlinked_lib.getEmittedBin());
-        katzensteg_unlinked_dsym_cmd.addArg("-o");
-        const katzensteg_unlinked_dsym = katzensteg_unlinked_dsym_cmd.addOutputDirectoryArg("libkatzensteg-unlinked.dylib.dSYM");
-        const install_katzensteg_unlinked_dsym = b.addInstallDirectory(.{
-            .source_dir = katzensteg_unlinked_dsym,
-            .install_dir = .lib,
-            .install_subdir = "libkatzensteg-unlinked.dylib.dSYM",
-        });
-        b.getInstallStep().dependOn(&install_katzensteg_unlinked_dsym.step);
-
-        const katzensteg_dsym_step = b.step("katzensteg-dsym", "Generate and install dSYM for Katzensteg preload library");
-        katzensteg_dsym_step.dependOn(&install_katzensteg_unlinked_dsym.step);
-    }
+    if (dsym_step) |s| installDsym(b, katzensteg_unlinked_lib, s);
 
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
@@ -769,4 +769,20 @@ fn addUnitTest(
     }
     const run_unit_test = b.addRunArtifact(unit_test);
     test_step.dependOn(&run_unit_test.step);
+}
+
+/// Install a UUID-matched `<dylib>.dSYM` next to the dylib for Instruments/lldb; wired into both the default install and the `katzensteg-dsym` step.
+fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Build.Step) void {
+    const bundle_name = b.fmt("{s}.dSYM", .{lib.out_filename});
+    const dsym_cmd = b.addSystemCommand(&.{"dsymutil"});
+    dsym_cmd.addFileArg(lib.getEmittedBin());
+    dsym_cmd.addArg("-o");
+    const dsym_out = dsym_cmd.addOutputDirectoryArg(bundle_name);
+    const install_dsym = b.addInstallDirectory(.{
+        .source_dir = dsym_out,
+        .install_dir = .lib,
+        .install_subdir = bundle_name,
+    });
+    b.getInstallStep().dependOn(&install_dsym.step);
+    dsym_step.dependOn(&install_dsym.step);
 }
