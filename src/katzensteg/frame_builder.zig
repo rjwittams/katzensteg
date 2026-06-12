@@ -2042,11 +2042,11 @@ pub const FrameBuilder = struct {
 
     fn presentCompositeFullscreenDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, backend: *ts_kitty.Backend, state: *RendererState) !void {
         const buf = state.composite_rgba.?;
-        const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
-        const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
         if (state.composite_last_presented) |last| {
             if (last.len == buf.len and std.mem.eql(u8, last, buf) and state.composite_image_id != 0 and state.composite_placement_id != 0) {
                 if (placementTraceEnabled()) {
+                    const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
+                    const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
                     logger.writeFmtScoped(
                         .info,
                         .frame_builder,
@@ -2057,6 +2057,8 @@ pub const FrameBuilder = struct {
                 return;
             }
         }
+        const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
+        const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
         if (state.composite_last_presented == null or state.composite_last_presented.?.len != buf.len) {
             if (state.composite_last_presented) |old| self.allocator.free(old);
             state.composite_last_presented = try self.allocator.alloc(u8, buf.len);
