@@ -37,6 +37,10 @@ const fullscreen_retained_placement_count: usize = 2;
 const native_fastpaths_enabled = !builtin.is_test and (builtin.os.tag == .macos or builtin.os.tag == .linux);
 const frame_builder_log = std.log.scoped(.frame_builder);
 
+fn placementTraceEnabled() bool {
+    return std.c.getenv("KATZENSTEG_TRACE_PLACEMENTS") != null or std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null;
+}
+
 const compat_sdl_pixelformat_rgb565: u32 = 353701890;
 const compat_sdl_pixelformat_rgba4444: u32 = 356651010;
 const compat_sdl_pixelformat_xrgb8888: u32 = 370546692;
@@ -2038,8 +2042,20 @@ pub const FrameBuilder = struct {
 
     fn presentCompositeFullscreenDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, backend: *ts_kitty.Backend, state: *RendererState) !void {
         const buf = state.composite_rgba.?;
+        const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
+        const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
         if (state.composite_last_presented) |last| {
-            if (last.len == buf.len and std.mem.eql(u8, last, buf) and state.composite_image_id != 0 and state.composite_placement_id != 0) return;
+            if (last.len == buf.len and std.mem.eql(u8, last, buf) and state.composite_image_id != 0 and state.composite_placement_id != 0) {
+                if (placementTraceEnabled()) {
+                    logger.writeFmtScoped(
+                        .info,
+                        .frame_builder,
+                        "placement trace direct_fullscreen op=skip_same_frame image={d} placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} tty={d}x{d} px={d}x{d}",
+                        .{ state.composite_image_id, state.composite_placement_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+                    );
+                }
+                return;
+            }
         }
         if (state.composite_last_presented == null or state.composite_last_presented.?.len != buf.len) {
             if (state.composite_last_presented) |old| self.allocator.free(old);
@@ -2051,8 +2067,6 @@ pub const FrameBuilder = struct {
         state.composite_image_id = self.allocImageId();
         state.composite_placement_id = self.allocCompositePlacementId();
         self.last_composite_image_id = state.composite_image_id;
-        const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
-        const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
         var scaled_buf: ?[]u8 = null;
         defer if (scaled_buf) |scratch| self.allocator.free(scratch);
         const upload_buf = if (upload_size.w == state.window_w and upload_size.h == state.window_h)
@@ -2063,6 +2077,14 @@ pub const FrameBuilder = struct {
             break :blk scratch;
         };
         if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen upload image_id={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d}", .{ state.composite_image_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h });
+        if (placementTraceEnabled()) {
+            logger.writeFmtScoped(
+                .info,
+                .frame_builder,
+                "placement trace direct_fullscreen op=place image={d} placement={d} old_image={d} old_placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} src=0,0 {d}x{d} z=100 tty={d}x{d} px={d}x{d}",
+                .{ state.composite_image_id, state.composite_placement_id, old_placement.image_id, old_placement.placement_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, upload_size.w, upload_size.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+            );
+        }
         try backend.registerRawImage(state.composite_image_id, upload_buf, upload_size.w, upload_size.h);
         try kitty_protocol.writePlace(tty.file.deprecatedWriter(), dest.row, dest.col, .{
             .image_id = state.composite_image_id,
@@ -2075,7 +2097,12 @@ pub const FrameBuilder = struct {
             .src_h = upload_size.h,
             .z = 100,
         });
-        if (state.rememberFullscreenPlacement(old_placement)) |evicted| self.deleteCompositePlacement(logger, tty, evicted);
+        if (state.rememberFullscreenPlacement(old_placement)) |evicted| {
+            if (placementTraceEnabled()) {
+                logger.writeFmtScoped(.info, .frame_builder, "placement trace direct_fullscreen op=delete_evicted image={d} placement={d}", .{ evicted.image_id, evicted.placement_id });
+            }
+            self.deleteCompositePlacement(logger, tty, evicted);
+        }
         @memcpy(state.composite_last_presented.?, buf);
         if (self.stats.enabled) {
             self.stats.texture_uploads += 1;

@@ -1190,6 +1190,19 @@ test "bundled profiles include ffplay passthrough launch target" {
     try std.testing.expect(envValue(profile, "LD_PRELOAD") != null or envValue(profile, "DYLD_INSERT_LIBRARIES") != null);
 }
 
+test "bundled profiles include temporary Porthole capture viewer launch target" {
+    var catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    defer catalog.deinit();
+
+    const profile = catalog.find("porthole.capture_viewer_sdl").?;
+    try std.testing.expect(!profile.hidden);
+    try std.testing.expectEqualStrings("$HOME/.codex/worktrees/0b3e/porthole/target/capture-viewer-sdl/capture-viewer-sdl", profile.target);
+    try std.testing.expectEqual(@as(usize, 0), profile.args.len);
+    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expectEqualStrings("software", envValue(profile, "SDL_RENDER_DRIVER").?);
+    try std.testing.expect(envValue(profile, "DYLD_INSERT_LIBRARIES") != null);
+}
+
 test "bundled Vulkan capture profile resolves platform layer paths" {
     var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();

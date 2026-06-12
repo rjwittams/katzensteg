@@ -373,6 +373,9 @@ pub const Runtime = struct {
         }
         if (config.present_fps > 0) log.info("present fps cap = {d}", .{config.present_fps});
         if (runtime.image_gc) log.info("old image GC enabled", .{});
+        if (std.c.getenv("KATZENSTEG_TRACE_PLACEMENTS") != null or std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null) {
+            log.info("placement trace enabled", .{});
+        }
         if (runtime.input_enabled) {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
             runtime.updateInputTarget();
