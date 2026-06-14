@@ -1195,6 +1195,24 @@ test "launcher appends extra profile arguments after configured args" {
     try std.testing.expectEqualStrings("192.168.1.100", argv[3]);
 }
 
+test "launcher forwards extra arguments verbatim without expansion" {
+    const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
+    var profile = profiles_mod.LaunchProfile{
+        .allocator = std.testing.allocator,
+        .name = "ffplay",
+        .target = "ffplay",
+        .args = &.{},
+    };
+    // Extra args are runtime data, not templates: tokens like $HOME / {repo} that
+    // a caller passed literally (or a shell already resolved) must survive intact.
+    const argv = try buildChildArgv(std.testing.allocator, &profile, expansion, &.{ "$HOME/literal.mp4", "report{repo}.txt" });
+    defer freeChildArgv(std.testing.allocator, argv);
+
+    try std.testing.expectEqualStrings("ffplay", argv[0]);
+    try std.testing.expectEqualStrings("$HOME/literal.mp4", argv[1]);
+    try std.testing.expectEqualStrings("report{repo}.txt", argv[2]);
+}
+
 test "launcher output tail keeps the last requested lines" {
     const tail = try lastLines(std.testing.allocator, "one\ntwo\nthree\nfour\n", 2);
     defer std.testing.allocator.free(tail);

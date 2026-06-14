@@ -83,6 +83,11 @@ pub fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles.Lau
     }
     try argv.append(allocator, try context.expandString(allocator, profile.target, expansion));
     for (profile.args) |arg| try argv.append(allocator, try context.expandString(allocator, arg, expansion));
+    // Extra args are forwarded verbatim. They are runtime data, not profile
+    // templates: a shell caller has already done its own ~/$VAR expansion and
+    // any quoting intent must be preserved, and expandString would otherwise
+    // rewrite literal $HOME/{repo}/etc. substrings anywhere in the arg. Callers
+    // without a shell (the pi extension) expand a leading ~ themselves.
     for (extra_args) |arg| try argv.append(allocator, try allocator.dupe(u8, arg));
     return argv.toOwnedSlice(allocator);
 }
