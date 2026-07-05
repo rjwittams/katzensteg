@@ -93,6 +93,8 @@ Use dry-runs to confirm probe wiring and adapter selection before interactive ru
 ./zig-out/bin/katzensteg --dry-run probe.input.sdl3
 ./zig-out/bin/katzensteg --dry-run probe.gl
 ./zig-out/bin/katzensteg --dry-run probe.gl.sdl3
+./zig-out/bin/katzensteg --dry-run probe.metal       # macOS
+./zig-out/bin/katzensteg --dry-run probe.metal.sdl3  # macOS
 ./zig-out/bin/katzensteg --dry-run probe.vulkan
 ./zig-out/bin/katzensteg --dry-run probe.vulkan.sdl3
 ```

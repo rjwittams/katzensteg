@@ -126,6 +126,30 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(katzensteg_core_lib);
     if (dsym_step) |s| installDsym(b, katzensteg_core_lib, s);
 
+    var katzensteg_metal_layer_install_step: ?*std.Build.Step = null;
+    if (is_macos) {
+        const layer = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = "katzensteg-metal-layer",
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        layer.addCSourceFile(.{ .file = b.path("src/katzensteg/metal_layer.m"), .flags = &.{"-fobjc-arc"} });
+        layer.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        layer.linkFramework("Foundation");
+        layer.linkFramework("Metal");
+        layer.linkFramework("QuartzCore");
+        layer.linkSystemLibrary("objc");
+        const install_layer = b.addInstallArtifact(layer, .{});
+        b.getInstallStep().dependOn(&install_layer.step);
+        if (dsym_step) |s| installDsym(b, layer, s);
+        katzensteg_metal_layer_install_step = &install_layer.step;
+    }
+
     const katzensteg_sdl2_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "katzensteg-sdl2",
@@ -421,6 +445,48 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(katzensteg_gl_probe_sdl3);
 
+    var katzensteg_metal_probe: ?*std.Build.Step.Compile = null;
+    var katzensteg_metal_probe_sdl3: ?*std.Build.Step.Compile = null;
+    if (is_macos) {
+        const probe = b.addExecutable(.{
+            .name = "katzensteg-metal-probe",
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        probe.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/metal_probe.m") });
+        probe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+        probe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        probe.linkSystemLibrary("SDL2");
+        probe.linkFramework("Foundation");
+        probe.linkFramework("Metal");
+        probe.linkFramework("QuartzCore");
+        b.installArtifact(probe);
+        katzensteg_metal_probe = probe;
+
+        const probe_sdl3 = b.addExecutable(.{
+            .name = "katzensteg-metal-probe-sdl3",
+            .use_llvm = use_llvm,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        probe_sdl3.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/metal_probe.m") });
+        probe_sdl3.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        probe_sdl3.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        probe_sdl3.linkSystemLibrary("SDL3");
+        probe_sdl3.linkFramework("Foundation");
+        probe_sdl3.linkFramework("Metal");
+        probe_sdl3.linkFramework("QuartzCore");
+        b.installArtifact(probe_sdl3);
+        katzensteg_metal_probe_sdl3 = probe_sdl3;
+    }
+
     const luchs = b.addExecutable(.{
         .name = "luchs",
         .use_llvm = use_llvm,
@@ -638,6 +704,18 @@ pub fn build(b: *std.Build) void {
     katzensteg_gl_probe_build_step.dependOn(&katzensteg_gl_probe.step);
     const katzensteg_gl_probe_sdl3_build_step = b.step("katzensteg-gl-probe-sdl3", "Build the SDL3 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_sdl3_build_step.dependOn(&katzensteg_gl_probe_sdl3.step);
+    if (katzensteg_metal_layer_install_step) |install_step| {
+        const katzensteg_metal_layer_build_step = b.step("katzensteg-metal-layer", "Build the Metal capture layer used by Katzensteg");
+        katzensteg_metal_layer_build_step.dependOn(install_step);
+    }
+    if (katzensteg_metal_probe) |probe| {
+        const katzensteg_metal_probe_build_step = b.step("katzensteg-metal-probe", "Build the SDL2 Metal probe used for Katzensteg Metal capture work");
+        katzensteg_metal_probe_build_step.dependOn(&probe.step);
+    }
+    if (katzensteg_metal_probe_sdl3) |probe| {
+        const katzensteg_metal_probe_sdl3_build_step = b.step("katzensteg-metal-probe-sdl3", "Build the SDL3 Metal probe used for Katzensteg Metal capture work");
+        katzensteg_metal_probe_sdl3_build_step.dependOn(&probe.step);
+    }
 
     const katzensteg_gl_probe_cmd = b.addRunArtifact(katzensteg_gl_probe);
     if (b.args) |args| katzensteg_gl_probe_cmd.addArgs(args);
@@ -647,6 +725,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| katzensteg_gl_probe_sdl3_cmd.addArgs(args);
     const katzensteg_gl_probe_sdl3_step = b.step("run-katzensteg-gl-probe-sdl3", "Run the SDL3 OpenGL probe used for Katzensteg GL capture work");
     katzensteg_gl_probe_sdl3_step.dependOn(&katzensteg_gl_probe_sdl3_cmd.step);
+    if (katzensteg_metal_probe) |probe| {
+        const katzensteg_metal_probe_cmd = b.addRunArtifact(probe);
+        if (b.args) |args| katzensteg_metal_probe_cmd.addArgs(args);
+        const katzensteg_metal_probe_step = b.step("run-katzensteg-metal-probe", "Run the SDL2 Metal probe used for Katzensteg Metal capture work");
+        katzensteg_metal_probe_step.dependOn(&katzensteg_metal_probe_cmd.step);
+    }
+    if (katzensteg_metal_probe_sdl3) |probe| {
+        const katzensteg_metal_probe_sdl3_cmd = b.addRunArtifact(probe);
+        if (b.args) |args| katzensteg_metal_probe_sdl3_cmd.addArgs(args);
+        const katzensteg_metal_probe_sdl3_step = b.step("run-katzensteg-metal-probe-sdl3", "Run the SDL3 Metal probe used for Katzensteg Metal capture work");
+        katzensteg_metal_probe_sdl3_step.dependOn(&katzensteg_metal_probe_sdl3_cmd.step);
+    }
 
     const luchs_build_step = b.step("luchs", "Build the SDL-backed web fragment viewer");
     luchs_build_step.dependOn(&install_luchs.step);
