@@ -11,6 +11,7 @@ This matrix tracks probe scenario coverage across SDL2 and SDL3 frontends.
 | `input.custom_cursor` | present | present | Color cursor create/set/show/free |
 | `opengl.context_swap` | present | present | SDL GL context + swap loop |
 | `vulkan.instance_surface_present` | present | present | Vulkan setup + present loop |
+| `metal.layer_drawable_present` | macOS | macOS | SDL Metal view + `CAMetalLayer` drawable present loop |
 | `input.gamepad_joystick` | present | partial | SDL3 now enumerates + optionally opens a device and counts related events, while staying hardware-agnostic |
 
 ## Current deliberate gaps

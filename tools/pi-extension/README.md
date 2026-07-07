@@ -38,6 +38,23 @@ The actual extension entrypoint lives in `extensions/katzensteg-panel.ts`.
 /katzensteg-panel profile sonic
 ```
 
+Tokens after the profile are forwarded verbatim to the program launched under
+Katzensteg, appended after the profile's own configured args:
+
+```text
+/katzensteg-panel inline ffplay ~/dev/k-vids/clip.mp4
+/katzensteg-panel open retroarch -L core.dylib game.rom
+/katzensteg-panel retroarch -L core.dylib game.rom   # bare profile + args
+```
+
+A `--` separator is optional. Use it to forward args only (preferred profile),
+or to keep an arg from being read as the profile:
+
+```text
+/katzensteg-panel open retroarch -- -L core.dylib    # explicit separator
+/katzensteg-panel -- -L core.dylib                   # preferred profile + args
+```
+
 ## Overrides
 
 - `KATZENSTEG_PANEL_MODE=layout` runs layout-only mode: no Katzensteg process, no raw graphics writes.

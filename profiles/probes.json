@@ -74,6 +74,18 @@
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-gl-probe-sdl3"
     },
+    "app.metal_probe": {
+      "hidden": true,
+      "target": {
+        "macos": "{repo}/zig-out/bin/katzensteg-metal-probe"
+      }
+    },
+    "app.metal_probe_sdl3": {
+      "hidden": true,
+      "target": {
+        "macos": "{repo}/zig-out/bin/katzensteg-metal-probe-sdl3"
+      }
+    },
     "app.dlopen_probe_sdl3": {
       "hidden": true,
       "target": "{repo}/zig-out/bin/katzensteg-dlopen-probe-sdl3"
@@ -101,6 +113,36 @@
         "adapter.sdl3_preload",
         "runtime.fullscreen_file"
       ]
+    },
+    "probe.metal": {
+      "extends": [
+        "app.metal_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "env": {
+        "DYLD_INSERT_LIBRARIES": {
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib:{repo}/zig-out/lib/libkatzensteg-metal-layer.dylib"
+        },
+        "KATZENSTEG_METAL_CAPTURE": {
+          "macos": "1"
+        }
+      }
+    },
+    "probe.metal.sdl3": {
+      "extends": [
+        "app.metal_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "env": {
+        "DYLD_INSERT_LIBRARIES": {
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl3.dylib:{repo}/zig-out/lib/libkatzensteg-metal-layer.dylib"
+        },
+        "KATZENSTEG_METAL_CAPTURE": {
+          "macos": "1"
+        }
+      }
     },
     "probe.dlopen.sdl3": {
       "extends": [

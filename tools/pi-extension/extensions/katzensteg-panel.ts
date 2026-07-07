@@ -26,6 +26,12 @@ import {
 	makePointerInputMessage,
 	makeTerminalBytesInputMessage,
 } from "./katzensteg-input.js";
+import {
+	type SizePresetName,
+	expandHomePrefix,
+	parseCommand,
+	sameArgs,
+} from "./katzensteg-command.js";
 
 const WINDOW_ID = "main" as const;
 // Each producer needs its own kitty image/placement id range — the terminal's
@@ -80,19 +86,13 @@ const CLOSE_AFTER_CLEANUP_MS = 150;
 type Aspect = "fit" | "stretch" | "cover";
 type UploadProfile = "direct_apc" | "file_whole" | "file_offset_ring";
 type PanelMode = "layout" | "live";
-type SizePresetName = "small" | "medium" | "large";
-type PanelCommand =
-	| { kind: "toggle" }
-	| { kind: "open"; profile?: string }
-	| { kind: "close" }
-	| { kind: "size"; size: SizePresetName }
-	| { kind: "profile"; profile: string }
-	| { kind: "inline"; profile?: string };
-
 interface PanelDetails {
 	mode: PanelMode;
 	profile: string;
 	size: SizePresetName;
+	// Extra arguments forwarded verbatim to the program launched under
+	// katzensteg, appended after the profile's own configured args.
+	args?: string[];
 }
 
 type OverlayRect = SurfaceRect;
@@ -165,6 +165,7 @@ interface ActivePanel {
 let activeController: ActivePanel | undefined;
 const inlinePanels = new Set<InlinePanelController>();
 let preferredProfile = DEFAULT_PROFILE;
+let preferredArgs: string[] = [];
 let preferredSize: SizePresetName = "medium";
 let globalChunkSeq = 0;
 
@@ -204,6 +205,13 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const command = parseCommand(args);
 			debugLog(`command ${JSON.stringify(command)}`);
+			// The launcher forwards extra args verbatim, so expand a leading ~
+			// here (no shell does it for us). Other tokens stay literal.
+			const home = os.homedir();
+			const programArgs =
+				command.kind === "open" || command.kind === "inline" || command.kind === "profile"
+					? (command.args ?? []).map((arg) => expandHomePrefix(arg, home))
+					: [];
 			switch (command.kind) {
 				case "toggle":
 					if (activeController) {
@@ -211,14 +219,14 @@ export default function (pi: ExtensionAPI) {
 						activeController = undefined;
 						ctx.ui.notify("Closed Katzensteg panel", "info");
 					} else {
-						openPanel(ctx, preferredProfile, preferredSize);
+						openPanel(ctx, preferredProfile, preferredSize, preferredArgs);
 					}
 					break;
 				case "open":
-					openPanel(ctx, command.profile ?? preferredProfile, preferredSize);
+					openPanel(ctx, command.profile ?? preferredProfile, preferredSize, programArgs);
 					break;
 				case "inline":
-					sendInlinePanel(pi, command.profile ?? preferredProfile, preferredSize);
+					sendInlinePanel(pi, command.profile ?? preferredProfile, preferredSize, programArgs);
 					break;
 				case "close":
 					if (!activeController) {
@@ -235,31 +243,37 @@ export default function (pi: ExtensionAPI) {
 					else ctx.ui.notify(`Set Katzensteg panel size to ${command.size}`, "info");
 					break;
 				case "profile":
+					// Switching profile resets program args to whatever this command
+					// supplied (args are program-specific; don't carry them across
+					// a profile change).
 					preferredProfile = command.profile;
-					if (activeController instanceof PanelController) activeController.setProfile(command.profile);
-					else openPanel(ctx, command.profile, preferredSize);
+					preferredArgs = programArgs;
+					if (activeController instanceof PanelController) activeController.setProfile(command.profile, preferredArgs);
+					else openPanel(ctx, command.profile, preferredSize, preferredArgs);
 					break;
 			}
 		},
 	});
 }
 
-function sendInlinePanel(pi: ExtensionAPI, profile: string, sizeName: SizePresetName): void {
+function sendInlinePanel(pi: ExtensionAPI, profile: string, sizeName: SizePresetName, args: string[]): void {
 	preferredProfile = profile;
+	preferredArgs = args;
 	preferredSize = sizeName;
 	pi.sendMessage<PanelDetails>({
 		customType: "katzensteg-panel",
 		content: `Katzensteg panel · ${profile} · ${sizeName}`,
 		display: true,
-		details: { mode: DEFAULT_MODE, profile, size: sizeName },
+		details: { mode: DEFAULT_MODE, profile, size: sizeName, ...(args.length > 0 ? { args } : {}) },
 	});
 }
 
-function openPanel(ctx: ExtensionCommandContext, profile: string, sizeName: SizePresetName): void {
+function openPanel(ctx: ExtensionCommandContext, profile: string, sizeName: SizePresetName, args: string[]): void {
 	preferredProfile = profile;
+	preferredArgs = args;
 	preferredSize = sizeName;
 	activeController?.close("replace-open");
-	const controller = new PanelController(ctx, DEFAULT_MODE, profile, SIZE_PRESETS[sizeName]);
+	const controller = new PanelController(ctx, DEFAULT_MODE, profile, SIZE_PRESETS[sizeName], args);
 	activeController = controller;
 	void controller.open().catch((error: unknown) => {
 		if (activeController === controller) activeController = undefined;
@@ -287,6 +301,7 @@ class PanelController {
 		private readonly mode: PanelMode,
 		private profile: string,
 		private size: SizePreset,
+		private args: string[] = [],
 	) {
 		this.producer = this.createProducer(profile);
 	}
@@ -318,10 +333,11 @@ class PanelController {
 		void this.replaceOverlay();
 	}
 
-	setProfile(profile: string): void {
-		if (this.closed || this.closing || this.profile === profile) return;
-		debugLog(`controller.setProfile ${this.profile} -> ${profile}`);
+	setProfile(profile: string, args: string[] = []): void {
+		if (this.closed || this.closing || (this.profile === profile && sameArgs(this.args, args))) return;
+		debugLog(`controller.setProfile ${this.profile} -> ${profile} args=${JSON.stringify(args)}`);
 		this.profile = profile;
+		this.args = args;
 		this.producer.stop("profile-change");
 		this.producer = this.createProducer(profile);
 		this.producer.start();
@@ -411,7 +427,7 @@ class PanelController {
 			onDetached: (message) => this.onDetached(message),
 			onStatus: (status) => this.setStatus(status),
 			onError: (error) => this.setError(error),
-		}, FLOATING_Z_BASE);
+		}, FLOATING_Z_BASE, this.args);
 	}
 
 	private onFrame(batch: FrameBatch): void {
@@ -634,8 +650,8 @@ function renderPanelChrome(width: number, theme: Theme, args: PanelChromeArgs): 
 	return lines;
 }
 
-function createProducer(mode: PanelMode, profile: string, callbacks: ProducerCallbacks, zBase: number): ProducerConnection {
-	return mode === "live" ? new KatzenstegProducer(profile, callbacks, zBase) : new LayoutOnlyProducer(callbacks);
+function createProducer(mode: PanelMode, profile: string, callbacks: ProducerCallbacks, zBase: number, args: string[] = []): ProducerConnection {
+	return mode === "live" ? new KatzenstegProducer(profile, callbacks, zBase, args) : new LayoutOnlyProducer(callbacks);
 }
 
 interface InlinePanelTui {
@@ -675,7 +691,7 @@ class InlinePanelController implements ActivePanel {
 			onDetached: (message) => this.onDetached(message),
 			onStatus: (status) => this.setStatus(status),
 			onError: (error) => this.setError(error),
-		}, INLINE_Z_BASE);
+		}, INLINE_Z_BASE, details.args ?? []);
 	}
 
 	render(width: number): string[] {
@@ -937,6 +953,7 @@ class KatzenstegProducer implements ProducerConnection {
 		private readonly profile: string,
 		private readonly callbacks: ProducerCallbacks,
 		private readonly zBase: number,
+		private readonly args: string[] = [],
 	) {
 		const ranges = allocateIdRanges();
 		this.imageIds = ranges.imageIds;
@@ -946,9 +963,11 @@ class KatzenstegProducer implements ProducerConnection {
 	start(): void {
 		if (this.child) return;
 		const bin = this.binaryPath();
-		debugLog(`producer.live.start bin=${bin} profile=${this.profile}`);
+		debugLog(`producer.live.start bin=${bin} profile=${this.profile} args=${JSON.stringify(this.args)}`);
 		this.callbacks.onStatus("launching");
-		this.child = spawn(bin, ["--embed-jsonl", this.profile], {
+		// Program args (after the profile) are forwarded to the launcher, which
+		// appends them after the profile's own configured args.
+		this.child = spawn(bin, ["--embed-jsonl", this.profile, ...this.args], {
 			cwd: REPO_ROOT,
 			stdio: ["pipe", "pipe", "pipe"],
 			env: producerEnv(),
@@ -1110,24 +1129,8 @@ function producerEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
-function parseCommand(args: string): PanelCommand {
-	const parts = args.trim().split(/\s+/).filter(Boolean);
-	if (parts.length === 0) return { kind: "toggle" };
-	if (parts[0] === "inline") return { kind: "inline", profile: parts.slice(1).join(" ") || undefined };
-	if (parts[0] === "open") return { kind: "open", profile: parts.slice(1).join(" ") || undefined };
-	if (parts[0] === "close") return { kind: "close" };
-	if (parts[0] === "size" && isSizePreset(parts[1])) return { kind: "size", size: parts[1] };
-	if (parts[0] === "profile" && parts[1]) return { kind: "profile", profile: parts.slice(1).join(" ") };
-	if (isSizePreset(parts[0])) return { kind: "size", size: parts[0] };
-	return { kind: "open", profile: parts.join(" ") };
-}
-
 function parseMode(value: string | undefined): PanelMode {
 	return value === "layout" ? "layout" : "live";
-}
-
-function isSizePreset(value: string | undefined): value is SizePresetName {
-	return value === "small" || value === "medium" || value === "large";
 }
 
 function fallbackPanelRowsForSize(size: SizePreset): number {
