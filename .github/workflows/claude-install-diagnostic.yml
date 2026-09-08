@@ -1,0 +1,35 @@
+name: Diagnose Claude installation
+
+on:
+  push:
+    branches: [diagnose-claude-install]
+
+permissions: {}
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run the action's installer command
+        run: |
+          set -o pipefail
+          curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.265
+
+      - name: Inspect installed executables and symlinks
+        if: always()
+        shell: bash
+        run: |
+          printf 'Home directory: %s\n' "$HOME"
+          for root in "$HOME/.local/bin" "$HOME/.local/share/claude" "$HOME/.claude" /usr/local/bin /opt; do
+            if [ -e "$root" ]; then
+              find "$root" -maxdepth 5 \( -type f -o -type l \) \( -name '*claude*' -o -path '*/claude/versions/*' \) -exec ls -ld {} \;
+            else
+              printf 'Missing directory: %s\n' "$root"
+            fi
+          done
+          printf 'Shell resolution:\n'
+          command -v claude || true
+          printf 'Expected launcher:\n'
+          ls -ld "$HOME/.local/bin/claude" || true
+          readlink -f "$HOME/.local/bin/claude" || true
