@@ -865,8 +865,11 @@ pub export fn ks_SDL_Vulkan_LoadLibrary(path: ?[*:0]const u8) callconv(.c) c_int
 }
 
 pub export fn ks_dlopen(path: ?[*:0]const u8, mode: c_int) callconv(.c) ?*anyopaque {
-    const selected = selectDlopenPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
-    return real_sdl.realDlopen(selected, mode);
+    return real_sdl.realDlopen(ks_select_dlopen_path(path), mode);
+}
+
+pub export fn ks_select_dlopen_path(path: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    return selectDlopenPath(path, std.c.getenv("KATZENSTEG_VULKAN_LOADER"));
 }
 
 fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct { w: c_int, h: c_int, len: usize } {
