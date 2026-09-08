@@ -94,10 +94,10 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
                 .vplane = null,
                 .vpitch = c.vpitch,
             } };
-            errdefer rt.recycleCommand(&cloned);
-            cloned.update_yuv_texture.yplane = try cloneBytesToPayloadBuffer(rt, c.yplane);
-            cloned.update_yuv_texture.uplane = try cloneBytesToPayloadBuffer(rt, c.uplane);
-            cloned.update_yuv_texture.vplane = try cloneBytesToPayloadBuffer(rt, c.vplane);
+            const copies = try rt.copyPayloads(3, .{ c.yplane, c.uplane, c.vplane });
+            cloned.update_yuv_texture.yplane = copies[0];
+            cloned.update_yuv_texture.uplane = copies[1];
+            cloned.update_yuv_texture.vplane = copies[2];
             break :blk cloned;
         },
         .update_nv_texture => |c| blk: {
@@ -109,9 +109,9 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
                 .uvplane = null,
                 .uvpitch = c.uvpitch,
             } };
-            errdefer rt.recycleCommand(&cloned);
-            cloned.update_nv_texture.yplane = try cloneBytesToPayloadBuffer(rt, c.yplane);
-            cloned.update_nv_texture.uvplane = try cloneBytesToPayloadBuffer(rt, c.uvplane);
+            const copies = try rt.copyPayloads(2, .{ c.yplane, c.uvplane });
+            cloned.update_nv_texture.yplane = copies[0];
+            cloned.update_nv_texture.uvplane = copies[1];
             break :blk cloned;
         },
         .lock_texture => |c| .{ .lock_texture = c },
@@ -246,24 +246,12 @@ pub fn enqueueUpdateYuvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Text
         return;
     };
     const chroma_h = @divTrunc(dims.h + 1, 2);
-    const copied_y = copyPlanePayload(rt, yplane, ypitch, dims.h);
-    const copied_u = copyPlanePayload(rt, uplane, upitch, chroma_h);
-    const copied_v = copyPlanePayload(rt, vplane, vpitch, chroma_h);
-    if (copied_y == null or copied_u == null or copied_v == null) {
-        log.warn("failed to copy SDL_UpdateYUVTexture payload", .{});
-        var doomed = Command{ .update_yuv_texture = .{
-            .texture = sdl_adapter.handleFromPtr(texture),
-            .rect = null,
-            .yplane = copied_y,
-            .ypitch = ypitch,
-            .uplane = copied_u,
-            .upitch = upitch,
-            .vplane = copied_v,
-            .vpitch = vpitch,
-        } };
-        rt.recycleCommand(&doomed);
-        return;
-    }
+    const sources = .{ planeBytes(yplane, ypitch, dims.h), planeBytes(uplane, upitch, chroma_h), planeBytes(vplane, vpitch, chroma_h) };
+    if (sources[0] == null or sources[1] == null or sources[2] == null) return;
+    const copies = rt.copyPayloads(3, sources) catch return;
+    const copied_y = copies[0];
+    const copied_u = copies[1];
+    const copied_v = copies[2];
     rt.enqueueCommand(.{ .update_yuv_texture = .{
         .texture = sdl_adapter.handleFromPtr(texture),
         .rect = sdl_adapter.rectFromSdl(rect),
@@ -282,21 +270,11 @@ pub fn enqueueUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Textu
         return;
     };
     const chroma_h = @divTrunc(dims.h + 1, 2);
-    const copied_y = copyPlanePayload(rt, yplane, ypitch, dims.h);
-    const copied_uv = copyPlanePayload(rt, uvplane, uvpitch, chroma_h);
-    if (copied_y == null or copied_uv == null) {
-        log.warn("failed to copy SDL_UpdateNVTexture payload", .{});
-        var doomed = Command{ .update_nv_texture = .{
-            .texture = sdl_adapter.handleFromPtr(texture),
-            .rect = null,
-            .yplane = copied_y,
-            .ypitch = ypitch,
-            .uvplane = copied_uv,
-            .uvpitch = uvpitch,
-        } };
-        rt.recycleCommand(&doomed);
-        return;
-    }
+    const sources = .{ planeBytes(yplane, ypitch, dims.h), planeBytes(uvplane, uvpitch, chroma_h) };
+    if (sources[0] == null or sources[1] == null) return;
+    const copies = rt.copyPayloads(2, sources) catch return;
+    const copied_y = copies[0];
+    const copied_uv = copies[1];
     rt.enqueueCommand(.{ .update_nv_texture = .{
         .texture = sdl_adapter.handleFromPtr(texture),
         .rect = sdl_adapter.rectFromSdl(rect),
@@ -329,13 +307,11 @@ fn textureMetadataOrFallback(texture: ?*sdl.SDL_Texture) struct { format: u32, w
     return .{ .format = format, .w = w, .h = h };
 }
 
-fn copyPlanePayload(rt: *runtime_mod.Runtime, plane: ?[*]const u8, pitch: i32, rows: i32) ?[]u8 {
+fn planeBytes(plane: ?[*]const u8, pitch: i32, rows: i32) ?[]const u8 {
     const src = plane orelse return null;
     if (pitch <= 0 or rows <= 0) return null;
-    const byte_len: usize = @intCast(pitch * rows);
-    const copied = rt.acquirePayloadBuffer(byte_len) catch return null;
-    @memcpy(copied, src[0..byte_len]);
-    return copied;
+    const byte_len = std.math.mul(usize, @intCast(pitch), @intCast(rows)) catch return null;
+    return src[0..byte_len];
 }
 
 pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {

@@ -51,6 +51,12 @@ In queued batch mode, app threads may copy payloads and enqueue commands, but th
 
 OpenGL/Vulkan framebuffer capture may still run on the app render thread to perform GPU readback, but it should publish copied framebuffer payloads to the worker rather than mutate presentation state directly. Any new runtime state that is touched from both app threads and the worker needs an explicit owner, mutex, or atomic before use.
 
+#### Replay Payloads And Overload
+
+`replay_payloads.zig` owns copied command data from allocation until retirement. Its 64 MiB live-data budget includes producer copies, queued uploads, and data being processed by the worker. Producers wait for capacity before allocating; all planes of a YUV upload reserve capacity together. A command larger than the budget is admitted only when no other payload is live. Reusable idle buffers have a separate 64 MiB cache limit. These limits do not include application memory or the frame builder's texture and presentation storage.
+
+The replay worker protects a frame from the moment it starts a texture upload or drawing command through completion of its present. Later obsolete draws and presents can be retired while that frame is processing. After retirement, a full texture replacement can supersede earlier uploads across a consecutive sequence of uploads. Surviving draws, presents, resource lifecycle commands, and state commands stop that optimization. Partial updates remain necessary unless a later full replacement overwrites them. Shutdown closes payload admission and wakes waiting producers.
+
 ### Window Manager Sessions
 
 The WM host keeps window state separate from the producer's channel and optional owned child process. `wm/client.zig` owns channel descriptors: separate control/presentation pipes for WM-launched producers, or one duplex socket. Closing socket control half-closes the write direction so final presentation batches can still be drained. Borrowed channel files must not be closed directly.

@@ -36,8 +36,6 @@ const log = std.log.scoped(.runtime);
 
 const queue_compact_threshold = 4096;
 const worker_control_poll_interval_ns = 5 * std.time.ns_per_ms;
-const payload_pool_max_buffers = 64;
-const payload_pool_max_bytes = 64 * 1024 * 1024;
 
 var terminal_resize_pending = std.atomic.Value(bool).init(false);
 var terminal_resize_handler_installed = std.atomic.Value(bool).init(false);
@@ -98,45 +96,7 @@ const ProducerStats = struct {
     render_present: ProducerBucket = .{},
 };
 
-const PayloadBufferPool = struct {
-    buffers: std.ArrayList([]u8) = .empty,
-    bytes: usize = 0,
-
-    fn acquire(self: *PayloadBufferPool, allocator: std.mem.Allocator, len: usize) ![]u8 {
-        var idx: usize = self.buffers.items.len;
-        while (idx > 0) {
-            idx -= 1;
-            const buf = self.buffers.items[idx];
-            if (buf.len != len) continue;
-            _ = self.buffers.swapRemove(idx);
-            self.bytes -= buf.len;
-            return buf;
-        }
-        return allocator.alloc(u8, len);
-    }
-
-    fn release(self: *PayloadBufferPool, allocator: std.mem.Allocator, buf: []u8) void {
-        if (buf.len == 0) {
-            allocator.free(buf);
-            return;
-        }
-        if (self.buffers.items.len >= payload_pool_max_buffers or self.bytes + buf.len > payload_pool_max_bytes) {
-            allocator.free(buf);
-            return;
-        }
-        self.buffers.append(allocator, buf) catch {
-            allocator.free(buf);
-            return;
-        };
-        self.bytes += buf.len;
-    }
-
-    fn deinit(self: *PayloadBufferPool, allocator: std.mem.Allocator) void {
-        for (self.buffers.items) |buf| allocator.free(buf);
-        self.buffers.deinit(allocator);
-        self.* = .{};
-    }
-};
+const PayloadBufferPool = @import("replay_payloads.zig").Payloads;
 
 fn presentationStatusEqual(a: render_batch_protocol.PresentationStatusView, b: render_batch_protocol.PresentationStatusView) bool {
     return std.mem.eql(u8, a.window_id, b.window_id) and
@@ -458,6 +418,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        self.payload_pool.close();
         self.queue_mutex.lock();
         self.shutdown_worker = true;
         self.queue_cond.signal();
@@ -1239,7 +1200,11 @@ pub const Runtime = struct {
         self.lockQueue("enqueue_command");
         defer self.queue_mutex.unlock();
         var owned = cmd;
-        if (isPresentCommand(owned) and self.pending_presents > 0 and !self.worker_frame_active) {
+        if (self.shutdown_worker) {
+            self.recycleCommandLocked(&owned);
+            return;
+        }
+        if (isPresentCommand(owned) and self.pending_presents > 0) {
             self.dropQueuedFrameLocalsBeforeLatestPresent();
         }
         self.queue.append(self.allocator, owned) catch |err| {
@@ -1260,10 +1225,27 @@ pub const Runtime = struct {
         }
     }
 
+    fn takeQueuedCommandLocked(self: *Runtime) Command {
+        const cmd = self.queue.items[self.queue_head];
+        const cmd_is_present = isPresentCommand(cmd);
+        const cmd_is_frame_local = isFrameLocalCommand(cmd);
+        self.queue_head += 1;
+        if (cmd_is_present) {
+            if (self.pending_presents > 0) self.pending_presents -= 1;
+        }
+        if (cmd_is_frame_local or textureUpload(cmd) != null) {
+            self.worker_frame_active = true;
+        }
+        self.maybeCompactQueue();
+        return cmd;
+    }
+
     pub fn acquirePayloadBuffer(self: *Runtime, len: usize) ![]u8 {
-        self.lockQueue("acquire_payload_buffer");
-        defer self.queue_mutex.unlock();
         return self.payload_pool.acquire(self.allocator, len);
+    }
+
+    pub fn copyPayloads(self: *Runtime, comptime n: usize, sources: [n]?[]const u8) ![n]?[]u8 {
+        return self.payload_pool.copyMany(self.allocator, n, sources);
     }
 
     pub fn recycleCommand(self: *Runtime, cmd: *Command) void {
@@ -1306,15 +1288,25 @@ pub const Runtime = struct {
     }
 
     fn dropQueuedFrameLocalsBeforeLatestPresent(self: *Runtime) void {
-        if (self.worker_frame_active) return;
+        // Finish the frame already consumed by the worker, but allow retirement
+        // of later complete frames while it is busy composing that first frame.
+        var drop_start = self.queue_head;
+        if (self.worker_frame_active) {
+            while (drop_start < self.queue.items.len) : (drop_start += 1) {
+                if (isPresentCommand(self.queue.items[drop_start])) {
+                    drop_start += 1;
+                    break;
+                }
+            }
+        }
         var last_present_idx: ?usize = null;
-        for (self.queue.items[self.queue_head..], self.queue_head..) |cmd, idx| {
+        for (self.queue.items[drop_start..], drop_start..) |cmd, idx| {
             if (isPresentCommand(cmd)) last_present_idx = idx;
         }
         const cutoff = last_present_idx orelse return;
-        var write_idx = self.queue_head;
+        var write_idx = drop_start;
         var dropped_any = false;
-        var idx = self.queue_head;
+        var idx = drop_start;
         while (idx <= cutoff) : (idx += 1) {
             const cmd = self.queue.items[idx];
             if (isFrameLocalCommand(cmd)) {
@@ -1332,13 +1324,52 @@ pub const Runtime = struct {
             write_idx += 1;
         }
         self.queue.items.len = write_idx;
+        self.retireSupersededUploads();
         self.pending_presents = 0;
         for (self.queue.items[self.queue_head..]) |queued| {
             if (isPresentCommand(queued)) self.pending_presents += 1;
         }
         if (dropped_any) log.info("dropped stale queued frame-local commands before latest present", .{});
     }
+
+    fn retireSupersededUploads(self: *Runtime) void {
+        // Only cross other uploads. Any draw, present, resource lifecycle, or
+        // state command is a barrier. This deliberately favors retaining an
+        // uncertain dependency over changing the image a surviving draw sees.
+        var replacements = std.AutoHashMap(core.CoreHandle, void).init(self.allocator);
+        defer replacements.deinit();
+        var write_idx = self.queue.items.len;
+        var idx = self.queue.items.len;
+        while (idx > self.queue_head) {
+            idx -= 1;
+            const cmd = self.queue.items[idx];
+            if (textureUpload(cmd)) |upload| {
+                if (replacements.contains(upload.texture)) {
+                    var doomed = cmd;
+                    self.recycleCommandLocked(&doomed);
+                    continue;
+                }
+                if (upload.full) replacements.put(upload.texture, {}) catch {};
+            } else {
+                replacements.clearRetainingCapacity();
+            }
+            write_idx -= 1;
+            self.queue.items[write_idx] = cmd;
+        }
+        const retained = self.queue.items.len - write_idx;
+        std.mem.copyForwards(Command, self.queue.items[self.queue_head..][0..retained], self.queue.items[write_idx..]);
+        self.queue.items.len = self.queue_head + retained;
+    }
 };
+
+fn textureUpload(cmd: Command) ?struct { texture: core.CoreHandle, full: bool } {
+    return switch (cmd) {
+        .update_texture => |c| .{ .texture = c.texture, .full = c.rect == null and c.pixels != null },
+        .update_yuv_texture => |c| .{ .texture = c.texture, .full = c.rect == null and c.yplane != null and c.uplane != null and c.vplane != null },
+        .update_nv_texture => |c| .{ .texture = c.texture, .full = c.rect == null and c.yplane != null and c.uvplane != null },
+        else => null,
+    };
+}
 
 fn isPresentCommand(cmd: Command) bool {
     return switch (cmd) {
@@ -1371,6 +1402,127 @@ test "external framebuffer present is a frame-local present command" {
     const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
     try std.testing.expect(isFrameLocalCommand(cmd));
     try std.testing.expect(isPresentCommand(cmd));
+}
+
+test "stalled replay consumer retains only latest full video upload" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    for (0..100) |frame| {
+        const pixels = try runtime.acquirePayloadBuffer(4);
+        @memset(pixels, @intCast(frame));
+        runtime.enqueueCommand(.{ .update_texture = .{ .texture = 1, .rect = null, .pixels = pixels, .pitch = 4 } });
+        runtime.enqueueCommand(.{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } });
+        runtime.enqueueCommand(.{ .render_present = .{ .renderer = 2 } });
+    }
+    var uploads: usize = 0;
+    for (runtime.queue.items[runtime.queue_head..]) |cmd| {
+        if (cmd == .update_texture) {
+            uploads += 1;
+            try std.testing.expectEqual(@as(u8, 99), cmd.update_texture.pixels.?[0]);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), uploads);
+}
+
+fn enqueueTestUpload(rt: *Runtime, value: u8, rect: ?core.CoreRect) !void {
+    const pixels = try rt.acquirePayloadBuffer(4);
+    @memset(pixels, value);
+    rt.enqueueCommand(.{ .update_texture = .{ .texture = 1, .rect = rect, .pixels = pixels, .pitch = 4 } });
+}
+
+fn enqueueTestDraw(rt: *Runtime) void {
+    rt.enqueueCommand(.{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } });
+    rt.enqueueCommand(.{ .render_present = .{ .renderer = 2 } });
+}
+
+test "texture conversion in flight protects its draw and present" {
+    var rt = Runtime.initShutdownStub();
+    defer rt.deinit();
+    try enqueueTestUpload(&rt, 0, null);
+    enqueueTestDraw(&rt);
+    rt.queue_mutex.lock();
+    var converting = rt.takeQueuedCommandLocked();
+    rt.queue_mutex.unlock();
+    defer rt.recycleCommand(&converting);
+    for (1..10) |frame| {
+        try enqueueTestUpload(&rt, @intCast(frame), null);
+        enqueueTestDraw(&rt);
+    }
+    try std.testing.expectEqual(@as(usize, 2), rt.pending_presents);
+    try std.testing.expect(rt.queue.items[rt.queue_head] == .render_copy);
+    try std.testing.expect(rt.queue.items[rt.queue_head + 1] == .render_present);
+}
+
+test "busy worker keeps its frame while later video uploads are superseded" {
+    var rt = Runtime.initShutdownStub();
+    defer rt.deinit();
+    try enqueueTestUpload(&rt, 0, null);
+    enqueueTestDraw(&rt);
+    // The worker has started this frame. Its pending upload and present must
+    // survive even while later frames accumulate behind it.
+    rt.worker_frame_active = true;
+    for (1..100) |frame| {
+        try enqueueTestUpload(&rt, @intCast(frame), null);
+        enqueueTestDraw(&rt);
+    }
+    var values: std.ArrayList(u8) = .empty;
+    defer values.deinit(std.testing.allocator);
+    for (rt.queue.items[rt.queue_head..]) |cmd| {
+        if (cmd == .update_texture) try values.append(std.testing.allocator, cmd.update_texture.pixels.?[0]);
+    }
+    try std.testing.expectEqualSlices(u8, &.{ 0, 99 }, values.items);
+    try std.testing.expectEqual(@as(usize, 2), rt.pending_presents);
+    try std.testing.expectEqual(@as(usize, 8), rt.payload_pool.live_bytes);
+}
+
+test "partial texture updates survive skipped draws until a full replacement" {
+    var rt = Runtime.initShutdownStub();
+    defer rt.deinit();
+    try enqueueTestUpload(&rt, 1, null);
+    enqueueTestDraw(&rt);
+    try enqueueTestUpload(&rt, 2, .{ .x = 0, .y = 0, .w = 1, .h = 1 });
+    enqueueTestDraw(&rt);
+    try std.testing.expectEqual(@as(usize, 8), rt.payload_pool.live_bytes);
+    try std.testing.expectEqual(@as(u8, 1), rt.queue.items[0].update_texture.pixels.?[0]);
+    try std.testing.expectEqual(@as(u8, 2), rt.queue.items[1].update_texture.pixels.?[0]);
+    try enqueueTestUpload(&rt, 3, null);
+    enqueueTestDraw(&rt);
+    try std.testing.expectEqual(@as(usize, 4), rt.payload_pool.live_bytes);
+    try std.testing.expectEqual(@as(u8, 3), rt.queue.items[0].update_texture.pixels.?[0]);
+}
+
+test "upload retirement preserves surviving draws and resource lifetime barriers" {
+    const barriers = [_]Command{
+        .{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } },
+        .{ .render_copy_ex = .{ .renderer = 2, .texture = 1, .src = null, .dst = null, .angle = 0, .center = null, .flip = 0 } },
+        .{ .render_present = .{ .renderer = 2 } },
+        .{ .destroy_texture = .{ .texture = 1 } },
+        .{ .create_texture = .{ .texture = 1, .format = core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }), .w = 1, .h = 1 } },
+        .{ .set_texture_color_mod = .{ .texture = 1, .r = 1, .g = 2, .b = 3 } },
+    };
+    for (barriers) |barrier| {
+        var rt = Runtime.initShutdownStub();
+        defer rt.deinit();
+        try enqueueTestUpload(&rt, 1, null);
+        rt.enqueueCommand(barrier);
+        try enqueueTestUpload(&rt, 2, null);
+        rt.retireSupersededUploads();
+        try std.testing.expectEqual(@as(usize, 3), rt.queue.items.len);
+        try std.testing.expectEqual(@as(usize, 8), rt.payload_pool.live_bytes);
+    }
+}
+
+test "planar video replacements release all obsolete planes" {
+    var rt = Runtime.initShutdownStub();
+    defer rt.deinit();
+    const old = try rt.copyPayloads(3, .{ "yyyy", "u", "v" });
+    rt.enqueueCommand(.{ .update_yuv_texture = .{ .texture = 1, .rect = null, .yplane = old[0], .ypitch = 2, .uplane = old[1], .upitch = 1, .vplane = old[2], .vpitch = 1 } });
+    enqueueTestDraw(&rt);
+    const next = try rt.copyPayloads(3, .{ "YYYY", "U", "V" });
+    rt.enqueueCommand(.{ .update_yuv_texture = .{ .texture = 1, .rect = null, .yplane = next[0], .ypitch = 2, .uplane = next[1], .upitch = 1, .vplane = next[2], .vpitch = 1 } });
+    enqueueTestDraw(&rt);
+    try std.testing.expectEqual(@as(usize, 6), rt.payload_pool.live_bytes);
+    try std.testing.expectEqualStrings("YYYY", rt.queue.items[0].update_yuv_texture.yplane.?);
 }
 
 test "queued replay does not drop present for a frame already started by worker" {
@@ -1965,17 +2117,8 @@ fn workerMain(runtime: *Runtime) void {
             log.info("queued replay worker exiting", .{});
             return;
         }
-        var cmd = runtime.queue.items[runtime.queue_head];
+        var cmd = runtime.takeQueuedCommandLocked();
         const cmd_is_present = isPresentCommand(cmd);
-        const cmd_is_frame_local = isFrameLocalCommand(cmd);
-        runtime.queue_head += 1;
-        if (cmd_is_present) {
-            if (runtime.pending_presents > 0) runtime.pending_presents -= 1;
-        }
-        if (cmd_is_frame_local) {
-            runtime.worker_frame_active = true;
-        }
-        runtime.maybeCompactQueue();
         runtime.queue_mutex.unlock();
         core_dispatch.handleCommand(runtime, cmd);
         runtime.lockQueue("worker_recycle_command");
@@ -2008,6 +2151,8 @@ pub fn get() *Runtime {
                 } else |err| {
                     log.warn("failed to start queued replay worker: {any}", .{err});
                     runtime.active = false;
+                    runtime.shutdown_worker = true;
+                    runtime.payload_pool.close();
                 }
             }
         }
