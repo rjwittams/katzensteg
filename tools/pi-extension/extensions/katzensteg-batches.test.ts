@@ -100,7 +100,7 @@ test("visible movement keeps old placements until the replacement generation arr
 	queue.flush(frame(writes), true);
 	assert.equal(writes.length, 1);
 	assert.match(writes[0], /a=d,d=i,i=10/);
-	assert.ok(writes[0].endsWith("replacement"));
+	assert.ok(writes.join("").endsWith("replacement"));
 });
 
 test("stale retirement cannot erase the visible frame while movement waits for placements", () => {
