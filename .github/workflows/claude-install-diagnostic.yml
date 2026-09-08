@@ -10,11 +10,36 @@ jobs:
   install:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [bash-env, bun, bun-env]
     steps:
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
       - name: Run the action's installer command
+        env:
+          INSTALL_MODE: ${{ matrix.mode }}
         run: |
           set -o pipefail
-          curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.265
+          if [[ "$INSTALL_MODE" == *-env ]]; then
+            export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='' CLAUDE_CODE_SCRIPT_CAPS=''
+            export NODE_VERSION='' ANTHROPIC_API_KEY='' ANTHROPIC_BASE_URL='' ANTHROPIC_CUSTOM_HEADERS=''
+            export CLAUDE_CODE_USE_BEDROCK='' CLAUDE_CODE_USE_VERTEX='' CLAUDE_CODE_USE_FOUNDRY=''
+            export CLAUDE_CODE_ENABLE_TELEMETRY='' INPUT_SETTINGS='' PATH_TO_CLAUDE_CODE_EXECUTABLE=''
+          fi
+          if [[ "$INSTALL_MODE" == bash* ]]; then
+            curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.265
+          else
+            cat > "$RUNNER_TEMP/install.mjs" <<'JS'
+          import { spawn } from 'node:child_process';
+          const child = spawn('bash', ['-c', 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.265'], { stdio: 'inherit' });
+          child.on('close', code => process.exit(code ?? 1));
+          child.on('error', error => { console.error(error); process.exit(1); });
+          JS
+            bun --no-env-file run "$RUNNER_TEMP/install.mjs"
+          fi
 
       - name: Inspect installed executables and symlinks
         if: always()
@@ -33,3 +58,5 @@ jobs:
           printf 'Expected launcher:\n'
           ls -ld "$HOME/.local/bin/claude" || true
           readlink -f "$HOME/.local/bin/claude" || true
+          test -x "$HOME/.local/bin/claude"
+          "$HOME/.local/bin/claude" --version
