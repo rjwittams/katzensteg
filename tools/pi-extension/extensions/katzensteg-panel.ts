@@ -31,6 +31,11 @@ import {
 	sameArgs,
 } from "./katzensteg-command.js";
 import {
+	GameInteraction,
+	type Observation,
+	rgbaPng,
+} from "./katzensteg-game.js";
+import {
 	bodyHasVisibleCells,
 	clipCellsForBody,
 	FRAME_OVERHEAD_ROWS,
@@ -43,14 +48,8 @@ import {
 	makeTerminalBytesInputMessage,
 	PointerInput,
 } from "./katzensteg-input.js";
-import { PanelWindowControls } from "./katzensteg-window.js";
-
-import {
-	GameInteraction,
-	rgbaPng,
-	type Observation,
-} from "./katzensteg-game.js";
 import { registerGameTools } from "./katzensteg-tools.js";
+import { PanelWindowControls } from "./katzensteg-window.js";
 
 const liveGamePanels = new Set<SurfacePanel>();
 let nextGamePanelId = 1;
@@ -1089,6 +1088,8 @@ class KatzenstegProducer implements ProducerConnection {
 			child.stdin.end();
 		}
 		if (child.exitCode === null && child.signalCode === null && !child.killed) {
+			// The launcher owns child-group cleanup: 1500 ms grace, then TERM
+			// and KILL 250 ms later. Do not interrupt that escalation.
 			this.killTimer = setTimeout(() => {
 				debugLog(
 					`producer.live.stop timeout exitCode=${child.exitCode ?? "null"} signal=${child.signalCode ?? "null"} killed=${child.killed}`,
@@ -1099,7 +1100,7 @@ class KatzenstegProducer implements ProducerConnection {
 					!child.killed
 				)
 					child.kill("SIGTERM");
-			}, 1000);
+			}, 3000);
 		}
 		this.attached = false;
 		this.latestSyncSent = undefined;
