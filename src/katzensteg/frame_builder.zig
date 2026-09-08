@@ -1204,6 +1204,16 @@ pub const FrameBuilder = struct {
         self.renderPresentJob(logger, tty, engine, backend, renderer, &job, debug_protocol_replies, image_gc);
     }
 
+    // Reconstruct a native-size observation even when terminal presentation uses
+    // separate sprites. Call before renderPresentJobBatch consumes frame commands.
+    pub fn buildObservationFrame(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, cursor: ?cursor_mod.Snapshot) !present_job.FramebufferJob {
+        const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
+        try self.buildCompositeFrame(logger, state);
+        const rgba = state.composite_rgba orelse return error.MissingCompositeBuffer;
+        compositeCursor(rgba, state.window_w, state.window_h, cursor);
+        return .{ .width = state.window_w, .height = state.window_h, .rgba = rgba, .owns_rgba = false };
+    }
+
     pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool, cursor: ?cursor_mod.Snapshot) !PresentJob {
         const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
         const use_composite = !bg_only and (self.needsFramebufferComposite(state) or cursor != null);
@@ -5503,4 +5513,23 @@ test "axis-aligned render geometry raw maps textured quad to copy rect" {
 
     try std.testing.expectEqual(core.CoreRect{ .x = 0, .y = 0, .w = 64, .h = 64 }, copy.src);
     try std.testing.expectEqual(core.CoreRect{ .x = 10, .y = 20, .w = 32, .h = 32 }, copy.dst);
+}
+
+test "observation composes a sprite-mode frame without consuming presentation commands" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    try builder.renderers.put(1, RendererState.init(std.testing.allocator, 4, 2));
+    const state = builder.renderers.getPtr(1).?;
+    state.clear_color = .{ 0, 0, 0, 255 };
+    try state.fills.append(std.testing.allocator, .{ .rect = .{ .x = 2, .y = 1, .w = 1, .h = 1 }, .color = .{ 255, 0, 0, 255 } });
+    try std.testing.expect(!builder.needsFramebufferComposite(state));
+    var frame = try builder.buildObservationFrame(&logger, 1, null);
+    defer frame.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i32, 4), frame.width);
+    try std.testing.expectEqual(@as(i32, 2), frame.height);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, frame.rgba[24..28]);
+    try std.testing.expectEqual(@as(usize, 1), state.fills.items.len);
+    try std.testing.expect(!state.composite_mode_active);
 }

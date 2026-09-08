@@ -3,6 +3,8 @@ const std = @import("std");
 pub const BatchView = struct {
     window_id: []const u8,
     seq: u64,
+    // Host-selected presentation identity, recorded before composing this batch.
+    presentation_generation: u64 = 0,
     deletes: []const []const u8,
     uploads: []const []const u8,
     placements: []const []const u8,
@@ -68,6 +70,7 @@ pub const UploadPolicy = struct {
 
 pub const AttachMessage = struct {
     window_id: []const u8,
+    presentation_generation: u64 = 0,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
     z_base: i32 = 0,
@@ -85,6 +88,10 @@ pub const AttachMessage = struct {
 
 pub const ViewportMessage = struct {
     window_id: []const u8,
+    presentation_generation: u64 = 0,
+    // Re-emit retained placements even when geometry is unchanged. Image data
+    // must still be present (or restored by the host) before applying them.
+    refresh_placements: bool = false,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
     z_base: i32 = 0,
@@ -147,7 +154,20 @@ pub const PointerEventPayload = struct {
     pointer_type: PointerType = .mouse,
 };
 
+pub const SourcePointer = struct {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    kind: PointerEventKind,
+    button: i32 = -1,
+    buttons: u32 = 0,
+};
+
+pub const ObserveMessage = struct { request_id: u32, path: []const u8 };
+
 pub const InputPayload = union(enum) {
+    source_pointer: SourcePointer,
     terminal_bytes: []const u8,
     pointer: PointerEventPayload,
 };
@@ -163,6 +183,7 @@ pub const ControlMessage = union(enum) {
     detach: DetachMessage,
     input: InputMessage,
     shutdown,
+    observe: ObserveMessage,
 };
 
 pub const ParseError = error{
@@ -173,7 +194,7 @@ pub const ParseError = error{
 pub fn writeFrameBatchJsonl(_: std.mem.Allocator, writer: anytype, batch: BatchView) !void {
     try writer.writeAll("{\"type\":\"frame_batch\",\"window_id\":");
     try writeJsonString(writer, batch.window_id);
-    try writer.print(",\"seq\":{d},\"groups\":{{", .{batch.seq});
+    try writer.print(",\"seq\":{d},\"presentation_generation\":{d},\"groups\":{{", .{ batch.seq, batch.presentation_generation });
     try writeGroup(writer, "deletes", batch.deletes);
     try writer.writeAll(",");
     try writeGroup(writer, "uploads", batch.uploads);
@@ -237,13 +258,13 @@ pub fn writeJsonString(writer: anytype, value: []const u8) !void {
 }
 
 pub fn parseAttachMessage(allocator: std.mem.Allocator, bytes: []const u8) !AttachMessage {
-    const control = try parseControlMessage(allocator, bytes);
+    var control = try parseControlMessage(allocator, bytes);
     switch (control) {
         .attach => |attach| return attach,
-        .viewport => return error.InvalidMessage,
-        .detach => return error.InvalidMessage,
-        .input => return error.InvalidMessage,
-        .shutdown => return error.InvalidMessage,
+        else => {
+            deinitControlMessage(allocator, &control);
+            return error.InvalidMessage;
+        },
     }
 }
 
@@ -267,6 +288,13 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         return .{ .detach = .{ .window_id = "main" } };
     }
 
+    if (std.mem.eql(u8, type_value.string, "observe")) {
+        const id = try jsonU64(root.get("request_id") orelse return error.InvalidMessage);
+        if (id > std.math.maxInt(u32)) return error.InvalidMessage;
+        const path = root.get("path") orelse return error.InvalidMessage;
+        if (path != .string or !std.fs.path.isAbsolute(path.string)) return error.InvalidMessage;
+        return .{ .observe = .{ .request_id = @intCast(id), .path = try allocator.dupe(u8, path.string) } };
+    }
     if (std.mem.eql(u8, type_value.string, "input")) {
         const event_value = root.get("event") orelse return error.InvalidMessage;
         if (event_value != .string) return error.InvalidMessage;
@@ -277,6 +305,27 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
                 .window_id = "main",
                 .payload = .{ .terminal_bytes = try allocator.dupe(u8, bytes_value.string) },
             } };
+        }
+        if (std.mem.eql(u8, event_value.string, "source_pointer")) {
+            const x = try jsonI32(root.get("x") orelse return error.InvalidMessage);
+            const y = try jsonI32(root.get("y") orelse return error.InvalidMessage);
+            const w = try jsonI32(root.get("width") orelse return error.InvalidMessage);
+            const h = try jsonI32(root.get("height") orelse return error.InvalidMessage);
+            const button = try jsonI32(root.get("button") orelse return error.InvalidMessage);
+            const buttons = try jsonU64(root.get("buttons") orelse return error.InvalidMessage);
+            const kind = root.get("kind") orelse return error.InvalidMessage;
+            if (kind != .string or w <= 0 or h <= 0 or x < 0 or y < 0 or x >= w or y >= h or button < -1 or button > 2 or buttons > 7) return error.InvalidMessage;
+            const parsed_kind = std.meta.stringToEnum(PointerEventKind, kind.string) orelse return error.InvalidMessage;
+            if (parsed_kind == .wheel or (parsed_kind != .pointermove and button < 0)) return error.InvalidMessage;
+            return .{ .input = .{ .window_id = "main", .payload = .{ .source_pointer = .{
+                .x = x,
+                .y = y,
+                .width = w,
+                .height = h,
+                .kind = parsed_kind,
+                .button = button,
+                .buttons = @intCast(buttons),
+            } } } };
         }
         if (std.mem.eql(u8, event_value.string, "pointer")) {
             return .{ .input = .{
@@ -294,10 +343,13 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
     const z_base: i32 = if (root.get("z_base")) |z_value| try jsonI32(z_value) else 0;
     const terminal = try parseTerminalGeometry(root);
     const clip: ?PresentationRectCells = if (root.get("clip_cells")) |clip_value| try parseRect(clip_value) else null;
+    const generation = if (root.get("presentation_generation")) |value| try jsonU64(value) else 0;
 
     if (std.mem.eql(u8, type_value.string, "viewport")) {
         return .{ .viewport = .{
             .window_id = "main",
+            .presentation_generation = generation,
+            .refresh_placements = if (root.get("refresh_placements")) |value| try jsonBool(value) else false,
             .rect_cells = rect,
             .aspect = aspect,
             .z_base = z_base,
@@ -317,6 +369,7 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 
     return .{ .attach = .{
         .window_id = "main",
+        .presentation_generation = generation,
         .rect_cells = rect,
         .aspect = aspect,
         .z_base = z_base,
@@ -348,8 +401,9 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
                 allocator.free(bytes);
                 input.payload = .{ .terminal_bytes = "" };
             },
-            .pointer => {},
+            .pointer, .source_pointer => {},
         },
+        .observe => |observe| allocator.free(observe.path),
         .detach => {},
         .shutdown => {},
     }
@@ -535,6 +589,7 @@ test "frame batch JSON escapes terminal control bytes" {
     try writeFrameBatchJsonl(std.testing.allocator, out.writer(std.testing.allocator), .{
         .window_id = "main",
         .seq = 7,
+        .presentation_generation = 12,
         .deletes = &.{},
         .uploads = &.{"\x1b_Gq=2,a=t;\x1b\\"},
         .placements = &.{"\x1b[4;1H\x1b_Gq=2,a=p;\x1b\\"},
@@ -543,6 +598,7 @@ test "frame batch JSON escapes terminal control bytes" {
 
     try std.testing.expect(std.mem.endsWith(u8, out.items, "\n"));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"presentation_generation\":12") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b_G") != null);
 }
 
@@ -717,8 +773,7 @@ test "control message parses terminal input bytes" {
 }
 
 test "control message parses structured pointerdown" {
-    var control = try parseControlMessage(
-        std.testing.allocator,
+    var control = try parseControlMessage(std.testing.allocator,
         \\{"type":"input","window_id":"main","event":"pointer","kind":"pointerdown","row":5,"col":10,"button":0,"buttons":1,"modifiers":{"shift":true,"ctrl":false,"alt":false,"meta":false}}
     );
     defer deinitControlMessage(std.testing.allocator, &control);
@@ -734,8 +789,7 @@ test "control message parses structured pointerdown" {
 }
 
 test "control message parses structured wheel with delta fields" {
-    var control = try parseControlMessage(
-        std.testing.allocator,
+    var control = try parseControlMessage(std.testing.allocator,
         \\{"type":"input","window_id":"main","event":"pointer","kind":"wheel","row":3,"col":4,"button":-1,"buttons":0,"delta_x":0,"delta_y":-1,"delta_mode":"line"}
     );
     defer deinitControlMessage(std.testing.allocator, &control);
@@ -767,4 +821,37 @@ test "control message parses global shutdown without window id" {
     defer deinitControlMessage(std.testing.allocator, &control);
 
     try std.testing.expectEqual(ControlMessage.shutdown, control);
+}
+
+test "presentation generation and placement refresh parse independently of geometry" {
+    var attach = try parseAttachMessage(std.testing.allocator,
+        \\{"type":"attach","window_id":"main","presentation_generation":42,"rect_cells":{"row":1,"col":1,"rows":8,"cols":16},"aspect":"fit","id_ranges":{"image":[[100,199]],"placement":[[200,299]]}}
+    );
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(u64, 42), attach.presentation_generation);
+
+    var viewport = try parseControlMessage(std.testing.allocator,
+        \\{"type":"viewport","window_id":"main","presentation_generation":43,"refresh_placements":true,"rect_cells":{"row":1,"col":1,"rows":8,"cols":16},"aspect":"fit"}
+    );
+    defer deinitControlMessage(std.testing.allocator, &viewport);
+    try std.testing.expectEqual(@as(u64, 43), viewport.viewport.presentation_generation);
+    try std.testing.expect(viewport.viewport.refresh_placements);
+
+    try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator,
+        \\{"type":"viewport","window_id":"main","presentation_generation":-1,"rect_cells":{"row":1,"col":1,"rows":8,"cols":16},"aspect":"fit"}
+    ));
+    try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator,
+        \\{"type":"viewport","window_id":"main","refresh_placements":"true","rect_cells":{"row":1,"col":1,"rows":8,"cols":16},"aspect":"fit"}
+    ));
+}
+
+test "observe and source pointer controls validate ownership and coordinates" {
+    var request = try parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":7,\"path\":\"/tmp/frame.rgba\"}");
+    defer deinitControlMessage(std.testing.allocator, &request);
+    try std.testing.expectEqual(@as(u32, 7), request.observe.request_id);
+    var pointer = try parseControlMessage(std.testing.allocator, "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"source_pointer\",\"x\":123,\"y\":50,\"width\":320,\"height\":200,\"kind\":\"pointermove\",\"button\":-1,\"buttons\":0}");
+    defer deinitControlMessage(std.testing.allocator, &pointer);
+    try std.testing.expectEqual(@as(i32, 123), pointer.input.payload.source_pointer.x);
+    try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":7,\"path\":\"relative\"}"));
+    try std.testing.expectError(error.InvalidMessage, parseAttachMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":7,\"path\":\"/tmp/frame.rgba\"}"));
 }

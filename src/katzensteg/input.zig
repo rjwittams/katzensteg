@@ -322,7 +322,15 @@ pub const TerminalInputParser = struct {
             try self.emitKey(.{ .keycode = 0x7f, .scancode = 76 });
             return start + 2;
         }
-        if (csiFinalIndex(bytes, start)) |final| return final + 1;
+        if (csiFinalIndex(bytes, start)) |final| {
+            // Hosts that already resolved a standalone Escape can send CSI u
+            // without depending on the direct tty's idle-read flush.
+            const sequence = bytes[start .. final + 1];
+            if (std.mem.eql(u8, sequence, "27u") or std.mem.eql(u8, sequence, "27;1u")) {
+                try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+            }
+            return final + 1;
+        }
         return null;
     }
 
@@ -398,9 +406,22 @@ pub const TerminalInputParser = struct {
     // negated when translating. deltaX maps directly.
     pub fn injectPointer(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload) !void {
         const point = self.mapCellToSdl(event.col, event.row) orelse return;
-        const x = point.x;
-        const y = point.y;
+        try self.injectPointerAt(event, point.x, point.y);
+    }
 
+    pub fn injectSourcePointer(self: *TerminalInputParser, event: render_batch_protocol.SourcePointer) !void {
+        // Source-image input is independent of terminal placement and clipping.
+        if (event.kind == .pointerup and (event.width != self.target.w or event.height != self.target.h)) {
+            // A resize must not prevent a controller from releasing a held button.
+            try self.injectPointerAt(.{ .kind = .pointerup, .row = 1, .col = 1, .button = event.button, .buttons = event.buttons }, self.last_mouse_x, self.last_mouse_y);
+            return;
+        }
+        if (event.width != self.target.w or event.height != self.target.h) return error.StaleSourceSize;
+        if (event.x < 0 or event.y < 0 or event.x >= self.target.w or event.y >= self.target.h) return error.InvalidSourcePoint;
+        try self.injectPointerAt(.{ .kind = event.kind, .row = 1, .col = 1, .button = event.button, .buttons = event.buttons }, event.x, event.y);
+    }
+
+    fn injectPointerAt(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload, x: i32, y: i32) !void {
         switch (event.kind) {
             .wheel => {
                 // Only line-mode deltas are normalised today. Pixel- and page-mode
@@ -718,6 +739,16 @@ test "terminal input parser emits c1 delete key" {
 
     try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
     try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
+}
+
+test "terminal input parser emits encoded escape without a tty flush" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    try parser.feed("\x1b[27u");
+    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
+    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
 }
 
 test "terminal input parser flushes standalone escape" {
@@ -1151,4 +1182,20 @@ test "injectPointer wheel drops non-line delta_mode events" {
     });
 
     try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+}
+
+test "source pointer uses image pixels and shares mouse state with terminal input" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .w = 320, .h = 200, .cols = 20, .rows = 5 });
+    try parser.injectSourcePointer(.{ .x = 247, .y = 123, .width = 320, .height = 200, .kind = .pointerdown, .button = 0, .buttons = 1 });
+    const down = parser.pop().?.mouse_button;
+    try std.testing.expectEqual(@as(i32, 247), down.x);
+    try std.testing.expectEqual(@as(i32, 123), parser.mouseState().y);
+    try std.testing.expectEqual(@as(u32, 1), parser.mouseState().buttons);
+    parser.setTarget(.{ .w = 640, .h = 480 });
+    try parser.injectSourcePointer(.{ .x = 247, .y = 123, .width = 320, .height = 200, .kind = .pointerup, .button = 0 });
+    try std.testing.expect(!parser.pop().?.mouse_button.pressed);
+    try std.testing.expectEqual(@as(u32, 0), parser.mouseState().buttons);
+    try std.testing.expectError(error.StaleSourceSize, parser.injectSourcePointer(.{ .x = 1, .y = 1, .width = 320, .height = 200, .kind = .pointermove }));
 }
