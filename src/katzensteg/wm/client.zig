@@ -224,6 +224,12 @@ test "socket control backpressure preserves bytes through graceful half close" {
     for (payload, 0..) |*byte, i| byte.* = @truncate(i);
     try channel.writer().writeAll(payload);
     try std.testing.expect(channel.socket.pending.items.len > channel.socket.sent);
+    // Rejected output must not append a partial message or discard earlier
+    // pending bytes; those still drain intact after the caller closes control.
+    const excessive = try std.testing.allocator.alloc(u8, 512 * 1024);
+    defer std.testing.allocator.free(excessive);
+    @memset(excessive, 0);
+    try std.testing.expectError(error.ControlBackpressure, channel.writer().writeAll(excessive));
     channel.closeControl();
     try std.testing.expect(channel.controlFile() == null);
     var received = std.ArrayList(u8).empty;

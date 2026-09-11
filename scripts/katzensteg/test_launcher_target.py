@@ -145,6 +145,18 @@ class LauncherTargetTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
+    def test_invalid_dry_run_target_has_the_same_diagnostic(self):
+        for target in ('unsupported:/tmp/host', 'jsonl:'):
+            with self.subTest(target=target):
+                self.env['KATZENSTEG_TARGET'] = target
+                proc = self.launch(options=('--dry-run',))
+                stdout, stderr = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 64)
+                self.assertEqual(stdout, b'')
+                self.assertIn(b'katzensteg: invalid KATZENSTEG_TARGET:', stderr)
+                self.assertNotIn(b'stack trace', stderr)
+                self.assertFalse(self.pidfile.exists())
+
     def test_rejected_registration_does_not_spawn(self):
         server = self.host()
         proc = self.launch()

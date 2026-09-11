@@ -767,6 +767,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     var shutdown_sent = false;
     const keep_alive_when_empty = listener != null or specs.len == 0;
     var shutdown_deadline_ms: ?i64 = null;
+    var accept_retry_ms: i64 = 0;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
@@ -819,11 +820,14 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         try retireFinishedSessions(allocator, sessions[0..initialized], &peer_queue, writer);
         if (!shutdown_sent) if (listener) |*host| {
             const now = std.time.milliTimestamp();
-            try host.acceptPending(now);
+            if (now >= accept_retry_ms) host.acceptPending(now) catch |err| {
+                logger.writeFmtScoped(.warn, .wm, "listener accept failed; retrying in one second: {s}", .{@errorName(err)});
+                accept_retry_ms = now + 1000;
+            };
             for (0..16) |_| {
                 const registration = (try host.nextRegistration(now)) orelse break;
                 defer allocator.free(registration.title);
-                var channel = ClientChannel{ .socket = .{ .file = registration.file } };
+                var channel = ClientChannel{ .socket = .{ .file = registration.file, .allocator = allocator } };
                 var transferred = false;
                 defer if (!transferred) channel.deinit();
                 const index = availableSessionSlot(sessions[0..initialized], session_capacity) orelse continue;

@@ -310,7 +310,10 @@ fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !desti
 }
 
 fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !void {
-    const destination = try resolveDestination(allocator, explicit_stdio);
+    const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
+        std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
+        std.process.exit(64);
+    };
     defer destination.deinit(allocator);
     const embed_jsonl = destination != .standalone;
     if (destination == .jsonl) std.debug.print("destination=jsonl:{s} (dry-run; not connected)\n", .{destination.jsonl});
