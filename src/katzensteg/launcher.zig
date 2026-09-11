@@ -1,6 +1,7 @@
 const std = @import("std");
 const attach_host = @import("attach_host.zig");
 const launcher_context = @import("launcher/context.zig");
+const destination_mod = @import("launcher/destination.zig");
 const launcher_exec = @import("launcher/exec.zig");
 const launcher_plan = @import("launcher/plan.zig");
 const profiles_mod = @import("launcher_profiles.zig");
@@ -26,6 +27,8 @@ const OutputSpec = launcher_plan.OutputSpec;
 const ResolvedLaunchPlan = launcher_plan.ResolvedLaunchPlan;
 const RuntimeConfig = launcher_plan.RuntimeConfig;
 
+var embed_signal_received = std.atomic.Value(u8).init(0);
+var embed_signal_wait_for_child = std.atomic.Value(bool).init(false);
 var embed_signal_child_pgid = std.atomic.Value(std.posix.pid_t).init(0);
 
 const FileSink = struct {
@@ -109,6 +112,7 @@ const usage_text =
     \\Options:
     \\  --dry-run      Resolve the target and print what would run.
     \\  --embed-jsonl  Quiet launcher mode; stdout is Katzensteg JSONL batches.
+    \\  KATZENSTEG_TARGET=jsonl:<socket-path> hosts a profile in a listening WM.
     \\
     \\Targets:
     \\  A target can be a named profile or, later, a command/path/URL matched by the launcher.
@@ -293,7 +297,23 @@ fn showProfiles(allocator: std.mem.Allocator) !void {
     try writer.interface.flush();
 }
 
-fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, embed_jsonl: bool) !void {
+fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !destination_mod.Destination {
+    if (explicit_stdio) return .stdio;
+    const value = std.process.getEnvVarOwned(allocator, "KATZENSTEG_TARGET") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return .standalone,
+        else => return err,
+    };
+    defer allocator.free(value);
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (home) |path| allocator.free(path);
+    return destination_mod.Destination.resolve(allocator, false, value, home);
+}
+
+fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !void {
+    const destination = try resolveDestination(allocator, explicit_stdio);
+    defer destination.deinit(allocator);
+    const embed_jsonl = destination != .standalone;
+    if (destination == .jsonl) std.debug.print("destination=jsonl:{s} (dry-run; not connected)\n", .{destination.jsonl});
     var catalog = try loadProfileCatalog(allocator);
     defer catalog.deinit();
 
@@ -365,12 +385,21 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     );
 }
 
-fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, embed_jsonl: bool) !u8 {
+fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !u8 {
+    const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
+        std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
+        return 64;
+    };
+    defer destination.deinit(allocator);
+    const embed_jsonl = destination != .standalone;
     var catalog = try loadProfileCatalog(allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
-        if (embed_jsonl) return 66;
+        if (embed_jsonl) {
+            std.debug.print("katzensteg: hosted launch requires a known profile: {s}\n", .{target});
+            return 66;
+        }
         return runCommand(allocator, target, extra_args);
     };
     if (profileLaunchProblem(profile)) |problem| {
@@ -382,6 +411,15 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     defer expansion.deinit(allocator);
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
+
+    const host: ?std.fs.File = if (destination == .jsonl)
+        destination_mod.connectJsonl(allocator, destination.jsonl, plan.profile_name) catch |err| {
+            std.debug.print("katzensteg: cannot connect to target {s}: {s}\n", .{ destination.jsonl, @errorName(err) });
+            return 69;
+        }
+    else
+        null;
+    defer if (host) |file| file.close();
 
     var embed_pipes: ?EmbedPipes = null;
     if (embed_jsonl) {
@@ -410,12 +448,12 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
     var child = std.process.Child.init(plan.argv, allocator);
     child.env_map = &env_map;
     child.cwd = plan.cwd;
-    child.stdin_behavior = if (embed_jsonl) .Ignore else .Inherit;
+    child.stdin_behavior = if (destination == .stdio) .Ignore else .Inherit;
     child.stdout_behavior = stdioForStdout(plan.stdout);
     child.stderr_behavior = stdioForStderr(plan.stdout, plan.stderr);
 
     const term = if (embed_jsonl)
-        spawnAndWaitEmbedJsonl(allocator, &child, plan.stdout, plan.stderr, &embed_pipes.?) catch |err| {
+        spawnAndWaitEmbedTransport(&child, plan.stdout, plan.stderr, &embed_pipes.?, host) catch |err| {
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
         }
@@ -722,7 +760,7 @@ const EmbedPipes = struct {
     }
 };
 
-fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, pipes: *EmbedPipes) !std.process.Child.Term {
+fn spawnAndWaitEmbedTransport(child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, pipes: *EmbedPipes, host: ?std.fs.File) !std.process.Child.Term {
     var stdout_sink: ?FileSink = try openStdoutSink(stdout_spec);
     defer if (stdout_sink) |*sink| sink.deinit();
     var stderr_sink: ?FileSink = try openStderrSink(stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
@@ -731,7 +769,7 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
     child.pgid = 0;
     try child.spawn();
     pipes.closeChildFds();
-    var signal_handlers = installEmbedSignalHandlers(child.id);
+    var signal_handlers = installEmbedSignalHandlers(child.id, host != null);
     defer signal_handlers.restore();
 
     var drain_stop = std.atomic.Value(bool).init(false);
@@ -753,24 +791,33 @@ fn spawnAndWaitEmbedJsonl(_: std.mem.Allocator, child: *std.process.Child, stdou
         stderr_thread = try std.Thread.spawn(.{}, drainPipeToSink, .{DrainArgs{ .source = stderr_file, .sink = sink, .stop = &drain_stop }});
     }
 
+    var control_stop = std.atomic.Value(bool).init(false);
     const render_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
         .source = pipes.takeRenderRead(),
-        .dest = std.fs.File.stdout(),
+        .dest = host orelse std.fs.File.stdout(),
         .close_source = true,
         .close_dest = false,
     }});
     const control_thread = try std.Thread.spawn(.{}, forwardEmbedControl, .{EmbedControlForwardArgs{
-        .source = std.fs.File.stdin(),
+        .source = host orelse std.fs.File.stdin(),
         .dest = pipes.takeControlWrite(),
         .child_pgid = child.id,
+        .stop = if (host != null) &control_stop else null,
     }});
-    control_thread.detach();
+    if (host == null) control_thread.detach();
 
     const term = try child.wait();
+    control_stop.store(true, .seq_cst);
+    if (host != null) control_thread.join();
     drain_stop.store(true, .seq_cst);
     if (stdout_thread) |thread| thread.join();
     if (stderr_thread) |thread| thread.join();
     render_thread.join();
+    if (host) |file| {
+        std.posix.shutdown(file.handle, .send) catch {};
+        const signal = embed_signal_received.load(.seq_cst);
+        if (signal != 0) return .{ .Exited = 128 + signal };
+    }
     return term;
 }
 
@@ -785,8 +832,10 @@ const EmbedSignalHandlers = struct {
     }
 };
 
-fn installEmbedSignalHandlers(child_pgid: std.posix.pid_t) EmbedSignalHandlers {
+fn installEmbedSignalHandlers(child_pgid: std.posix.pid_t, wait_for_child: bool) EmbedSignalHandlers {
     embed_signal_child_pgid.store(child_pgid, .seq_cst);
+    embed_signal_received.store(0, .seq_cst);
+    embed_signal_wait_for_child.store(wait_for_child, .seq_cst);
     const action = std.posix.Sigaction{
         .handler = .{ .handler = embedSignalHandler },
         .mask = std.posix.sigemptyset(),
@@ -803,6 +852,10 @@ fn embedSignalHandler(sig: i32) callconv(.c) void {
     if (pgid > 0) {
         std.posix.kill(-pgid, std.posix.SIG.TERM) catch {};
     }
+    if (embed_signal_wait_for_child.load(.seq_cst)) {
+        embed_signal_received.store(@intCast(sig), .seq_cst);
+        return;
+    }
     std.posix.exit(@intCast(128 + sig));
 }
 
@@ -810,6 +863,7 @@ const EmbedControlForwardArgs = struct {
     source: std.fs.File,
     dest: std.fs.File,
     child_pgid: std.posix.pid_t,
+    stop: ?*std.atomic.Value(bool) = null,
 };
 
 fn forwardEmbedControl(args: EmbedControlForwardArgs) void {
@@ -822,22 +876,31 @@ fn forwardEmbedControl(args: EmbedControlForwardArgs) void {
 
     var buf: [8192]u8 = undefined;
     while (true) {
+        if (args.stop) |stop| {
+            if (stop.load(.seq_cst)) return;
+            if (embed_signal_received.load(.seq_cst) != 0) {
+                terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
+                return;
+            }
+            var poll = [_]std.posix.pollfd{.{ .fd = source.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if ((std.posix.poll(&poll, 50) catch 0) == 0) continue;
+        }
         const n = source.read(&buf) catch {
-            terminateEmbedChildAfterGrace(args.child_pgid);
+            terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
             return;
         };
         if (n == 0) {
-            terminateEmbedChildAfterGrace(args.child_pgid);
+            terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
             return;
         }
         dest.writeAll(buf[0..n]) catch {
-            terminateEmbedChildAfterGrace(args.child_pgid);
+            terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
             return;
         };
         for (buf[0..n]) |byte| {
             if (byte == '\n') {
                 if (embedControlLineRequestsShutdown(line.items)) {
-                    terminateEmbedChildAfterGrace(args.child_pgid);
+                    terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
                     return;
                 }
                 line.clearRetainingCapacity();
@@ -863,16 +926,18 @@ fn embedControlLineRequestsShutdown(line: []const u8) bool {
     };
 }
 
-fn terminateEmbedChildAfterGrace(child_pgid: std.posix.pid_t) void {
+fn terminateEmbedChildAfterGrace(child_pgid: std.posix.pid_t, stop: ?*std.atomic.Value(bool)) void {
     if (child_pgid <= 0) return;
-    std.Thread.sleep(1500 * std.time.ns_per_ms);
-    terminateProcessGroup(child_pgid);
-}
-
-fn terminateProcessGroup(pgid: std.posix.pid_t) void {
-    std.posix.kill(-pgid, std.posix.SIG.TERM) catch {};
-    std.Thread.sleep(250 * std.time.ns_per_ms);
-    std.posix.kill(-pgid, std.posix.SIG.KILL) catch {};
+    for (0..60) |_| {
+        if (stop) |flag| if (flag.load(.seq_cst)) return;
+        std.Thread.sleep(25 * std.time.ns_per_ms);
+    }
+    std.posix.kill(-child_pgid, std.posix.SIG.TERM) catch {};
+    for (0..10) |_| {
+        if (stop) |flag| if (flag.load(.seq_cst)) return;
+        std.Thread.sleep(25 * std.time.ns_per_ms);
+    }
+    std.posix.kill(-child_pgid, std.posix.SIG.KILL) catch {};
 }
 
 const CopyFileArgs = struct {
