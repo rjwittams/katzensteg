@@ -36,14 +36,30 @@ jobs:
 
             Use the repository's CLAUDE.md for guidance on style and conventions if it exists. Be constructive and helpful in your feedback.
 
+            Review the diff and relevant source directly in this session. Do not invoke
+            /code-review or another review skill. Complete the review and post its
+            comment before returning your final response; a promise to finish later
+            does not complete this CI job.
+
             AFTER reviewing,
               * CHECK your findings against the existing comments and replies on the PR. e.g if followup issues are filed or the implementor pushed back, make sure that is
               correct: drop issues that are already addressed, repeat issues that still need to be dealt with with an explanation.
               * ALWAYS Use `gh pr comment` with your Bash tool to leave your review as a SINGLE comment on the PR, properly formatted as markdown, even if just to say that you found no issues.
+              * Include this exact marker at the end of that comment:
+                <!-- claude-review:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.event.pull_request.head.sha }} -->
 
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://docs.claude.com/en/docs/claude-code/cli-reference for available options
-          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+          claude_args: '--disallowed-tools Skill --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+
+      - name: Verify review was posted
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_MARKER: '<!-- claude-review:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.event.pull_request.head.sha }} -->'
+        run: python3 scripts/katzensteg/verify_review_posted.py
 
       - name: Summarize review permission denials
         if: always() && steps.claude-review.outputs.execution_file != ''
