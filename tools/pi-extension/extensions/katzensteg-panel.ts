@@ -1,37 +1,58 @@
-import { appendFileSync, existsSync, mkdtempSync } from "node:fs";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import {
+	appendFileSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
-	type MessageHandle,
 	type OverlayHandle,
-	type PointerEvent,
-	type SurfaceRect,
+	type SurfaceGeometry,
+	type SurfaceHandle,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { type FrameBatch, PendingBatches } from "./katzensteg-batches.js";
 import {
-	FRAME_OVERHEAD_COLS,
-	FRAME_OVERHEAD_ROWS,
-	VIEWPORT_COL_OFFSET,
-	VIEWPORT_ROW_OFFSET,
+	expandHomePrefix,
+	parseCommand,
+	type SizePresetName,
+	sameArgs,
+} from "./katzensteg-command.js";
+import {
+	GameInteraction,
+	type Observation,
+	rgbaPng,
+} from "./katzensteg-game.js";
+import {
+	bodyHasVisibleCells,
 	clipCellsForBody,
+	FRAME_OVERHEAD_ROWS,
 	messageLogicalBodyRect,
+	occlusionCellsForBody,
 	type RectCells,
 	statusLineVisible,
 } from "./katzensteg-geometry.js";
 import {
-	makePointerInputMessage,
 	makeTerminalBytesInputMessage,
+	PointerInput,
 } from "./katzensteg-input.js";
-import {
-	type SizePresetName,
-	expandHomePrefix,
-	parseCommand,
-	sameArgs,
-} from "./katzensteg-command.js";
+import { registerGameTools } from "./katzensteg-tools.js";
+import { PanelWindowControls } from "./katzensteg-window.js";
+
+const liveGamePanels = new Set<SurfacePanel>();
+let nextGamePanelId = 1;
 
 const WINDOW_ID = "main" as const;
 // Each producer needs its own kitty image/placement id range — the terminal's
@@ -52,7 +73,10 @@ const PLACEMENT_RANGE_SIZE = 10000;
 let nextImageRangeBase = IMAGE_RANGE_BASE;
 let nextPlacementRangeBase = PLACEMENT_RANGE_BASE;
 
-function allocateIdRanges(): { imageIds: [number, number]; placementIds: [number, number] } {
+function allocateIdRanges(): {
+	imageIds: [number, number];
+	placementIds: [number, number];
+} {
 	const imageStart = nextImageRangeBase;
 	nextImageRangeBase += IMAGE_RANGE_SIZE;
 	const placementStart = nextPlacementRangeBase;
@@ -64,7 +88,10 @@ function allocateIdRanges(): { imageIds: [number, number]; placementIds: [number
 }
 const DEFAULT_PROFILE = process.env.KATZENSTEG_PI_PROFILE || "sonic";
 const DEFAULT_MODE = parseMode(process.env.KATZENSTEG_PANEL_MODE);
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const REPO_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../../..",
+);
 const DEFAULT_UPLOAD_HIGH_WATER = 10 * 1024 * 1024;
 const DEBUG_LOG_PATH = "/tmp/katzensteg-pi-extension.log";
 
@@ -73,15 +100,18 @@ const PANEL_ASPECT: Aspect = "fit";
 // Katzensteg's full-frame composite uses z=100. For inline panels we neutralize
 // that (effective z=0) so host text chrome stays readable. The floating panel
 // should sit on top of any inline panels, so it keeps katzensteg's native z.
-const INLINE_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_Z_BASE, -100);
-const FLOATING_Z_BASE = parseIntegerEnv(process.env.KATZENSTEG_PANEL_FLOATING_Z_BASE, 0);
-const PANEL_WINDOW_POLICY = nonEmptyEnv(process.env.KATZENSTEG_PANEL_WINDOW_POLICY);
+const INLINE_Z_BASE = parseIntegerEnv(
+	process.env.KATZENSTEG_PANEL_Z_BASE,
+	-100,
+);
+const FLOATING_Z_BASE = parseIntegerEnv(
+	process.env.KATZENSTEG_PANEL_FLOATING_Z_BASE,
+	0,
+);
+const PANEL_WINDOW_POLICY = nonEmptyEnv(
+	process.env.KATZENSTEG_PANEL_WINDOW_POLICY,
+);
 const PANEL_REAL_WINDOW = nonEmptyEnv(process.env.KATZENSTEG_PANEL_REAL_WINDOW);
-// The launcher gives an embed producer 1500ms after shutdown before SIGTERM.
-// Keep the panel alive longer than that so producer-authored delete batches can
-// drain instead of leaving stale kitty placements behind.
-const CLOSE_DRAIN_MS = 2500;
-const CLOSE_AFTER_CLEANUP_MS = 150;
 
 type Aspect = "fit" | "stretch" | "cover";
 type UploadProfile = "direct_apc" | "file_whole" | "file_offset_ring";
@@ -95,7 +125,7 @@ interface PanelDetails {
 	args?: string[];
 }
 
-type OverlayRect = SurfaceRect;
+type OverlayRect = SurfaceGeometry;
 
 interface TerminalCells {
 	rows: number;
@@ -105,7 +135,8 @@ interface TerminalCells {
 interface ViewportSync {
 	rect: RectCells;
 	clip: RectCells | undefined;
-	terminal: TerminalCells;
+	occlusions: RectCells[];
+	generation: number;
 }
 
 interface SizePreset {
@@ -114,27 +145,17 @@ interface SizePreset {
 	height: number | `${number}%`;
 }
 
-interface FrameBatch {
-	type: "frame_batch";
-	window_id: string;
-	seq: number;
-	groups: {
-		deletes: string[];
-		uploads: string[];
-		placements: string[];
-		after: string[];
-	};
-}
-
 interface DetachedMessage {
 	type: "detached";
 	window_id: string;
 }
 
 interface AttachOptions {
+	generation: number;
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
 	clipCells?: RectCells;
+	occlusions: RectCells[];
 	terminalCells?: TerminalCells;
 	aspect: Aspect;
 	zBase: number;
@@ -144,9 +165,11 @@ interface AttachOptions {
 }
 
 interface ViewportOptions {
+	generation: number;
 	windowId: typeof WINDOW_ID;
 	rectCells: RectCells;
 	clipCells?: RectCells;
+	occlusions: RectCells[];
 	terminalCells?: TerminalCells;
 	aspect: Aspect;
 	zBase: number;
@@ -162,18 +185,33 @@ interface ActivePanel {
 	close(reason: string): void;
 }
 
-let activeController: ActivePanel | undefined;
-const inlinePanels = new Set<InlinePanelController>();
+const floatingPanels = new Set<PanelController>();
+let nextFloatingLevel = 0;
+const inlinePanels = new Set<SurfacePanel>();
 let preferredProfile = DEFAULT_PROFILE;
 let preferredArgs: string[] = [];
 let preferredSize: SizePresetName = "medium";
 let globalChunkSeq = 0;
 
 export default function (pi: ExtensionAPI) {
+	registerGameTools(
+		pi,
+		() => [...liveGamePanels].flatMap((panel) => panel.agentPanel() ?? []),
+		(ctx, profile, args) =>
+			openPanel(
+				ctx,
+				profile,
+				preferredSize,
+				args.map((arg) => expandHomePrefix(arg, os.homedir())),
+			),
+	);
+	let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+	let heartbeatStopped = false;
 	pi.on("session_shutdown", () => {
+		heartbeatStopped = true;
+		if (heartbeatTimer) clearTimeout(heartbeatTimer);
 		debugLog("session_shutdown");
-		activeController?.close("session_shutdown");
-		activeController = undefined;
+		for (const panel of floatingPanels) panel.close("session_shutdown");
 		for (const panel of inlinePanels) panel.close("session_shutdown");
 		inlinePanels.clear();
 	});
@@ -182,51 +220,66 @@ export default function (pi: ExtensionAPI) {
 	// it actually takes to fire. Spikes mean the event loop was busy with something.
 	let heartbeatPrev = process.hrtime.bigint();
 	const heartbeat = (): void => {
+		if (heartbeatStopped) return;
 		const now = process.hrtime.bigint();
 		const elapsedMs = Number((now - heartbeatPrev) / 1_000_000n);
 		heartbeatPrev = now;
 		if (elapsedMs > 150) debugLog(`pi.event_loop_lag_ms=${elapsedMs}`);
-		setTimeout(() => setImmediate(heartbeat), 100);
+		heartbeatTimer = setTimeout(heartbeat, 100);
 	};
-	setImmediate(heartbeat);
+	heartbeatTimer = setTimeout(heartbeat, 100);
 
-	pi.registerMessageRenderer<PanelDetails>("katzensteg-panel", (message, options, theme) => {
-		const details = message.details;
-		const tui = options.tui;
-		const handle = options.handle;
-		if (!details || !tui || !handle) return undefined;
-		const controller = new InlinePanelController(tui, theme, handle, details);
-		inlinePanels.add(controller);
-		return controller;
-	});
+	pi.registerMessageRenderer<PanelDetails>(
+		"katzensteg-panel",
+		(message, options, theme) => {
+			const details = message.details;
+			if (!details || !options.ui) return undefined;
+			const controller = new SurfacePanel(theme, details);
+			controller.attach(options.ui.trackSurface(controller, { mouse: true }));
+			inlinePanels.add(controller);
+			return controller;
+		},
+	);
 
 	pi.registerCommand("katzensteg-panel", {
 		description: "Show or control a Katzensteg embed panel",
 		handler: async (args, ctx) => {
+			const activeController = [...floatingPanels].at(-1);
 			const command = parseCommand(args);
 			debugLog(`command ${JSON.stringify(command)}`);
 			// The launcher forwards extra args verbatim, so expand a leading ~
 			// here (no shell does it for us). Other tokens stay literal.
 			const home = os.homedir();
 			const programArgs =
-				command.kind === "open" || command.kind === "inline" || command.kind === "profile"
+				command.kind === "open" ||
+				command.kind === "inline" ||
+				command.kind === "profile"
 					? (command.args ?? []).map((arg) => expandHomePrefix(arg, home))
 					: [];
 			switch (command.kind) {
 				case "toggle":
 					if (activeController) {
 						activeController.close("toggle");
-						activeController = undefined;
 						ctx.ui.notify("Closed Katzensteg panel", "info");
 					} else {
 						openPanel(ctx, preferredProfile, preferredSize, preferredArgs);
 					}
 					break;
 				case "open":
-					openPanel(ctx, command.profile ?? preferredProfile, preferredSize, programArgs);
+					openPanel(
+						ctx,
+						command.profile ?? preferredProfile,
+						preferredSize,
+						programArgs,
+					);
 					break;
 				case "inline":
-					sendInlinePanel(pi, command.profile ?? preferredProfile, preferredSize, programArgs);
+					sendInlinePanel(
+						pi,
+						command.profile ?? preferredProfile,
+						preferredSize,
+						programArgs,
+					);
 					break;
 				case "close":
 					if (!activeController) {
@@ -234,13 +287,17 @@ export default function (pi: ExtensionAPI) {
 						break;
 					}
 					activeController.close("command-close");
-					activeController = undefined;
 					ctx.ui.notify("Closed Katzensteg panel", "info");
 					break;
 				case "size":
 					preferredSize = command.size;
-					if (activeController instanceof PanelController) activeController.setSize(SIZE_PRESETS[command.size]);
-					else ctx.ui.notify(`Set Katzensteg panel size to ${command.size}`, "info");
+					if (activeController instanceof PanelController)
+						activeController.setSize(SIZE_PRESETS[command.size]);
+					else
+						ctx.ui.notify(
+							`Set Katzensteg panel size to ${command.size}`,
+							"info",
+						);
 					break;
 				case "profile":
 					// Switching profile resets program args to whatever this command
@@ -248,7 +305,8 @@ export default function (pi: ExtensionAPI) {
 					// a profile change).
 					preferredProfile = command.profile;
 					preferredArgs = programArgs;
-					if (activeController instanceof PanelController) activeController.setProfile(command.profile, preferredArgs);
+					if (activeController instanceof PanelController)
+						activeController.setProfile(command.profile, preferredArgs);
 					else openPanel(ctx, command.profile, preferredSize, preferredArgs);
 					break;
 			}
@@ -256,7 +314,12 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-function sendInlinePanel(pi: ExtensionAPI, profile: string, sizeName: SizePresetName, args: string[]): void {
+function sendInlinePanel(
+	pi: ExtensionAPI,
+	profile: string,
+	sizeName: SizePresetName,
+	args: string[],
+): void {
 	preferredProfile = profile;
 	preferredArgs = args;
 	preferredSize = sizeName;
@@ -264,353 +327,418 @@ function sendInlinePanel(pi: ExtensionAPI, profile: string, sizeName: SizePreset
 		customType: "katzensteg-panel",
 		content: `Katzensteg panel · ${profile} · ${sizeName}`,
 		display: true,
-		details: { mode: DEFAULT_MODE, profile, size: sizeName, ...(args.length > 0 ? { args } : {}) },
+		details: {
+			mode: DEFAULT_MODE,
+			profile,
+			size: sizeName,
+			...(args.length > 0 ? { args } : {}),
+		},
 	});
 }
 
-function openPanel(ctx: ExtensionCommandContext, profile: string, sizeName: SizePresetName, args: string[]): void {
+function openPanel(
+	ctx: Pick<ExtensionContext, "ui">,
+	profile: string,
+	sizeName: SizePresetName,
+	args: string[],
+): Promise<string> {
 	preferredProfile = profile;
 	preferredArgs = args;
 	preferredSize = sizeName;
-	activeController?.close("replace-open");
-	const controller = new PanelController(ctx, DEFAULT_MODE, profile, SIZE_PRESETS[sizeName], args);
-	activeController = controller;
-	void controller.open().catch((error: unknown) => {
-		if (activeController === controller) activeController = undefined;
-		ctx.ui.notify(`Katzensteg panel failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+	const controller = new PanelController(
+		ctx,
+		DEFAULT_MODE,
+		profile,
+		SIZE_PRESETS[sizeName],
+		args,
+	);
+	floatingPanels.add(controller);
+	const opened = new Promise<string>((resolve, reject) => {
+		void controller
+			.open(resolve)
+			.then(() => reject(new Error("Panel closed before opening")))
+			.catch((error: unknown) => {
+				floatingPanels.delete(controller);
+				ctx.ui.notify(
+					`Katzensteg panel failed: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				reject(error);
+			});
 	});
+	// Command callers may intentionally leave the panel opening in the background.
+	void opened.catch(() => {});
+	return opened;
 }
 
 class PanelController {
-	private overlay: OverlayRun | undefined;
-	private producer: ProducerConnection;
-	private currentGeneration = 0;
-	private closing = false;
-	private closed = false;
-	private cleanupSeen = false;
-	private closeTimer: NodeJS.Timeout | undefined;
-	private latestOverlayRect: OverlayRect | undefined;
-	private latestViewport: RectCells | undefined;
-	private latestSync: ViewportSync | undefined;
-	private overlayHandle: OverlayHandle | undefined;
-	private status = "starting";
-	private error: string | undefined;
-
-	constructor(
-		private readonly ctx: ExtensionCommandContext,
-		private readonly mode: PanelMode,
-		private profile: string,
-		private size: SizePreset,
-		private args: string[] = [],
-	) {
-		this.producer = this.createProducer(profile);
-	}
-
-	async open(): Promise<void> {
-		debugLog(`controller.open mode=${this.mode} profile=${this.profile} size=${this.size.name}`);
-		this.closing = false;
-		this.closed = false;
-		this.cleanupSeen = false;
-		this.producer.start();
-		await this.openOverlay();
-	}
-
-	close(reason: string): void {
-		if (this.closed || this.closing) return;
-		debugLog(`controller.close reason=${reason}`);
-		this.closing = true;
-		this.cleanupSeen = false;
-		this.status = "closing";
-		this.overlay?.invalidate();
-		this.producer.stop(reason);
-		this.scheduleCloseFinish(reason, CLOSE_DRAIN_MS);
-	}
-
-	setSize(size: SizePreset): void {
-		if (this.closed || this.closing || this.size.name === size.name) return;
-		debugLog(`controller.setSize ${this.size.name} -> ${size.name}`);
-		this.size = size;
-		void this.replaceOverlay();
-	}
-
-	setProfile(profile: string, args: string[] = []): void {
-		if (this.closed || this.closing || (this.profile === profile && sameArgs(this.args, args))) return;
-		debugLog(`controller.setProfile ${this.profile} -> ${profile} args=${JSON.stringify(args)}`);
-		this.profile = profile;
-		this.args = args;
-		this.producer.stop("profile-change");
-		this.producer = this.createProducer(profile);
-		this.producer.start();
-		this.overlay?.invalidate();
-		if (this.latestSync) this.scheduleViewportSync(this.currentGeneration, this.latestSync);
-	}
-
-	render(width: number, theme: Theme): string[] {
-		return renderPanelChrome(width, theme, {
-			mode: this.mode,
-			profile: this.profile,
-			sizeName: this.size.name,
-			rect: this.latestOverlayRect,
-			viewport: this.latestViewport,
-			status: this.status,
-			error: this.error,
-			panelRows: this.latestOverlayRect?.totalRows ?? fallbackPanelRowsForSize(this.size),
-			zBase: FLOATING_Z_BASE,
-			focused: this.overlayHandle?.isFocused() ?? false,
-		});
-	}
-
-	setHandle(handle: OverlayHandle | undefined): void {
-		this.overlayHandle = handle;
-	}
-
-	onOverlayRect(generation: number, rect: OverlayRect | undefined): void {
-		if (this.closed || this.closing || generation !== this.currentGeneration || !rect) return;
-		const body = messageLogicalBodyRect(rect);
-		if (!body) return;
-		const clip = clipCellsForBody(body, rect);
-		debugLog(`overlay.rect gen=${generation} raw=${formatRect(rect)} body=${formatRect(body)} clip=${formatRect(clip)}`);
-		this.latestOverlayRect = rect;
-		this.latestViewport = body;
-		this.overlay?.invalidate();
-		const sync: ViewportSync = {
-			rect: body,
-			clip,
-			// terminal_cells.rows here is an approximation (overlay bottom edge,
-			// not the actual terminal height) — PanelController doesn't carry a
-			// TUI reference. This is benign in practice: the producer only uses
-			// terminal_cells.rows to derive a pixel-per-cell hint via
-			// scaledPixelExtent, and only when terminal_px is also supplied. We
-			// don't send terminal_px, so the field is decorative for floating
-			// overlays. If we ever start sending terminal_px (or scaling becomes
-			// terminal-relative for other reasons), wire the real height through.
-			terminal: { rows: rect.row + rect.rows, cols: rect.cols },
-		};
-		this.latestSync = sync;
-		this.scheduleViewportSync(generation, sync);
-	}
-
-	private scheduleViewportSync(generation: number, sync: ViewportSync): void {
-		this.overlay?.afterNextRender(() => {
-			if (this.closed || this.closing || generation !== this.currentGeneration) {
-				debugLog(`viewport.sync stale gen=${generation} current=${this.currentGeneration}`);
-				return;
-			}
-			debugLog(`viewport.sync gen=${generation} viewport=${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
-			this.producer.setViewport(sync);
-		});
-	}
-
-	private async openOverlay(): Promise<void> {
-		const generation = ++this.currentGeneration;
-		const overlay = new OverlayRun(this.ctx, this, generation);
-		this.overlay = overlay;
-		debugLog(`overlay.open gen=${generation} size=${this.size.name} width=${String(this.size.width)} height=${String(this.size.height)}`);
-		await overlay.run();
-		debugLog(`overlay.done gen=${generation} current=${this.currentGeneration} closed=${this.closed}`);
-		if (this.overlay === overlay) this.overlay = undefined;
-		if (!this.closed && !this.closing && generation === this.currentGeneration) this.close("overlay-ended");
-	}
-
-	private async replaceOverlay(): Promise<void> {
-		if (this.closed) return;
-		const previous = this.overlay;
-		debugLog(`overlay.replace fromGen=${this.currentGeneration}`);
-		this.currentGeneration++;
-		if (previous) await previous.closeAndWait();
-		if (!this.closed) void this.openOverlay();
-	}
-
-	private createProducer(profile: string): ProducerConnection {
-		return createProducer(this.mode, profile, {
-			onFrame: (batch) => this.onFrame(batch),
-			onDetached: (message) => this.onDetached(message),
-			onStatus: (status) => this.setStatus(status),
-			onError: (error) => this.setError(error),
-		}, FLOATING_Z_BASE, this.args);
-	}
-
-	private onFrame(batch: FrameBatch): void {
-		if (this.closed) return;
-		if (this.closing) {
-			this.status = `closing #${batch.seq}`;
-			const bytes = cleanupTerminalChunks(batch).join("");
-			if (bytes.length > 0) {
-				this.cleanupSeen = true;
-				const cleanupOnly = isCleanupOnlyBatch(batch);
-				debugLog(`controller.cleanup batch seq=${batch.seq} bytes=${bytes.length} cleanupOnly=${cleanupOnly}`);
-				this.overlay?.writeRaw(bytes);
-				if (cleanupOnly) this.scheduleCloseFinish("cleanup-drained", CLOSE_AFTER_CLEANUP_MS);
-			}
-			this.overlay?.invalidate();
-			return;
-		}
-		this.status = `streaming #${batch.seq}`;
-		const bytes = orderedTerminalChunks(batch).join("");
-		if (bytes.length > 0) this.overlay?.writeRaw(bytes);
-		this.overlay?.invalidate();
-	}
-
-	private onDetached(message: DetachedMessage): void {
-		debugLog(`controller.detached window=${message.window_id} closing=${this.closing}`);
-		if (this.closed) return;
-		if (this.closing) this.scheduleCloseFinish("detached", 0);
-		else this.status = "detached";
-	}
-
-	private scheduleCloseFinish(reason: string, delayMs: number): void {
-		if (this.closeTimer) clearTimeout(this.closeTimer);
-		this.closeTimer = setTimeout(() => this.finishClose(reason), delayMs);
-	}
-
-	private finishClose(reason: string): void {
-		if (this.closed) return;
-		debugLog(`controller.finishClose reason=${reason} cleanupSeen=${this.cleanupSeen}`);
-		this.closed = true;
-		this.closing = false;
-		if (this.closeTimer) {
-			clearTimeout(this.closeTimer);
-			this.closeTimer = undefined;
-		}
-		this.currentGeneration++;
-		const overlay = this.overlay;
-		this.overlay = undefined;
-		overlay?.close();
-	}
-
-	private setStatus(status: string): void {
-		this.status = status;
-		this.error = undefined;
-		this.overlay?.invalidate();
-	}
-
-	private setError(error: string): void {
-		this.error = error;
-		this.overlay?.invalidate();
-	}
-
-	getSize(): SizePreset {
-		return this.size;
-	}
-
-	forwardKeystroke(data: string): void {
-		if (this.closed || this.closing) return;
-		this.producer.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
-	}
-
-	forwardPointer(event: PointerEvent): void {
-		if (this.closed || this.closing) return;
-		this.producer.sendInput(makePointerInputMessage(WINDOW_ID, event));
-	}
-}
-
-class OverlayRun {
-	private handle: OverlayHandle | undefined;
-	private unsubscribes: (() => void)[] = [];
+	private readonly zBase = FLOATING_Z_BASE + nextFloatingLevel++ * 10000;
+	private readonly cascade = floatingPanels.size % 6;
+	private readonly ctx: Pick<ExtensionContext, "ui">;
+	private readonly mode: PanelMode;
+	private profile: string;
+	private size: SizePreset;
+	private args: string[];
+	private component: SurfacePanel | undefined;
 	private done: (() => void) | undefined;
-	private component: PanelComponent | undefined;
-	private finishedResolve!: () => void;
-	readonly finished = new Promise<void>((resolve) => {
-		this.finishedResolve = resolve;
-	});
+	private closed = false;
 
 	constructor(
-		private readonly ctx: ExtensionCommandContext,
-		private readonly controller: PanelController,
-		private readonly generation: number,
-	) {}
+		ctx: Pick<ExtensionContext, "ui">,
+		mode: PanelMode,
+		profile: string,
+		size: SizePreset,
+		args: string[] = [],
+	) {
+		this.ctx = ctx;
+		this.mode = mode;
+		this.profile = profile;
+		this.size = size;
+		this.args = args;
+	}
 
-	async run(): Promise<void> {
+	async open(onOpened: (id: string) => void): Promise<void> {
 		try {
 			await this.ctx.ui.custom<void>(
-				(tui, theme, _keybindings, done) => {
+				(tui, theme, _keys, done) => {
 					this.done = done;
-					this.component = new PanelComponent(tui, theme, this.controller);
+					this.component = new SurfacePanel(
+						theme,
+						{
+							mode: this.mode,
+							profile: this.profile,
+							size: this.size.name,
+							args: this.args,
+						},
+						done,
+						this.zBase,
+						() => this.activate(),
+					);
+					this.component.attach(
+						tui.trackSurface(this.component, { mouse: true }),
+					);
+					if (this.closed) done();
 					return this.component;
 				},
 				{
 					overlay: true,
-					overlayOptions: {
+					overlayOptions: () => ({
 						anchor: "top-right",
 						nonCapturing: true,
-						width: this.controller.getSize().width,
-						height: this.controller.getSize().height,
+						width: this.size.width,
+						height: this.size.height,
 						margin: PANEL_MARGIN,
-					},
+						offsetX: -this.cascade * 4,
+						offsetY: this.cascade * 2,
+					}),
 					onHandle: (handle) => {
-						this.handle = handle;
-						this.controller.setHandle(handle);
-						debugLog(`overlay.handle gen=${this.generation}`);
-						this.unsubscribes.push(handle.onRectChange((rect) => this.controller.onOverlayRect(this.generation, rect)));
-						this.unsubscribes.push(handle.onPointer(
-							(event) => this.controller.forwardPointer(event),
-							{ wheel: true, hover: true },
-						));
+						this.component?.setOverlay(handle);
+						if (this.component && !this.closed)
+							onOpened(this.component.gamePanelId);
 					},
 				},
 			);
+		} catch (error) {
+			if (!this.component?.disposed) throw error;
 		} finally {
-			debugLog(`overlay.finally gen=${this.generation}`);
-			for (const unsub of this.unsubscribes) unsub();
-			this.unsubscribes = [];
-			this.controller.setHandle(undefined);
-			this.finishedResolve();
+			this.component?.dispose();
+			floatingPanels.delete(this);
 		}
 	}
 
-	close(): void {
-		debugLog(`overlay.close gen=${this.generation}`);
+	close(reason: string): void {
+		debugLog(`controller.close ${reason}`);
+		floatingPanels.delete(this);
+		this.closed = true;
 		this.done?.();
 	}
-
-	async closeAndWait(): Promise<void> {
-		this.close();
-		await this.finished;
+	private activate(): void {
+		if (this.closed || !floatingPanels.has(this)) return;
+		if ([...floatingPanels].at(-1) === this) return;
+		floatingPanels.delete(this);
+		floatingPanels.add(this);
+		this.component?.raise(FLOATING_Z_BASE + nextFloatingLevel++ * 10000);
 	}
-
-	invalidate(): void {
-		this.component?.invalidate();
+	setSize(size: SizePreset): void {
+		this.size = size;
+		this.component?.setSize(size);
 	}
-
-	afterNextRender(callback: () => void): void {
-		this.component?.afterNextRender(callback);
-	}
-
-	writeRaw(data: string): void {
-		this.component?.writeRaw(data);
+	setProfile(profile: string, args: string[] = []): void {
+		if (profile === this.profile && sameArgs(args, this.args)) return;
+		this.profile = profile;
+		this.args = args;
+		this.component?.setProfile(profile, args);
 	}
 }
 
-class PanelComponent {
-	readonly width: number;
+/** One lifecycle and output path for floating and inline panels. */
+export class SurfacePanel implements ActivePanel {
+	readonly gamePanelId = `panel-${nextGamePanelId++}`;
+	agentPanel() {
+		const game = this.producer?.game;
+		return !this.disposed && this.producer?.ready && game
+			? { id: this.gamePanelId, profile: this.details.profile, game }
+			: undefined;
+	}
+	focused = false;
+	disposed = false;
+	private readonly theme: Theme;
+	private readonly floating: boolean;
+	private zBase: number;
+	private readonly activate: (() => void) | undefined;
+	private readonly window: PanelWindowControls | undefined;
+	private bodyCapture = false;
+	private details: PanelDetails;
+	private surface: SurfaceHandle | undefined;
+	private overlay: OverlayHandle | undefined;
+	private geometry: SurfaceGeometry | undefined;
+	private sync: ViewportSync | undefined;
+	private generation = 0;
+	private producerEpoch = 0;
+	private producer: ProducerConnection | undefined;
+	private batches = new PendingBatches();
+	private pendingCleanup = "";
+	private pointer = new PointerInput();
+	private status = "starting";
+	private error: string | undefined;
 
 	constructor(
-		private readonly tui: { writeRaw(data: string): void; afterNextRender(callback: () => void): void; requestRender(): void },
-		private readonly theme: Theme,
-		private readonly controller: PanelController,
+		theme: Theme,
+		details: PanelDetails,
+		close?: () => void,
+		zBase = INLINE_Z_BASE,
+		activate?: () => void,
 	) {
-		const size = controller.getSize();
-		this.width = typeof size.width === "number" ? size.width : 56;
+		this.theme = theme;
+		this.zBase = zBase;
+		this.activate = activate;
+		this.details = details;
+		liveGamePanels.add(this);
+		this.floating = !!close;
+		if (close)
+			this.window = new PanelWindowControls(
+				() => this.geometry?.bounds,
+				(options) => this.overlay?.updateOptions(options),
+				close,
+			);
+	}
+
+	attach(surface: SurfaceHandle): void {
+		this.surface = surface;
+		surface.onGeometryChange((geometry) => this.onGeometry(geometry));
+		surface.onRender((frame) => {
+			if (this.pendingCleanup) {
+				frame.write(this.pendingCleanup);
+				this.pendingCleanup = "";
+			}
+			if (frame.disposed) {
+				this.batches.flush(frame, false);
+				this.dispose();
+				return;
+			}
+			if (this.disposed) return;
+			if (!this.producer && this.sync) this.startProducer();
+			const visible =
+				!!frame.geometry &&
+				!!this.sync &&
+				bodyHasVisibleCells(
+					this.sync.rect,
+					this.sync.clip,
+					this.sync.occlusions,
+				);
+			this.batches.flush(frame, visible);
+		});
+	}
+
+	setOverlay(overlay: OverlayHandle): void {
+		this.overlay = overlay;
+	}
+	raise(zBase: number): void {
+		if (this.disposed) return;
+		this.zBase = zBase;
+		this.overlay?.focus();
+		if (this.sync) {
+			this.sync = { ...this.sync, generation: ++this.generation };
+			this.batches.setGeneration(this.generation);
+			this.producer?.setViewport(this.sync, this.zBase);
+		}
+		this.surface?.requestRender();
+	}
+	setSize(size: SizePreset): void {
+		this.details = { ...this.details, size: size.name };
+		this.overlay?.updateOptions({ width: size.width, height: size.height });
+		this.surface?.requestRender();
+	}
+	setProfile(profile: string, args: string[]): void {
+		this.handleMouseCancel();
+		this.producerEpoch++;
+		this.producer?.stop("profile-change");
+		this.producer = undefined;
+		// Cleanup is deferred to the next legal graphics write, before the new
+		// producer's first frame. Late callbacks from the old epoch are ignored.
+		this.pendingCleanup += this.batches.dispose();
+		this.batches = new PendingBatches();
+		this.batches.setGeneration(this.generation);
+		this.details = { ...this.details, profile, args };
+		this.status = "starting";
+		this.error = undefined;
+		this.surface?.requestRender();
 	}
 
 	render(width: number): string[] {
-		return this.controller.render(width, this.theme);
+		return renderPanelChrome(width, this.theme, {
+			mode: this.details.mode,
+			profile: this.details.profile,
+			sizeName: this.details.size,
+			rect: this.geometry,
+			viewport: this.sync?.rect,
+			status: this.status,
+			error: this.error,
+			panelRows: this.floating
+				? (this.geometry?.bounds.height ??
+					fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]))
+				: fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]),
+			zBase: this.zBase,
+			focused: this.focused,
+			closeButton: this.floating,
+		});
 	}
-
-	invalidate(): void {
-		this.tui.requestRender();
-	}
-
-	afterNextRender(callback: () => void): void {
-		this.tui.afterNextRender(callback);
-	}
-
-	writeRaw(data: string): void {
-		this.tui.writeRaw(data);
-	}
-
+	invalidate(): void {}
 	handleInput(data: string): void {
-		this.controller.forwardKeystroke(data);
+		this.producer?.game?.cancel();
+		if (!this.disposed)
+			this.producer?.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
+	}
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.disposed || event.type === "click") return undefined;
+		// Let pi record mouse focus before raising the overlay explicitly.
+		if (event.type === "press")
+			queueMicrotask(() => {
+				if (!this.disposed) this.activate?.();
+			});
+		this.producer?.game?.cancel();
+		const chrome = this.window?.handle(event);
+		if (chrome) return chrome;
+		const insideBody =
+			event.x >= 1 &&
+			event.x < event.width - 1 &&
+			event.y >= 3 &&
+			event.y < event.height - 1;
+		if (!this.bodyCapture && !insideBody)
+			return event.type === "press"
+				? { handled: true, focus: true }
+				: undefined;
+		if (event.type === "press") this.bodyCapture = true;
+		if (event.type === "release") this.bodyCapture = false;
+		const message = this.pointer.encode(WINDOW_ID, event);
+		if (message) this.producer?.sendInput(message);
+		return {
+			handled: true,
+			capture: event.type === "press",
+			focus: event.type === "press",
+			render: event.type === "press",
+		};
+	}
+	handleMouseCancel(): void {
+		this.window?.cancel();
+		this.bodyCapture = false;
+		for (const message of this.pointer.cancel(WINDOW_ID))
+			this.producer?.sendInput(message);
+	}
+	close(reason: string): void {
+		debugLog(`panel.close ${reason}`);
+		this.dispose();
+	}
+	dispose(): void {
+		if (this.disposed) return;
+		liveGamePanels.delete(this);
+		this.handleMouseCancel();
+		this.disposed = true;
+		this.producerEpoch++;
+		this.producer?.stop("surface-disposed");
+		this.producer = undefined;
+		this.surface?.dispose();
+		inlinePanels.delete(this);
+	}
+
+	private onGeometry(geometry: SurfaceGeometry | undefined): void {
+		if (this.disposed) return;
+		const oldHeight = this.geometry?.bounds.height;
+		this.geometry = geometry;
+		if (this.floating && oldHeight !== geometry?.bounds.height)
+			this.surface?.requestRender();
+		const body = geometry ? messageLogicalBodyRect(geometry) : undefined;
+		const rect = body ?? this.sync?.rect;
+		if (!rect) return;
+		const clip =
+			body && geometry
+				? clipCellsForBody(body, geometry)
+				: { row: rect.row, col: rect.col, rows: 0, cols: 0 };
+		const occlusions =
+			body && geometry ? occlusionCellsForBody(body, geometry) : [];
+		if (
+			this.sync &&
+			sameRect(this.sync.rect, rect) &&
+			sameOptionalRect(this.sync.clip, clip) &&
+			this.sync.occlusions.length === occlusions.length &&
+			this.sync.occlusions.every((rect, index) =>
+				sameRect(rect, occlusions[index]),
+			)
+		)
+			return;
+		this.sync = { rect, clip, occlusions, generation: ++this.generation };
+		this.batches.setGeneration(this.generation);
+		this.producer?.setViewport(this.sync, this.zBase);
+		debugLog(
+			`surface.geometry gen=${this.generation} body=${formatRect(rect)} clip=${formatRect(clip)}`,
+		);
+		this.surface?.requestRender();
+	}
+
+	private startProducer(): void {
+		const epoch = ++this.producerEpoch;
+		const current = () => !this.disposed && epoch === this.producerEpoch;
+		this.producer = createProducer(
+			this.details.mode,
+			this.details.profile,
+			{
+				onFrame: (batch) => {
+					if (!current()) return;
+					try {
+						this.batches.enqueue(batch);
+					} catch (error) {
+						this.error = String(error);
+						this.producer?.stop("invalid-output");
+					}
+					if (statusLineVisible(this.geometry))
+						this.status = `streaming #${batch.seq}`;
+					this.surface?.requestRender();
+				},
+				onDetached: () => {
+					if (current()) {
+						this.status = "detached";
+						this.surface?.requestRender();
+					}
+				},
+				onStatus: (status) => {
+					if (current()) {
+						this.status = status;
+						this.error = undefined;
+						this.surface?.requestRender();
+					}
+				},
+				onError: (error) => {
+					if (current()) {
+						this.error = error;
+						this.surface?.requestRender();
+					}
+				},
+			},
+			this.zBase,
+			this.details.args ?? [],
+		);
+		this.producer.start();
+		if (this.sync) this.producer.setViewport(this.sync, this.zBase);
 	}
 }
 
@@ -625,24 +753,39 @@ interface PanelChromeArgs {
 	panelRows: number;
 	zBase: number;
 	focused: boolean;
+	closeButton: boolean;
 }
 
-function renderPanelChrome(width: number, theme: Theme, args: PanelChromeArgs): string[] {
+function renderPanelChrome(
+	width: number,
+	theme: Theme,
+	args: PanelChromeArgs,
+): string[] {
 	const innerWidth = Math.max(1, width - 2);
 	// Border color tracks focus state (matches terminal-surface-demo). Border
 	// cell-color when focused → accent; otherwise → border. Plus a [focused]
 	// suffix in the title so it's legible even when colors are subtle.
 	const borderColor: "accent" | "border" = args.focused ? "accent" : "border";
-	const row = (content: string) => theme.fg(borderColor, "│") + fitCellText(content, innerWidth) + theme.fg(borderColor, "│");
+	const row = (content: string) =>
+		theme.fg(borderColor, "│") +
+		fitCellText(content, innerWidth) +
+		theme.fg(borderColor, "│");
 	const lines: string[] = [];
 	const focusedSuffix = args.focused ? " [focused]" : "";
 	const title = ` 🐈 Katzensteg · ${args.mode} · ${args.profile} · ${args.sizeName}${focusedSuffix}`;
-	const status = args.error ? theme.fg("error", ` ${args.error}`) : theme.fg("dim", ` ${args.status}`);
+	const status = args.error
+		? theme.fg("error", ` ${args.error}`)
+		: theme.fg("dim", ` ${args.status}`);
 	const rectLine = args.rect
-		? ` rect ${formatRect(args.rect)} viewport ${formatRect(args.viewport)} z=${args.zBase}`
+		? ` rect ${`${args.rect.bounds.y},${args.rect.bounds.x} ${args.rect.bounds.height}x${args.rect.bounds.width}`} viewport ${formatRect(args.viewport)} z=${args.zBase}`
 		: " waiting for rect";
 	const bodyRows = Math.max(2, args.panelRows - FRAME_OVERHEAD_ROWS);
-	lines.push(theme.fg(borderColor, `╭${"─".repeat(innerWidth)}╮`));
+	lines.push(
+		theme.fg(
+			borderColor,
+			`╭${"─".repeat(Math.max(0, innerWidth - 1))}${args.closeButton ? "×" : "─"}╮`,
+		),
+	);
 	lines.push(row(theme.fg("accent", title)));
 	lines.push(row(args.mode === "layout" ? theme.fg("dim", rectLine) : status));
 	for (let i = 0; i < bodyRows; i++) lines.push(row(""));
@@ -650,252 +793,16 @@ function renderPanelChrome(width: number, theme: Theme, args: PanelChromeArgs): 
 	return lines;
 }
 
-function createProducer(mode: PanelMode, profile: string, callbacks: ProducerCallbacks, zBase: number, args: string[] = []): ProducerConnection {
-	return mode === "live" ? new KatzenstegProducer(profile, callbacks, zBase, args) : new LayoutOnlyProducer(callbacks);
-}
-
-interface InlinePanelTui {
-	writeRaw(data: string): void;
-	afterNextRender(callback: () => void): void;
-	requestRender(): void;
-	// Pi's TUI exposes terminal dimensions on its public `terminal` property.
-	// We need the row count to compute clip_cells correctly when an inline
-	// message is partially or fully scrolled out of the viewport; rect.cols
-	// already mirrors terminal.columns.
-	terminal: { rows: number; columns: number };
-}
-
-class InlinePanelController implements ActivePanel {
-	private readonly producer: ProducerConnection;
-	private unsubscribes: (() => void)[] = [];
-	private started = false;
-	private startScheduled = false;
-	private closing = false;
-	private closed = false;
-	private cleanupSeen = false;
-	private latestRect: OverlayRect | undefined;
-	private latestViewport: RectCells | undefined;
-	private latestSync: ViewportSync | undefined;
-	private status = "starting";
-	private error: string | undefined;
-	private closeTimer: NodeJS.Timeout | undefined;
-
-	constructor(
-		private readonly tui: InlinePanelTui,
-		private readonly theme: Theme,
-		private readonly handle: MessageHandle,
-		private readonly details: PanelDetails,
-	) {
-		this.producer = createProducer(details.mode, details.profile, {
-			onFrame: (batch) => this.onFrame(batch),
-			onDetached: (message) => this.onDetached(message),
-			onStatus: (status) => this.setStatus(status),
-			onError: (error) => this.setError(error),
-		}, INLINE_Z_BASE, details.args ?? []);
-	}
-
-	render(width: number): string[] {
-		if (!this.started && !this.startScheduled && !this.closed) {
-			this.startScheduled = true;
-			this.tui.afterNextRender(() => this.start());
-		}
-		// The inline component's line count must be stable across rect changes:
-		// pi-tui handles scroll clipping itself, and rendering fewer lines when
-		// the message partly scrolls off the top would shrink the buffered
-		// surface (and the producer's body rect with it). Use the configured
-		// preset height, never the visible rect height.
-		const panelRows = fallbackPanelRowsForSize(SIZE_PRESETS[this.details.size]);
-		return renderPanelChrome(width, this.theme, {
-			mode: this.details.mode,
-			profile: this.details.profile,
-			sizeName: this.details.size,
-			rect: this.latestRect,
-			viewport: this.latestViewport,
-			status: this.status,
-			error: this.error,
-			panelRows,
-			zBase: INLINE_Z_BASE,
-			focused: this.handle.isFocused(),
-		});
-	}
-
-	invalidate(): void {}
-
-	// pi-tui delivers raw key bytes here only while this surface is focused.
-	// Esc is intercepted by pi-tui (it releases focus) and never reaches us.
-	handleInput(data: string): void {
-		this.forwardKeystroke(data);
-	}
-
-	close(reason: string): void {
-		if (this.closed || this.closing) return;
-		debugLog(`inline.close reason=${reason}`);
-		this.closing = true;
-		this.cleanupSeen = false;
-		this.status = "closing";
-		for (const unsub of this.unsubscribes) unsub();
-		this.unsubscribes = [];
-		this.producer.stop(reason);
-		this.scheduleCloseFinish(reason, CLOSE_DRAIN_MS);
-		this.tui.requestRender();
-	}
-
-	private start(): void {
-		// Guard against `closing` too: close() may run synchronously before the
-		// afterNextRender callback that calls start(); without this we'd kick
-		// off the producer during the close-drain phase.
-		if (this.started || this.closed || this.closing) return;
-		this.started = true;
-		this.startScheduled = false;
-		debugLog(`inline.start mode=${this.details.mode} profile=${this.details.profile}`);
-		this.producer.start();
-		this.unsubscribes.push(this.handle.onRectChange((rect) => this.onRectChange(rect)));
-		// Forward pointer events to the producer as structured `pointer` input
-		// messages. Wheel and hover are opted in — we want producers (web /
-		// SDL / pygame / love2d) to see the same set of events the host
-		// terminal can plausibly deliver; if a producer can't make sense of a
-		// kind, it just ignores it.
-		this.unsubscribes.push(this.handle.onPointer(
-			(event) => this.forwardPointer(event),
-			{ wheel: true, hover: true },
-		));
-	}
-
-	// Called from this.handleInput when pi-tui delivers a keystroke to the
-	// focused inline component. We pass the raw terminal bytes through
-	// unchanged via the existing `terminal_bytes` input variant — the
-	// producer's TerminalInputParser already knows how to interpret them.
-	private forwardKeystroke(data: string): void {
-		if (this.closed || this.closing) return;
-		this.producer.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, data));
-	}
-
-	private forwardPointer(event: PointerEvent): void {
-		if (this.closed || this.closing) return;
-		this.producer.sendInput(makePointerInputMessage(WINDOW_ID, event));
-	}
-
-	private onRectChange(rect: OverlayRect | undefined): void {
-		if (this.closed || this.closing) return;
-		if (!rect) {
-			// Surface scrolled fully off-screen. If we already attached, send a
-			// zero-clip at the last known logical body so the producer stops
-			// emitting placements; otherwise just clear our render state.
-			this.latestRect = undefined;
-			this.latestViewport = undefined;
-			if (this.latestSync) {
-				// row/col on a zero-sized clip are irrelevant — the producer
-				// emits no placements either way — but we anchor at the body's
-				// own origin to match the convention used elsewhere (the WM's
-				// computeClipForRect does the same).
-				const zeroSync: ViewportSync = {
-					rect: this.latestSync.rect,
-					clip: { row: this.latestSync.rect.row, col: this.latestSync.rect.col, rows: 0, cols: 0 },
-					terminal: this.latestSync.terminal,
-				};
-				this.latestSync = zeroSync;
-				// Captured `zeroSync` is intentionally the value at scheduling
-				// time. afterNextRender callbacks fire in scheduling order, so
-				// if a subsequent onRectChange schedules another setViewport
-				// before this one fires, the producer ends up at the latest
-				// state regardless (KatzenstegProducer.setViewport dedupes via
-				// sameSync against latestSyncSent, so any intermediate replay
-				// of a stale value is also a cheap no-op write).
-				this.tui.afterNextRender(() => {
-					if (this.closed || this.closing) return;
-					this.producer.setViewport(zeroSync);
-				});
-			}
-			this.tui.requestRender();
-			return;
-		}
-		const body = messageLogicalBodyRect(rect);
-		if (!body) return;
-		const clip = clipCellsForBody(body, rect);
-		const terminal: TerminalCells = { rows: this.tui.terminal.rows, cols: this.tui.terminal.columns };
-		const sync: ViewportSync = { rect: body, clip, terminal };
-		this.latestRect = rect;
-		this.latestViewport = body;
-		this.latestSync = sync;
-		debugLog(`inline.rect ${formatRect(rect)} body=${formatRect(body)} clip=${formatRect(clip)}`);
-		this.tui.afterNextRender(() => {
-			if (this.closed || this.closing) return;
-			this.producer.setViewport(sync);
-		});
-		this.tui.requestRender();
-	}
-
-	private onFrame(batch: FrameBatch): void {
-		if (this.closed) return;
-		if (this.closing) {
-			this.status = `closing #${batch.seq}`;
-			const bytes = cleanupTerminalChunks(batch).join("");
-			if (bytes.length > 0) {
-				this.cleanupSeen = true;
-				this.tui.writeRaw(bytes);
-				if (isCleanupOnlyBatch(batch)) this.scheduleCloseFinish("cleanup-drained", CLOSE_AFTER_CLEANUP_MS);
-			}
-			this.tui.requestRender();
-			return;
-		}
-		const bytes = orderedTerminalChunks(batch).join("");
-		debugLog(
-			`inline.frame seq=${batch.seq} d=${batch.groups.deletes.length} u=${batch.groups.uploads.length} p=${batch.groups.placements.length} a=${batch.groups.after.length} bytes=${bytes.length} clip=${formatRect(this.latestSync?.clip)}`,
-		);
-		// Always flush producer bytes — they go via writeRaw and bypass pi-tui's
-		// buffer, so they never trigger redraws.
-		if (bytes.length > 0) this.tui.writeRaw(bytes);
-		// Only mutate the status line (chrome row 2) and request a re-render
-		// when the status line is actually inside the viewport. If it's scrolled
-		// above the top, changing it causes pi-tui's diff to land at
-		// firstChanged < viewportTop, which forces a clearing full redraw — and
-		// the screen clear takes every kitty placement on screen with it,
-		// causing all producers' images to flicker.
-		if (this.statusLineVisible()) {
-			this.status = `streaming #${batch.seq}`;
-			this.tui.requestRender();
-		}
-	}
-
-	private statusLineVisible(): boolean {
-		return statusLineVisible(this.latestRect);
-	}
-
-	private onDetached(message: DetachedMessage): void {
-		debugLog(`inline.detached window=${message.window_id} closing=${this.closing}`);
-		if (this.closed) return;
-		if (this.closing) this.scheduleCloseFinish("detached", 0);
-		else this.status = "detached";
-		this.tui.requestRender();
-	}
-
-	private scheduleCloseFinish(reason: string, delayMs: number): void {
-		if (this.closeTimer) clearTimeout(this.closeTimer);
-		this.closeTimer = setTimeout(() => this.finishClose(reason), delayMs);
-	}
-
-	private finishClose(reason: string): void {
-		if (this.closed) return;
-		debugLog(`inline.finishClose reason=${reason} cleanupSeen=${this.cleanupSeen}`);
-		this.closed = true;
-		this.closing = false;
-		if (this.closeTimer) {
-			clearTimeout(this.closeTimer);
-			this.closeTimer = undefined;
-		}
-		inlinePanels.delete(this);
-	}
-
-	private setStatus(status: string): void {
-		this.status = status;
-		this.error = undefined;
-		this.tui.requestRender();
-	}
-
-	private setError(error: string): void {
-		this.error = error;
-		this.tui.requestRender();
-	}
+function createProducer(
+	mode: PanelMode,
+	profile: string,
+	callbacks: ProducerCallbacks,
+	zBase: number,
+	args: string[] = [],
+): ProducerConnection {
+	return mode === "live"
+		? new KatzenstegProducer(profile, callbacks, zBase, args)
+		: new LayoutOnlyProducer(callbacks);
 }
 
 interface ProducerCallbacks {
@@ -906,16 +813,21 @@ interface ProducerCallbacks {
 }
 
 interface ProducerConnection {
+	readonly game?: GameInteraction;
+	readonly ready?: boolean;
 	start(): void;
-	setViewport(sync: ViewportSync): void;
+	setViewport(sync: ViewportSync, zBase: number): void;
 	sendInput(message: object): void;
 	stop(reason: string): void;
 }
 
 class LayoutOnlyProducer implements ProducerConnection {
 	private latestSync: ViewportSync | undefined;
+	private readonly callbacks: ProducerCallbacks;
 
-	constructor(private readonly callbacks: ProducerCallbacks) {}
+	constructor(callbacks: ProducerCallbacks) {
+		this.callbacks = callbacks;
+	}
 
 	start(): void {
 		debugLog("producer.layout.start");
@@ -925,7 +837,9 @@ class LayoutOnlyProducer implements ProducerConnection {
 	setViewport(sync: ViewportSync): void {
 		if (sameSync(this.latestSync, sync)) return;
 		this.latestSync = sync;
-		debugLog(`producer.layout.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
+		debugLog(
+			`producer.layout.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`,
+		);
 		this.callbacks.onStatus(`layout viewport ${formatRect(sync.rect)}`);
 	}
 
@@ -939,22 +853,116 @@ class LayoutOnlyProducer implements ProducerConnection {
 }
 
 class KatzenstegProducer implements ProducerConnection {
+	get ready(): boolean {
+		return !!this.child && this.attached && !this.child.stdin.destroyed;
+	}
+	readonly game = new GameInteraction({
+		observe: (signal) => this.observe(signal),
+		input: (message) => {
+			if (!this.child || !this.attached || this.child.stdin.destroyed)
+				throw new Error("Game panel is not attached");
+			this.sendInput(message);
+		},
+	});
+	private observationId = 0;
+	private pendingObservations = new Map<
+		number,
+		{ finish: (message?: Record<string, unknown>, error?: Error) => void }
+	>();
+
+	private observe(signal: AbortSignal): Promise<Observation | undefined> {
+		signal.throwIfAborted();
+		if (!this.child || !this.attached)
+			return Promise.reject(new Error("Game panel is not attached yet"));
+		const id = ++this.observationId;
+		const snapshotPath = path.join(this.uploadDir, `observation-${id}.rgba`);
+		return new Promise((resolve, reject) => {
+			const abort = () => finish(undefined, new Error("Observation cancelled"));
+			const timer = setTimeout(
+				() =>
+					finish(
+						undefined,
+						new Error(
+							"Producer did not answer observation request; it may still be starting, have exited, or need rebuilding",
+						),
+					),
+				2000,
+			);
+			const finish = (message?: Record<string, unknown>, error?: Error) => {
+				clearTimeout(timer);
+				signal.removeEventListener("abort", abort);
+				this.pendingObservations.delete(id);
+				try {
+					if (error) throw error;
+					if (message?.error === "NoFrame") {
+						resolve(undefined);
+						return;
+					}
+					if (message?.error) throw new Error(String(message.error));
+					const width = Number(message?.width),
+						height = Number(message?.height);
+					const frameId = Number(message?.frame_id),
+						timestampMs = Number(message?.timestamp_ms);
+					if (
+						!Number.isSafeInteger(frameId) ||
+						frameId < 1 ||
+						!Number.isSafeInteger(timestampMs)
+					)
+						throw new Error("Invalid observation metadata");
+					resolve(
+						rgbaPng(width, height, readFileSync(snapshotPath)).then((png) => ({
+							width,
+							height,
+							frameId,
+							timestampMs,
+							png,
+						})),
+					);
+				} catch (error) {
+					reject(error);
+				} finally {
+					rmSync(snapshotPath, { force: true });
+				}
+			};
+			this.pendingObservations.set(id, { finish });
+			signal.addEventListener("abort", abort, { once: true });
+			this.writeControl(
+				`${JSON.stringify({ type: "observe", window_id: WINDOW_ID, request_id: id, path: snapshotPath })}\n`,
+			);
+		});
+	}
+	private cancelAgent(reason: string): void {
+		this.game.cancel(reason);
+		for (const pending of [...this.pendingObservations.values()])
+			pending.finish(undefined, new Error(reason));
+	}
+
+	private readonly profile: string;
+	private readonly callbacks: ProducerCallbacks;
+	private zBase: number;
+	private readonly args: string[];
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private carry = "";
 	private attached = false;
 	private latestSyncSent: ViewportSync | undefined;
 	private killTimer: NodeJS.Timeout | undefined;
-	private readonly uploadDir = mkdtempSync(path.join(os.tmpdir(), "katzensteg-pi-"));
+	private readonly uploadDir = mkdtempSync(
+		path.join(os.tmpdir(), "katzensteg-pi-"),
+	);
 	private readonly uploadPath = path.join(this.uploadDir, "embed-upload.rgba");
 	private readonly imageIds: [number, number];
 	private readonly placementIds: [number, number];
 
 	constructor(
-		private readonly profile: string,
-		private readonly callbacks: ProducerCallbacks,
-		private readonly zBase: number,
-		private readonly args: string[] = [],
+		profile: string,
+		callbacks: ProducerCallbacks,
+		zBase: number,
+		args: string[] = [],
 	) {
+		this.profile = profile;
+		this.callbacks = callbacks;
+		this.zBase = zBase;
+		this.args = args;
 		const ranges = allocateIdRanges();
 		this.imageIds = ranges.imageIds;
 		this.placementIds = ranges.placementIds;
@@ -963,7 +971,9 @@ class KatzenstegProducer implements ProducerConnection {
 	start(): void {
 		if (this.child) return;
 		const bin = this.binaryPath();
-		debugLog(`producer.live.start bin=${bin} profile=${this.profile} args=${JSON.stringify(this.args)}`);
+		debugLog(
+			`producer.live.start bin=${bin} profile=${this.profile} args=${JSON.stringify(this.args)}`,
+		);
 		this.callbacks.onStatus("launching");
 		// Program args (after the profile) are forwarded to the launcher, which
 		// appends them after the profile's own configured args.
@@ -977,37 +987,56 @@ class KatzenstegProducer implements ProducerConnection {
 		this.child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
 		this.child.stderr.on("data", (chunk: string) => this.onStderr(chunk));
 		this.child.on("error", (error) => {
+			this.cancelAgent("Game process failed");
 			debugLog(`producer.live.error ${error.message}`);
 			this.callbacks.onError?.(error.message);
 		});
 		this.child.on("close", (code, signal) => {
-			debugLog(`producer.live.close code=${code ?? "null"} signal=${signal ?? "null"}`);
+			this.cancelAgent("Game exited");
+			debugLog(
+				`producer.live.close code=${code ?? "null"} signal=${signal ?? "null"}`,
+			);
 			if (this.killTimer) clearTimeout(this.killTimer);
+			rmSync(this.uploadDir, { recursive: true, force: true });
 			this.child = undefined;
 			this.attached = false;
 			this.latestSyncSent = undefined;
-			this.callbacks.onStatus(signal ? `exited ${signal}` : `exited ${code ?? 0}`);
+			this.callbacks.onStatus(
+				signal ? `exited ${signal}` : `exited ${code ?? 0}`,
+			);
 		});
 	}
 
-	setViewport(sync: ViewportSync): void {
+	setViewport(sync: ViewportSync, zBase: number): void {
+		this.zBase = zBase;
 		if (!this.child?.stdin) {
-			debugLog(`producer.live.viewport skipped no child viewport=${formatRect(sync.rect)}`);
+			debugLog(
+				`producer.live.viewport skipped no child viewport=${formatRect(sync.rect)}`,
+			);
 			return;
 		}
 		if (!this.attached) {
-			debugLog(`producer.live.attach ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
-			this.writeControl(makeAttachMessage({
-				windowId: WINDOW_ID,
-				rectCells: sync.rect,
-				clipCells: sync.clip,
-				terminalCells: sync.terminal,
-				aspect: PANEL_ASPECT,
-				zBase: this.zBase,
-				imageIds: this.imageIds,
-				placementIds: this.placementIds,
-				upload: { profile: "file_whole", path: this.uploadPath, highWater: DEFAULT_UPLOAD_HIGH_WATER },
-			}));
+			debugLog(
+				`producer.live.attach ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`,
+			);
+			this.writeControl(
+				makeAttachMessage({
+					windowId: WINDOW_ID,
+					generation: sync.generation,
+					rectCells: sync.rect,
+					clipCells: sync.clip,
+					occlusions: sync.occlusions,
+					aspect: PANEL_ASPECT,
+					zBase: this.zBase,
+					imageIds: this.imageIds,
+					placementIds: this.placementIds,
+					upload: {
+						profile: "file_whole",
+						path: this.uploadPath,
+						highWater: DEFAULT_UPLOAD_HIGH_WATER,
+					},
+				}),
+			);
 			this.attached = true;
 			this.latestSyncSent = sync;
 			this.callbacks.onStatus("attached");
@@ -1017,15 +1046,20 @@ class KatzenstegProducer implements ProducerConnection {
 			debugLog(`producer.live.viewport no-op ${formatRect(sync.rect)}`);
 			return;
 		}
-		debugLog(`producer.live.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`);
-		this.writeControl(makeViewportMessage({
-			windowId: WINDOW_ID,
-			rectCells: sync.rect,
-			clipCells: sync.clip,
-			terminalCells: sync.terminal,
-			aspect: PANEL_ASPECT,
-			zBase: this.zBase,
-		}));
+		debugLog(
+			`producer.live.viewport ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`,
+		);
+		this.writeControl(
+			makeViewportMessage({
+				windowId: WINDOW_ID,
+				generation: sync.generation,
+				rectCells: sync.rect,
+				clipCells: sync.clip,
+				occlusions: sync.occlusions,
+				aspect: PANEL_ASPECT,
+				zBase: this.zBase,
+			}),
+		);
 		this.latestSyncSent = sync;
 		this.callbacks.onStatus("viewport");
 	}
@@ -1036,13 +1070,17 @@ class KatzenstegProducer implements ProducerConnection {
 		// is gone (panel closing) — no need to spam logs in that case.
 		if (!this.child?.stdin || this.child.stdin.destroyed) return;
 		if (!this.attached) return;
-		this.writeControl(JSON.stringify(message) + "\n");
+		this.writeControl(`${JSON.stringify(message)}\n`);
 	}
 
 	stop(reason: string): void {
+		this.cancelAgent(reason);
 		const child = this.child;
-		debugLog(`producer.live.stop reason=${reason} child=${child ? "yes" : "no"} attached=${this.attached}`);
+		debugLog(
+			`producer.live.stop reason=${reason} child=${child ? "yes" : "no"} attached=${this.attached}`,
+		);
 		if (!child) return;
+		if (this.killTimer) clearTimeout(this.killTimer);
 		if (child.stdin && !child.stdin.destroyed) {
 			// Match the WM host: shutdown is the close primitive. The runtime handles
 			// shutdown by flushing producer-owned delete placements and then emitting
@@ -1052,10 +1090,19 @@ class KatzenstegProducer implements ProducerConnection {
 			child.stdin.end();
 		}
 		if (child.exitCode === null && child.signalCode === null && !child.killed) {
+			// The launcher owns child-group cleanup: 1500 ms grace, then TERM
+			// and KILL 250 ms later. Do not interrupt that escalation.
 			this.killTimer = setTimeout(() => {
-				debugLog(`producer.live.stop timeout exitCode=${child.exitCode ?? "null"} signal=${child.signalCode ?? "null"} killed=${child.killed}`);
-				if (child.exitCode === null && child.signalCode === null && !child.killed) child.kill("SIGTERM");
-			}, 1000);
+				debugLog(
+					`producer.live.stop timeout exitCode=${child.exitCode ?? "null"} signal=${child.signalCode ?? "null"} killed=${child.killed}`,
+				);
+				if (
+					child.exitCode === null &&
+					child.signalCode === null &&
+					!child.killed
+				)
+					child.kill("SIGTERM");
+			}, 3000);
 		}
 		this.attached = false;
 		this.latestSyncSent = undefined;
@@ -1068,7 +1115,8 @@ class KatzenstegProducer implements ProducerConnection {
 		}
 		debugLog(`producer.live.write ${message.trim()}`);
 		this.child.stdin.write(message, (error) => {
-			if (error) debugLog(`producer.live.write callback error=${error.message}`);
+			if (error)
+				debugLog(`producer.live.write callback error=${error.message}`);
 		});
 	}
 
@@ -1084,7 +1132,23 @@ class KatzenstegProducer implements ProducerConnection {
 			const line = this.carry.slice(0, newline);
 			this.carry = this.carry.slice(newline + 1);
 			lines++;
-			const message = parseProducerLine(line);
+			try {
+				const reply = JSON.parse(line);
+				if (reply?.type === "observation") {
+					this.pendingObservations.get(reply.request_id)?.finish(reply);
+					continue;
+				}
+			} catch {
+				/* The existing graphics parser reports malformed output. */
+			}
+			let message: FrameBatch | DetachedMessage | null;
+			try {
+				message = parseProducerLine(line);
+			} catch (error) {
+				this.callbacks.onError?.(String(error));
+				this.stop("protocol-error");
+				return;
+			}
 			if (!message) {
 				debugLog(`producer.live.stdout ignored ${line.slice(0, 160)}`);
 				continue;
@@ -1096,14 +1160,20 @@ class KatzenstegProducer implements ProducerConnection {
 		}
 		const us = Number((process.hrtime.bigint() - start) / 1000n);
 		if (us >= 1000 || lines > 0) {
-			debugLog(`producer.live.chunk seq=${seq} profile=${this.profile} bytes=${chunk.length} lines=${lines} frames=${frames} us=${us}`);
+			debugLog(
+				`producer.live.chunk seq=${seq} profile=${this.profile} bytes=${chunk.length} lines=${lines} frames=${frames} us=${us}`,
+			);
 		}
 	}
 
 	private onStderr(chunk: string): void {
-		const lines = chunk.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+		const lines = chunk
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean);
 		if (lines.length === 0) return;
-		const last = lines[lines.length - 1]!;
+		const last = lines.at(-1);
+		if (!last) return;
 		debugLog(`producer.live.stderr ${last}`);
 		this.callbacks.onError?.(last);
 	}
@@ -1120,6 +1190,7 @@ class KatzenstegProducer implements ProducerConnection {
 function producerEnv(): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
+		KATZENSTEG_OBSERVE: "1",
 	};
 	if (PANEL_WINDOW_POLICY) env.KATZENSTEG_WINDOW_POLICY = PANEL_WINDOW_POLICY;
 	if (PANEL_REAL_WINDOW) env.KATZENSTEG_REAL_WINDOW = PANEL_REAL_WINDOW;
@@ -1138,37 +1209,54 @@ function fallbackPanelRowsForSize(size: SizePreset): number {
 }
 
 function makeAttachMessage(options: AttachOptions): string {
-	return JSON.stringify({
+	return `${JSON.stringify({
 		type: "attach",
 		window_id: options.windowId,
+		presentation_generation: options.generation,
 		rect_cells: options.rectCells,
-		...(options.clipCells === undefined ? {} : { clip_cells: options.clipCells }),
-		...(options.terminalCells === undefined ? {} : { terminal_cells: options.terminalCells }),
+		occlusion_rects: options.occlusions,
+		...(options.clipCells === undefined
+			? {}
+			: { clip_cells: options.clipCells }),
+		...(options.terminalCells === undefined
+			? {}
+			: { terminal_cells: options.terminalCells }),
 		aspect: options.aspect,
 		z_base: options.zBase,
-		id_ranges: { image: [options.imageIds], placement: [options.placementIds] },
+		id_ranges: {
+			image: [options.imageIds],
+			placement: [options.placementIds],
+		},
 		upload: {
 			profile: options.upload.profile,
-			...(options.upload.path === undefined ? {} : { path: options.upload.path }),
+			...(options.upload.path === undefined
+				? {}
+				: { path: options.upload.path }),
 			high_water: options.upload.highWater,
 		},
-	}) + "\n";
+	})}\n`;
 }
 
 function makeViewportMessage(options: ViewportOptions): string {
-	return JSON.stringify({
+	return `${JSON.stringify({
 		type: "viewport",
 		window_id: options.windowId,
+		presentation_generation: options.generation,
 		rect_cells: options.rectCells,
-		...(options.clipCells === undefined ? {} : { clip_cells: options.clipCells }),
-		...(options.terminalCells === undefined ? {} : { terminal_cells: options.terminalCells }),
+		occlusion_rects: options.occlusions,
+		...(options.clipCells === undefined
+			? {}
+			: { clip_cells: options.clipCells }),
+		...(options.terminalCells === undefined
+			? {}
+			: { terminal_cells: options.terminalCells }),
 		aspect: options.aspect,
 		z_base: options.zBase,
-	}) + "\n";
+	})}\n`;
 }
 
 function makeShutdownMessage(): string {
-	return JSON.stringify({ type: "shutdown" }) + "\n";
+	return `${JSON.stringify({ type: "shutdown" })}\n`;
 }
 
 function parseProducerLine(line: string): FrameBatch | DetachedMessage | null {
@@ -1184,7 +1272,16 @@ function parseProducerLine(line: string): FrameBatch | DetachedMessage | null {
 		return { type: "detached", window_id: message.window_id };
 	}
 	if (message.type !== "frame_batch") return null;
-	if (typeof message.window_id !== "string" || typeof message.seq !== "number") return null;
+	if (typeof message.window_id !== "string" || typeof message.seq !== "number")
+		return null;
+	if (
+		!Number.isSafeInteger(message.presentation_generation) ||
+		Number(message.presentation_generation) < 0
+	) {
+		throw new Error(
+			"Katzensteg producer lacks presentation generations; rebuild the local producer",
+		);
+	}
 	if (!isRecord(message.groups)) return null;
 	const groups = message.groups;
 	if (!isStringArray(groups.deletes)) return null;
@@ -1195,30 +1292,24 @@ function parseProducerLine(line: string): FrameBatch | DetachedMessage | null {
 		type: "frame_batch",
 		window_id: message.window_id,
 		seq: message.seq,
-		groups: { deletes: groups.deletes, uploads: groups.uploads, placements: groups.placements, after: groups.after },
+		presentation_generation: Number(message.presentation_generation),
+		groups: {
+			deletes: groups.deletes,
+			uploads: groups.uploads,
+			placements: groups.placements,
+			after: groups.after,
+		},
 	};
 }
 
-function orderedTerminalChunks(batch: FrameBatch): string[] {
-	return [...batch.groups.deletes, ...batch.groups.uploads, ...batch.groups.placements, ...batch.groups.after];
-}
-
-function cleanupTerminalChunks(batch: FrameBatch): string[] {
-	// While closing, replay renderer-authored cleanup but do not accept any late
-	// uploads or placements that could make the panel visible again after detach.
-	return [...batch.groups.deletes, ...batch.groups.after];
-}
-
-function isCleanupOnlyBatch(batch: FrameBatch): boolean {
-	return batch.groups.deletes.length > 0 && batch.groups.uploads.length === 0 && batch.groups.placements.length === 0;
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item) => typeof item === "string");
+	return (
+		Array.isArray(value) && value.every((item) => typeof item === "string")
+	);
 }
 
 function fitCellText(value: string, width: number): string {
@@ -1239,10 +1330,15 @@ function nonEmptyEnv(value: string | undefined): string | undefined {
 }
 
 function sameRect(a: RectCells, b: RectCells): boolean {
-	return a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+	return (
+		a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols
+	);
 }
 
-function sameOptionalRect(a: RectCells | undefined, b: RectCells | undefined): boolean {
+function sameOptionalRect(
+	a: RectCells | undefined,
+	b: RectCells | undefined,
+): boolean {
 	if (!a && !b) return true;
 	if (!a || !b) return false;
 	return sameRect(a, b);
@@ -1250,10 +1346,11 @@ function sameOptionalRect(a: RectCells | undefined, b: RectCells | undefined): b
 
 function sameSync(a: ViewportSync | undefined, b: ViewportSync): boolean {
 	if (!a) return false;
-	return sameRect(a.rect, b.rect)
-		&& sameOptionalRect(a.clip, b.clip)
-		&& a.terminal.rows === b.terminal.rows
-		&& a.terminal.cols === b.terminal.cols;
+	return (
+		sameRect(a.rect, b.rect) &&
+		sameOptionalRect(a.clip, b.clip) &&
+		a.generation === b.generation
+	);
 }
 
 function formatRect(rect: RectCells | undefined): string {

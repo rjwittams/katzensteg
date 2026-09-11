@@ -93,7 +93,7 @@ extern _Bool ks_SDL_ShowCursor(void);
 extern _Bool ks_SDL_HideCursor(void);
 extern void ks_SDL_DestroyCursor(struct SDL_Cursor *);
 extern void ks_katzensteg_shutdown(void);
-extern void *ks_dlopen(const char *, int);
+#include "dlopen_macos.h"
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
 
 __attribute__((constructor))
@@ -248,6 +248,6 @@ DYLD_INTERPOSE(ks_SDL_SetCursor, SDL_SetCursor)
 DYLD_INTERPOSE(ks_SDL_ShowCursor, SDL_ShowCursor)
 DYLD_INTERPOSE(ks_SDL_HideCursor, SDL_HideCursor)
 DYLD_INTERPOSE(ks_SDL_DestroyCursor, SDL_DestroyCursor)
-DYLD_INTERPOSE(ks_dlopen, dlopen)
+DYLD_INTERPOSE(ks_macos_dlopen, dlopen)
 
 #endif

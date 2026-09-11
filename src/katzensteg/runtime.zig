@@ -151,6 +151,8 @@ fn optionalEqual(comptime T: type, a: ?T, b: ?T) bool {
 }
 
 pub const Runtime = struct {
+    observation: @import("frame_observation.zig").FrameObservation = .{},
+    observation_enabled: bool = false,
     allocator: std.mem.Allocator,
     logger: Logger,
     tty: ?DirectTty = null,
@@ -237,6 +239,7 @@ pub const Runtime = struct {
         const debug_composite = config.debug_composite;
         const trace_blocking = blocking_trace.settingsFromEnv();
         var runtime = Runtime{
+            .observation_enabled = std.c.getenv("KATZENSTEG_OBSERVE") != null,
             .allocator = allocator,
             .logger = logger,
             .frame_builder = FrameBuilder.init(allocator, stats, config.composite_mode, dump_composites, debug_composite),
@@ -483,6 +486,7 @@ pub const Runtime = struct {
             self.pollTerminalInput();
         }
         if (self.input_parser) |*parser| parser.deinit();
+        self.observation.deinit(self.allocator);
         self.frame_builder.deinit();
         self.cursor_state.deinit();
         if (self.backend) |*backend| backend.deinit();
@@ -726,6 +730,7 @@ pub const Runtime = struct {
             if (!self.batch_sink.?.isAttached()) return;
             const start_ns = std.time.nanoTimestamp();
             self.queuePendingBatchPresentationReset();
+            self.observation.pixels.clearRetainingCapacity(); // External capture observation is not supported yet.
             self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, self.batch_writer.?.deprecatedWriter());
             var virtual_tty = self.batchVirtualTty();
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
@@ -788,6 +793,16 @@ pub const Runtime = struct {
             return;
         };
         defer job.deinit(self.allocator);
+        if (self.observation_enabled) {
+            switch (job) {
+                .framebuffer => |fb| self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {},
+                .scene => {
+                    if (self.frame_builder.buildObservationFrame(&self.logger, renderer, self.cursor_state.snapshot())) |fb| {
+                        self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {};
+                    } else |_| self.observation.pixels.clearRetainingCapacity();
+                },
+            }
+        }
         self.queuePendingBatchPresentationReset();
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
@@ -902,6 +917,7 @@ pub const Runtime = struct {
         const sink = &(self.batch_sink orelse return);
         switch (control) {
             .attach => |attach| {
+                if (!self.advanceBatchGeneration(sink, attach.presentation_generation)) return;
                 log.info(
                     "batch attach window={s} rect=({d},{d} {d}x{d}) aspect={s} z_base={d} image_ids={d}..{d} placement_ids={d}..{d} upload={s}",
                     .{
@@ -954,6 +970,8 @@ pub const Runtime = struct {
                 const previous_terminal = sink.terminalGeometry();
                 const previous_occlusions = sink.occlusionRects();
                 const previous_clip = sink.clipCells();
+                const generation_changed = sink.presentation_generation != viewport.presentation_generation;
+                if (!self.advanceBatchGeneration(sink, viewport.presentation_generation)) return;
                 log.info(
                     "batch viewport window={s} from=({d},{d} {d}x{d})/{s}/z={d} to=({d},{d} {d}x{d})/{s}/z={d}",
                     .{
@@ -975,7 +993,7 @@ pub const Runtime = struct {
                 const terminal_changed = if (viewport.terminal) |terminal| previous_terminal == null or !std.meta.eql(previous_terminal.?, terminal) else false;
                 const occlusions_changed = !presentationRectsEqual(previous_occlusions, viewport.occlusion_rects);
                 const clip_changed = !std.meta.eql(previous_clip, viewport.clip_cells);
-                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed or occlusions_changed or clip_changed;
+                const presentation_changed = !std.meta.eql(previous, viewport.rect_cells) or previous_aspect != viewport.aspect or previous_z_base != viewport.z_base or terminal_changed or occlusions_changed or clip_changed or generation_changed or viewport.refresh_placements;
                 if (presentation_changed) {
                     self.batch_presentation_reset_pending = true;
                     self.last_batch_presentation_status = null;
@@ -1010,6 +1028,17 @@ pub const Runtime = struct {
                     );
                 }
             },
+            .observe => |request| {
+                const output = self.batch_writer orelse return;
+                const writer = output.deprecatedWriter();
+                self.observation.write(request.path) catch |err| {
+                    writer.print("{{\"type\":\"observation\",\"request_id\":{d},\"error\":\"{s}\"}}\n", .{ request.request_id, @errorName(err) }) catch {};
+                    return;
+                };
+                writer.print("{{\"type\":\"observation\",\"request_id\":{d},\"width\":{d},\"height\":{d},\"frame_id\":{d},\"timestamp_ms\":{d}}}\n", .{
+                    request.request_id, self.observation.width, self.observation.height, self.observation.frame_id, self.observation.timestamp_ms,
+                }) catch {};
+            },
             .input => |input| {
                 if (!self.input_enabled) return;
                 self.lockInput("apply_batch_control_input");
@@ -1019,6 +1048,12 @@ pub const Runtime = struct {
                     .terminal_bytes => |bytes| {
                         parser.feed(bytes) catch |err| {
                             log.warn("batch input parse failed: {any}", .{err});
+                            return;
+                        };
+                    },
+                    .source_pointer => |event| {
+                        parser.injectSourcePointer(event) catch |err| {
+                            log.warn("source pointer inject failed: {any}", .{err});
                             return;
                         };
                     },
@@ -1038,6 +1073,22 @@ pub const Runtime = struct {
                 self.detachBatchWindow(sink, "main");
             },
         }
+    }
+
+    // Called under presentation_mutex, before changing geometry. Pending bytes
+    // retain the generation under which they were composed, including uploads
+    // and deletes the host must process even if it rejects stale placements.
+    fn advanceBatchGeneration(self: *Runtime, sink: *RenderBatchSink, generation: u64) bool {
+        if (sink.presentation_generation == generation) return true;
+        if (sink.hasPendingBytes()) {
+            const writer = self.batch_writer orelse return false;
+            sink.flushFrame(writer.deprecatedWriter()) catch |err| {
+                log.warn("batch generation flush failed: {any}", .{err});
+                return false;
+            };
+        }
+        sink.presentation_generation = generation;
+        return true;
     }
 
     fn detachBatchWindow(self: *Runtime, sink: *RenderBatchSink, window_id: []const u8) void {
@@ -1549,6 +1600,57 @@ test "batch viewport immediately reprojects retained presentation when writer is
     const n = try std.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
+    try std.testing.expect(!runtime.batch_presentation_reset_pending);
+}
+
+test "batch generation fences pending bytes and refreshes unchanged retained placements" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.processBatchControlLine(
+        \\{"type":"attach","window_id":"main","presentation_generation":1,"rect_cells":{"row":5,"col":11,"rows":20,"cols":40},"aspect":"fit","id_ranges":{"image":[[100000,100010]],"placement":[[200000,200010]]}}
+    );
+    const renderer: core.CoreHandle = 0x7777;
+    runtime.frame_builder.onCreateWindow(0x6666, 640, 480);
+    runtime.frame_builder.onCreateRenderer(0x6666, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+    var tty = runtime.batch_sink.?.presentationTty();
+    var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
+    defer job.deinit(runtime.allocator);
+    var first = std.ArrayList(u8).empty;
+    defer first.deinit(std.testing.allocator);
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first.writer(std.testing.allocator));
+    try std.testing.expect(std.mem.indexOf(u8, first.items, "\"presentation_generation\":1") != null);
+
+    // Pending resource operations must keep their old generation; they cannot
+    // silently inherit the next viewport's identity during the eventual flush.
+    try runtime.batch_sink.?.deleteImageData(100009);
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","presentation_generation":2,"rect_cells":{"row":5,"col":11,"rows":20,"cols":40},"aspect":"fit"}
+    );
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","presentation_generation":2,"refresh_placements":true,"rect_cells":{"row":5,"col":11,"rows":20,"cols":40},"aspect":"fit"}
+    );
+    // An identical request without refresh must not create another batch.
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","presentation_generation":2,"rect_cells":{"row":5,"col":11,"rows":20,"cols":40},"aspect":"fit"}
+    );
+    setNonblocking(pipe[0]);
+    var buf: [16384]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+    const pending = lines.next().?;
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"presentation_generation\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "i=100009") != null);
+    for (0..2) |_| {
+        const refresh = lines.next().?;
+        try std.testing.expect(std.mem.indexOf(u8, refresh, "\"presentation_generation\":2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refresh, "a=p") != null);
+    }
+    try std.testing.expect(lines.next() == null);
     try std.testing.expect(!runtime.batch_presentation_reset_pending);
 }
 

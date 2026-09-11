@@ -46,6 +46,7 @@ pub const RenderBatchSink = struct {
     allocator: std.mem.Allocator,
     window_id: []const u8,
     seq: u64 = 0,
+    presentation_generation: u64 = 0,
     deletes: std.ArrayList([]u8) = .empty,
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
@@ -300,6 +301,7 @@ pub const RenderBatchSink = struct {
         try render_batch_protocol.writeFrameBatchJsonl(self.allocator, writer, .{
             .window_id = self.window_id,
             .seq = self.seq,
+            .presentation_generation = self.presentation_generation,
             .deletes = self.deletes.items,
             .uploads = self.uploads.items,
             .placements = self.placements.items,

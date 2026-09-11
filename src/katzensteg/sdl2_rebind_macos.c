@@ -76,7 +76,8 @@ KS_DECLARE_CAPTURE(SDL_ConvertSurfaceFormat);
 KS_DECLARE_CAPTURE(SDL_FreeSurface);
 KS_DECLARE_CAPTURE(SDL_GetError);
 
-extern void *ks_dlopen(const char *, int);
+#define KS_DLOPEN_REBIND
+#include "dlopen_macos.h"
 extern void *ks_real_macos_slot_dlopen;
 
 static const struct ks_darwin_rebinding sdl2_rebindings[] = {
@@ -142,7 +143,7 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_REPLACE(SDL_FreeCursor),
     KS_CAPTURE(SDL_GetError),
     KS_CAPTURE(SDL_QueryTexture),
-    { "dlopen", (void *)ks_dlopen, &ks_real_macos_slot_dlopen },
+    { "dlopen", (void *)ks_macos_dlopen, &ks_real_macos_slot_dlopen },
 };
 
 void ks_macos_register_sdl2_rebindings(void) {
