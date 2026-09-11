@@ -21,7 +21,14 @@ test("agent Escape sends a complete key sequence without needing another input",
 		input: (message) => sent.push(message),
 	});
 	await game.act([{ type: "key", key: "escape" }]);
-	assert.deepEqual(sent, [{ type: "input", window_id: "main", event: "terminal_bytes", bytes: "\x1b[27u" }]);
+	assert.deepEqual(sent, [
+		{
+			type: "input",
+			window_id: "main",
+			event: "terminal_bytes",
+			bytes: "\x1b[27u",
+		},
+	]);
 });
 test("actions use full image pixels and release click before human takeover", async () => {
 	const sent: Record<string, unknown>[] = [];
@@ -95,9 +102,9 @@ test("abort releases a held button and overlapping operations fail", async () =>
 	await assert.rejects(action, /Cancelled/);
 	assert.equal(sent.at(-1)?.kind, "pointerup");
 });
-test("PNG preserves exact RGBA pixels and dimensions", () => {
+test("PNG preserves exact RGBA pixels and dimensions", async () => {
 	const rgba = Buffer.from([255, 0, 0, 255, 0, 255, 0, 128]);
-	const png = rgbaPng(2, 1, rgba);
+	const png = await rgbaPng(2, 1, rgba);
 	assert.equal(png.readUInt32BE(16), 2);
 	assert.equal(png.readUInt32BE(20), 1);
 	const compressedLength = png.readUInt32BE(33);
@@ -105,7 +112,32 @@ test("PNG preserves exact RGBA pixels and dimensions", () => {
 		inflateSync(png.subarray(41, 41 + compressedLength)),
 		Buffer.concat([Buffer.from([0]), rgba]),
 	);
-	assert.throws(() => rgbaPng(3, 1, rgba), /Invalid/);
+	await assert.rejects(rgbaPng(3, 1, rgba), /Invalid/);
+});
+
+test("PNG compression lets the event loop run before completion", async () => {
+	let yielded = false;
+	const turn = new Promise<void>((resolve) =>
+		setImmediate(() => {
+			yielded = true;
+			resolve();
+		}),
+	);
+	await rgbaPng(1024, 1024, Buffer.alloc(1024 * 1024 * 4));
+	assert.equal(yielded, true);
+	await turn;
+});
+
+test("cancellation during asynchronous observation rejects the operation", async () => {
+	const abort = new AbortController();
+	const game = new GameInteraction({
+		observe: async () => {
+			abort.abort(new Error("Cancelled"));
+			return frame();
+		},
+		input: () => assert.fail("unexpected input"),
+	});
+	await assert.rejects(game.observe({}, abort.signal), /Cancelled/);
 });
 
 test("invalid keys do not enter the input stream", async () => {

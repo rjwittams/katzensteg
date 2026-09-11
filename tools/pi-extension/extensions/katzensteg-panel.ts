@@ -909,13 +909,15 @@ class KatzenstegProducer implements ProducerConnection {
 						!Number.isSafeInteger(timestampMs)
 					)
 						throw new Error("Invalid observation metadata");
-					resolve({
-						width,
-						height,
-						frameId,
-						timestampMs,
-						png: rgbaPng(width, height, readFileSync(snapshotPath)),
-					});
+					resolve(
+						rgbaPng(width, height, readFileSync(snapshotPath)).then((png) => ({
+							width,
+							height,
+							frameId,
+							timestampMs,
+							png,
+						})),
+					);
 				} catch (error) {
 					reject(error);
 				} finally {

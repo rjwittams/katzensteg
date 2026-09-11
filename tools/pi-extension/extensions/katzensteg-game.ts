@@ -1,5 +1,8 @@
-import { deflateSync } from "node:zlib";
+import { promisify } from "node:util";
+import { deflate } from "node:zlib";
 import { makeTerminalBytesInputMessage } from "./katzensteg-input.js";
+
+const compress = promisify(deflate);
 
 export interface Observation {
 	frameId: number;
@@ -117,6 +120,7 @@ export class GameInteraction {
 		do {
 			signal.throwIfAborted();
 			latest = await this.transport.observe(signal);
+			signal.throwIfAborted();
 			if (latest) {
 				if (
 					options.afterFrame === undefined ||
@@ -164,7 +168,9 @@ export class GameInteraction {
 				s.throwIfAborted();
 				if (action.type === "wait") await delay(action.ms, s);
 				else if (action.type === "key") {
-					this.transport.input(makeTerminalBytesInputMessage("main", keyBytes(action.key)));
+					this.transport.input(
+						makeTerminalBytesInputMessage("main", keyBytes(action.key)),
+					);
 					await delay(100, s);
 				} else {
 					const pointer = {
@@ -225,7 +231,11 @@ export class GameInteraction {
 }
 
 /** PNG encoding from a coherent RGBA snapshot; no terminal upload files involved. */
-export function rgbaPng(width: number, height: number, rgba: Buffer): Buffer {
+export async function rgbaPng(
+	width: number,
+	height: number,
+	rgba: Buffer,
+): Promise<Buffer> {
 	if (
 		!Number.isInteger(width) ||
 		!Number.isInteger(height) ||
@@ -265,7 +275,7 @@ export function rgbaPng(width: number, height: number, rgba: Buffer): Buffer {
 	return Buffer.concat([
 		Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
 		chunk("IHDR", header),
-		chunk("IDAT", deflateSync(scanlines)),
+		chunk("IDAT", await compress(scanlines)),
 		chunk("IEND", Buffer.alloc(0)),
 	]);
 }

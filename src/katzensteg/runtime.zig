@@ -152,6 +152,7 @@ fn optionalEqual(comptime T: type, a: ?T, b: ?T) bool {
 
 pub const Runtime = struct {
     observation: @import("frame_observation.zig").FrameObservation = .{},
+    observation_enabled: bool = false,
     allocator: std.mem.Allocator,
     logger: Logger,
     tty: ?DirectTty = null,
@@ -238,6 +239,7 @@ pub const Runtime = struct {
         const debug_composite = config.debug_composite;
         const trace_blocking = blocking_trace.settingsFromEnv();
         var runtime = Runtime{
+            .observation_enabled = std.c.getenv("KATZENSTEG_OBSERVE") != null,
             .allocator = allocator,
             .logger = logger,
             .frame_builder = FrameBuilder.init(allocator, stats, config.composite_mode, dump_composites, debug_composite),
@@ -791,7 +793,7 @@ pub const Runtime = struct {
             return;
         };
         defer job.deinit(self.allocator);
-        if (std.c.getenv("KATZENSTEG_OBSERVE") != null) {
+        if (self.observation_enabled) {
             switch (job) {
                 .framebuffer => |fb| self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {},
                 .scene => {
