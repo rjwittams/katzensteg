@@ -1,5 +1,7 @@
 const std = @import("std");
 const xev = @import("xev");
+const Listener = @import("wm/listener.zig").Listener;
+const ClientChannel = @import("wm/client.zig").ClientChannel;
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
@@ -46,6 +48,7 @@ pub const EventKind = enum {
     detached_received,
     shutdown_sent,
     process_exited,
+    connection_closed,
     parse_error,
     focus_changed,
 };
@@ -433,18 +436,28 @@ pub fn runSessionSpecs(allocator: std.mem.Allocator, specs: []const SessionLaunc
 }
 
 pub fn runSessionSpecsWithProducerExe(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
-    return runMultiProfile(allocator, producer_exe, specs);
+    return runSessionSpecsWithOptions(allocator, producer_exe, specs, .{});
+}
+
+pub const HostOptions = struct {
+    listen_path: ?[]const u8 = null,
+};
+
+pub fn runSessionSpecsWithOptions(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec, options: HostOptions) !u8 {
+    return runMultiProfile(allocator, producer_exe, specs, options);
 }
 
 const WmProducerSession = struct {
     profile_name: []const u8,
+    session_id: u64 = 0,
+    retired: bool = false,
     window: WmWindowState,
     upload: render_batch_protocol.UploadPolicy,
     presentation_status: WmPresentationStatus = .{},
     initial_presentation_resolved: bool = false,
-    child: std.process.Child,
-    child_stdin: ?std.fs.File = null,
-    stdout_file: ?std.fs.File = null,
+    // Only launchers started by this host are waited for/reaped.
+    child: ?std.process.Child = null,
+    channel: ClientChannel = .{ .stdio = .{} },
     stdout_buffer: std.ArrayList(u8) = .empty,
     stdout_ready: bool = false,
     stdout_poll_armed: bool = false,
@@ -452,8 +465,6 @@ const WmProducerSession = struct {
     stdout_poll_completion: xev.Completion = .{},
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
-    control_open: bool = true,
-    stdin_closed: bool = false,
 
     fn focusedContent(self: WmProducerSession) Rect {
         return contentRectForOuter(self.window.outer);
@@ -489,6 +500,13 @@ const WmPeerLineQueue = struct {
     fn enableBlockingTrace(self: *WmPeerLineQueue, settings: blocking_trace.Settings, logger: *Logger) void {
         self.blocking_trace_settings = settings;
         self.blocking_trace_logger = logger;
+    }
+
+    fn hasSession(self: *WmPeerLineQueue, session: *WmProducerSession) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items[self.head..]) |entry| if (entry.session == session) return true;
+        return false;
     }
 
     fn close(self: *WmPeerLineQueue) void {
@@ -632,7 +650,7 @@ fn armWmLifecycleTick(events: *WmEventLoop) void {
 fn armWmSessionStdoutRead(events: *WmEventLoop, session: *WmProducerSession) void {
     if (!session.stdout_poll_supported) return;
     if (session.stdout_ready or session.stdout_poll_armed) return;
-    const stdout_file = session.stdout_file orelse return;
+    const stdout_file = session.channel.presentationFile() orelse return;
     const file = xev.File.initFd(stdout_file.handle);
     file.poll(&events.loop, &session.stdout_poll_completion, .read, WmProducerSession, session, onWmSessionStdoutReadable);
     session.stdout_poll_armed = true;
@@ -687,7 +705,10 @@ fn onWmSessionStdoutReadable(
     return .disarm;
 }
 
-fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec) !u8 {
+fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs: []const SessionLaunchSpec, options: HostOptions) !u8 {
+    // Bind before opening the terminal, so a bad address cannot take it over.
+    var listener: ?Listener = if (options.listen_path) |path| try Listener.init(allocator, path) else null;
+    defer if (listener) |*host| host.deinit();
     var tty = try DirectTty.init();
     defer tty.deinit();
 
@@ -712,11 +733,12 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     var z_order = try allocator.alloc(usize, session_capacity);
     defer allocator.free(z_order);
     var initialized: usize = 0;
+    var next_session_id: u64 = 1;
+    var first_exit_code: u8 = 0;
     defer {
         peer_queue.close();
         for (sessions[0..initialized]) |*session| {
-            closeSessionControl(session);
-            if (session.stdout_file) |file| file.close();
+            session.channel.deinit();
             session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(allocator, &session.upload);
             allocator.free(session.profile_name);
@@ -727,6 +749,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     for (specs, 0..) |spec, i| {
         z_order[i] = i;
         sessions[i] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, &event_log);
+        sessions[i].session_id = next_session_id;
+        next_session_id += 1;
         initialized += 1;
         try startSessionProcessPolling(&sessions[i]);
     }
@@ -741,7 +765,9 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     logger.writeFmtScoped(.info, .wm, "multi-profile launch count={d}", .{initialized});
 
     var shutdown_sent = false;
-    const keep_alive_when_empty = specs.len == 0;
+    const keep_alive_when_empty = listener != null or specs.len == 0;
+    var shutdown_deadline_ms: ?i64 = null;
+    var accept_retry_ms: i64 = 0;
     var input_buf: [256]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
@@ -749,7 +775,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     var prompt_active = false;
     var wm_events = try WmEventLoop.init();
     defer wm_events.deinit();
-    while (!shutdown_sent and (keep_alive_when_empty or !allSessionsDone(sessions[0..initialized]))) {
+    while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
         for (sessions[0..initialized]) |*session| {
@@ -764,13 +790,68 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
             for (sessions[0..initialized]) |*session| {
                 if (!session.stdout_poll_supported) session.stdout_ready = true;
             }
+            if (shutdown_deadline_ms) |deadline| {
+                if (std.time.milliTimestamp() >= deadline) {
+                    for (sessions[0..initialized]) |*session| {
+                        if (session.child == null) session.channel.deinit();
+                    }
+                }
+            }
+            for (sessions[0..initialized]) |*session| {
+                session.channel.flushControl() catch |err| {
+                    logger.writeFmtScoped(.warn, .wm, "control flush failed: {s}", .{@errorName(err)});
+                };
+            }
             _ = try pollSessionChildExits(sessions[0..initialized]);
+            if (first_exit_code == 0) for (sessions[0..initialized]) |session| {
+                if (session.child != null and session.wait_state.done.load(.seq_cst)) {
+                    first_exit_code = childTermExitCode(session.wait_state.term);
+                    if (first_exit_code != 0) break;
+                }
+            };
             const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
             if (lifecycle.changed) {
                 if (lifecycle.focus_changed or lifecycle.z_order_changed) try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
             }
         }
+        // Queued lines hold pointers into the fixed session array. Retire only
+        // after EOF, the readiness callback and all queued lines have drained.
+        try retireFinishedSessions(allocator, sessions[0..initialized], &peer_queue, writer);
+        if (!shutdown_sent) if (listener) |*host| {
+            const now = std.time.milliTimestamp();
+            if (now >= accept_retry_ms) host.acceptPending(now) catch |err| {
+                logger.writeFmtScoped(.warn, .wm, "listener accept failed; retrying in one second: {s}", .{@errorName(err)});
+                accept_retry_ms = now + 1000;
+            };
+            for (0..16) |_| {
+                const registration = (try host.nextRegistration(now)) orelse break;
+                defer allocator.free(registration.title);
+                var channel = ClientChannel{ .socket = .{ .file = registration.file, .allocator = allocator } };
+                var transferred = false;
+                defer if (!transferred) channel.deinit();
+                const index = availableSessionSlot(sessions[0..initialized], session_capacity) orelse continue;
+                // Registration acknowledgement belongs to the listener protocol;
+                // subsequent bytes are the existing embedded control protocol.
+                const session_id = next_session_id;
+                next_session_id += 1;
+                channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
+                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, &event_log) catch |err| {
+                    logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
+                    continue;
+                };
+                session.session_id = session_id;
+                installSession(allocator, sessions, &initialized, index, session, z_order);
+                transferred = true;
+                try startSessionStdoutPolling(&sessions[index]);
+                focused_index = index;
+                bringWindowToFront(z_order[0..initialized], index);
+                mouse_state = .{};
+                try event_log.record(.focus_changed, sessions[index].profile_name);
+                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                redraw_requested.store(true, .seq_cst);
+            }
+        };
         if (redraw_requested.swap(false, .seq_cst)) {
             const initial_ready_changed = blk: {
                 tty_lock.lock();
@@ -801,13 +882,14 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                     prompt_active = false;
                     if (launch_prompt.items.len == 0) {
                         try event_log.record(.launch_prompt, "empty");
-                    } else if (initialized >= session_capacity) {
+                    } else if (availableSessionSlot(sessions[0..initialized], session_capacity) == null) {
                         try event_log.record(.parse_error, "session limit reached");
                     } else {
-                        const new_index = initialized;
-                        z_order[new_index] = new_index;
-                        sessions[new_index] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
-                        initialized += 1;
+                        const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
+                        var session = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
+                        session.session_id = next_session_id;
+                        next_session_id += 1;
+                        installSession(allocator, sessions, &initialized, new_index, session, z_order);
                         try startSessionProcessPolling(&sessions[new_index]);
                         focused_index = new_index;
                         bringWindowToFront(z_order[0..initialized], focused_index);
@@ -867,6 +949,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                 },
                 .quit => {
                     shutdown_sent = true;
+                    shutdown_deadline_ms = std.time.milliTimestamp() + 2000;
                     for (sessions[0..initialized]) |*session| try shutdownSession(session, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 },
@@ -920,27 +1003,67 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
         const already_recorded_exit = session.state == .exited;
         session.state = .exited;
         _ = try drainSessionStdoutAvailable(allocator, session, &peer_queue);
-        if (!already_recorded_exit) try event_log.record(.process_exited, session.profile_name);
+        if (!already_recorded_exit) try event_log.record(sessionEndEvent(session), session.profile_name);
     }
     peer_queue.close();
     while (try drainQueuedPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0, trace_blocking, &logger)) {}
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+    for (sessions[0..initialized], 0..) |*session, index| {
+        if (!session.retired) try deleteSessionGraphics(writer, index);
+    }
     if (shutdown_sent) return 0;
+    if (first_exit_code != 0) return first_exit_code;
     for (sessions[0..initialized]) |*session| {
+        if (session.child == null) continue;
         const code = childTermExitCode(session.wait_state.term);
         if (code != 0) return code;
     }
     return 0;
 }
 
+fn allSessionsDrained(sessions: []const WmProducerSession) bool {
+    if (!allSessionsDone(sessions)) return false;
+    for (sessions) |session| if (session.channel.presentationFile() != null) return false;
+    return true;
+}
+
+fn availableSessionSlot(sessions: []const WmProducerSession, capacity: usize) ?usize {
+    for (sessions, 0..) |session, i| if (session.retired) return i;
+    return if (sessions.len < capacity) sessions.len else null;
+}
+
+fn installSession(allocator: std.mem.Allocator, sessions: []WmProducerSession, initialized: *usize, index: usize, session: WmProducerSession, z_order: []usize) void {
+    if (index < initialized.*) {
+        std.debug.assert(sessions[index].retired);
+        sessions[index].stdout_buffer.deinit(allocator);
+        allocator.free(sessions[index].profile_name);
+    } else {
+        z_order[index] = index;
+        initialized.* += 1;
+    }
+    sessions[index] = session;
+}
+
+fn retireFinishedSessions(allocator: std.mem.Allocator, sessions: []WmProducerSession, queue: *WmPeerLineQueue, writer: anytype) !void {
+    for (sessions, 0..) |*session, index| {
+        if (session.retired or session.state != .exited or session.channel.presentationFile() != null or session.stdout_poll_armed) continue;
+        if (queue.hasSession(session)) continue;
+        try deleteSessionGraphics(writer, index);
+        session.channel.deinit();
+        deinitUploadPolicy(allocator, &session.upload);
+        session.retired = true;
+    }
+}
+
+fn deleteSessionGraphics(writer: anytype, index: usize) !void {
+    const range = idRangesForSession(index).image;
+    // Kitty's range deletion removes both placements and image storage.
+    // Only this slot's assigned IDs are deleted, after its last batch.
+    try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
+}
+
 fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
-    var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
-    errdefer deinitUploadPolicy(allocator, &upload);
-
-    const owned_profile_name = try allocator.dupe(u8, spec.profile_name);
-    errdefer allocator.free(owned_profile_name);
-
-    const child_argv = try buildProducerArgv(allocator, producer_exe, owned_profile_name, spec.extra_args);
+    const child_argv = try buildProducerArgv(allocator, producer_exe, spec.profile_name, spec.extra_args);
     defer allocator.free(child_argv);
 
     var child = std.process.Child.init(child_argv, allocator);
@@ -949,20 +1072,35 @@ fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8,
     // Producers run inside the terminal surface, so stderr must not inherit it.
     child.stderr_behavior = .Ignore;
     try child.spawn();
+    errdefer _ = child.kill() catch {};
+
+    var channel = ClientChannel{ .stdio = .{ .control = child.stdin, .presentation = child.stdout } };
+    child.stdin = null;
+    child.stdout = null;
+    errdefer channel.deinit();
+
+    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &channel, events);
+    session.child = child;
+    return session;
+}
+
+// Takes ownership of the channel only on success. Both owned and external
+// producers use the same presentation allocation and initial attach.
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: std.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, events: *ProtocolEventLog) !WmProducerSession {
+    var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
+    errdefer deinitUploadPolicy(allocator, &upload);
+    const owned_title = try allocator.dupe(u8, title);
+    errdefer allocator.free(owned_title);
 
     var session = WmProducerSession{
-        .profile_name = owned_profile_name,
+        .profile_name = owned_title,
         .window = WmWindowState.init("main", cascadedOuterRect(terminal, session_index)),
         .upload = upload,
-        .child = child,
     };
-    errdefer closeSessionControl(&session);
-
-    session.child_stdin = session.child.stdin.?;
-    session.child.stdin = null;
+    if (channel.controlFile() == null) return error.ControlChannelClosed;
     const ranges = idRangesForSession(session_index);
     const session_rect = session.focusedContent().toPresentationRectCells();
-    try writeInitialControl(session.child_stdin.?.deprecatedWriter(), .{
+    try writeInitialControl(channel.writer(), .{
         .rect_cells = session_rect,
         .aspect = .fit,
         .z_base = zBaseForSlot(session_index),
@@ -974,10 +1112,8 @@ fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8,
     });
     session.window.markAttached();
     session.state = .running;
-    try events.record(.attach_sent, owned_profile_name);
-
-    session.stdout_file = session.child.stdout.?;
-    session.child.stdout = null;
+    try events.record(.attach_sent, owned_title);
+    session.channel = channel.*;
     return session;
 }
 
@@ -993,7 +1129,7 @@ fn buildProducerArgv(allocator: std.mem.Allocator, producer_exe: []const u8, pro
 }
 
 fn startSessionStdoutPolling(session: *WmProducerSession) !void {
-    const stdout_file = session.stdout_file orelse return;
+    const stdout_file = session.channel.presentationFile() orelse return;
     setNonBlocking(stdout_file.handle);
 }
 
@@ -1010,7 +1146,7 @@ fn drainSessionStdoutChunk(allocator: std.mem.Allocator, session: *WmProducerSes
 }
 
 fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, max_bytes: usize) !bool {
-    const stdout_file = session.stdout_file orelse return false;
+    const stdout_file = session.channel.presentationFile() orelse return false;
 
     var buf: [8192]u8 = undefined;
     const limit = @min(max_bytes, buf.len);
@@ -1018,15 +1154,13 @@ fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmPr
     const n = stdout_file.read(buf[0..limit]) catch |err| switch (err) {
         error.WouldBlock => return false,
         else => {
-            stdout_file.close();
-            session.stdout_file = null;
+            session.channel.closePresentation();
             try flushPeerStdoutBuffer(session, peer_queue);
             return false;
         },
     };
     if (n == 0) {
-        stdout_file.close();
-        session.stdout_file = null;
+        session.channel.closePresentation();
         try flushPeerStdoutBuffer(session, peer_queue);
         return true;
     }
@@ -1059,7 +1193,7 @@ fn setNonBlocking(fd: std.posix.fd_t) void {
 }
 
 fn startSessionProcessPolling(session: *WmProducerSession) !void {
-    try session.child.waitForSpawn();
+    if (session.child) |*child| try child.waitForSpawn();
 }
 
 fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
@@ -1071,10 +1205,11 @@ fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
 }
 
 fn pollSessionChildExit(session: *WmProducerSession) !bool {
+    const child = if (session.child) |*child| child else return false;
     if (session.wait_state.done.load(.seq_cst)) return false;
-    try session.child.waitForSpawn();
+    try child.waitForSpawn();
 
-    const result = std.posix.waitpid(session.child.id, std.posix.W.NOHANG);
+    const result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
     if (result.pid == 0) return false;
 
     markSessionChildExited(session, childTermFromStatus(result.status));
@@ -1082,12 +1217,13 @@ fn pollSessionChildExit(session: *WmProducerSession) !bool {
 }
 
 fn waitForSessionChildExit(session: *WmProducerSession) !void {
+    const child = if (session.child) |*child| child else return;
     if (session.wait_state.done.load(.seq_cst)) return;
-    markSessionChildExited(session, session.child.wait() catch .{ .Unknown = 0 });
+    markSessionChildExited(session, child.wait() catch .{ .Unknown = 0 });
 }
 
 fn markSessionChildExited(session: *WmProducerSession, term: std.process.Child.Term) void {
-    session.child.term = term;
+    session.child.?.term = term;
     session.wait_state.term = term;
     // term is safe to read after done is observed true; seq_cst releases the write.
     session.wait_state.done.store(true, .seq_cst);
@@ -1183,7 +1319,7 @@ fn hitSessionIndex(sessions: []const WmProducerSession, z_order: []const usize, 
 }
 
 fn sessionIsVisible(session: *const WmProducerSession) bool {
-    return session.state == .running and !session.wait_state.done.load(.seq_cst);
+    return session.state == .running and !sessionHasEnded(session);
 }
 
 fn sessionIsDrawable(session: *const WmProducerSession) bool {
@@ -1200,13 +1336,17 @@ fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focu
     var result = LifecycleReconcileResult{};
     if (sessions.len == 0) return result;
     for (sessions, 0..) |*session, session_index| {
-        if (session.state == .exited or !session.wait_state.done.load(.seq_cst)) continue;
+        if (session.state == .exited or !sessionHasEnded(session)) continue;
 
         session.state = .exited;
         closeSessionControl(session);
         result.changed = true;
-        logger.writeFmtScoped(.info, .wm, "producer exited profile={s} {s}", .{ session.profile_name, childTermSummary(session.wait_state.term) });
-        try events.record(.process_exited, session.profile_name);
+        if (session.child != null) {
+            logger.writeFmtScoped(.info, .wm, "producer exited profile={s} {s}", .{ session.profile_name, childTermSummary(session.wait_state.term) });
+        } else {
+            logger.writeFmtScoped(.info, .wm, "producer disconnected title={s}", .{session.profile_name});
+        }
+        try events.record(sessionEndEvent(session), session.profile_name);
 
         if (session_index == focused_index.*) {
             if (nextVisibleSessionIndex(sessions, focused_index.*)) |next_index| {
@@ -1873,10 +2013,11 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
 }
 
 fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
-    if (!session.control_open or !sessionIsVisible(session)) return;
+    if (!sessionIsVisible(session)) return;
+    if (session.channel.controlFile() == null) return;
     const content = session.focusedContent();
     const content_rect = content.toPresentationRectCells();
-    if (tryWriteViewportControl(session.child_stdin.?.deprecatedWriter(), .{
+    if (tryWriteViewportControl(session.channel.writer(), .{
         .rect_cells = content_rect,
         .aspect = aspect,
         .z_base = z_base,
@@ -1888,45 +2029,39 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
         logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d}) z_base={d}", .{ session.profile_name, content.row, content.col, content.cols, content.rows, z_base });
     } else {
         logger.writeFmtScoped(.warn, .wm, "viewport control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
-        session.control_open = false;
+        closeSessionControl(session);
     }
 }
 
 fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, events: *ProtocolEventLog, logger: *Logger) !void {
-    if (!session.control_open or !sessionIsVisible(session)) return;
-    if (tryWriteInputControl(session.child_stdin.?.deprecatedWriter(), bytes)) {
+    if (!sessionIsVisible(session)) return;
+    if (session.channel.controlFile() == null) return;
+    if (tryWriteInputControl(session.channel.writer(), bytes)) {
         try events.record(.input_sent, session.profile_name);
     } else {
         logger.writeFmtScoped(.warn, .wm, "input control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
-        session.control_open = false;
+        closeSessionControl(session);
     }
 }
 
 fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logger: *Logger) !void {
     if (session.state == .draining or session.state == .exited) return;
     session.state = .draining;
-    if (session.control_open and session.child_stdin != null and !tryWriteShutdownControl(session.child_stdin.?.deprecatedWriter())) {
-        logger.writeFmtScoped(.warn, .wm, "shutdown control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
-        session.control_open = false;
-    } else if (session.control_open and session.child_stdin != null) {
-        logger.writeFmtScoped(.info, .wm, "shutdown sent profile={s}", .{session.profile_name});
+    if (session.channel.controlFile() != null) {
+        if (tryWriteShutdownControl(session.channel.writer())) {
+            logger.writeFmtScoped(.info, .wm, "shutdown sent profile={s}", .{session.profile_name});
+        } else {
+            logger.writeFmtScoped(.warn, .wm, "shutdown control write failed profile={s}", .{session.profile_name});
+        }
     } else {
-        logger.writeFmtScoped(.info, .wm, "shutdown skipped profile={s}; producer control pipe is closed", .{session.profile_name});
+        logger.writeFmtScoped(.info, .wm, "shutdown skipped profile={s}; producer control channel is closed", .{session.profile_name});
     }
-    session.control_open = false;
-    try events.record(.shutdown_sent, session.profile_name);
     closeSessionControl(session);
+    try events.record(.shutdown_sent, session.profile_name);
 }
 
 fn closeSessionControl(session: *WmProducerSession) void {
-    session.control_open = false;
-    if (!session.stdin_closed) {
-        if (session.child_stdin) |file| {
-            file.close();
-            session.child_stdin = null;
-        }
-        session.stdin_closed = true;
-    }
+    session.channel.closeControl();
 }
 
 fn selectUploadPolicy(allocator: std.mem.Allocator, tty: std.fs.File) !render_batch_protocol.UploadPolicy {
@@ -1994,9 +2129,20 @@ fn sessionUploadPath(allocator: std.mem.Allocator, base_path: []const u8, sessio
     return try std.fmt.allocPrint(allocator, "{s}.session-{d}", .{ base_path, session_index });
 }
 
+// Owned launchers retain process-based lifetime; external clients end at
+// presentation EOF. Closing control alone starts draining, not retirement.
+fn sessionHasEnded(session: *const WmProducerSession) bool {
+    if (session.child != null) return session.wait_state.done.load(.seq_cst);
+    return session.channel.presentationFile() == null;
+}
+
+fn sessionEndEvent(session: *const WmProducerSession) EventKind {
+    return if (session.child != null) .process_exited else .connection_closed;
+}
+
 fn allSessionsDone(sessions: []const WmProducerSession) bool {
     for (sessions) |*session| {
-        if (!session.wait_state.done.load(.seq_cst)) return false;
+        if (!sessionHasEnded(session)) return false;
     }
     return true;
 }
@@ -2640,7 +2786,7 @@ test "wm peer presentation status updates session cache" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
 
     var out = std.ArrayList(u8).empty;
@@ -2668,7 +2814,7 @@ test "wm peer presentation status only requests redraw on visible state changes"
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
 
     var out = std.ArrayList(u8).empty;
@@ -2689,7 +2835,7 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2715,7 +2861,7 @@ test "wm main loop peer drain does not leave older queued frames behind input" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2753,7 +2899,7 @@ test "wm peer stdout polling queues complete lines and retains partial lines" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
     defer session.stdout_buffer.deinit(std.testing.allocator);
 
@@ -2781,10 +2927,10 @@ test "wm peer stdout chunk drain reads a bounded amount" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
-        .stdout_file = std.fs.File{ .handle = pipe[0] },
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } },
     };
-    defer if (session.stdout_file) |file| file.close();
+    defer session.channel.deinit();
     defer session.stdout_buffer.deinit(std.testing.allocator);
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2826,7 +2972,7 @@ test "wm producer stdout poll error does not mark stdout ready" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
         .stdout_poll_armed = true,
     };
 
@@ -2913,7 +3059,7 @@ test "wm queued presentation status still updates during drain" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = undefined,
+        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -3504,8 +3650,6 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
             .upload = .{ .profile = .direct_apc },
             .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
             .state = .draining,
-            .control_open = false,
-            .stdin_closed = true,
         },
     };
     const z_order = [_]usize{ 0, 1 };
@@ -3532,7 +3676,6 @@ test "wm reconciles externally exited producer sessions" {
             .upload = .{ .profile = .direct_apc },
             .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
             .state = .running,
-            .stdin_closed = true,
         },
         .{
             .profile_name = "alive",
@@ -3540,7 +3683,6 @@ test "wm reconciles externally exited producer sessions" {
             .upload = .{ .profile = .direct_apc },
             .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
             .state = .running,
-            .stdin_closed = true,
         },
     };
     sessions[0].wait_state.done.store(true, .seq_cst);
@@ -3701,4 +3843,154 @@ test "wm chrome marks focused window with terminal styling" {
 
     try std.testing.expect(std.mem.indexOf(u8, active.items, "\x1b[1;36m") != null);
     try std.testing.expect(std.mem.indexOf(u8, inactive.items, "\x1b[2m") != null);
+}
+
+test "wm mixed ownership retires child exit and external EOF independently" {
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    var peer: ?std.fs.File = .{ .handle = pipe[1] };
+    defer if (peer) |file| file.close();
+    var sessions = [_]WmProducerSession{
+        .{
+            .profile_name = "owned",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .child = std.process.Child.init(&.{"/usr/bin/true"}, std.testing.allocator),
+            .state = .running,
+        },
+        .{
+            .profile_name = "external",
+            .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
+            .upload = .{ .profile = .direct_apc },
+            .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } },
+            .state = .running,
+        },
+    };
+    defer for (&sessions) |*session| {
+        session.channel.deinit();
+        session.stdout_buffer.deinit(std.testing.allocator);
+    };
+    try sessions[0].child.?.spawn();
+    defer waitForSessionChildExit(&sessions[0]) catch {};
+    try startSessionProcessPolling(&sessions[1]);
+    try std.testing.expect(!try pollSessionChildExit(&sessions[1]));
+    try waitForSessionChildExit(&sessions[1]);
+    try std.testing.expect(!sessionHasEnded(&sessions[1]));
+
+    try waitForSessionChildExit(&sessions[0]);
+    try std.testing.expect(!allSessionsDone(&sessions));
+    try std.testing.expect(sessionIsVisible(&sessions[1]));
+    var z_order = [_]usize{ 0, 1 };
+    var focused_index: usize = 0;
+    var mouse = WmMouseInputState{};
+    var log = try ProtocolEventLog.init(std.testing.allocator, 8);
+    defer log.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    const first = try reconcileExitedSessions(&sessions, &z_order, &focused_index, &mouse, &log, &logger);
+    try std.testing.expect(first.focus_changed);
+    try std.testing.expectEqual(@as(usize, 1), focused_index);
+    try std.testing.expectEqual(EventKind.process_exited, log.at(0).?.kind);
+
+    try peer.?.writeAll("final batch\n");
+    peer.?.close();
+    peer = null;
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+    try std.testing.expect(try drainSessionStdoutAvailable(std.testing.allocator, &sessions[1], &queue));
+    var batch = try queue.take(std.testing.allocator, 0);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("final batch", batch.items[0].line);
+    try std.testing.expectEqual(&sessions[1], batch.items[0].session.?);
+    const second = try reconcileExitedSessions(&sessions, &z_order, &focused_index, &mouse, &log, &logger);
+    try std.testing.expect(second.changed);
+    try std.testing.expectEqual(EventKind.connection_closed, log.last().?.kind);
+    try std.testing.expectEqual(ProducerSessionState.exited, sessions[1].state);
+    try std.testing.expect(allSessionsDone(&sessions));
+    try std.testing.expect(!try pollSessionChildExits(&sessions));
+}
+
+test "wm external shutdown drains presentation after control half close" {
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+    defer std.posix.close(fds[1]);
+    var session = WmProducerSession{
+        .profile_name = "external",
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+        .upload = .{ .profile = .direct_apc },
+        .channel = .{ .socket = .{ .file = .{ .handle = fds[0] } } },
+        .state = .running,
+    };
+    defer session.channel.deinit();
+    defer session.stdout_buffer.deinit(std.testing.allocator);
+    try startSessionStdoutPolling(&session);
+    var log = try ProtocolEventLog.init(std.testing.allocator, 4);
+    defer log.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    try shutdownSession(&session, &log, &logger);
+    try shutdownSession(&session, &log, &logger);
+    try std.testing.expectEqual(@as(usize, 1), log.len());
+    try std.testing.expect(!sessionIsVisible(&session));
+    try std.testing.expect(!sessionHasEnded(&session));
+    var buf: [128]u8 = undefined;
+    const n = try std.posix.read(fds[1], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "shutdown") != null);
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.read(fds[1], &buf));
+
+    _ = try std.posix.write(fds[1], "cleanup\n");
+    try std.posix.shutdown(fds[1], .send);
+    var queue = WmPeerLineQueue.init(std.testing.allocator);
+    defer queue.deinit();
+    try std.testing.expect(try drainSessionStdoutAvailable(std.testing.allocator, &session, &queue));
+    var batch = try queue.take(std.testing.allocator, 0);
+    defer batch.deinit(std.testing.allocator);
+    defer for (batch.items) |entry| std.testing.allocator.free(entry.line);
+    try std.testing.expectEqual(@as(usize, 1), batch.items.len);
+    try std.testing.expectEqualStrings("cleanup", batch.items[0].line);
+    try std.testing.expect(sessionHasEnded(&session));
+    try std.testing.expect(session.channel.socket.file == null);
+}
+
+test "wm slots wait for EOF callbacks and queued output before reuse" {
+    const allocator = std.testing.allocator;
+    var sessions = [_]WmProducerSession{.{
+        .profile_name = try allocator.dupe(u8, "old"),
+        .session_id = 7,
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+        .upload = .{ .profile = .direct_apc },
+        .state = .exited,
+        .stdout_poll_armed = true,
+    }};
+    defer allocator.free(sessions[0].profile_name);
+    defer sessions[0].stdout_buffer.deinit(allocator);
+    var queue = WmPeerLineQueue.init(allocator);
+    defer queue.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    try queue.enqueueCopy(&sessions[0], "last");
+    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try std.testing.expect(availableSessionSlot(&sessions, 1) == null);
+    sessions[0].stdout_poll_armed = false;
+    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try std.testing.expect(availableSessionSlot(&sessions, 1) == null);
+    var batch = try queue.take(allocator, 0);
+    defer batch.deinit(allocator);
+    for (batch.items) |entry| allocator.free(entry.line);
+    batch.clearRetainingCapacity();
+    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try std.testing.expectEqual(@as(?usize, 0), availableSessionSlot(&sessions, 1));
+    try std.testing.expectEqualStrings("\x1b_Ga=d,d=R,x=100000,y=199999,q=2;\x1b\\", out.items);
+    var initialized: usize = 1;
+    var z_order = [_]usize{0};
+    installSession(allocator, &sessions, &initialized, 0, .{
+        .profile_name = try allocator.dupe(u8, "new"),
+        .session_id = 8,
+        .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
+        .upload = .{ .profile = .direct_apc },
+    }, &z_order);
+    try std.testing.expectEqual(@as(usize, 1), initialized);
+    try std.testing.expectEqual(@as(u64, 8), sessions[0].session_id);
+    try std.testing.expect(!sessions[0].retired);
 }

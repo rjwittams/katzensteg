@@ -8,16 +8,28 @@ pub const SessionSpec = struct {
 pub const Parsed = struct {
     allocator: std.mem.Allocator,
     sessions: []SessionSpec,
+    listen_path: ?[]const u8 = null,
 
     pub fn deinit(self: *Parsed) void {
         for (self.sessions) |session| freeSession(self.allocator, session);
         self.allocator.free(self.sessions);
+        if (self.listen_path) |path| self.allocator.free(path);
         self.* = undefined;
     }
 };
 
 pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
-    const args = if (argv.len > 0) argv[1..] else argv;
+    var args = if (argv.len > 0) argv[1..] else argv;
+    var listen_path: ?[]const u8 = null;
+    errdefer if (listen_path) |path| allocator.free(path);
+    // Host options precede profiles; arguments after a session's -- belong to
+    // that application and are never interpreted as host options.
+    if (args.len > 0 and std.mem.eql(u8, args[0], "--listen")) {
+        if (args.len < 2 or args[1].len == 0 or std.mem.startsWith(u8, args[1], "--")) return error.MissingListenerPath;
+        listen_path = try allocator.dupe(u8, args[1]);
+        args = args[2..];
+    }
+    if (args.len > 0 and std.mem.eql(u8, args[0], "--listen")) return error.DuplicateListener;
     const uses_session_syntax = for (args) |arg| {
         if (std.mem.eql(u8, arg, "--session")) break true;
     } else false;
@@ -35,7 +47,7 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
                 .extra_args = &.{},
             });
         }
-        return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator) };
+        return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator), .listen_path = listen_path };
     }
 
     if (args.len > 0 and !std.mem.eql(u8, args[0], "--session")) return error.MixedSessionSyntax;
@@ -69,7 +81,7 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
         });
     }
 
-    return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator) };
+    return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator), .listen_path = listen_path };
 }
 
 fn freeSession(allocator: std.mem.Allocator, session: SessionSpec) void {
@@ -109,4 +121,15 @@ test "wm cli preserves positional compatibility for no arg sessions" {
 
 test "wm cli rejects mixed positional and session syntax" {
     try std.testing.expectError(error.MixedSessionSyntax, parse(std.testing.allocator, &.{ "katzensteg-wm", "sonic", "--session", "mi2" }));
+}
+
+test "wm listener option precedes either session syntax" {
+    var empty = try parse(std.testing.allocator, &.{ "wm", "--listen", "/tmp/wm.sock" });
+    defer empty.deinit();
+    try std.testing.expectEqualStrings("/tmp/wm.sock", empty.listen_path.?);
+    try std.testing.expectEqual(@as(usize, 0), empty.sessions.len);
+    var mixed = try parse(std.testing.allocator, &.{ "wm", "--listen", "~/wm.sock", "--session", "mi2", "--", "--listen", "app-option" });
+    defer mixed.deinit();
+    try std.testing.expectEqualStrings("--listen", mixed.sessions[0].extra_args[0]);
+    try std.testing.expectError(error.MissingListenerPath, parse(std.testing.allocator, &.{ "wm", "--listen" }));
 }

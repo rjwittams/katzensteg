@@ -31,7 +31,7 @@ pub fn main() !void {
         };
     }
 
-    const exit_code = try wm_host.runSessionSpecsWithProducerExe(allocator, producer_exe, specs);
+    const exit_code = try wm_host.runSessionSpecsWithOptions(allocator, producer_exe, specs, .{ .listen_path = parsed.listen_path });
     std.process.exit(exit_code);
 }
 
@@ -52,7 +52,7 @@ fn siblingProducerExecutablePath(allocator: std.mem.Allocator) ![]const u8 {
 
 const usage_text =
     \\Usage:
-    \\  katzensteg-wm [profile...]
-    \\  katzensteg-wm --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]
+    \\  katzensteg-wm [--listen <socket-path>] [profile...]
+    \\  katzensteg-wm [--listen <socket-path>] --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]
     \\
 ;

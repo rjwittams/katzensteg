@@ -51,6 +51,12 @@ In queued batch mode, app threads may copy payloads and enqueue commands, but th
 
 OpenGL/Vulkan framebuffer capture may still run on the app render thread to perform GPU readback, but it should publish copied framebuffer payloads to the worker rather than mutate presentation state directly. Any new runtime state that is touched from both app threads and the worker needs an explicit owner, mutex, or atomic before use.
 
+### Window Manager Sessions
+
+The WM host keeps window state separate from the producer's channel and optional owned child process. `wm/client.zig` owns channel descriptors: separate control/presentation pipes for WM-launched producers, or one duplex socket. Closing socket control half-closes the write direction so final presentation batches can still be drained. Borrowed channel files must not be closed directly.
+
+Only WM-owned children are waited for and reaped. Their exit determines session lifetime; a session without an owned child ends at presentation EOF. Presentation allocation and initial attach share one path, as do focus, layout and input routing. The WM exposes external registration through `--listen`; the launcher selects it with `KATZENSTEG_TARGET=jsonl:<socket-path>`. Destination selection is separate from the JSONL transport. The shell launcher supervises its application and relays runtime pipes over the socket, leaving its own terminal alone. Explicit `--embed-jsonl` takes precedence over inherited target selection. Socket control writes retain partial output in a bounded buffer and flush from the host event loop. Session slots are reused only after presentation EOF, readiness callbacks, queued batches and graphics cleanup have completed; each new connection receives a fresh host session ID.
+
 ### Profiles
 
 Profiles are JSON files under `profiles/`. They define target commands, inheritance, platform-specific values, runtime policy, and local setup details.
