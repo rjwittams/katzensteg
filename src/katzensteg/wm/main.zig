@@ -22,6 +22,25 @@ pub fn main() !void {
     const producer_exe = try siblingProducerExecutablePath(allocator);
     defer allocator.free(producer_exe);
 
+    if (parsed.headless) {
+        var parent_pid = parsed.parent_pid;
+        if (parent_pid == null) {
+            if (std.process.getEnvVarOwned(allocator, "CLAUDE_PID")) |value| {
+                defer allocator.free(value);
+                parent_pid = std.fmt.parseInt(i32, value, 10) catch null;
+            } else |_| {}
+        }
+        const code = try wm_host.runHeadless(allocator, producer_exe, .{
+            .http_address = parsed.http_address orelse "127.0.0.1:0",
+            .tty_path = parsed.tty_path,
+            .host_file = parsed.host_file,
+            .parent_pid = parent_pid,
+            .background = parsed.background,
+            .idle_refresh_ms = parsed.idle_refresh_ms,
+        });
+        std.process.exit(code);
+    }
+
     var specs = try allocator.alloc(wm_host.SessionLaunchSpec, parsed.sessions.len);
     defer allocator.free(specs);
     for (parsed.sessions, 0..) |session, i| {
@@ -31,7 +50,13 @@ pub fn main() !void {
         };
     }
 
-    const exit_code = try wm_host.runSessionSpecsWithOptions(allocator, producer_exe, specs, .{ .listen_path = parsed.listen_path });
+    const exit_code = try wm_host.runSessionSpecsWithOptions(allocator, producer_exe, specs, .{
+        .listen_path = parsed.listen_path,
+        .presentation = switch (parsed.presentation) {
+            .positioned => .positioned,
+            .placeholder => .placeholder,
+        },
+    });
     std.process.exit(exit_code);
 }
 
@@ -52,7 +77,8 @@ fn siblingProducerExecutablePath(allocator: std.mem.Allocator) ![]const u8 {
 
 const usage_text =
     \\Usage:
-    \\  katzensteg-wm [--listen <socket-path>] [profile...]
-    \\  katzensteg-wm [--listen <socket-path>] --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]
+    \\  katzensteg-wm --headless [--background] [--tty <device>] [--parent-pid <pid>] [--http 127.0.0.1:<port>] [--host-file <path>] [--idle-refresh-ms <ms; 0 disables>]
+    \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] [profile...]
+    \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]
     \\
 ;

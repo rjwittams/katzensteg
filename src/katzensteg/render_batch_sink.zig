@@ -8,6 +8,10 @@ const upload_path = @import("upload_path.zig");
 const rotating_file_count = upload_path.rotating_file_count;
 const log = std.log.scoped(.render_batch_sink);
 
+// One placement per placeholder image: every refresh re-places under this id so
+// the terminal replaces the placement instead of accumulating anonymous ones.
+pub const placeholder_placement_id: u32 = 1;
+
 pub const RenderBatchSink = struct {
     const PlacementTrace = struct {
         image_id: u32,
@@ -51,6 +55,7 @@ pub const RenderBatchSink = struct {
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
     after: std.ArrayList([]u8) = .empty,
+    frame_json: std.ArrayList(u8) = .empty,
     trace_placements: std.ArrayList(PlacementTrace) = .empty,
     trace_deletes: std.ArrayList(PlacementTrace) = .empty,
     trace_after_deletes: std.ArrayList(PlacementTrace) = .empty,
@@ -65,6 +70,10 @@ pub const RenderBatchSink = struct {
     // means no clip (whole rect_cells is the placement target).
     clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     upload: UploadState = .direct_apc,
+    placeholder: ?render_batch_protocol.PlaceholderPresentation = null,
+    placeholder_uploaded: bool = false,
+    placeholder_scaled: std.ArrayList(u8) = .empty,
+    placeholder_frame: @import("frame_observation.zig").FrameObservation = .{},
     placement_trace_enabled: bool = false,
     blocking_trace_settings: blocking_trace.Settings = .{},
 
@@ -85,6 +94,9 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
+        self.frame_json.deinit(self.allocator);
+        self.placeholder_frame.deinit(self.allocator);
+        self.placeholder_scaled.deinit(self.allocator);
         self.trace_placements.deinit(self.allocator);
         self.trace_deletes.deinit(self.allocator);
         self.trace_after_deletes.deinit(self.allocator);
@@ -193,6 +205,47 @@ pub const RenderBatchSink = struct {
         return tty;
     }
 
+    pub fn presentPlaceholder(self: *RenderBatchSink, rgba: []const u8, w: i32, h: i32) !void {
+        if (self.placeholder == null) return error.NotPlaceholderPresentation;
+        // Presentation owns a copy so a stationary producer can restore an
+        // image lost by the terminal. This also covers external framebuffers
+        // and does not depend on observation being enabled.
+        try self.placeholder_frame.retain(self.allocator, w, h, rgba);
+        try self.restorePlaceholder();
+    }
+
+    pub fn refreshPlaceholder(self: *RenderBatchSink) !void {
+        const target = self.placeholder orelse return;
+        if (!self.placeholder_uploaded) return;
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try kitty_protocol.writeVirtualPlace(out.writer(self.allocator), target.image_id, placeholder_placement_id, target.cols, target.rows);
+        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+    }
+
+    pub fn restorePlaceholder(self: *RenderBatchSink) !void {
+        const target = self.placeholder orelse return;
+        if (self.placeholder_frame.pixels.items.len == 0) return;
+        const frame = &self.placeholder_frame;
+        const size = target.uploadSize(.{ .w = frame.width, .h = frame.height });
+        const pixels = if (size.w == frame.width and size.h == frame.height) frame.pixels.items else blk: {
+            try self.placeholder_scaled.resize(self.allocator, @intCast(@as(i64, size.w) * size.h * 4));
+            @import("rgba_scale.zig").into(self.placeholder_scaled.items, size.w, size.h, frame.pixels.items, frame.width, frame.height);
+            break :blk self.placeholder_scaled.items;
+        };
+        try self.uploadRgba(target.image_id, pixels, size.w, size.h);
+        self.placeholder_uploaded = true;
+        try self.refreshPlaceholder();
+    }
+
+    pub fn deletePlaceholder(self: *RenderBatchSink) !void {
+        self.placeholder_frame.pixels.clearRetainingCapacity();
+        const target = self.placeholder orelse return;
+        if (!self.placeholder_uploaded) return;
+        try self.deleteImageData(target.image_id);
+        self.placeholder_uploaded = false;
+    }
+
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
@@ -298,7 +351,10 @@ pub const RenderBatchSink = struct {
         const pending_bytes = self.pendingFrameBytes();
         self.seq += 1;
         const start_ns = self.traceBlockingStart();
-        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, writer, .{
+        // Runtime supplies an unbuffered pipe writer. Encode in memory so JSON
+        // escaping does not turn each character into a separate pipe write.
+        defer self.frame_json.clearRetainingCapacity();
+        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, self.frame_json.writer(self.allocator), .{
             .window_id = self.window_id,
             .seq = self.seq,
             .presentation_generation = self.presentation_generation,
@@ -307,6 +363,7 @@ pub const RenderBatchSink = struct {
             .placements = self.placements.items,
             .after = self.after.items,
         });
+        try writer.writeAll(self.frame_json.items);
         self.traceBlockingWriteSince("flush_frame_jsonl", start_ns, pending_bytes);
         self.clearRetainingCapacity();
     }
@@ -663,4 +720,112 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
     const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, uploaded_path, 16);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, bytes);
+}
+
+test "batch sink writes a complete JSON frame at once and handles partial writes" {
+    const Output = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        calls: usize = 0,
+        max_write: usize = std.math.maxInt(usize),
+
+        fn write(self: *@This(), bytes: []const u8) error{OutOfMemory}!usize {
+            self.calls += 1;
+            const count = @min(self.max_write, bytes.len);
+            try self.bytes.appendSlice(std.testing.allocator, bytes[0..count]);
+            return count;
+        }
+
+        fn writer(self: *@This()) std.io.GenericWriter(*@This(), error{OutOfMemory}, write) {
+            return .{ .context = self };
+        }
+    };
+    var output: Output = .{};
+    defer output.bytes.deinit(std.testing.allocator);
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    try sink.deleteImageData(42);
+    try sink.flushFrame(output.writer());
+    try std.testing.expectEqual(@as(usize, 1), output.calls);
+    try std.testing.expectEqual(@as(usize, 0), sink.pendingFrameBytes());
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output.bytes.items, "\n"));
+    const first = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.bytes.items, .{});
+    defer first.deinit();
+    try std.testing.expectEqual(@as(i64, 1), first.value.object.get("seq").?.integer);
+    try std.testing.expectEqualStrings("\x1b_Gq=2,a=d,d=I,i=42;\x1b\\", first.value.object.get("groups").?.object.get("deletes").?.array.items[0].string);
+
+    output.bytes.clearRetainingCapacity();
+    output.calls = 0;
+    output.max_write = 7;
+    try sink.deleteImageData(43);
+    try sink.flushFrame(output.writer());
+    try std.testing.expectEqual(std.math.divCeil(usize, output.bytes.items.len, 7) catch unreachable, output.calls);
+    const second = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.bytes.items, .{});
+    defer second.deinit();
+    try std.testing.expectEqual(@as(i64, 2), second.value.object.get("seq").?.integer);
+    try std.testing.expectEqual(@as(usize, 1), second.value.object.get("groups").?.object.get("deletes").?.array.items.len);
+}
+
+test "placeholder frames keep one id with only upload and virtual placement" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.placeholder = .{ .image_id = 777, .cols = 60, .rows = 20 };
+    sink.attach(sink.placeholder.?.localRect());
+    const rgba = [_]u8{ 12, 34, 56, 255 };
+    for (0..3) |_| {
+        try sink.presentPlaceholder(&rgba, 1, 1);
+        try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
+        try std.testing.expectEqual(@as(usize, 1), sink.placements.items.len);
+        try std.testing.expectEqual(@as(usize, 0), sink.deletes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), sink.after.items.len);
+        try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "i=777") != null);
+        try std.testing.expectEqualStrings("\x1b_Ga=p,U=1,i=777,p=1,c=60,r=20,q=2;\x1b\\", sink.placements.items[0]);
+        sink.clearRetainingCapacity();
+    }
+    // A stationary source can resize its virtual placement without reuploading.
+    sink.placeholder.?.cols = 40;
+    try sink.refreshPlaceholder();
+    try std.testing.expectEqual(@as(usize, 0), sink.uploads.items.len);
+    try std.testing.expectEqualStrings("\x1b_Ga=p,U=1,i=777,p=1,c=40,r=20,q=2;\x1b\\", sink.placements.items[0]);
+    sink.clearRetainingCapacity();
+    try sink.deletePlaceholder();
+    try sink.deletePlaceholder();
+    try std.testing.expectEqual(@as(usize, 1), sink.deletes.items.len);
+    try std.testing.expectEqualStrings("\x1b_Gq=2,a=d,d=I,i=777;\x1b\\", sink.deletes.items[0]);
+}
+
+test "placeholder restore owns pixels and retransmits after a terminal clear" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.placeholder = .{ .image_id = 77, .cols = 3, .rows = 2 };
+    var rgba = [_]u8{ 1, 2, 3, 255 };
+    try sink.presentPlaceholder(&rgba, 1, 1);
+    const upload = try std.testing.allocator.dupe(u8, sink.uploads.items[0]);
+    defer std.testing.allocator.free(upload);
+    @memset(&rgba, 0);
+    sink.clearRetainingCapacity();
+    try sink.restorePlaceholder();
+    try std.testing.expectEqual(@as(u64, 1), sink.placeholder_frame.frame_id);
+    try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
+    try std.testing.expectEqualStrings(upload, sink.uploads.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), sink.placements.items.len);
+    try sink.deletePlaceholder();
+    sink.clearRetainingCapacity();
+    try sink.restorePlaceholder();
+    try std.testing.expect(!sink.hasPendingBytes());
+}
+
+test "placeholder upload bounds leave native framebuffer available for observation and resize" {
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.placeholder = .{ .image_id = 77, .cols = 2, .rows = 1, .target_px = .{ .w = 2, .h = 1 } };
+    const rgba = [_]u8{255} ** (4 * 2 * 4);
+    try sink.presentPlaceholder(&rgba, 4, 2);
+    try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "s=2,v=1,i=77") != null);
+    try std.testing.expectEqual(@as(i32, 4), sink.placeholder_frame.width);
+    try std.testing.expectEqualSlices(u8, &rgba, sink.placeholder_frame.pixels.items);
+    sink.clearRetainingCapacity();
+    sink.placeholder.?.target_px = .{ .w = 8, .h = 4 };
+    try sink.restorePlaceholder();
+    try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "s=4,v=2,i=77") != null);
+    try std.testing.expectEqual(@as(u64, 1), sink.placeholder_frame.frame_id);
 }

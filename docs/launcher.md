@@ -109,3 +109,219 @@ The host replies with `{"type":"registered","version":1,"session_id":1}`, follow
 The socket is mode `0600` and is a trusted, same-user rendering connection, like the existing embedded pipes. It carries terminal presentation commands, not an untrusted remote-display protocol. Incomplete registrations never block the event loop. Socket control output is buffered up to 512 KiB per client; exceeding that limit closes its control direction. Closing a window requests shutdown and drains final presentation output. On WM quit, external clients have two seconds to finish before their sockets are closed.
 
 The host reuses completed slots (32 by default) after draining traffic and deleting that slot's graphics. Cleanup uses Kitty's image-ID range deletion, confirmed against the local Kitty implementation; terminals hosting the WM need support for that operation. Session IDs remain distinct when slots are reused.
+
+## Hosted presentation modes in the WM
+
+The normal WM can exercise either producer presentation mode:
+
+```bash
+# Existing positioned-image mode (the default):
+./zig-out/bin/katzensteg-wm sonic mi2
+
+# Unicode placeholder mode in the WM's own windows:
+KATZENSTEG_REAL_WINDOW=hide ./zig-out/bin/katzensteg-wm \
+  --presentation placeholder sonic mi2
+```
+
+Both commands run the same WM: window borders, movement, resizing, focus,
+layouts, input routing and lifecycle handling. `--presentation positioned`
+selects the default explicitly. Presentation selection is global for now;
+initial profiles, interactive launches with `n`, and external registrations
+through `--listen` all use the selected mode.
+
+In placeholder mode the WM allocates a separate image ID for each producer,
+fits a grid to the source aspect ratio inside the window, and draws Kitty
+Unicode placeholder cells. The producer uploads frames bounded by the grid's physical pixel size under
+that stable ID and reissues one `a=p,U=1` virtual placement per frame. The WM
+positions and stacks the text grids, including clearing cells vacated by moved
+or closed windows. Moving or raising a window does not change its producer's
+virtual placement; resizing sends a new grid size when needed.
+
+The usual controls apply: `h/j/k/l` move, `H/J/K/L` resize, Tab cycles focus,
+`t` tiles, `c` cascades, and `q` quits the WM. Mouse focus and title/border
+controls work as in positioned mode. The WM translates content mouse events
+into the grid's local coordinates before forwarding them. Hiding real SDL
+windows avoids their mouse focus taking precedence over forwarded input.
+
+This requires a terminal supporting Kitty Unicode placeholders, truecolour
+text and the WM's selected image-upload medium. No Claude Code plugin, separate
+placeholder drawer, image-ID argument or second terminal is needed.
+
+### Producer control interface
+
+Other hosts can select the same mode through the existing `--embed-jsonl`
+producer connection:
+
+```json
+{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":60,"rows":20,"target_px":{"w":600,"h":400}},"upload":{"profile":"file_whole","path":"/tmp/host-owned-upload.rgba"}}
+{"type":"viewport","window_id":"main","placeholder":{"image_id":777,"cols":40,"rows":12,"target_px":{"w":400,"h":240}}}
+```
+
+The placeholder object replaces `rect_cells`, `aspect`, `id_ranges`, terminal
+geometry, clipping and z-order. IDs are 1–16777215; grid dimensions are 1–297.
+The host owns allocation, text placement, aspect fitting, terminal output and
+upload-file cleanup. `frame_batch` responses use the existing groups and
+presentation status reports source pixels without an absolute terminal
+rectangle. A viewport may resize or refresh the same image; changing image
+ownership or presentation kind requires a new attach. Setting
+`refresh_placements: true` on a placeholder viewport re-uploads the retained
+frame and reissues its virtual placement, even if the application has stopped
+drawing. A cell-only change reissues the placement. Changing `target_px`
+recomposes the retained scene at the new size, even without an application frame.
+
+`target_px` is an optional upload-size bound in physical pixels. Each axis must
+be 1–16384, with at most 16,777,216 pixels in total. It preserves source aspect
+and never requests an upscale. Without it, producers retain their original
+presentation resolution. SDL scenes are composed directly at the chosen size;
+source textures, completed draw commands and cursor state are retained so a
+full-resolution observation can be composed on demand. Already captured external
+framebuffers are resized before upload. This does not change their GPU readback
+path. Source metadata and input coordinates remain independent of upload size.
+
+Input uses the existing messages. For `terminal_bytes`, pointer coordinates
+are one-based positions within the virtual grid; keyboard bytes are unchanged.
+The existing `source_pointer` message is also available. Detach and shutdown
+retain their existing meanings.
+
+
+## Headless placeholder host
+
+An application that draws its own placeholder cells can use the WM's headless
+frontend for producer management and graphics delivery. For example, a
+restricted plugin can start or reuse a host with one process call:
+
+```sh
+./zig-out/bin/katzensteg-wm --headless --background
+```
+
+The command returns discovery JSON on stdout once the host is listening:
+
+```json
+{"pid":123,"port":456,"token":"...","tty":"/dev/ttys007","host_file":"/tmp/katzensteg-wm-501/....json","version":1}
+```
+
+Without `--background`, the host runs in the foreground and publishes only its
+discovery file. `--tty /dev/ttys007` selects an explicit terminal. Otherwise it
+resolves its controlling terminal to a concrete device path, then tries the
+terminal of `--parent-pid` or `CLAUDE_PID` and walks ancestors. The concrete
+device is opened before a background host detaches; the `/dev/tty` alias is
+never retained across detach.
+`--host-file <absolute-path>` overrides the discovery path; `--http
+127.0.0.1:<port>` overrides the default ephemeral port. Other bind addresses are
+rejected.
+
+Hosts use a private directory under `/tmp/katzensteg-wm-<uid>`. A lifetime lock
+per terminal prevents duplicate hosts, and discovery files have mode 0600 and
+are published atomically. Repeated background starts authenticate with the
+existing host before returning its descriptor. The host changes no terminal
+modes, reads no keyboard input, and writes no borders, placeholder cells or
+cursor movement. It emits file-upload graphics commands with quiet responses
+and deletes only its own images. Small writes reduce interference with the
+application's terminal output; they cannot guarantee atomic output between
+independent writers.
+
+Before presenting a frame, the host checks `TIOCOUTQ`. If output is queued,
+it drops the entire batch before writing any bytes and restores the producer's
+latest retained frame once the queue clears. Recovery also works when periodic
+idle refresh is disabled. Session order rotates so several panels can share
+quiet intervals. Unsupported queue queries retain the small-write behavior.
+This reduces opportunities for interleaving; a queue check does not lock out
+another writer, and lifecycle cleanup writes remain best-effort.
+
+### HTTP clients and sessions
+
+Every request requires `Authorization: Bearer <token>`. Missing or incorrect
+authorization returns 401 with an empty body. Requests and responses use JSON.
+The HTTP adapter supports bounded requests, without keepalive or chunked bodies.
+
+1. `GET /v1/health` returns `{pid,tty,version,cell_px:{w,h}|null}`. Cell pixels
+   come from terminal geometry via ioctl; no terminal query is emitted.
+2. `POST /v1/clients {}` creates a plugin client and returns
+   `{id,target,lease_ms}`. Retain its ID and set `KATZENSTEG_TARGET` to the
+   returned `jsonl:<socket>` value in that client's shell environment.
+   An optional `{"parent_pid":123}` binds this client to a live process.
+   The host checks once per second and closes the client when that process
+   disappears. This does not bind the shared host or any other client.
+3. Send `X-Katzensteg-Client: <id>` with every client-scoped request below.
+   `GET /v1/sessions` lists only that client's sessions. Polling every 250–500 ms
+   is sufficient for metadata changes; frames stream independently.
+4. `POST /v1/client/close {}` closes that client's sessions and listener.
+   Every client-scoped request renews a 120-second lease. An idle client can use
+   `POST /v1/client/heartbeat {}`. Expired clients are closed, and the host exits
+   after 30 seconds without clients. SIGTERM, SIGINT and SIGHUP also shut it down.
+
+The headless CLI takes no profiles or `--listen` argument: sessions belong to
+clients, and each client receives its own automatically allocated registration
+socket. Ordinary shell launches through `KATZENSTEG_TARGET` appear in that
+client's session list, using the same producer interface as HTTP launches.
+
+| Request | Body | Response |
+| --- | --- | --- |
+| `GET /v1/sessions` | — | Array of `{id,title,image_id,state,source_px,grid}` |
+| `POST /v1/sessions` | `{profile,args?:[]}` | `{id}` |
+| `POST /v1/sessions/{id}/grid` | `{cols,rows}` | `{}` |
+| `POST /v1/sessions/{id}/observe` | `{after_frame?:N}` | `{path,width,height,frame_id,timestamp_ms,newer}` |
+| `POST /v1/sessions/{id}/refresh` | `{}` | `{}` |
+| `POST /v1/sessions/{id}/input` | `{events:[...]}` | `{}` |
+| `POST /v1/sessions/{id}/close` | `{}` | `{}` |
+
+Session IDs are numbers, monotonically allocated during the host lifetime.
+State is `starting`, `ready`, `closing` or `exited`. The list is authoritative;
+exited records remain for 30 seconds. Clients should remove cells for closing,
+exited or absent sessions. Access to another client's session returns 404.
+A launch response acknowledges acceptance: later application startup failures
+appear as exited sessions. Synchronous errors return 400 with an `error` field, except handler memory
+exhaustion, which returns 503 `OutOfMemory`.
+
+A producer starts with a temporary 1×1 virtual grid so it can report source
+pixels. Its graphics are withheld until the client supplies the grid it drew.
+Grid dimensions must each be 1–297 and are applied exactly and idempotently.
+The client owns aspect fitting, using `source_px` and `/health`'s `cell_px`.
+If cell pixels are unavailable, the client must choose its own explicit
+configuration or fallback. The WM derives `target_px` from the assigned cells
+and the terminal's physical cell size. It updates the producer when either
+changes, including pixel-only terminal resizes. No HTTP client change is needed.
+If terminal pixel dimensions are unknown, it omits the bound rather than guessing.
+
+`POST /v1/sessions/{id}/refresh {}` restores the retained frame and virtual
+placement after a terminal clear. It requires an assigned grid. Initial grid
+assignment and grid changes also request a restore. Ready sessions with no
+recent frames are refreshed every 500 ms; `--idle-refresh-ms <ms>` changes this
+interval and `0` disables it. No periodic refresh is requested while frames
+arrive within that interval. A failed graphics write closes the affected
+session; cleanup failures are logged without stopping the host.
+
+Observation returns a source-resolution RGBA PNG under the session's private
+runtime directory, mode 0600. It atomically replaces the same file on each
+capture and is deleted on session or host exit. Placeholder producers retain
+the completed scene or external framebuffer automatically; no
+`KATZENSTEG_OBSERVE` environment setting is needed.
+With `after_frame`, the request waits up to two seconds for a newer retained
+frame, then returns the latest available with `newer: false` if necessary.
+This wait leaves the host free to deliver frames, process input and serve other
+clients. If no frame is available by the deadline, it returns 503 `NoFrame`.
+One observation request may be pending per session; a concurrent request gets
+409 `ObservationPending`. Frame IDs count captured frames; refreshes do not
+advance them. PNG encoding uses stored DEFLATE blocks and runs only on demand.
+
+Input requests preserve event order and validate the complete request before
+queuing input. Up to 64 events may be sent together:
+
+```json
+{"events":[{"type":"key","key":"escape"}]}
+{"events":[{"type":"key","key":"up","ctrl":true,"action":"down"}]}
+{"events":[{"type":"key","key":"up","action":"up"}]}
+{"events":[{"type":"pointer","kind":"down","x":0,"y":0,"button":"left"},{"type":"pointer","kind":"up","x":0,"y":0,"button":"left"}]}
+```
+
+Keys accept single Unicode characters, `enter`/`return`, `escape`, `tab`,
+`backspace`, `space`, `delete`, `insert`, arrow names, `home`, `end`, `pageup`,
+`pagedown` and `f1`–`f12`. Modifiers are `ctrl`, `shift`, `alt` and `meta`;
+`action` is `tap` by default, or `down`/`up` for clients with held-key events.
+The producer's canonical input model supplies key events and polling state.
+Pointer coordinates are zero-based within the drawn grid. `kind` is `down`,
+`move` or `up`; down/up require `left`, `middle` or `right`. The host tracks
+button state per session. Out-of-grid coordinates return 400.
+
+Event long-polling and Kitty frame-edit uploads are deferred. The Claude Code
+plugin in `tools/claude-code-plugin/` uses the client-scoped interface above.

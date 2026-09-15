@@ -25,7 +25,13 @@ export function registerGameTools(
 			name: "katzensteg_open",
 			label: "Open game panel",
 			description:
-				"Open a floating game panel using the same launcher and UI as /katzensteg-panel open. Supply a Katzensteg profile such as mi2 and optional program arguments. Returns the panel ID; the game may still be starting. Use katzensteg_panels to check availability before observing or acting.",
+				"Open a floating game panel using the same launcher and UI as /katzensteg-panel open. Supply a Katzensteg profile such as mi2 and optional program arguments. Returns the panel ID; the game may still be starting. Use katzensteg_panels to check availability before observing or acting. In interactive pi, ordinary Katzensteg launches through bash also open panels via the inherited KATZENSTEG_TARGET.",
+			promptSnippet: "Open a Katzensteg game in an interactive panel",
+			promptGuidelines: [
+				"Before launching Katzensteg through bash, check `command -v katzensteg`. If it is absent from PATH, use katzensteg_open (which resolves the configured or checkout launcher), or use the checkout launcher by absolute path. A background job PID does not prove the game launched: check its log and katzensteg_panels before reporting success.",
+				"When KATZENSTEG_TARGET is set by the interactive pi extension, ordinary `katzensteg <profile> [args...]` launches through bash automatically open floating panels. Preserve this inherited target; do not allocate a socket or start a separate host. An explicit target selects another host; `env -u KATZENSTEG_TARGET katzensteg <profile>` selects standalone terminal output.",
+				"A foreground bash launch waits for the application to exit. katzensteg_open returns a panel ID while the game runs. Both launch paths support katzensteg_panels, katzensteg_observe and katzensteg_act. List attached panels before acting; pass a panel ID when more than one is available.",
+			],
 			parameters: Type.Object({
 				profile: Type.String({ minLength: 1 }),
 				args: Type.Optional(Type.Array(Type.String())),
@@ -96,7 +102,7 @@ export function registerGameTools(
 			name: "katzensteg_panels",
 			label: "Game panels",
 			description:
-				"List live Katzensteg game panels available for observation and input. Panels still starting are omitted. Open games using katzensteg_open.",
+				"List live Katzensteg game panels available for observation and input. Includes games opened with katzensteg_open or launched through bash into pi via KATZENSTEG_TARGET. Panels still starting are omitted; an empty list immediately after a launch does not mean another game should be opened.",
 			parameters: Type.Object({}),
 			async execute() {
 				const available = panels().map(({ id, profile }) => ({ id, profile }));

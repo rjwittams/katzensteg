@@ -12,6 +12,7 @@ import path from "node:path";
 import test from "node:test";
 import { setTimeout } from "node:timers/promises";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { getCellDimensions, setCellDimensions } from "@earendil-works/pi-tui";
 import type {
 	SurfaceGeometry,
 	SurfaceHandle,
@@ -41,6 +42,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 `,
 	);
 	chmodSync(executable, 0o755);
+	const previousCellDimensions = getCellDimensions();
+	setCellDimensions({ widthPx: 13, heightPx: 29 });
 	const previousBin = process.env.KATZENSTEG_BIN;
 	process.env.KATZENSTEG_BIN = executable;
 	let geometry: SurfaceGeometry = {
@@ -95,6 +98,21 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 		onRender(frame());
 		const attach = (await controls(1))[0];
 		assert.equal(attach.type, "attach");
+		const assertCellDimensions = (
+			message: Record<string, unknown>,
+			width: number,
+			height: number,
+		) => {
+			const cells = message.terminal_cells as { rows: number; cols: number };
+			const pixels = message.terminal_px as { w: number; h: number };
+			assert.ok(
+				cells && pixels,
+				"host must send terminal cells and pixels together",
+			);
+			assert.equal(pixels.w / cells.cols, width);
+			assert.equal(pixels.h / cells.rows, height);
+		};
+		assertCellDimensions(attach, 13, 29);
 		assert.deepEqual(attach.occlusion_rects, [
 			{ row: 5, col: 11, rows: 6, cols: 11 },
 		]);
@@ -118,6 +136,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 		);
 		const covered = (await controls(2))[1];
 		assert.equal(covered.type, "viewport");
+		assertCellDimensions(covered, 13, 29);
 		assert.deepEqual(covered.rect_cells, attach.rect_cells);
 		assert.deepEqual(covered.occlusion_rects, [
 			{ row: 5, col: 4, rows: 6, cols: 18 },
@@ -130,9 +149,22 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 		onGeometry(geometry);
 		onRender(frame());
 		assert.deepEqual((await controls(3))[2].occlusion_rects, []);
+		// Pi's startup measurement may arrive after the first geometry callback.
+		// A render with unchanged cell bounds must propagate the corrected ratio.
+		setCellDimensions({ widthPx: 15, heightPx: 31 });
+		onRender(frame());
+		const corrected = (await controls(4))[3];
+		assert.equal(corrected.type, "viewport");
+		assertCellDimensions(corrected, 15, 31);
+		assert.deepEqual(corrected.rect_cells, attach.rect_cells);
+		assert.ok(
+			Number(corrected.presentation_generation) >
+				Number(covered.presentation_generation),
+		);
 		panel.dispose();
-		assert.equal((await controls(4))[3].type, "shutdown");
+		assert.equal((await controls(5))[4].type, "shutdown");
 	} finally {
+		setCellDimensions(previousCellDimensions);
 		panel.dispose();
 		if (previousBin === undefined) delete process.env.KATZENSTEG_BIN;
 		else process.env.KATZENSTEG_BIN = previousBin;

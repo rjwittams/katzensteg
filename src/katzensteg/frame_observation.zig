@@ -26,6 +26,19 @@ pub const FrameObservation = struct {
         self.timestamp_ms = std.time.milliTimestamp();
     }
 
+    pub fn writePng(self: *const FrameObservation, allocator: std.mem.Allocator, path: []const u8) !void {
+        if (self.pixels.items.len == 0) return error.NoFrame;
+        const temporary = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+        defer allocator.free(temporary);
+        defer std.fs.deleteFileAbsolute(temporary) catch {};
+        const file = try std.fs.createFileAbsolute(temporary, .{ .mode = 0o600 });
+        {
+            defer file.close();
+            try @import("png.zig").write(allocator, file.deprecatedWriter(), self.width, self.height, self.pixels.items);
+        }
+        try std.fs.renameAbsolute(temporary, path);
+    }
+
     pub fn write(self: *const FrameObservation, path: []const u8) !void {
         if (self.pixels.items.len == 0) return error.NoFrame;
         var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });

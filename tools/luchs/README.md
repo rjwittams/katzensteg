@@ -31,12 +31,29 @@ The helper binary is installed next to `luchs` as `luchs-webview-capture`. Direc
 
 `luchs` forwards SDL mouse, wheel, key, and text-input events to the helper over stdin as JSONL. The helper dispatches those into the page as DOM events. This is intentionally separate from any future app/control stdin channel.
 
+Options for hosting a page in a panel:
+
+```bash
+luchs --renderer=native-webview --size=1568x512 --watch page.html
+```
+
+- `--size=WxH` sets the frame size (default 800x600). A panel host passes the
+  pixel area its cells cover, doubled on high-density displays, so text stays
+  legible after the terminal scales the image into the grid.
+- `--watch` polls the page file's modification time four times a second and
+  asks the helper to reload it on change, bypassing WebKit's cache. Rewriting
+  the file is the whole update channel.
+- Unbounded native-webview runs present a frame only when its pixels changed,
+  plus one a second as a keep-alive, so a static page does not stream. Bounded
+  `--frames=N` runs keep every frame so smoke profiles finish on time.
+- A bare `--`, as the launcher forwards it, is ignored.
+
 Current limitations:
 
-- fixed 800x600 WebView viewport
+- the WebView viewport is fixed for the run: no resize after start
 - WebView input is a practical JS bridge, not a complete browser input stack
 - macOS native WebView only
-- file-based HTML input only; no manifest, hot reload, app channel, or multi-fragment/session protocol yet
+- file-based HTML input only; no manifest, app channel, or multi-fragment/session protocol yet
 
 Manual input smoke:
 

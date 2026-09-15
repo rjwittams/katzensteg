@@ -24,7 +24,7 @@ The integration supports:
 
 - floating and inline panels using pi's generic surface API
 - title dragging, border/corner resizing, and a top-right close button
-- Katzensteg `--embed-jsonl` producer launch
+- Katzensteg `--embed-jsonl` producer launch and external launches through a private host socket
 - committed geometry and clipping, with stale-position filtering
 - keyboard input, pointer capture, and cancellation releases
 - post-render graphics writes and synchronous image cleanup on disposal
@@ -46,7 +46,7 @@ The actual extension entrypoint lives in `extensions/katzensteg-panel.ts`.
 /katzensteg-panel profile sonic
 ```
 
-Click the body to focus the producer. Drag the title to move the floating panel; drag an edge or corner to resize it. Click `×` to close it. Ctrl+G returns focus to the composer (or use the configured surface-release binding). Escape remains available to the game or application. Size presets resize the existing overlay without restarting the producer.
+Click the body to focus the producer and bring the panel to the front. Drag the title to move the floating panel; drag an edge or corner to resize it. These layout gestures preserve keyboard focus and stacking order without interrupting agent actions. Hovering or scrolling over an unfocused body also leaves the agent in control. Acquiring focus or sending input to the game cancels its current agent operation. Click `×` to close it. Ctrl+G returns focus to the composer (or use the configured surface-release binding). Escape remains available to the game or application. Size presets resize the existing overlay without restarting the producer.
 
 Each `open` adds a floating panel. New panels are offset and receive a higher
 graphics depth using Katzensteg's existing `z_base`. `close`, `size`, `profile`,
@@ -75,6 +75,45 @@ or to keep an arg from being read as the profile:
 /katzensteg-panel -- -L core.dylib                   # preferred profile + args
 ```
 
+## Launching from a shell in pi
+
+In interactive pi, the extension allocates its own socket and sets
+`KATZENSTEG_TARGET=jsonl:<socket-path>` in the process environment. Both the
+agent's bash tool and `!` shell commands inherit it, so ordinary launches open
+floating panels:
+
+```bash
+~/dev/katzensteg/zig-out/bin/katzensteg mi2
+```
+
+Each launch opens a separate panel with the same input, occlusion, and agent
+controls as `/katzensteg-panel open`. The launcher stays with its calling shell
+and preserves the app's exit status; closing the panel asks it to shut down.
+An exited application leaves an empty panel marked disconnected, which can be
+closed or given another profile.
+
+The address belongs to the interactive pi host, across conversation changes.
+Conversation replacement closes existing panels and hands the listener to the
+new extension runtime; it does not preserve running games.
+Reloading the extension closes its connections, removes its socket, restores
+inherited environment values, and allocates a fresh address. Headless pi does
+not start a listener. The extension also exports `KATZENSTEG_OBSERVE=1` so games
+launched through bash support screenshot requests.
+
+Socket allocation uses a private random directory under `XDG_RUNTIME_DIR` when
+it is owned by the user and has mode 0700, otherwise the system temporary
+directory. Long paths fall back to `/tmp` to fit Unix socket limits. The directory
+has mode 0700 and the socket 0600. Treat the full target as opaque: there is no
+workspace-derived name or shared socket registry. The listener bounds pending
+registrations to 16, active connections to 32, and registration time to 5 seconds.
+
+A command can explicitly select another host with `KATZENSTEG_TARGET=jsonl:...`,
+or use `env -u KATZENSTEG_TARGET katzensteg <profile>` for a normal terminal
+launch. Existing panel commands still use explicit `--embed-jsonl`, which takes
+precedence over the inherited target. To launch from a separate shell into pi,
+copy its target address and also set `KATZENSTEG_OBSERVE=1` if agent screenshots
+are wanted.
+
 ## Overrides
 
 - `KATZENSTEG_PANEL_MODE=layout` runs layout-only mode: no Katzensteg process, no raw graphics writes.
@@ -92,6 +131,11 @@ The extension queues pending batches until pi commits its next render; it does n
 Without `KATZENSTEG_BIN`, the extension prefers `zig-out/bin/katzensteg` from this repo and otherwise falls back to `katzensteg` from `$PATH`.
 
 ## Agent interaction
+
+The registered tool descriptions explain both panel tools and shell launches.
+`katzensteg_open` also supplies pi prompt guidelines covering inherited target
+routing, foreground shell lifetime, and selecting panels for observation/input;
+the agent does not need to read this README to discover those behaviors.
 
 Rebuild Katzensteg with `zig build -Doptimize=Debug`, then reload the pi extension.
 Open a game with `/katzensteg-panel open mi2` or `/katzensteg-panel inline mi2`.

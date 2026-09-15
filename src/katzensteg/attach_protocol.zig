@@ -52,13 +52,24 @@ pub const PresentationStatus = struct {
     }
 };
 
+pub const Observation = struct {
+    request_id: u32,
+    width: i32 = 0,
+    height: i32 = 0,
+    frame_id: u64 = 0,
+    timestamp_ms: i64 = 0,
+    failed: bool = false,
+};
+
 pub const PeerMessage = union(enum) {
+    observation: Observation,
     frame_batch: FrameBatch,
     detached: Detached,
     presentation_status: PresentationStatus,
 
     pub fn deinit(self: *PeerMessage, allocator: std.mem.Allocator) void {
         switch (self.*) {
+            .observation => {},
             .frame_batch => |*batch| batch.deinit(allocator),
             .detached => |*detached| detached.deinit(allocator),
             .presentation_status => |*status| status.deinit(allocator),
@@ -81,6 +92,15 @@ pub fn parsePeerMessage(allocator: std.mem.Allocator, line: []const u8) !PeerMes
 
     if (std.mem.eql(u8, type_value.string, "frame_batch")) {
         return .{ .frame_batch = try parseFrameBatch(allocator, line) };
+    }
+
+    if (std.mem.eql(u8, type_value.string, "observation")) {
+        const Reply = struct { request_id: u32, width: i32 = 0, height: i32 = 0, frame_id: u64 = 0, timestamp_ms: i64 = 0, @"error": ?[]const u8 = null };
+        const reply = try std.json.parseFromSlice(Reply, allocator, line, .{ .ignore_unknown_fields = true });
+        defer reply.deinit();
+        const r = reply.value;
+        if (r.@"error" == null and (r.width <= 0 or r.height <= 0 or r.frame_id == 0)) return error.InvalidMessage;
+        return .{ .observation = .{ .request_id = r.request_id, .width = r.width, .height = r.height, .frame_id = r.frame_id, .timestamp_ms = r.timestamp_ms, .failed = r.@"error" != null } };
     }
 
     const window_value = root.get("window_id") orelse return error.InvalidMessage;

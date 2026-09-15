@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "jackstay-viewer": {
+      "extends": [
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "target": "{home}/dev/porthole/target/capture-viewer-sdl/capture-viewer-sdl",
+      "env": {
+        "SDL_RENDER_DRIVER": "software"
+      },
+      "stdout": "/tmp/katzensteg-jackstay-viewer.out",
+      "stderr": "stdout"
+    }
+  }
+}

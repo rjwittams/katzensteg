@@ -57,6 +57,8 @@ KS_DECLARE_REPLACEMENT(SDL_GL_SwapWindow);
 KS_DECLARE_REPLACEMENT(SDL_Vulkan_LoadLibrary);
 KS_DECLARE_REPLACEMENT(SDL_PumpEvents);
 KS_DECLARE_REPLACEMENT(SDL_PollEvent);
+KS_DECLARE_REPLACEMENT(SDL_WaitEvent);
+KS_DECLARE_REPLACEMENT(SDL_WaitEventTimeout);
 KS_DECLARE_REPLACEMENT(SDL_PeepEvents);
 KS_DECLARE_REPLACEMENT(SDL_GetKeyboardState);
 KS_DECLARE_REPLACEMENT(SDL_GetMouseState);
@@ -75,6 +77,8 @@ KS_DECLARE_CAPTURE(SDL_GetTicks);
 KS_DECLARE_CAPTURE(SDL_ConvertSurfaceFormat);
 KS_DECLARE_CAPTURE(SDL_FreeSurface);
 KS_DECLARE_CAPTURE(SDL_GetError);
+KS_DECLARE_CAPTURE(SDL_GetRendererOutputSize);
+KS_DECLARE_CAPTURE(SDL_ClearError);
 
 #define KS_DLOPEN_REBIND
 #include "dlopen_macos.h"
@@ -128,6 +132,8 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_REPLACE(SDL_Vulkan_LoadLibrary),
     KS_REPLACE(SDL_PumpEvents),
     KS_REPLACE(SDL_PollEvent),
+    KS_REPLACE(SDL_WaitEvent),
+    KS_REPLACE(SDL_WaitEventTimeout),
     KS_REPLACE(SDL_PeepEvents),
     KS_REPLACE(SDL_GetKeyboardState),
     KS_CAPTURE(SDL_GetMouseFocus),
@@ -142,6 +148,8 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_REPLACE(SDL_ShowCursor),
     KS_REPLACE(SDL_FreeCursor),
     KS_CAPTURE(SDL_GetError),
+    KS_CAPTURE(SDL_GetRendererOutputSize),
+    KS_CAPTURE(SDL_ClearError),
     KS_CAPTURE(SDL_QueryTexture),
     { "dlopen", (void *)ks_macos_dlopen, &ks_real_macos_slot_dlopen },
 };

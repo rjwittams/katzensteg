@@ -21,3 +21,5 @@ pub const detectFileTransmissionSupportWhole = detect.detectFileTransmissionSupp
 pub const detectFileTransmissionSupportOffset = detect.detectFileTransmissionSupportOffset;
 pub const readReplies = detect.readReplies;
 pub const readRepliesFromFile = detect.readRepliesFromFile;
+
+pub const placeholders = @import("placeholders.zig");

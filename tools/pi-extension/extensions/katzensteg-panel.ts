@@ -6,6 +6,8 @@ import {
 	readFileSync,
 	rmSync,
 } from "node:fs";
+import type { Socket } from "node:net";
+import type { Writable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +17,8 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	type CellDimensions,
+	getCellDimensions,
 	type OverlayHandle,
 	type SurfaceGeometry,
 	type SurfaceHandle,
@@ -48,6 +52,11 @@ import {
 	makeTerminalBytesInputMessage,
 	PointerInput,
 } from "./katzensteg-input.js";
+import {
+	installHostEnvironment,
+	interactiveHostState,
+	listenForLaunches,
+} from "./katzensteg-host.js";
 import { registerGameTools } from "./katzensteg-tools.js";
 import { PanelWindowControls } from "./katzensteg-window.js";
 
@@ -133,6 +142,7 @@ interface TerminalCells {
 }
 
 interface ViewportSync {
+	cellDimensions: CellDimensions;
 	rect: RectCells;
 	clip: RectCells | undefined;
 	occlusions: RectCells[];
@@ -156,7 +166,7 @@ interface AttachOptions {
 	rectCells: RectCells;
 	clipCells?: RectCells;
 	occlusions: RectCells[];
-	terminalCells?: TerminalCells;
+	cellDimensions: CellDimensions;
 	aspect: Aspect;
 	zBase: number;
 	imageIds: [number, number];
@@ -170,7 +180,7 @@ interface ViewportOptions {
 	rectCells: RectCells;
 	clipCells?: RectCells;
 	occlusions: RectCells[];
-	terminalCells?: TerminalCells;
+	cellDimensions: CellDimensions;
 	aspect: Aspect;
 	zBase: number;
 }
@@ -194,6 +204,49 @@ let preferredSize: SizePresetName = "medium";
 let globalChunkSeq = 0;
 
 export default function (pi: ExtensionAPI) {
+	const hostState = interactiveHostState();
+	let startingHost: Promise<void> | undefined;
+	let shutdown = false;
+	let hostContext: Pick<ExtensionContext, "ui"> | undefined;
+	pi.on("session_start", async (_event, ctx) => {
+		if (!ctx.hasUI || shutdown) return;
+		hostContext = ctx;
+		hostState.onLaunch = async (socket, title) => {
+			if (shutdown || !hostContext) {
+				socket.destroy();
+				return;
+			}
+			await openPanel(hostContext, title, preferredSize, [], socket);
+		};
+		hostState.onError = (error) =>
+			hostContext?.ui.notify(`Katzensteg host: ${error.message}`, "error");
+		if (hostState.listener) return;
+		if (!startingHost)
+			startingHost = (async () => {
+				try {
+					const listener = await listenForLaunches(
+						(socket, title) => {
+							if (hostState.onLaunch) return hostState.onLaunch(socket, title);
+							socket.destroy();
+						},
+						(error) => hostState.onError?.(error),
+					);
+					if (shutdown) {
+						listener.close();
+						return;
+					}
+					hostState.listener = listener;
+					hostState.restoreEnvironment = installHostEnvironment(
+						listener.target,
+					);
+					debugLog(`host.listen ${listener.target}`);
+				} catch (error) {
+					ctx.ui.notify(`Katzensteg host failed: ${String(error)}`, "error");
+				}
+			})();
+		await startingHost;
+		startingHost = undefined;
+	});
 	registerGameTools(
 		pi,
 		() => [...liveGamePanels].flatMap((panel) => panel.agentPanel() ?? []),
@@ -207,7 +260,21 @@ export default function (pi: ExtensionAPI) {
 	);
 	let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
 	let heartbeatStopped = false;
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (event) => {
+		shutdown = true;
+		hostContext = undefined;
+		hostState.onLaunch = undefined;
+		hostState.onError = undefined;
+		if (
+			event.reason !== "new" &&
+			event.reason !== "resume" &&
+			event.reason !== "fork"
+		) {
+			hostState.restoreEnvironment?.();
+			hostState.listener?.close();
+			hostState.listener = undefined;
+			hostState.restoreEnvironment = undefined;
+		}
 		heartbeatStopped = true;
 		if (heartbeatTimer) clearTimeout(heartbeatTimer);
 		debugLog("session_shutdown");
@@ -341,16 +408,20 @@ function openPanel(
 	profile: string,
 	sizeName: SizePresetName,
 	args: string[],
+	socket?: Socket,
 ): Promise<string> {
-	preferredProfile = profile;
-	preferredArgs = args;
-	preferredSize = sizeName;
+	if (!socket) {
+		preferredProfile = profile;
+		preferredArgs = args;
+		preferredSize = sizeName;
+	}
 	const controller = new PanelController(
 		ctx,
-		DEFAULT_MODE,
+		socket ? "live" : DEFAULT_MODE,
 		profile,
 		SIZE_PRESETS[sizeName],
 		args,
+		socket,
 	);
 	floatingPanels.add(controller);
 	const opened = new Promise<string>((resolve, reject) => {
@@ -383,13 +454,17 @@ class PanelController {
 	private done: (() => void) | undefined;
 	private closed = false;
 
+	private readonly socket: Socket | undefined;
+
 	constructor(
 		ctx: Pick<ExtensionContext, "ui">,
 		mode: PanelMode,
 		profile: string,
 		size: SizePreset,
 		args: string[] = [],
+		socket?: Socket,
 	) {
+		this.socket = socket;
 		this.ctx = ctx;
 		this.mode = mode;
 		this.profile = profile;
@@ -413,6 +488,7 @@ class PanelController {
 						done,
 						this.zBase,
 						() => this.activate(),
+						this.socket,
 					);
 					this.component.attach(
 						tui.trackSurface(this.component, { mouse: true }),
@@ -442,6 +518,7 @@ class PanelController {
 			if (!this.component?.disposed) throw error;
 		} finally {
 			this.component?.dispose();
+			if (!this.component) this.socket?.destroy();
 			floatingPanels.delete(this);
 		}
 	}
@@ -480,7 +557,15 @@ export class SurfacePanel implements ActivePanel {
 			? { id: this.gamePanelId, profile: this.details.profile, game }
 			: undefined;
 	}
-	focused = false;
+	private inputFocused = false;
+	get focused(): boolean {
+		return this.inputFocused;
+	}
+	set focused(value: boolean) {
+		if (value && !this.inputFocused && !this.disposed)
+			this.producer?.game?.cancel();
+		this.inputFocused = value;
+	}
 	disposed = false;
 	private readonly theme: Theme;
 	private readonly floating: boolean;
@@ -502,13 +587,17 @@ export class SurfacePanel implements ActivePanel {
 	private status = "starting";
 	private error: string | undefined;
 
+	private socket: Socket | undefined;
+
 	constructor(
 		theme: Theme,
 		details: PanelDetails,
 		close?: () => void,
 		zBase = INLINE_Z_BASE,
 		activate?: () => void,
+		socket?: Socket,
 	) {
+		this.socket = socket;
 		this.theme = theme;
 		this.zBase = zBase;
 		this.activate = activate;
@@ -537,6 +626,13 @@ export class SurfacePanel implements ActivePanel {
 				return;
 			}
 			if (this.disposed) return;
+			// Pi can receive its startup cell-size reply after our initial attach.
+			// Re-read its cache on render; it already invalidates images on a reply.
+			if (
+				this.sync &&
+				!sameCellDimensions(this.sync.cellDimensions, getCellDimensions())
+			)
+				this.onGeometry(this.geometry);
 			if (!this.producer && this.sync) this.startProducer();
 			const visible =
 				!!frame.geometry &&
@@ -570,6 +666,8 @@ export class SurfacePanel implements ActivePanel {
 		this.surface?.requestRender();
 	}
 	setProfile(profile: string, args: string[]): void {
+		this.socket?.destroy();
+		this.socket = undefined;
 		this.handleMouseCancel();
 		this.producerEpoch++;
 		this.producer?.stop("profile-change");
@@ -611,12 +709,7 @@ export class SurfacePanel implements ActivePanel {
 	}
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.disposed || event.type === "click") return undefined;
-		// Let pi record mouse focus before raising the overlay explicitly.
-		if (event.type === "press")
-			queueMicrotask(() => {
-				if (!this.disposed) this.activate?.();
-			});
-		this.producer?.game?.cancel();
+		// Layout gestures capture the pointer without taking game input focus.
 		const chrome = this.window?.handle(event);
 		if (chrome) return chrome;
 		const insideBody =
@@ -625,9 +718,16 @@ export class SurfacePanel implements ActivePanel {
 			event.y >= 3 &&
 			event.y < event.height - 1;
 		if (!this.bodyCapture && !insideBody)
-			return event.type === "press"
-				? { handled: true, focus: true }
-				: undefined;
+			return event.type === "press" ? { handled: true } : undefined;
+		// Hovering over an unfocused panel must not compete with the agent.
+		if (!this.focused && !this.bodyCapture && event.type !== "press")
+			return { handled: true, render: false };
+		// Let pi record mouse focus before raising the overlay explicitly.
+		if (event.type === "press")
+			queueMicrotask(() => {
+				if (!this.disposed) this.activate?.();
+			});
+		this.producer?.game?.cancel();
 		if (event.type === "press") this.bodyCapture = true;
 		if (event.type === "release") this.bodyCapture = false;
 		const message = this.pointer.encode(WINDOW_ID, event);
@@ -650,6 +750,8 @@ export class SurfacePanel implements ActivePanel {
 		this.dispose();
 	}
 	dispose(): void {
+		this.socket?.destroy();
+		this.socket = undefined;
 		if (this.disposed) return;
 		liveGamePanels.delete(this);
 		this.handleMouseCancel();
@@ -676,8 +778,10 @@ export class SurfacePanel implements ActivePanel {
 				: { row: rect.row, col: rect.col, rows: 0, cols: 0 };
 		const occlusions =
 			body && geometry ? occlusionCellsForBody(body, geometry) : [];
+		const cellDimensions = { ...getCellDimensions() };
 		if (
 			this.sync &&
+			sameCellDimensions(this.sync.cellDimensions, cellDimensions) &&
 			sameRect(this.sync.rect, rect) &&
 			sameOptionalRect(this.sync.clip, clip) &&
 			this.sync.occlusions.length === occlusions.length &&
@@ -686,7 +790,13 @@ export class SurfacePanel implements ActivePanel {
 			)
 		)
 			return;
-		this.sync = { rect, clip, occlusions, generation: ++this.generation };
+		this.sync = {
+			rect,
+			clip,
+			occlusions,
+			cellDimensions,
+			generation: ++this.generation,
+		};
 		this.batches.setGeneration(this.generation);
 		this.producer?.setViewport(this.sync, this.zBase);
 		debugLog(
@@ -714,6 +824,11 @@ export class SurfacePanel implements ActivePanel {
 						this.status = `streaming #${batch.seq}`;
 					this.surface?.requestRender();
 				},
+				onClosed: () => {
+					if (!current()) return;
+					this.pendingCleanup += this.batches.dispose();
+					this.surface?.requestRender();
+				},
 				onDetached: () => {
 					if (current()) {
 						this.status = "detached";
@@ -736,7 +851,9 @@ export class SurfacePanel implements ActivePanel {
 			},
 			this.zBase,
 			this.details.args ?? [],
+			this.socket,
 		);
+		this.socket = undefined;
 		this.producer.start();
 		if (this.sync) this.producer.setViewport(this.sync, this.zBase);
 	}
@@ -799,13 +916,15 @@ function createProducer(
 	callbacks: ProducerCallbacks,
 	zBase: number,
 	args: string[] = [],
+	socket?: Socket,
 ): ProducerConnection {
 	return mode === "live"
-		? new KatzenstegProducer(profile, callbacks, zBase, args)
+		? new KatzenstegProducer(profile, callbacks, zBase, args, socket)
 		: new LayoutOnlyProducer(callbacks);
 }
 
 interface ProducerCallbacks {
+	onClosed?: () => void;
 	onFrame?: (batch: FrameBatch) => void;
 	onDetached?: (message: DetachedMessage) => void;
 	onStatus: (status: string) => void;
@@ -852,15 +971,19 @@ class LayoutOnlyProducer implements ProducerConnection {
 	}
 }
 
-class KatzenstegProducer implements ProducerConnection {
+export class KatzenstegProducer implements ProducerConnection {
 	get ready(): boolean {
-		return !!this.child && this.attached && !this.child.stdin.destroyed;
+		return (
+			!!this.control &&
+			this.attached &&
+			!this.control.destroyed &&
+			!this.control.writableEnded
+		);
 	}
 	readonly game = new GameInteraction({
 		observe: (signal) => this.observe(signal),
 		input: (message) => {
-			if (!this.child || !this.attached || this.child.stdin.destroyed)
-				throw new Error("Game panel is not attached");
+			if (!this.ready) throw new Error("Game panel is not attached");
 			this.sendInput(message);
 		},
 	});
@@ -872,7 +995,7 @@ class KatzenstegProducer implements ProducerConnection {
 
 	private observe(signal: AbortSignal): Promise<Observation | undefined> {
 		signal.throwIfAborted();
-		if (!this.child || !this.attached)
+		if (!this.ready)
 			return Promise.reject(new Error("Game panel is not attached yet"));
 		const id = ++this.observationId;
 		const snapshotPath = path.join(this.uploadDir, `observation-${id}.rgba`);
@@ -942,6 +1065,10 @@ class KatzenstegProducer implements ProducerConnection {
 	private zBase: number;
 	private readonly args: string[];
 	private child: ChildProcessWithoutNullStreams | undefined;
+	private get control(): Writable | undefined {
+		return this.socket ?? this.child?.stdin;
+	}
+	private started = false;
 	private carry = "";
 	private attached = false;
 	private latestSyncSent: ViewportSync | undefined;
@@ -953,12 +1080,16 @@ class KatzenstegProducer implements ProducerConnection {
 	private readonly imageIds: [number, number];
 	private readonly placementIds: [number, number];
 
+	private readonly socket: Socket | undefined;
+
 	constructor(
 		profile: string,
 		callbacks: ProducerCallbacks,
 		zBase: number,
 		args: string[] = [],
+		socket?: Socket,
 	) {
+		this.socket = socket;
 		this.profile = profile;
 		this.callbacks = callbacks;
 		this.zBase = zBase;
@@ -969,6 +1100,30 @@ class KatzenstegProducer implements ProducerConnection {
 	}
 
 	start(): void {
+		if (this.started) return;
+		this.started = true;
+		if (this.socket) {
+			const socket = this.socket;
+			let finished = false;
+			const closed = () => {
+				if (finished) return;
+				finished = true;
+				this.cancelAgent("Game disconnected");
+				if (this.killTimer) clearTimeout(this.killTimer);
+				this.attached = false;
+				rmSync(this.uploadDir, { recursive: true, force: true });
+				this.callbacks.onClosed?.();
+				this.callbacks.onStatus("disconnected");
+			};
+			socket.setEncoding("utf8");
+			socket.on("data", (chunk: string) => this.onStdout(chunk));
+			socket.on("error", (error) => this.callbacks.onError?.(error.message));
+			socket.once("end", () => socket.destroy());
+			socket.once("close", closed);
+			if (socket.destroyed) closed();
+			else socket.resume();
+			return;
+		}
 		if (this.child) return;
 		const bin = this.binaryPath();
 		debugLog(
@@ -1009,7 +1164,7 @@ class KatzenstegProducer implements ProducerConnection {
 
 	setViewport(sync: ViewportSync, zBase: number): void {
 		this.zBase = zBase;
-		if (!this.child?.stdin) {
+		if (!this.control || this.control.destroyed || this.control.writableEnded) {
 			debugLog(
 				`producer.live.viewport skipped no child viewport=${formatRect(sync.rect)}`,
 			);
@@ -1023,6 +1178,7 @@ class KatzenstegProducer implements ProducerConnection {
 				makeAttachMessage({
 					windowId: WINDOW_ID,
 					generation: sync.generation,
+					cellDimensions: sync.cellDimensions,
 					rectCells: sync.rect,
 					clipCells: sync.clip,
 					occlusions: sync.occlusions,
@@ -1053,6 +1209,7 @@ class KatzenstegProducer implements ProducerConnection {
 			makeViewportMessage({
 				windowId: WINDOW_ID,
 				generation: sync.generation,
+				cellDimensions: sync.cellDimensions,
 				rectCells: sync.rect,
 				clipCells: sync.clip,
 				occlusions: sync.occlusions,
@@ -1068,13 +1225,22 @@ class KatzenstegProducer implements ProducerConnection {
 		// Only the live producer needs to forward input to the actual katzensteg
 		// child; layout-only is a debug stand-in. Drop silently when the child
 		// is gone (panel closing) — no need to spam logs in that case.
-		if (!this.child?.stdin || this.child.stdin.destroyed) return;
+		if (!this.ready) return;
 		if (!this.attached) return;
 		this.writeControl(`${JSON.stringify(message)}\n`);
 	}
 
 	stop(reason: string): void {
 		this.cancelAgent(reason);
+		if (this.socket) {
+			if (!this.socket.destroyed && !this.socket.writableEnded) {
+				this.writeControl(makeShutdownMessage());
+				this.socket.end();
+				this.killTimer = setTimeout(() => this.socket?.destroy(), 3000);
+			}
+			this.attached = false;
+			return;
+		}
 		const child = this.child;
 		debugLog(
 			`producer.live.stop reason=${reason} child=${child ? "yes" : "no"} attached=${this.attached}`,
@@ -1109,12 +1275,20 @@ class KatzenstegProducer implements ProducerConnection {
 	}
 
 	private writeControl(message: string): void {
-		if (!this.child?.stdin || this.child.stdin.destroyed) {
+		const control = this.control;
+		if (!control || control.destroyed || control.writableEnded) {
 			debugLog(`producer.live.write skipped ${message.trim()}`);
 			return;
 		}
 		debugLog(`producer.live.write ${message.trim()}`);
-		this.child.stdin.write(message, (error) => {
+		if (
+			this.socket &&
+			control.writableLength + Buffer.byteLength(message) > 512 * 1024
+		) {
+			this.socket.destroy(new Error("Host control queue exceeded 512 KiB"));
+			return;
+		}
+		control.write(message, (error) => {
 			if (error)
 				debugLog(`producer.live.write callback error=${error.message}`);
 		});
@@ -1208,6 +1382,24 @@ function fallbackPanelRowsForSize(size: SizePreset): number {
 	return typeof size.height === "number" ? size.height : 20;
 }
 
+function terminalGeometry(cellDimensions: CellDimensions) {
+	const cells: TerminalCells = {
+		rows: process.stdout.rows || 24,
+		cols: process.stdout.columns || 80,
+	};
+	return {
+		terminal_cells: cells,
+		terminal_px: {
+			w: cells.cols * cellDimensions.widthPx,
+			h: cells.rows * cellDimensions.heightPx,
+		},
+	};
+}
+
+function sameCellDimensions(a: CellDimensions, b: CellDimensions): boolean {
+	return a.widthPx === b.widthPx && a.heightPx === b.heightPx;
+}
+
 function makeAttachMessage(options: AttachOptions): string {
 	return `${JSON.stringify({
 		type: "attach",
@@ -1218,9 +1410,7 @@ function makeAttachMessage(options: AttachOptions): string {
 		...(options.clipCells === undefined
 			? {}
 			: { clip_cells: options.clipCells }),
-		...(options.terminalCells === undefined
-			? {}
-			: { terminal_cells: options.terminalCells }),
+		...terminalGeometry(options.cellDimensions),
 		aspect: options.aspect,
 		z_base: options.zBase,
 		id_ranges: {
@@ -1247,9 +1437,7 @@ function makeViewportMessage(options: ViewportOptions): string {
 		...(options.clipCells === undefined
 			? {}
 			: { clip_cells: options.clipCells }),
-		...(options.terminalCells === undefined
-			? {}
-			: { terminal_cells: options.terminalCells }),
+		...terminalGeometry(options.cellDimensions),
 		aspect: options.aspect,
 		z_base: options.zBase,
 	})}\n`;
@@ -1347,6 +1535,7 @@ function sameOptionalRect(
 function sameSync(a: ViewportSync | undefined, b: ViewportSync): boolean {
 	if (!a) return false;
 	return (
+		sameCellDimensions(a.cellDimensions, b.cellDimensions) &&
 		sameRect(a.rect, b.rect) &&
 		sameOptionalRect(a.clip, b.clip) &&
 		a.generation === b.generation

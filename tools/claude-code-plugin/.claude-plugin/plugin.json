@@ -1,0 +1,6 @@
+{
+  "name": "katzensteg",
+  "version": "0.0.1",
+  "description": "Game and HTML panels backed by the headless Katzensteg WM. Needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.",
+  "keywords": ["katzensteg", "kitty", "graphics", "function-hooks"]
+}
