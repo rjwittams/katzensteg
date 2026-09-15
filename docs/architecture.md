@@ -57,6 +57,12 @@ OpenGL/Vulkan framebuffer capture may still run on the app render thread to perf
 
 The replay worker protects a frame from the moment it starts a texture upload or drawing command through completion of its present. Later obsolete draws and presents can be retired while that frame is processing. After retirement, a full texture replacement can supersede earlier uploads across a consecutive sequence of uploads. Surviving draws, presents, resource lifecycle commands, and state commands stop that optimization. Partial updates remain necessary unless a later full replacement overwrites them. Shutdown closes payload admission and wakes waiting producers.
 
+#### Renderer Pixels And Input Coordinates
+
+SDL2 renderer capture samples `SDL_GetRendererOutputSize` on the app thread and sends size changes through the command queue. The frame builder composes in renderer pixels and tracks logical window dimensions separately. Moving a window between displays can change its pixel dimensions without changing its logical size. Terminal mouse mapping uses the logical dimensions; input expressed in observation-image pixels is converted by the input model before the SDL adapter projects it into events.
+
+SDL2 polling and waiting consume the same canonical input model. `SDL_WaitEvent` and `SDL_WaitEventTimeout` use native waits of at most 8 ms between checks for terminal or host input. Native window and application events remain available, including streaming clients' frame-ready notifications. Null event pointers check availability without consuming an event.
+
 ### Window Manager Sessions
 
 The WM host keeps window state separate from the producer's channel and optional owned child process. `wm/client.zig` owns channel descriptors: separate control/presentation pipes for WM-launched producers, or one duplex socket. Closing socket control half-closes the write direction so final presentation batches can still be drained. Borrowed channel files must not be closed directly.
@@ -72,3 +78,55 @@ Hidden profiles are reusable fragments. Visible profiles are direct launch targe
 ### External App Forks
 
 Some real workloads need patched application branches to expose paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.
+
+### Host-drawn placeholder grids
+
+An attached producer can target a Unicode placeholder grid using a host-owned
+image ID, cell dimensions and an optional physical-pixel upload bound. The runtime
+retains the last completed SDL scene in `PresentationSnapshot`: source textures,
+draw commands and cursor data, with their original coordinate system. Display
+frames are composed directly at the bounded resolution, avoiding an intermediate
+framebuffer sized to a high-DPI real window. Observation composes the retained
+scene at source resolution on demand. Texture updates after a present cannot
+alter that completed snapshot.
+
+`RenderBatchSink` owns the current presentation pixels and transmits them under
+the stable ID followed by one virtual placement. Pixel-size changes recompose
+from the retained scene; cell-only changes reissue the virtual placement. Refresh
+and resize do not advance observation frame IDs. External framebuffer conversion
+remains in the present path; its captured pixels are retained and resized before
+upload. Earlier GPU readback sizing is unchanged by this interface addition.
+Detach or presentation replacement deletes the owned image.
+
+The WM exercises this mode through its normal desktop and session lifecycle.
+With `--presentation placeholder`, each owned or externally registered session
+receives a stable image ID and the dimensions of the WM's fitted content grid.
+The WM renders those cells as text, handles overlap and vacated-cell cleanup,
+and translates mouse input into grid-local coordinates. Producer graphics do
+not carry terminal position, clipping or z-order. Selection is global initially;
+image ownership and grid state live on each session.
+
+The WM also has a headless frontend for applications that draw their own
+placeholder cells. The desktop and headless frontends share `wm/producer.zig`
+for process/channel ownership, `wm/client.zig` for buffered control output, and
+`wm/producer_control.zig` for attach, viewport and input serialization. Desktop
+layout and terminal input remain in `wm_host.zig`. The headless frontend never
+constructs `DirectTty`, so it cannot enter the alternate screen, change input
+modes or clear another application's graphics during cleanup.
+
+The headless frontend exposes authenticated loopback HTTP. Each client owns a
+registration socket and a set of sessions; image IDs are allocated by the
+terminal's shared host. Each client can bind to a parent PID; process exit or
+lease expiry closes that client's sessions. The shared host exits after its
+no-client timeout. Its output uses a concrete terminal device opened before
+detach, and a session's graphics failure does not propagate through cleanup to
+stop the host. Deferred HTTP observation requests have a two-second deadline
+and leave producer draining and other clients running. The frontend accepts the
+exact grid drawn by its client and does no aspect fitting. Source metadata and
+terminal cell pixel dimensions let the client do that fitting. Graphics writes
+use file uploads and small APC batches; concurrent terminal writers remain a
+protocol limitation, not an atomicity guarantee.
+
+Structured keyboard requests join terminal bytes and pointer requests at the
+canonical input model. That model owns key events, held state and modifier
+translation; the HTTP adapter does not inject SDL events directly.

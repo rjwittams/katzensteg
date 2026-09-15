@@ -1,5 +1,7 @@
 const std = @import("std");
 const xev = @import("xev");
+const producer_control = @import("wm/producer_control.zig");
+const Producer = @import("wm/producer.zig").Producer;
 const Listener = @import("wm/listener.zig").Listener;
 const ClientChannel = @import("wm/client.zig").ClientChannel;
 const render_batch_protocol = @import("render_batch_protocol.zig");
@@ -15,12 +17,7 @@ const ts_kitty = @import("termscene").kitty;
 const wm_peer_line_queue_max_entries: usize = 256;
 const wm_lifecycle_tick_ms: u64 = 20;
 
-pub const TerminalSize = struct {
-    rows: i32,
-    cols: i32,
-    pixel_width: i32 = 0,
-    pixel_height: i32 = 0,
-};
+pub const TerminalSize = producer_control.TerminalSize;
 
 pub const Rect = struct {
     row: i32,
@@ -256,6 +253,7 @@ pub const WmPresentationStatus = struct {
 const WmChromeSnapshot = struct {
     session_index: usize,
     outer: Rect,
+    placeholder: bool = false,
 };
 
 pub const WmDesktopRedrawState = struct {
@@ -270,7 +268,7 @@ pub const WmDesktopRedrawState = struct {
             if (!sessionIsDrawable(session)) continue;
             // Only the default interactive capacity gets previous-chrome cleanup tracking.
             if (self.previous_count >= self.previous_chrome.len) break;
-            self.previous_chrome[self.previous_count] = .{ .session_index = session_index, .outer = session.window.outer };
+            self.previous_chrome[self.previous_count] = .{ .session_index = session_index, .outer = session.window.outer, .placeholder = session.placeholder_image_id != null };
             self.previous_count += 1;
         }
     }
@@ -439,7 +437,12 @@ pub fn runSessionSpecsWithProducerExe(allocator: std.mem.Allocator, producer_exe
     return runSessionSpecsWithOptions(allocator, producer_exe, specs, .{});
 }
 
+pub const runHeadless = @import("wm/headless.zig").run;
+
+pub const PresentationMode = enum { positioned, placeholder };
+
 pub const HostOptions = struct {
+    presentation: PresentationMode = .positioned,
     listen_path: ?[]const u8 = null,
 };
 
@@ -448,6 +451,8 @@ pub fn runSessionSpecsWithOptions(allocator: std.mem.Allocator, producer_exe: []
 }
 
 const WmProducerSession = struct {
+    placeholder_image_id: ?u32 = null,
+    last_placeholder: ?render_batch_protocol.PlaceholderPresentation = null,
     profile_name: []const u8,
     session_id: u64 = 0,
     retired: bool = false,
@@ -456,8 +461,7 @@ const WmProducerSession = struct {
     presentation_status: WmPresentationStatus = .{},
     initial_presentation_resolved: bool = false,
     // Only launchers started by this host are waited for/reaped.
-    child: ?std.process.Child = null,
-    channel: ClientChannel = .{ .stdio = .{} },
+    producer: Producer = .{},
     stdout_buffer: std.ArrayList(u8) = .empty,
     stdout_ready: bool = false,
     stdout_poll_armed: bool = false,
@@ -650,7 +654,7 @@ fn armWmLifecycleTick(events: *WmEventLoop) void {
 fn armWmSessionStdoutRead(events: *WmEventLoop, session: *WmProducerSession) void {
     if (!session.stdout_poll_supported) return;
     if (session.stdout_ready or session.stdout_poll_armed) return;
-    const stdout_file = session.channel.presentationFile() orelse return;
+    const stdout_file = session.producer.channel.presentationFile() orelse return;
     const file = xev.File.initFd(stdout_file.handle);
     file.poll(&events.loop, &session.stdout_poll_completion, .read, WmProducerSession, session, onWmSessionStdoutReadable);
     session.stdout_poll_armed = true;
@@ -738,7 +742,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     defer {
         peer_queue.close();
         for (sessions[0..initialized]) |*session| {
-            session.channel.deinit();
+            session.producer.deinit();
             session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(allocator, &session.upload);
             allocator.free(session.profile_name);
@@ -746,9 +750,14 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     }
 
     try tty.enableInputCapture();
-    for (specs, 0..) |spec, i| {
+    for (specs) |spec| {
+        const i = initialized;
         z_order[i] = i;
-        sessions[i] = try launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, &event_log);
+        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, &event_log) catch |err| {
+            try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
+            first_exit_code = 1;
+            continue;
+        };
         sessions[i].session_id = next_session_id;
         next_session_id += 1;
         initialized += 1;
@@ -793,18 +802,18 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
             if (shutdown_deadline_ms) |deadline| {
                 if (std.time.milliTimestamp() >= deadline) {
                     for (sessions[0..initialized]) |*session| {
-                        if (session.child == null) session.channel.deinit();
+                        if (session.producer.child == null) session.producer.channel.deinit();
                     }
                 }
             }
             for (sessions[0..initialized]) |*session| {
-                session.channel.flushControl() catch |err| {
+                session.producer.channel.flushControl() catch |err| {
                     logger.writeFmtScoped(.warn, .wm, "control flush failed: {s}", .{@errorName(err)});
                 };
             }
             _ = try pollSessionChildExits(sessions[0..initialized]);
             if (first_exit_code == 0) for (sessions[0..initialized]) |session| {
-                if (session.child != null and session.wait_state.done.load(.seq_cst)) {
+                if (session.producer.child != null and session.wait_state.done.load(.seq_cst)) {
                     first_exit_code = childTermExitCode(session.wait_state.term);
                     if (first_exit_code != 0) break;
                 }
@@ -836,7 +845,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                 const session_id = next_session_id;
                 next_session_id += 1;
                 channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
-                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, &event_log) catch |err| {
+                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, &event_log) catch |err| {
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -858,7 +867,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                 defer tty_lock.unlock();
                 break :blk resolveInitialReadyPresentations(sessions[0..initialized], terminal);
             };
-            if (initial_ready_changed) {
+            if (initial_ready_changed or options.presentation == .placeholder) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
             }
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -884,9 +893,12 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                         try event_log.record(.launch_prompt, "empty");
                     } else if (availableSessionSlot(sessions[0..initialized], session_capacity) == null) {
                         try event_log.record(.parse_error, "session limit reached");
-                    } else {
+                    } else launch: {
                         const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
-                        var session = try launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, &event_log);
+                        var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, &event_log) catch |err| {
+                            try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
+                            break :launch;
+                        };
                         session.session_id = next_session_id;
                         next_session_id += 1;
                         installSession(allocator, sessions, &initialized, new_index, session, z_order);
@@ -945,7 +957,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
                 },
                 .forward => {
                     if (initialized == 0) continue;
-                    try forwardInputToSession(&sessions[focused_index], input.bytes, &event_log, &logger);
+                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, &event_log, &logger);
                 },
                 .quit => {
                     shutdown_sent = true;
@@ -1014,7 +1026,7 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
     if (shutdown_sent) return 0;
     if (first_exit_code != 0) return first_exit_code;
     for (sessions[0..initialized]) |*session| {
-        if (session.child == null) continue;
+        if (session.producer.child == null) continue;
         const code = childTermExitCode(session.wait_state.term);
         if (code != 0) return code;
     }
@@ -1023,8 +1035,15 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
 
 fn allSessionsDrained(sessions: []const WmProducerSession) bool {
     if (!allSessionsDone(sessions)) return false;
-    for (sessions) |session| if (session.channel.presentationFile() != null) return false;
+    for (sessions) |session| if (session.producer.channel.presentationFile() != null) return false;
     return true;
+}
+
+fn recordLaunchFailure(events: *ProtocolEventLog, logger: *Logger, profile: []const u8, err: anyerror) !void {
+    const detail = try std.fmt.allocPrint(events.allocator, "launch failed: {s}: {s}", .{ profile, @errorName(err) });
+    defer events.allocator.free(detail);
+    logger.writeFmtScoped(.warn, .wm, "{s}", .{detail});
+    try events.record(.parse_error, detail);
 }
 
 fn availableSessionSlot(sessions: []const WmProducerSession, capacity: usize) ?usize {
@@ -1046,10 +1065,10 @@ fn installSession(allocator: std.mem.Allocator, sessions: []WmProducerSession, i
 
 fn retireFinishedSessions(allocator: std.mem.Allocator, sessions: []WmProducerSession, queue: *WmPeerLineQueue, writer: anytype) !void {
     for (sessions, 0..) |*session, index| {
-        if (session.retired or session.state != .exited or session.channel.presentationFile() != null or session.stdout_poll_armed) continue;
+        if (session.retired or session.state != .exited or session.producer.channel.presentationFile() != null or session.stdout_poll_armed) continue;
         if (queue.hasSession(session)) continue;
         try deleteSessionGraphics(writer, index);
-        session.channel.deinit();
+        session.producer.channel.deinit();
         deinitUploadPolicy(allocator, &session.upload);
         session.retired = true;
     }
@@ -1062,31 +1081,17 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, events: *ProtocolEventLog) !WmProducerSession {
-    const child_argv = try buildProducerArgv(allocator, producer_exe, spec.profile_name, spec.extra_args);
-    defer allocator.free(child_argv);
-
-    var child = std.process.Child.init(child_argv, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    // Producers run inside the terminal surface, so stderr must not inherit it.
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-    errdefer _ = child.kill() catch {};
-
-    var channel = ClientChannel{ .stdio = .{ .control = child.stdin, .presentation = child.stdout } };
-    child.stdin = null;
-    child.stdout = null;
-    errdefer channel.deinit();
-
-    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &channel, events);
-    session.child = child;
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: std.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
+    var producer = try Producer.spawn(allocator, producer_exe, spec.profile_name, spec.extra_args);
+    errdefer producer.deinit();
+    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, events);
+    session.producer.child = producer.child;
     return session;
 }
 
 // Takes ownership of the channel only on success. Both owned and external
 // producers use the same presentation allocation and initial attach.
-fn attachProducerSession(allocator: std.mem.Allocator, tty_file: std.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, events: *ProtocolEventLog) !WmProducerSession {
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: std.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
     var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
     errdefer deinitUploadPolicy(allocator, &upload);
     const owned_title = try allocator.dupe(u8, title);
@@ -1100,8 +1105,12 @@ fn attachProducerSession(allocator: std.mem.Allocator, tty_file: std.fs.File, te
     if (channel.controlFile() == null) return error.ControlChannelClosed;
     const ranges = idRangesForSession(session_index);
     const session_rect = session.focusedContent().toPresentationRectCells();
+    if (presentation == .placeholder) session.placeholder_image_id = ranges.image.start;
+    const placeholder = placeholderTarget(&session, terminal);
+    session.last_placeholder = placeholder;
     try writeInitialControl(channel.writer(), .{
         .rect_cells = session_rect,
+        .placeholder = placeholder,
         .aspect = .fit,
         .z_base = zBaseForSlot(session_index),
         .terminal = terminal,
@@ -1113,23 +1122,14 @@ fn attachProducerSession(allocator: std.mem.Allocator, tty_file: std.fs.File, te
     session.window.markAttached();
     session.state = .running;
     try events.record(.attach_sent, owned_title);
-    session.channel = channel.*;
+    session.producer.channel = channel.*;
     return session;
 }
 
-fn buildProducerArgv(allocator: std.mem.Allocator, producer_exe: []const u8, profile_name: []const u8, extra_args: []const []const u8) ![]const []const u8 {
-    var argv = try allocator.alloc([]const u8, 3 + extra_args.len);
-    argv[0] = producer_exe;
-    argv[1] = "--embed-jsonl";
-    argv[2] = profile_name;
-    for (extra_args, 0..) |arg, i| {
-        argv[3 + i] = arg;
-    }
-    return argv;
-}
+const buildProducerArgv = @import("wm/producer.zig").buildArgv;
 
 fn startSessionStdoutPolling(session: *WmProducerSession) !void {
-    const stdout_file = session.channel.presentationFile() orelse return;
+    const stdout_file = session.producer.channel.presentationFile() orelse return;
     setNonBlocking(stdout_file.handle);
 }
 
@@ -1146,7 +1146,7 @@ fn drainSessionStdoutChunk(allocator: std.mem.Allocator, session: *WmProducerSes
 }
 
 fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, max_bytes: usize) !bool {
-    const stdout_file = session.channel.presentationFile() orelse return false;
+    const stdout_file = session.producer.channel.presentationFile() orelse return false;
 
     var buf: [8192]u8 = undefined;
     const limit = @min(max_bytes, buf.len);
@@ -1154,13 +1154,13 @@ fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmPr
     const n = stdout_file.read(buf[0..limit]) catch |err| switch (err) {
         error.WouldBlock => return false,
         else => {
-            session.channel.closePresentation();
+            session.producer.channel.closePresentation();
             try flushPeerStdoutBuffer(session, peer_queue);
             return false;
         },
     };
     if (n == 0) {
-        session.channel.closePresentation();
+        session.producer.channel.closePresentation();
         try flushPeerStdoutBuffer(session, peer_queue);
         return true;
     }
@@ -1193,7 +1193,7 @@ fn setNonBlocking(fd: std.posix.fd_t) void {
 }
 
 fn startSessionProcessPolling(session: *WmProducerSession) !void {
-    if (session.child) |*child| try child.waitForSpawn();
+    if (session.producer.child) |*child| try child.waitForSpawn();
 }
 
 fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
@@ -1205,40 +1205,26 @@ fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
 }
 
 fn pollSessionChildExit(session: *WmProducerSession) !bool {
-    const child = if (session.child) |*child| child else return false;
     if (session.wait_state.done.load(.seq_cst)) return false;
-    try child.waitForSpawn();
-
-    const result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
-    if (result.pid == 0) return false;
-
-    markSessionChildExited(session, childTermFromStatus(result.status));
+    const term = (try session.producer.pollExit()) orelse return false;
+    markSessionChildExited(session, term);
     return true;
 }
 
 fn waitForSessionChildExit(session: *WmProducerSession) !void {
-    const child = if (session.child) |*child| child else return;
+    const child = if (session.producer.child) |*child| child else return;
     if (session.wait_state.done.load(.seq_cst)) return;
     markSessionChildExited(session, child.wait() catch .{ .Unknown = 0 });
 }
 
 fn markSessionChildExited(session: *WmProducerSession, term: std.process.Child.Term) void {
-    session.child.?.term = term;
+    session.producer.child.?.term = term;
     session.wait_state.term = term;
     // term is safe to read after done is observed true; seq_cst releases the write.
     session.wait_state.done.store(true, .seq_cst);
 }
 
-fn childTermFromStatus(status: u32) std.process.Child.Term {
-    return if (std.posix.W.IFEXITED(status))
-        .{ .Exited = std.posix.W.EXITSTATUS(status) }
-    else if (std.posix.W.IFSIGNALED(status))
-        .{ .Signal = std.posix.W.TERMSIG(status) }
-    else if (std.posix.W.IFSTOPPED(status))
-        .{ .Stopped = std.posix.W.STOPSIG(status) }
-    else
-        .{ .Unknown = status };
-}
+const childTermFromStatus = @import("wm/producer.zig").termFromStatus;
 
 pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: anytype, options: RunExecOptions) !u8 {
     if (argv.len == 0) return 64;
@@ -1341,7 +1327,7 @@ fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focu
         session.state = .exited;
         closeSessionControl(session);
         result.changed = true;
-        if (session.child != null) {
+        if (session.producer.child != null) {
             logger.writeFmtScoped(.info, .wm, "producer exited profile={s} {s}", .{ session.profile_name, childTermSummary(session.wait_state.term) });
         } else {
             logger.writeFmtScoped(.info, .wm, "producer disconnected title={s}", .{session.profile_name});
@@ -1774,7 +1760,7 @@ fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8
             .placements = batch.groups.placements,
             .after = batch.groups.after,
         }),
-        .detached, .presentation_status => {},
+        .detached, .presentation_status, .observation => {},
     }
 }
 
@@ -1801,7 +1787,7 @@ fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: 
                 if (redraw_requested) |flag| flag.store(true, .seq_cst);
             }
         },
-        .detached => {},
+        .detached, .observation => {},
     }
 }
 
@@ -1821,91 +1807,82 @@ fn childTermExitCode(term: std.process.Child.Term) u8 {
     };
 }
 
-const AttachOptions = struct {
-    window_id: []const u8 = "main",
-    rect_cells: render_batch_protocol.PresentationRectCells,
-    aspect: render_batch_protocol.PresentationAspect = .fit,
-    z_base: i32 = 0,
-    terminal: ?TerminalSize = null,
-    occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
-    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
-    image_ids: render_batch_protocol.IdRange = .{ .start = 100000, .end = 199999 },
-    placement_ids: render_batch_protocol.IdRange = .{ .start = 200000, .end = 299999 },
-    upload: render_batch_protocol.UploadPolicy,
-};
+const AttachOptions = producer_control.AttachOptions;
+const ViewportOptions = producer_control.ViewportOptions;
+const writeInitialControl = producer_control.writeInitialControl;
+const writeViewportControl = producer_control.writeViewportControl;
 
-fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
-    try writer.writeAll("{\"type\":\"hello\",\"protocol\":\"katzensteg.embed_jsonl\",\"version\":1}\n");
-    try writer.writeAll("{\"type\":\"attach\",\"window_id\":");
-    try render_batch_protocol.writeJsonString(writer, options.window_id);
-    try writer.writeAll(",\"rect_cells\":{");
-    try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
-    try writer.writeAll("},\"aspect\":");
-    try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
-    if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
-    try writeTerminalGeometryFields(writer, options.terminal);
-    try writeOcclusionRectsField(writer, options.occlusion_rects);
-    try writeClipCellsField(writer, options.clip_cells);
-    try writer.writeAll(",\"id_ranges\":{\"image\":[[");
-    try writer.print("{d},{d}", .{ options.image_ids.start, options.image_ids.end });
-    try writer.writeAll("]],\"placement\":[[");
-    try writer.print("{d},{d}", .{ options.placement_ids.start, options.placement_ids.end });
-    try writer.writeAll("]]},\"upload\":{\"profile\":");
-    try render_batch_protocol.writeJsonString(writer, @tagName(options.upload.profile));
-    if (options.upload.path) |path| {
-        try writer.writeAll(",\"path\":");
-        try render_batch_protocol.writeJsonString(writer, path);
+// Fitting belongs to this host. The producer receives only the resulting grid.
+fn placeholderGridRect(session: *const WmProducerSession, terminal: TerminalSize) Rect {
+    const content = session.focusedContent();
+    var cols = std.math.clamp(content.cols, 1, 297);
+    var rows = std.math.clamp(content.rows, 1, 297);
+    if (session.presentation_status.source_px) |source| {
+        if (source.w > 0 and source.h > 0) {
+            var pixels = terminal;
+            if (pixels.pixel_width <= 0 or pixels.pixel_height <= 0) {
+                pixels.pixel_width = @max(1, terminal.cols) * 10;
+                pixels.pixel_height = @max(1, terminal.rows) * 20;
+            }
+            pixels.cols = @max(1, pixels.cols);
+            pixels.rows = @max(1, pixels.rows);
+            const fitted_rows = rowsForContentCols(cols, source, pixels);
+            if (fitted_rows <= rows) rows = fitted_rows else cols = @min(cols, colsForContentRows(rows, source, pixels));
+        }
     }
-    try writer.print(",\"high_water\":{d}", .{options.upload.high_water});
-    try writer.writeAll("}}\n");
+    return .{ .row = content.row + @divTrunc(content.rows - rows, 2), .col = content.col + @divTrunc(content.cols - cols, 2), .rows = rows, .cols = cols };
 }
 
-const ViewportOptions = struct {
-    window_id: []const u8 = "main",
-    rect_cells: render_batch_protocol.PresentationRectCells,
-    aspect: render_batch_protocol.PresentationAspect = .fit,
-    z_base: i32 = 0,
-    terminal: ?TerminalSize = null,
-    occlusion_rects: []const render_batch_protocol.PresentationRectCells = &.{},
-    clip_cells: ?render_batch_protocol.PresentationRectCells = null,
-};
-
-fn writeViewportControl(writer: anytype, options: ViewportOptions) !void {
-    try writer.writeAll("{\"type\":\"viewport\",\"window_id\":");
-    try render_batch_protocol.writeJsonString(writer, options.window_id);
-    try writer.writeAll(",\"rect_cells\":{");
-    try writer.print("\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}", .{ options.rect_cells.row, options.rect_cells.col, options.rect_cells.rows, options.rect_cells.cols });
-    try writer.writeAll("},\"aspect\":");
-    try render_batch_protocol.writeJsonString(writer, @tagName(options.aspect));
-    if (options.z_base != 0) try writer.print(",\"z_base\":{d}", .{options.z_base});
-    try writeTerminalGeometryFields(writer, options.terminal);
-    try writeOcclusionRectsField(writer, options.occlusion_rects);
-    try writeClipCellsField(writer, options.clip_cells);
-    try writer.writeAll("}\n");
+fn placeholderTarget(session: *const WmProducerSession, terminal: TerminalSize) ?render_batch_protocol.PlaceholderPresentation {
+    const image_id = session.placeholder_image_id orelse return null;
+    const grid = placeholderGridRect(session, terminal);
+    return .{ .image_id = image_id, .cols = grid.cols, .rows = grid.rows, .target_px = if (terminal.pixel_width > 0 and terminal.pixel_height > 0 and terminal.cols > 0 and terminal.rows > 0) .{
+        .w = @intCast(@max(1, @divTrunc(@as(i64, grid.cols) * terminal.pixel_width, terminal.cols))),
+        .h = @intCast(@max(1, @divTrunc(@as(i64, grid.rows) * terminal.pixel_height, terminal.rows))),
+    } else null };
 }
 
-fn writeTerminalGeometryFields(writer: anytype, terminal: ?TerminalSize) !void {
-    const value = terminal orelse return;
-    if (value.rows <= 0 or value.cols <= 0) return;
-    try writer.print(",\"terminal_cells\":{{\"rows\":{d},\"cols\":{d}}}", .{ value.rows, value.cols });
-    if (value.pixel_width > 0 and value.pixel_height > 0) {
-        try writer.print(",\"terminal_px\":{{\"w\":{d},\"h\":{d}}}", .{ value.pixel_width, value.pixel_height });
+fn translatePlaceholderInput(writer: anytype, bytes: []const u8, grid: Rect) !void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (parseSgrMouseAt(bytes, i)) |event| {
+            if (rectContainsCell(grid, event.row, event.col)) {
+                try writer.print("\x1b[<{d};{d};{d}{c}", .{ event.button, event.col - grid.col + 1, event.row - grid.row + 1, @as(u8, if (event.pressed) 'M' else 'm') });
+            }
+            i += event.len;
+        } else {
+            try writer.writeByte(bytes[i]);
+            i += 1;
+        }
     }
 }
 
-fn writeOcclusionRectsField(writer: anytype, occlusion_rects: []const render_batch_protocol.PresentationRectCells) !void {
-    if (occlusion_rects.len == 0) return;
-    try writer.writeAll(",\"occlusion_rects\":[");
-    for (occlusion_rects, 0..) |rect, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
+fn renderPlaceholderGrid(writer: anytype, session: *const WmProducerSession, terminal: TerminalSize) !void {
+    const id = session.placeholder_image_id orelse return;
+    const grid = placeholderGridRect(session, terminal);
+    const area = windowAreaForTerminal(terminal);
+    const first_row = @max(1, grid.row);
+    const last_row = @min(area.rows, grid.row + grid.rows - 1);
+    const first_col = @max(1, grid.col);
+    const last_col = @min(area.cols, grid.col + grid.cols - 1);
+    if (first_col > last_col or first_row > last_row) return;
+    try writer.print("\x1b[0;38;2;{d};{d};{d}m", .{ (id >> 16) & 255, (id >> 8) & 255, id & 255 });
+    var row = first_row;
+    while (row <= last_row) : (row += 1) {
+        try moveCursor(writer, row, first_col);
+        var col = first_col;
+        while (col <= last_col) : (col += 1) {
+            try ts_kitty.placeholders.writeCell(writer, @intCast(row - grid.row), @intCast(col - grid.col));
+        }
     }
-    try writer.writeAll("]");
+    try writer.writeAll("\x1b[0m");
 }
 
-fn writeClipCellsField(writer: anytype, clip: ?render_batch_protocol.PresentationRectCells) !void {
-    const rect = clip orelse return;
-    try writer.print(",\"clip_cells\":{{\"row\":{d},\"col\":{d},\"rows\":{d},\"cols\":{d}}}", .{ rect.row, rect.col, rect.rows, rect.cols });
+fn clearWindowArea(writer: anytype, outer: Rect, terminal: TerminalSize) !void {
+    try writer.writeAll("\x1b[0m");
+    var row = @max(1, outer.row);
+    const end = @min(windowAreaForTerminal(terminal).rows, outer.row + outer.rows - 1);
+    while (row <= end) : (row += 1) try clearCellSpan(writer, row, outer.col, outer.cols, terminal);
 }
 
 /// Compute the clip rect to send to the producer for `rect` given the current
@@ -1945,20 +1922,14 @@ fn tryWriteViewportControl(writer: anytype, options: ViewportOptions) bool {
     return true;
 }
 
-fn writeInputControl(writer: anytype, bytes: []const u8) !void {
-    try writer.writeAll("{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":");
-    try render_batch_protocol.writeJsonString(writer, bytes);
-    try writer.writeAll("}\n");
-}
+const writeInputControl = producer_control.writeInputControl;
 
 fn tryWriteInputControl(writer: anytype, bytes: []const u8) bool {
     writeInputControl(writer, bytes) catch return false;
     return true;
 }
 
-fn writeShutdownControl(writer: anytype) !void {
-    try writer.writeAll("{\"type\":\"shutdown\"}\n");
-}
+const writeShutdownControl = producer_control.writeShutdownControl;
 
 fn tryWriteShutdownControl(writer: anytype) bool {
     writeShutdownControl(writer) catch return false;
@@ -2014,17 +1985,21 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
 
 fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session)) return;
-    if (session.channel.controlFile() == null) return;
+    if (session.producer.channel.controlFile() == null) return;
     const content = session.focusedContent();
     const content_rect = content.toPresentationRectCells();
-    if (tryWriteViewportControl(session.channel.writer(), .{
+    const placeholder = placeholderTarget(session, terminal);
+    if (placeholder != null and std.meta.eql(placeholder, session.last_placeholder)) return;
+    if (tryWriteViewportControl(session.producer.channel.writer(), .{
         .rect_cells = content_rect,
+        .placeholder = placeholder,
         .aspect = aspect,
         .z_base = z_base,
         .terminal = terminal,
         .occlusion_rects = occlusion_rects,
         .clip_cells = computeClipForRect(content_rect, terminal),
     })) {
+        session.last_placeholder = placeholder;
         try events.record(.viewport_sent, session.profile_name);
         logger.writeFmtScoped(.info, .wm, "viewport sent profile={s} rect=({d},{d} {d}x{d}) z_base={d}", .{ session.profile_name, content.row, content.col, content.cols, content.rows, z_base });
     } else {
@@ -2033,10 +2008,17 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
     }
 }
 
-fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, events: *ProtocolEventLog, logger: *Logger) !void {
+fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session)) return;
-    if (session.channel.controlFile() == null) return;
-    if (tryWriteInputControl(session.channel.writer(), bytes)) {
+    if (session.producer.channel.controlFile() == null) return;
+    var local_bytes = std.ArrayList(u8).empty;
+    defer local_bytes.deinit(events.allocator);
+    const forwarded = if (session.placeholder_image_id != null) blk: {
+        try translatePlaceholderInput(local_bytes.writer(events.allocator), bytes, placeholderGridRect(session, terminal));
+        break :blk local_bytes.items;
+    } else bytes;
+    if (forwarded.len == 0) return;
+    if (tryWriteInputControl(session.producer.channel.writer(), forwarded)) {
         try events.record(.input_sent, session.profile_name);
     } else {
         logger.writeFmtScoped(.warn, .wm, "input control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
@@ -2047,8 +2029,8 @@ fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, events:
 fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logger: *Logger) !void {
     if (session.state == .draining or session.state == .exited) return;
     session.state = .draining;
-    if (session.channel.controlFile() != null) {
-        if (tryWriteShutdownControl(session.channel.writer())) {
+    if (session.producer.channel.controlFile() != null) {
+        if (tryWriteShutdownControl(session.producer.channel.writer())) {
             logger.writeFmtScoped(.info, .wm, "shutdown sent profile={s}", .{session.profile_name});
         } else {
             logger.writeFmtScoped(.warn, .wm, "shutdown control write failed profile={s}", .{session.profile_name});
@@ -2061,7 +2043,7 @@ fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logge
 }
 
 fn closeSessionControl(session: *WmProducerSession) void {
-    session.channel.closeControl();
+    session.producer.channel.closeControl();
 }
 
 fn selectUploadPolicy(allocator: std.mem.Allocator, tty: std.fs.File) !render_batch_protocol.UploadPolicy {
@@ -2132,12 +2114,12 @@ fn sessionUploadPath(allocator: std.mem.Allocator, base_path: []const u8, sessio
 // Owned launchers retain process-based lifetime; external clients end at
 // presentation EOF. Closing control alone starts draining, not retirement.
 fn sessionHasEnded(session: *const WmProducerSession) bool {
-    if (session.child != null) return session.wait_state.done.load(.seq_cst);
-    return session.channel.presentationFile() == null;
+    if (session.producer.child != null) return session.wait_state.done.load(.seq_cst);
+    return session.producer.channel.presentationFile() == null;
 }
 
 fn sessionEndEvent(session: *const WmProducerSession) EventKind {
-    return if (session.child != null) .process_exited else .connection_closed;
+    return if (session.producer.child != null) .process_exited else .connection_closed;
 }
 
 fn allSessionsDone(sessions: []const WmProducerSession) bool {
@@ -2385,15 +2367,26 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
 fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     tty_lock.lock();
     defer tty_lock.unlock();
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(events.allocator);
+    try renderDesktopMany(bytes.writer(events.allocator), terminal, sessions, z_order, focused_index, events, redraw_state);
+    try writer.writeAll(bytes.items);
+}
+
+fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     for (redraw_state.previous_chrome[0..redraw_state.previous_count]) |previous| {
         if (!chromeSnapshotStillCurrent(previous, sessions)) {
-            try clearChrome(writer, previous.outer, terminal);
+            if (previous.placeholder) try clearWindowArea(writer, previous.outer, terminal) else try clearChrome(writer, previous.outer, terminal);
         }
     }
     for (z_order) |session_index| {
         if (session_index >= sessions.len) continue;
         const session = &sessions[session_index];
         if (!sessionIsDrawable(session)) continue;
+        if (session.placeholder_image_id != null) {
+            try clearWindowArea(writer, session.window.outer, terminal);
+            try renderPlaceholderGrid(writer, session, terminal);
+        }
         try renderChrome(writer, .{
             .outer = session.window.outer,
             .title = session.profile_name,
@@ -2786,7 +2779,7 @@ test "wm peer presentation status updates session cache" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
     var out = std.ArrayList(u8).empty;
@@ -2814,7 +2807,7 @@ test "wm peer presentation status only requests redraw on visible state changes"
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
     var out = std.ArrayList(u8).empty;
@@ -2835,7 +2828,7 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2861,7 +2854,7 @@ test "wm main loop peer drain does not leave older queued frames behind input" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2899,7 +2892,7 @@ test "wm peer stdout polling queues complete lines and retains partial lines" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
     defer session.stdout_buffer.deinit(std.testing.allocator);
 
@@ -2927,10 +2920,9 @@ test "wm peer stdout chunk drain reads a bounded amount" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
-        .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } },
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator), .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } } },
     };
-    defer session.channel.deinit();
+    defer session.producer.channel.deinit();
     defer session.stdout_buffer.deinit(std.testing.allocator);
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -2972,7 +2964,7 @@ test "wm producer stdout poll error does not mark stdout ready" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
         .stdout_poll_armed = true,
     };
 
@@ -3059,7 +3051,7 @@ test "wm queued presentation status still updates during drain" {
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
-        .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+        .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
     var queue = WmPeerLineQueue.init(std.testing.allocator);
@@ -3091,7 +3083,7 @@ test "wm resolves initial ready presentation to effective content rect" {
                 .source_px = .{ .w = 640, .h = 480 },
                 .effective_rect_cells = .{ .row = 6, .col = 10, .rows = 12, .cols = 40 },
             },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3108,7 +3100,7 @@ test "wm desktop waits for presentation ready before drawing producer chrome" {
             .profile_name = "not-ready",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3168,7 +3160,7 @@ test "wm desktop redraw does not clear unchanged window chrome" {
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 8, .cols = 24 }),
             .upload = .{ .profile = .direct_apc },
             .presentation_status = .{ .seen = true, .ready_to_show = true },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
@@ -3176,7 +3168,7 @@ test "wm desktop redraw does not clear unchanged window chrome" {
             .window = WmWindowState.init("main", .{ .row = 12, .col = 30, .rows = 8, .cols = 24 }),
             .upload = .{ .profile = .direct_apc },
             .presentation_status = .{ .seen = true, .ready_to_show = true },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3261,8 +3253,8 @@ test "wm attach and viewport controls advertise occlusion rectangles" {
 
 test "wm occlusion policy uses outer rects of higher running windows" {
     var sessions = [_]WmProducerSession{
-        .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .child = std.process.Child.init(&.{"true"}, std.testing.allocator), .presentation_status = .{ .seen = true, .ready_to_show = true } },
-        .{ .profile_name = "top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .child = std.process.Child.init(&.{"true"}, std.testing.allocator), .presentation_status = .{ .seen = true, .ready_to_show = true } },
+        .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
+        .{ .profile_name = "top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
     };
     sessions[0].state = .running;
     sessions[1].state = .running;
@@ -3279,8 +3271,8 @@ test "wm occlusion policy uses outer rects of higher running windows" {
 
 test "wm occlusion policy ignores higher producers that are not drawable yet" {
     var sessions = [_]WmProducerSession{
-        .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .child = std.process.Child.init(&.{"true"}, std.testing.allocator), .presentation_status = .{ .seen = true, .ready_to_show = true } },
-        .{ .profile_name = "launching-top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
+        .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
+        .{ .profile_name = "launching-top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) } },
     };
     sessions[0].state = .running;
     sessions[1].state = .running;
@@ -3606,7 +3598,7 @@ test "wm mouse drag keeps original focused window when crossing another window" 
             .profile_name = "back",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
             .presentation_status = .{ .seen = true, .ready_to_show = true, .source_px = .{ .w = 640, .h = 480 } },
         },
@@ -3614,7 +3606,7 @@ test "wm mouse drag keeps original focused window when crossing another window" 
             .profile_name = "front",
             .window = WmWindowState.init("main", .{ .row = 4, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
             .presentation_status = .{ .seen = true, .ready_to_show = true, .source_px = .{ .w = 640, .h = 480 } },
         },
@@ -3640,7 +3632,7 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
             .profile_name = "active",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
             .presentation_status = .{ .seen = true, .ready_to_show = true, .source_px = .{ .w = 640, .h = 480 } },
         },
@@ -3648,7 +3640,7 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
             .profile_name = "closed",
             .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .draining,
         },
     };
@@ -3674,14 +3666,14 @@ test "wm reconciles externally exited producer sessions" {
             .profile_name = "dead",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
             .profile_name = "alive",
             .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3713,7 +3705,7 @@ test "wm child exit polling marks finished child without wait thread" {
         .profile_name = "done",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
         .upload = .{ .profile = .direct_apc },
-        .child = child,
+        .producer = .{ .child = child },
         .state = .running,
     };
 
@@ -3733,21 +3725,21 @@ test "wm z order compacts exited sessions behind visible sessions" {
             .profile_name = "visible-a",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
             .profile_name = "exited",
             .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .exited,
         },
         .{
             .profile_name = "visible-b",
             .window = WmWindowState.init("main", .{ .row = 5, .col = 9, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3764,14 +3756,14 @@ test "wm tile layout arranges visible producers without overlap" {
             .profile_name = "one",
             .window = WmWindowState.init("main", .{ .row = 5, .col = 5, .rows = 8, .cols = 30 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
             .profile_name = "two",
             .window = WmWindowState.init("main", .{ .row = 7, .col = 9, .rows = 8, .cols = 30 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3788,21 +3780,21 @@ test "wm cascade layout skips non-visible producers" {
             .profile_name = "visible-a",
             .window = WmWindowState.init("main", .{ .row = 9, .col = 9, .rows = 8, .cols = 30 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
             .profile_name = "closed",
             .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .exited,
         },
         .{
             .profile_name = "visible-b",
             .window = WmWindowState.init("main", .{ .row = 11, .col = 13, .rows = 8, .cols = 30 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
             .state = .running,
         },
     };
@@ -3854,22 +3846,22 @@ test "wm mixed ownership retires child exit and external EOF independently" {
             .profile_name = "owned",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .child = std.process.Child.init(&.{"/usr/bin/true"}, std.testing.allocator),
+            .producer = .{ .child = std.process.Child.init(&.{"/usr/bin/true"}, std.testing.allocator) },
             .state = .running,
         },
         .{
             .profile_name = "external",
             .window = WmWindowState.init("main", .{ .row = 3, .col = 5, .rows = 12, .cols = 40 }),
             .upload = .{ .profile = .direct_apc },
-            .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } },
+            .producer = .{ .channel = .{ .stdio = .{ .presentation = .{ .handle = pipe[0] } } } },
             .state = .running,
         },
     };
     defer for (&sessions) |*session| {
-        session.channel.deinit();
+        session.producer.channel.deinit();
         session.stdout_buffer.deinit(std.testing.allocator);
     };
-    try sessions[0].child.?.spawn();
+    try sessions[0].producer.child.?.spawn();
     defer waitForSessionChildExit(&sessions[0]) catch {};
     try startSessionProcessPolling(&sessions[1]);
     try std.testing.expect(!try pollSessionChildExit(&sessions[1]));
@@ -3919,10 +3911,10 @@ test "wm external shutdown drains presentation after control half close" {
         .profile_name = "external",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
         .upload = .{ .profile = .direct_apc },
-        .channel = .{ .socket = .{ .file = .{ .handle = fds[0] } } },
+        .producer = .{ .channel = .{ .socket = .{ .file = .{ .handle = fds[0] } } } },
         .state = .running,
     };
-    defer session.channel.deinit();
+    defer session.producer.channel.deinit();
     defer session.stdout_buffer.deinit(std.testing.allocator);
     try startSessionStdoutPolling(&session);
     var log = try ProtocolEventLog.init(std.testing.allocator, 4);
@@ -3950,7 +3942,7 @@ test "wm external shutdown drains presentation after control half close" {
     try std.testing.expectEqual(@as(usize, 1), batch.items.len);
     try std.testing.expectEqualStrings("cleanup", batch.items[0].line);
     try std.testing.expect(sessionHasEnded(&session));
-    try std.testing.expect(session.channel.socket.file == null);
+    try std.testing.expect(session.producer.channel.socket.file == null);
 }
 
 test "wm slots wait for EOF callbacks and queued output before reuse" {
@@ -3993,4 +3985,71 @@ test "wm slots wait for EOF callbacks and queued output before reuse" {
     try std.testing.expectEqual(@as(usize, 1), initialized);
     try std.testing.expectEqual(@as(u64, 8), sessions[0].session_id);
     try std.testing.expect(!sessions[0].retired);
+}
+
+test "WM selects placeholder presentation without sending window geometry" {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(std.testing.allocator);
+    try writeInitialControl(bytes.writer(std.testing.allocator), .{
+        .placeholder = .{ .image_id = 100000, .cols = 40, .rows = 12 },
+        .rect_cells = .{ .row = 6, .col = 10, .rows = 12, .cols = 40 },
+        .terminal = .{ .rows = 40, .cols = 120 },
+        .z_base = 1000,
+        .upload = .{ .profile = .file_whole, .path = "/tmp/wm-placeholder-test" },
+    });
+    const first_line = std.mem.indexOfScalar(u8, bytes.items, '\n').?;
+    var attach = try render_batch_protocol.parseAttachMessage(std.testing.allocator, bytes.items[first_line + 1 ..]);
+    defer render_batch_protocol.deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(u32, 100000), attach.placeholder.?.image_id);
+    for ([_][]const u8{ "rect_cells", "terminal_cells", "z_base", "id_ranges", "occlusion_rects" }) |key| try std.testing.expect(std.mem.indexOf(u8, bytes.items, key) == null);
+}
+
+test "WM fits a placeholder grid and keeps image identity when moving" {
+    const terminal = TerminalSize{ .rows = 40, .cols = 100, .pixel_width = 1000, .pixel_height = 800 };
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .placeholder_image_id = 100000,
+        .window = WmWindowState.init("main", .{ .row = 2, .col = 3, .rows = 24, .cols = 42 }),
+        .upload = .{ .profile = .direct_apc },
+        .presentation_status = .{ .ready_to_show = true, .source_px = .{ .w = 800, .h = 400 } },
+    };
+    const grid = placeholderGridRect(&session, terminal);
+    try std.testing.expectEqual(Rect{ .row = 10, .col = 4, .cols = 40, .rows = 10 }, grid);
+    const target = placeholderTarget(&session, terminal);
+    session.window.outer.row += 4;
+    session.window.outer.col += 5;
+    try std.testing.expectEqualDeep(target, placeholderTarget(&session, terminal));
+    const moved = placeholderGridRect(&session, terminal);
+    try std.testing.expectEqual(grid.row + 4, moved.row);
+    try std.testing.expectEqual(grid.col + 5, moved.col);
+    session.window.outer.cols += 10;
+    try std.testing.expect(!std.meta.eql(target, placeholderTarget(&session, terminal)));
+    try std.testing.expectEqual(@as(u32, 100000), placeholderTarget(&session, terminal).?.image_id);
+}
+
+test "WM translates placeholder mouse coordinates and excludes letterboxing" {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(std.testing.allocator);
+    try translatePlaceholderInput(bytes.writer(std.testing.allocator), "a\x1b[<0;11;8M\x1b[<0;11;8m\x1b[<35;9;8M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 });
+    try std.testing.expectEqualStrings("a\x1b[<0;1;1M\x1b[<0;1;1m", bytes.items);
+}
+
+test "WM clipped placeholder text retains its source row and column indices" {
+    var session = WmProducerSession{
+        .profile_name = "test",
+        .placeholder_image_id = 0x123456,
+        .window = WmWindowState.init("main", .{ .row = -3, .col = -2, .rows = 8, .cols = 8 }),
+        .upload = .{ .profile = .direct_apc },
+    };
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(std.testing.allocator);
+    try renderPlaceholderGrid(bytes.writer(std.testing.allocator), &session, .{ .rows = 20, .cols = 40 });
+    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "38;2;18;52;86m") != null);
+    // Grid origin is row 0, col -1. First visible cell is source row 1, col 2.
+    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "\x1b[1;1H\u{10eeee}\u{30d}\u{30e}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "\x1b_G") == null);
+}
+
+test {
+    _ = @import("wm/headless.zig");
 }

@@ -5,6 +5,10 @@ pub const SessionId = u32;
 pub const StdioChannel = struct {
     control: ?std.fs.File = null,
     presentation: ?std.fs.File = null,
+    control_open: bool = true,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    pending: std.ArrayList(u8) = .empty,
+    sent: usize = 0,
 };
 
 pub const SocketChannel = struct {
@@ -31,7 +35,7 @@ pub const ClientChannel = union(enum) {
 
     pub fn controlFile(self: ClientChannel) ?std.fs.File {
         return switch (self) {
-            .stdio => |pipes| pipes.control,
+            .stdio => |pipes| if (pipes.control_open) pipes.control else null,
             .socket => |socket| if (socket.control_open) socket.file else null,
         };
     }
@@ -48,27 +52,48 @@ pub const ClientChannel = union(enum) {
     }
 
     fn writeControl(self: *ClientChannel, bytes: []const u8) !usize {
-        const file = self.controlFile() orelse return error.ControlClosed;
+        _ = self.controlFile() orelse return error.ControlClosed;
         switch (self.*) {
-            .stdio => try file.writeAll(bytes),
-            .socket => |*socket| {
-                if (socket.sent != 0) {
-                    const remaining = socket.pending.items[socket.sent..];
-                    std.mem.copyForwards(u8, socket.pending.items[0..remaining.len], remaining);
-                    socket.pending.shrinkRetainingCapacity(remaining.len);
-                    socket.sent = 0;
+            inline else => |*transport| {
+                if (transport.sent != 0) {
+                    const remaining = transport.pending.items[transport.sent..];
+                    std.mem.copyForwards(u8, transport.pending.items[0..remaining.len], remaining);
+                    transport.pending.shrinkRetainingCapacity(remaining.len);
+                    transport.sent = 0;
                 }
-                if (socket.pending.items.len + bytes.len > 512 * 1024) return error.ControlBackpressure;
-                try socket.pending.appendSlice(socket.allocator, bytes);
-                try self.flushControl();
+                if (transport.pending.items.len + bytes.len > 512 * 1024) return error.ControlBackpressure;
+                try transport.pending.appendSlice(transport.allocator, bytes);
             },
         }
+        try self.flushControl();
         return bytes.len;
     }
 
     pub fn flushControl(self: *ClientChannel) !void {
         switch (self.*) {
-            .stdio => {},
+            .stdio => |*pipes| {
+                const file = pipes.control orelse return;
+                while (pipes.sent < pipes.pending.items.len) {
+                    const n = file.write(pipes.pending.items[pipes.sent..]) catch |err| switch (err) {
+                        error.WouldBlock => return,
+                        else => {
+                            file.close();
+                            pipes.control = null;
+                            pipes.control_open = false;
+                            pipes.pending.clearRetainingCapacity();
+                            pipes.sent = 0;
+                            return err;
+                        },
+                    };
+                    pipes.sent += n;
+                }
+                pipes.pending.clearRetainingCapacity();
+                pipes.sent = 0;
+                if (!pipes.control_open) {
+                    file.close();
+                    pipes.control = null;
+                }
+            },
             .socket => |*socket| {
                 const file = socket.file orelse return;
                 while (socket.sent < socket.pending.items.len) {
@@ -96,8 +121,8 @@ pub const ClientChannel = union(enum) {
     pub fn closeControl(self: *ClientChannel) void {
         switch (self.*) {
             .stdio => |*pipes| {
-                if (pipes.control) |file| file.close();
-                pipes.control = null;
+                pipes.control_open = false;
+                self.flushControl() catch {};
             },
             .socket => |*socket| {
                 socket.control_open = false;
@@ -124,9 +149,15 @@ pub const ClientChannel = union(enum) {
 
     pub fn deinit(self: *ClientChannel) void {
         switch (self.*) {
-            .stdio => {
-                self.closeControl();
-                self.closePresentation();
+            .stdio => |*pipes| {
+                if (pipes.control) |file| file.close();
+                if (pipes.presentation) |file| file.close();
+                pipes.control = null;
+                pipes.presentation = null;
+                pipes.control_open = false;
+                pipes.pending.deinit(pipes.allocator);
+                pipes.pending = .empty;
+                pipes.sent = 0;
             },
             .socket => |*socket| {
                 if (socket.file) |file| file.close();
@@ -251,4 +282,49 @@ test "socket control backpressure preserves bytes through graceful half close" {
     try std.testing.expect(eof);
     try std.testing.expectEqualSlices(u8, payload, received.items);
     try std.testing.expect(channel.presentationFile() != null);
+}
+
+test "stdio backpressure preserves bytes through graceful control close" {
+    const fds = try std.posix.pipe();
+    defer std.posix.close(fds[0]);
+    for (fds) |fd| {
+        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+        var typed: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+        typed.NONBLOCK = true;
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
+    }
+    var channel = ClientChannel{ .stdio = .{ .control = .{ .handle = fds[1] }, .allocator = std.testing.allocator } };
+    defer channel.deinit();
+    const payload = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(payload);
+    for (payload, 0..) |*byte, i| byte.* = @truncate(i);
+    try channel.writer().writeAll(payload);
+    try std.testing.expect(channel.stdio.pending.items.len > channel.stdio.sent);
+    // Rejected output must not append a partial message or discard earlier
+    // pending bytes; those still drain intact after the caller closes control.
+    const excessive = try std.testing.allocator.alloc(u8, 512 * 1024);
+    defer std.testing.allocator.free(excessive);
+    @memset(excessive, 0);
+    try std.testing.expectError(error.ControlBackpressure, channel.writer().writeAll(excessive));
+    channel.closeControl();
+    try std.testing.expect(channel.controlFile() == null);
+    var received = std.ArrayList(u8).empty;
+    defer received.deinit(std.testing.allocator);
+    var eof = false;
+    for (0..10000) |_| {
+        try channel.flushControl();
+        var buf: [4096]u8 = undefined;
+        const n = std.posix.read(fds[0], &buf) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) {
+            eof = true;
+            break;
+        }
+        try received.appendSlice(std.testing.allocator, buf[0..n]);
+    }
+    try std.testing.expect(eof);
+    try std.testing.expectEqualSlices(u8, payload, received.items);
+    try std.testing.expect(channel.stdio.control == null);
 }

@@ -1,0 +1,77 @@
+const std = @import("std");
+extern "c" fn ttyname_r(fd: std.c.fd_t, buf: [*]u8, len: usize) c_int;
+
+pub const Terminal = struct {
+    allocator: std.mem.Allocator,
+    file: std.fs.File,
+    path: []const u8,
+
+    pub fn open(allocator: std.mem.Allocator, explicit: ?[]const u8, parent: ?i32) !Terminal {
+        if (explicit) |path| {
+            if (!std.mem.eql(u8, path, "/dev/tty")) return openPath(allocator, path);
+        }
+        // /dev/tty is a controlling-terminal alias, not a stable device fd.
+        // Resolve the real device before setsid, even for explicit /dev/tty.
+        if (try openForProcess(allocator, std.c.getpid(), 1)) |terminal| return terminal;
+        return (try openForProcess(allocator, parent orelse std.c.getppid(), 32)) orelse error.TerminalNotFound;
+    }
+
+    fn openForProcess(allocator: std.mem.Allocator, initial_pid: i32, depth: usize) !?Terminal {
+        var pid = initial_pid;
+        for (0..depth) |_| {
+            if (pid <= 1) break;
+            const number = try std.fmt.allocPrint(allocator, "{d}", .{pid});
+            defer allocator.free(number);
+            const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "/bin/ps", "-o", "ppid=,tty=", "-p", number }, .max_output_bytes = 4096 });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+            var words = std.mem.tokenizeAny(u8, result.stdout, " \t\r\n");
+            pid = std.fmt.parseInt(i32, words.next() orelse break, 10) catch break;
+            const tty = words.next() orelse break;
+            if (std.mem.eql(u8, tty, "??") or std.mem.eql(u8, tty, "?") or std.mem.eql(u8, tty, "-")) continue;
+            const path = if (std.mem.startsWith(u8, tty, "/dev/")) try allocator.dupe(u8, tty) else try std.fmt.allocPrint(allocator, "/dev/{s}", .{tty});
+            defer allocator.free(path);
+            return try openPath(allocator, path);
+        }
+        return null;
+    }
+
+    fn openPath(allocator: std.mem.Allocator, path: []const u8) !Terminal {
+        const file = std.fs.File{ .handle = try std.posix.open(path, .{ .ACCMODE = .WRONLY, .NOCTTY = true, .CLOEXEC = true }, 0) };
+        errdefer file.close();
+        var name: [std.fs.max_path_bytes]u8 = undefined;
+        if (ttyname_r(file.handle, &name, name.len) != 0) return error.NotATerminal;
+        const resolved = std.mem.sliceTo(&name, 0);
+        if (std.mem.eql(u8, resolved, "/dev/tty")) return error.ControllingTerminalAlias;
+        return .{ .allocator = allocator, .file = file, .path = try allocator.dupe(u8, resolved) };
+    }
+
+    pub fn deinit(self: *Terminal) void {
+        self.file.close();
+        self.allocator.free(self.path);
+    }
+
+    pub fn cellPixels(self: *const Terminal) ?struct { w: f64, h: f64 } {
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        if (std.posix.system.ioctl(self.file.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&size)) != 0 or size.col == 0 or size.row == 0 or size.xpixel == 0 or size.ypixel == 0) return null;
+        return .{ .w = @as(f64, @floatFromInt(size.xpixel)) / @as(f64, @floatFromInt(size.col)), .h = @as(f64, @floatFromInt(size.ypixel)) / @as(f64, @floatFromInt(size.row)) };
+    }
+};
+
+pub fn privateRoot(allocator: std.mem.Allocator) ![]const u8 {
+    const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-wm-{d}", .{std.c.getuid()});
+    errdefer allocator.free(path);
+    std.posix.mkdir(path, 0o700) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, path, std.posix.AT.SYMLINK_NOFOLLOW);
+    if (stat.uid != std.c.getuid() or stat.mode & 0o777 != 0o700 or stat.mode & std.posix.S.IFMT != std.posix.S.IFDIR) return error.UnsafeRuntimeDirectory;
+    return path;
+}
+
+pub fn randomId() [32]u8 {
+    var random: [16]u8 = undefined;
+    std.crypto.random.bytes(&random);
+    return std.fmt.bytesToHex(random, .lower);
+}

@@ -76,6 +76,8 @@ jobs:
           python3 scripts/katzensteg/test_image_fastpath_portable.py
           python3 scripts/katzensteg/test_katzensteg_banner.py
           python3 scripts/katzensteg/test_launcher_target.py
+          python3 scripts/katzensteg/test_headless_wm.py
+          python3 scripts/katzensteg/test_wm_placeholder_host.py
           python3 scripts/katzensteg/test_linux_preload_exports.py
           python3 scripts/katzensteg/test_no_preload_stderr.py
           python3 scripts/katzensteg/test_summarize_review_permissions.py
