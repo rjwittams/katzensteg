@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "luchs": {
+      "extends": [
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "target": "{repo}/zig-out/bin/luchs",
+      "args": [
+        {
+          "macos": "--renderer=native-webview"
+        }
+      ]
+    }
+  }
+}

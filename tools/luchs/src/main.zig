@@ -51,7 +51,20 @@ const CliOptions = struct {
     html_path: []const u8,
     renderer_backend: RendererBackend = .test_pattern,
     frame_limit: ?u32 = null,
+    // Frame size in pixels; a panel host passes the size its cells cover.
+    width: u32 = frame_width,
+    height: u32 = frame_height,
+    // Reload the page when the file changes, so rewriting it updates the view.
+    watch: bool = false,
 };
+
+fn parseSize(text: []const u8) !struct { width: u32, height: u32 } {
+    const sep = std.mem.indexOfScalar(u8, text, 'x') orelse return error.Usage;
+    const width = std.fmt.parseInt(u32, text[0..sep], 10) catch return error.Usage;
+    const height = std.fmt.parseInt(u32, text[sep + 1 ..], 10) catch return error.Usage;
+    if (width == 0 or height == 0 or width > 8192 or height > 8192) return error.Usage;
+    return .{ .width = width, .height = height };
+}
 
 fn effectiveFrameLimit(options: CliOptions) u32 {
     if (options.frame_limit) |limit| return limit;
@@ -154,13 +167,13 @@ fn writeJsonLine(writer: anytype, value: anytype) !void {
 
 fn writeWebInputEventJson(writer: anytype, event: WebInputEvent) !void {
     switch (event) {
-        .mouse_move => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_move", .x = e.x, .y = e.y }),
-        .mouse_down => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_down", .x = e.x, .y = e.y, .button = e.button }),
-        .mouse_up => |e| try writeJsonLine(writer, .{ .@"type" = "mouse_up", .x = e.x, .y = e.y, .button = e.button }),
-        .wheel => |e| try writeJsonLine(writer, .{ .@"type" = "wheel", .x = e.x, .y = e.y, .dx = e.dx, .dy = e.dy }),
-        .key_down => |e| try writeJsonLine(writer, .{ .@"type" = "key_down", .keycode = e.keycode, .repeat = e.repeat }),
-        .key_up => |e| try writeJsonLine(writer, .{ .@"type" = "key_up", .keycode = e.keycode }),
-        .text => |text| try writeJsonLine(writer, .{ .@"type" = "text", .text = text }),
+        .mouse_move => |e| try writeJsonLine(writer, .{ .type = "mouse_move", .x = e.x, .y = e.y }),
+        .mouse_down => |e| try writeJsonLine(writer, .{ .type = "mouse_down", .x = e.x, .y = e.y, .button = e.button }),
+        .mouse_up => |e| try writeJsonLine(writer, .{ .type = "mouse_up", .x = e.x, .y = e.y, .button = e.button }),
+        .wheel => |e| try writeJsonLine(writer, .{ .type = "wheel", .x = e.x, .y = e.y, .dx = e.dx, .dy = e.dy }),
+        .key_down => |e| try writeJsonLine(writer, .{ .type = "key_down", .keycode = e.keycode, .repeat = e.repeat }),
+        .key_up => |e| try writeJsonLine(writer, .{ .type = "key_up", .keycode = e.keycode }),
+        .text => |text| try writeJsonLine(writer, .{ .type = "text", .text = text }),
     }
 }
 
@@ -171,7 +184,7 @@ const NativeWebviewStream = struct {
     stdout_file: std.fs.File,
     waited: bool = false,
 
-    fn init(allocator: std.mem.Allocator, html_path: []const u8, frame_limit: u32) !NativeWebviewStream {
+    fn init(allocator: std.mem.Allocator, html_path: []const u8, frame_limit: u32, width: u32, height: u32) !NativeWebviewStream {
         const helper_path = try nativeWebviewHelperPath(allocator);
         defer allocator.free(helper_path);
 
@@ -179,8 +192,8 @@ const NativeWebviewStream = struct {
         var height_buf: [16]u8 = undefined;
         var frames_buf: [16]u8 = undefined;
         var fps_buf: [16]u8 = undefined;
-        const width_arg = try std.fmt.bufPrint(&width_buf, "{d}", .{frame_width});
-        const height_arg = try std.fmt.bufPrint(&height_buf, "{d}", .{frame_height});
+        const width_arg = try std.fmt.bufPrint(&width_buf, "{d}", .{width});
+        const height_arg = try std.fmt.bufPrint(&height_buf, "{d}", .{height});
         const frames_arg = try std.fmt.bufPrint(&frames_buf, "{d}", .{frame_limit});
         const fps_arg = try std.fmt.bufPrint(&fps_buf, "{d}", .{native_webview_fps});
 
@@ -232,7 +245,17 @@ const NativeWebviewStream = struct {
     fn sendInput(self: *NativeWebviewStream, event: WebInputEvent) void {
         writeWebInputEventJson(self.stdin_file.deprecatedWriter(), event) catch {};
     }
+
+    fn sendReload(self: *NativeWebviewStream) void {
+        writeJsonLine(self.stdin_file.deprecatedWriter(), .{ .type = "reload" }) catch {};
+    }
 };
+
+/// Modification time of the page, or null when it cannot be read (mid-write).
+fn pageMtime(path: []const u8) ?i128 {
+    const stat = std.fs.cwd().statFile(path) catch return null;
+    return stat.mtime;
+}
 
 fn sdlTextInputSlice(text: *const [32]u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, text, 0) orelse text.len;
@@ -283,12 +306,40 @@ fn parseArgs(args: []const []const u8) !CliOptions {
             options.frame_limit = std.fmt.parseInt(u32, arg[frames_prefix.len..], 10) catch return error.Usage;
             continue;
         }
+        const size_prefix = "--size=";
+        if (std.mem.startsWith(u8, arg, size_prefix)) {
+            const size = try parseSize(arg[size_prefix.len..]);
+            options.width = size.width;
+            options.height = size.height;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--watch")) {
+            options.watch = true;
+            continue;
+        }
+        // The launcher forwards its own `--` separator; it is not an option.
+        if (std.mem.eql(u8, arg, "--")) continue;
         if (std.mem.startsWith(u8, arg, "--")) return error.Usage;
         if (html_path != null) return error.Usage;
         html_path = arg;
     }
     options.html_path = html_path orelse return error.Usage;
     return options;
+}
+
+test "luchs parses size and watch options" {
+    const opts = try parseArgs(&.{ "luchs", "--size=480x256", "--watch", "page.html" });
+    try std.testing.expectEqual(@as(u32, 480), opts.width);
+    try std.testing.expectEqual(@as(u32, 256), opts.height);
+    try std.testing.expect(opts.watch);
+    const forwarded = try parseArgs(&.{ "luchs", "--renderer=native-webview", "--", "--watch", "page.html" });
+    try std.testing.expect(forwarded.watch);
+    try std.testing.expectEqualStrings("page.html", forwarded.html_path);
+    const plain = try parseArgs(&.{ "luchs", "page.html" });
+    try std.testing.expectEqual(@as(u32, frame_width), plain.width);
+    try std.testing.expect(!plain.watch);
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "luchs", "--size=0x10", "page.html" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "luchs", "--size=wide", "page.html" }));
 }
 
 test "luchs requires one html path" {
@@ -386,7 +437,7 @@ pub fn main() !void {
     const frame_allocator = std.heap.page_allocator;
     var native_stream: ?NativeWebviewStream = switch (options.renderer_backend) {
         .test_pattern => null,
-        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path, frame_limit),
+        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path, frame_limit, options.width, options.height),
     };
     defer if (native_stream) |*stream| stream.deinit();
 
@@ -396,8 +447,8 @@ pub fn main() !void {
         null;
     defer if (pending_native_frame) |frame| freeRawFrame(frame_allocator, frame);
 
-    const window_width: u32 = if (pending_native_frame) |frame| frame.header.width else frame_width;
-    const window_height: u32 = if (pending_native_frame) |frame| frame.header.height else frame_height;
+    const window_width: u32 = if (pending_native_frame) |frame| frame.header.width else options.width;
+    const window_height: u32 = if (pending_native_frame) |frame| frame.header.height else options.height;
 
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) return error.SDLInitFailed;
     defer sdl.SDL_Quit();
@@ -433,6 +484,16 @@ pub fn main() !void {
     defer sdl.SDL_DestroyTexture(texture);
 
     const pixels = try arena.allocator().alloc(u8, @as(usize, window_width) * @as(usize, window_height) * 4);
+    // The last presented frame, so an unchanged page presents nothing new:
+    // the interceptor only captures presents, and a static page should not
+    // stream. One present a second keeps the retained frame fresh anyway.
+    // Bounded runs keep every frame so smoke profiles finish on time.
+    const dedupe = native_stream != null and frame_limit == 0;
+    const last_presented = if (dedupe) try arena.allocator().alloc(u8, pixels.len) else pixels;
+    var have_presented = false;
+    var last_present_ms: i64 = 0;
+    var last_mtime: ?i128 = if (options.watch) pageMtime(options.html_path) else null;
+    var last_watch_ms: i64 = 0;
     var frame: usize = 0;
     var quit = false;
     while (!quit and (frame_limit == 0 or frame < frame_limit)) : (frame += 1) {
@@ -440,6 +501,19 @@ pub fn main() !void {
         while (sdl.SDL_PollEvent(&event) != 0) {
             if (event.type == sdl.SDL_QUIT) quit = true;
             if (native_stream) |*stream| forwardSdlEventToWebview(stream, &event);
+        }
+        if (options.watch) {
+            const now = std.time.milliTimestamp();
+            if (now - last_watch_ms >= 250) {
+                last_watch_ms = now;
+                if (pageMtime(options.html_path)) |mtime| {
+                    if (last_mtime != null and mtime != last_mtime.?) {
+                        if (native_stream) |*stream| stream.sendReload();
+                        std.debug.print("luchs: page changed, reloading\n", .{});
+                    }
+                    last_mtime = mtime;
+                }
+            }
         }
 
         var frame_to_free: ?RawFrame = null;
@@ -459,6 +533,14 @@ pub fn main() !void {
             },
             @as(usize, window_width) * 4,
         };
+        if (dedupe) {
+            const now = std.time.milliTimestamp();
+            const same = have_presented and present_pixels.len == last_presented.len and std.mem.eql(u8, present_pixels, last_presented);
+            if (same and now - last_present_ms < 1000) continue;
+            if (present_pixels.len == last_presented.len) @memcpy(last_presented, present_pixels);
+            have_presented = true;
+            last_present_ms = now;
+        }
         if (sdl.SDL_UpdateTexture(texture, null, present_pixels.ptr, @intCast(present_pitch)) != 0) return error.SDLUpdateTextureFailed;
         _ = sdl.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         _ = sdl.SDL_RenderClear(renderer);

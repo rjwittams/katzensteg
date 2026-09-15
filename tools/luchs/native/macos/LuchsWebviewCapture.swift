@@ -20,6 +20,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
     private var window: NSWindow?
     private var webView: WKWebView?
     private var loaded = false
+    private var capturing = false
     private var emittedFrames = 0
 
     init(fileURL: URL, width: Int, height: Int, frameCount: Int, fps: Int) {
@@ -65,6 +66,9 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         loaded = true
+        // One capture chain for the helper's life: a reload lands in it.
+        guard !capturing else { return }
+        capturing = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.capture(webView)
         }
@@ -96,6 +100,16 @@ private final class CaptureController: NSObject, WKNavigationDelegate {
               let message = object as? [String: Any],
               let type = message["type"] as? String,
               !type.isEmpty else {
+            return
+        }
+        if type == "reload" {
+            // The page file changed (luchs --watch). A plain load of the same
+            // file URL can be served from WebKit's cache, so bypass it.
+            if let html = try? String(contentsOf: fileURL, encoding: .utf8) {
+                webView.loadHTMLString(html, baseURL: fileURL)
+            } else {
+                webView.reloadFromOrigin()
+            }
             return
         }
         let jsonData = (try? JSONSerialization.data(withJSONObject: message)) ?? Data("{}".utf8)
