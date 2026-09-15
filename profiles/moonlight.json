@@ -17,7 +17,7 @@
       ],
       "args": [
         "stream",
-        "feta",
+        "polaris-feta",
         "Steam Big Picture",
         "--display-mode",
         "windowed",
