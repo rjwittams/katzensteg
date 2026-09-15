@@ -220,6 +220,14 @@ and deletes only its own images. Small writes reduce interference with the
 application's terminal output; they cannot guarantee atomic output between
 independent writers.
 
+Before presenting a frame, the host checks `TIOCOUTQ`. If output is queued,
+it drops the entire batch before writing any bytes and restores the producer's
+latest retained frame once the queue clears. Recovery also works when periodic
+idle refresh is disabled. Session order rotates so several panels can share
+quiet intervals. Unsupported queue queries retain the small-write behavior.
+This reduces opportunities for interleaving; a queue check does not lock out
+another writer, and lifecycle cleanup writes remain best-effort.
+
 ### HTTP clients and sessions
 
 Every request requires `Authorization: Bearer <token>`. Missing or incorrect

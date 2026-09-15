@@ -131,9 +131,10 @@ model turn: the four agent tools `mcp__katzensteg__open`, `panels`, `act`
 and `observe`, mirroring the pi extension; `observe` returns a 640x480 PNG
 the Read tool renders, served by the host's `/observe`. Verified the same way: `show` renders a page, a rewrite of its file
 re-renders (luchs `--watch`), and `observe` returns the new picture. Event long-polling, wheel input and animation-frame edits remain unsupported
-by the host. The plugin requests refresh after redraws; the host also restores
-idle sessions every 500 ms by default. This can produce extra uploads for
-static pages; use `--idle-refresh-ms 0` when measuring producer frame cadence.
+by the host. Band redraws reuse the existing image instead of requesting another upload.
+The host restores idle sessions every 500 ms by default, including after
+terminal clears. Use `--idle-refresh-ms 0` when measuring producer frame cadence;
+stationary images then need an explicit refresh after a clear.
 
 ## Findings that shaped this
 

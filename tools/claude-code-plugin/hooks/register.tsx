@@ -51,11 +51,6 @@ const lastWidths = new Map<string, number>()
 // Where each panel sits in the band body, as the last render laid it out:
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
 const placed = new Map<string, { col: number; row: number; cols: number; rows: number }>()
-// Restore after the host application cleared the screen: a render re-run
-// means the cells were redrawn, so ask the host to re-upload and re-place.
-// Off once the host answers 404, until it grows the endpoint.
-let refreshSupported = true
-const lastRefresh = new Map<string, number>()
 const lastN = new Map<string, number>()
 let forwarded = 0
 let shown = 0
@@ -573,17 +568,10 @@ export const register: Register = on => {
             .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`) })
             .catch(err => log($, `grid for ${s.id} failed: ${err}`))
         })
-      } else if (sent && s.state === 'ready' && refreshSupported) {
-        const now = Date.now()
-        if (now - (lastRefresh.get(s.id) ?? 0) > 250) {
-          lastRefresh.set(s.id, now)
-          $.clock.after(0, () => {
-            api($, `/sessions/${encodeURIComponent(s.id)}/refresh`, {})
-              .then(r => { if (r.status === 404) refreshSupported = false })
-              .catch(() => undefined)
-          })
-        }
       }
+      // Repainting placeholder cells does not need another image upload.
+      // Live producers restore themselves on their next frame; the WM's idle
+      // refresh covers stationary producers after a terminal clear.
       return { s, grid }
     })
     // Replicate the wrapping row layout below so scroll events can be mapped

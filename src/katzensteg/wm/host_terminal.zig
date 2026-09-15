@@ -51,6 +51,17 @@ pub const Terminal = struct {
         self.allocator.free(self.path);
     }
 
+    // This is a scheduling hint, not a lock against another terminal writer.
+    // Some PTY implementations cannot report pending output; keep the existing
+    // small-write behavior there instead of starving presentation indefinitely.
+    pub fn outputQueued(self: *const Terminal) bool {
+        // Darwin's _IOR('t', 115, int) is absent from Zig 0.15's std.c.T.
+        const request = if (@import("builtin").os.tag == .macos) 0x40047473 else if (@hasDecl(std.posix.T, "IOCOUTQ")) std.posix.T.IOCOUTQ else return false;
+        var pending: c_int = 0;
+        if (std.posix.system.ioctl(self.file.handle, request, @intFromPtr(&pending)) != 0) return false;
+        return pending > 0;
+    }
+
     pub fn cellPixels(self: *const Terminal) ?struct { w: f64, h: f64 } {
         var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
         if (std.posix.system.ioctl(self.file.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&size)) != 0 or size.col == 0 or size.row == 0 or size.xpixel == 0 or size.ypixel == 0) return null;

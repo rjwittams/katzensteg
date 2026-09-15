@@ -125,6 +125,7 @@ class HeadlessHostTest(unittest.TestCase):
 
             pump_lock = threading.Lock()
             reader_stop = threading.Event()
+            reader_pause = threading.Event()
             def pump():
                 with pump_lock:
                     if master < 0:
@@ -134,7 +135,8 @@ class HeadlessHostTest(unittest.TestCase):
 
             def read_terminal():
                 while not reader_stop.wait(0.005):
-                    pump()
+                    if not reader_pause.is_set():
+                        pump()
             reader = threading.Thread(target=read_terminal)
             reader.start()
 
@@ -199,6 +201,34 @@ class HeadlessHostTest(unittest.TestCase):
                     api(f"/sessions/{session}/grid", {"cols": 32, "rows": 12}, client)
                 until(lambda: all(s["state"] == "ready" for s in api("/sessions", client=a)))
                 until(lambda: b"a=p,U=1" in raw)
+                # Darwin exposes queued slave output. With a full queue the
+                # host must keep serving requests instead of starting a frame
+                # write inside another application's partially drained repaint.
+                if sys.platform == "darwin":
+                    reader_pause.set()
+                    filler = os.open(tty, os.O_WRONLY | os.O_NONBLOCK)
+                    try:
+                        with pump_lock:
+                            while True:
+                                try:
+                                    os.write(filler, b"\x01" * 1024)
+                                except BlockingIOError:
+                                    break
+                        queued = struct.unpack("i", fcntl.ioctl(slave, termios.TIOCOUTQ, struct.pack("i", 0)))[0]
+                        self.assertGreater(queued, 0)
+                        # Allow an actual producer frame to reach the host.
+                        time.sleep(0.1)
+                        api("/health")
+                        api(f"/sessions/{first}/refresh", {}, a)
+                        api("/health")
+                    finally:
+                        os.close(filler)
+                        reader_pause.clear()
+                    until(lambda: struct.unpack("i", fcntl.ioctl(slave, termios.TIOCOUTQ, struct.pack("i", 0)))[0] == 0)
+                    # Filler bytes are not host output; remove only those before
+                    # the final graphics-only output assertion.
+                    with pump_lock:
+                        raw[:] = raw.replace(b"\x01", b"")
                 api(f"/sessions/{first}/refresh", {}, a)
                 api(f"/sessions/{second}/observe", {}, a, expected=404)
                 observation = api(f"/sessions/{first}/observe", {}, a)

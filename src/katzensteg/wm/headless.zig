@@ -50,6 +50,7 @@ const Session = struct {
     buttons: u32 = 0,
     source_px: ?protocol.SourcePixels = null,
     ready: bool = false,
+    restore_pending: bool = false,
     last_frame_at: i64 = 0,
     last_refresh_at: i64 = 0,
     closing_at: ?i64 = null,
@@ -95,6 +96,7 @@ const Host = struct {
     clients: std.ArrayList(Client) = .empty,
     sessions: std.ArrayList(Session) = .empty,
     next_session: u32 = 1,
+    presentation_start: usize = 0,
     next_observation: u32 = 1,
     observations: [16]?PendingObservation = @splat(null),
     idle_since: i64,
@@ -180,7 +182,10 @@ const Host = struct {
             }
             ci += 1;
         }
-        for (self.sessions.items) |*session| {
+        // Give different sessions first access to each quiet output interval.
+        // A continuously drawing first panel must not monopolize the terminal.
+        for (0..self.sessions.items.len) |offset| {
+            const session = &self.sessions.items[(self.presentation_start + offset) % self.sessions.items.len];
             if (session.exited_at != null) continue;
             session.producer.channel.flushControl() catch {
                 session.close(now);
@@ -201,12 +206,13 @@ const Host = struct {
                 std.fs.cwd().deleteTree(session.directory) catch {};
             } else if (eof or term != null) session.close(now);
             const target_changed = if (session.grid) |grid| !std.meta.eql(session.last_target_px, self.placeholderTarget(session, grid).target_px) else false;
-            if ((target_changed and session.closing_at == null and session.exited_at == null) or refreshDue(session, now, self.idle_refresh_ms)) {
+            if ((target_changed and session.closing_at == null and session.exited_at == null) or restoreDue(session, now, self.idle_refresh_ms, self.terminal.outputQueued())) {
                 self.refresh(session, now) catch {
                     session.close(now);
                 };
             }
         }
+        self.presentation_start = (self.presentation_start + 1) % @max(1, self.sessions.items.len);
         var si: usize = 0;
         while (si < self.sessions.items.len) {
             const session = &self.sessions.items[si];
@@ -306,8 +312,17 @@ const Host = struct {
                     session.ready = status.ready_to_show;
                 },
                 .frame_batch => |batch| if (session.grid != null and session.closing_at == null) {
-                    session.last_frame_at = std.time.milliTimestamp();
+                    // Do not start an APC while the host application's output
+                    // is still queued. Drop the whole batch before any bytes are
+                    // written; ask the producer for its latest retained scene
+                    // when the terminal clears, even with idle refresh disabled.
+                    if (self.terminal.outputQueued()) {
+                        session.restore_pending = true;
+                        continue;
+                    }
                     try graphics.apply(self.allocator, self.terminal.file.deprecatedWriter(), session.image_id, .{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after });
+                    session.last_frame_at = std.time.milliTimestamp();
+                    if (batch.groups.uploads.len != 0) session.restore_pending = false;
                 },
                 .detached => {},
             }
@@ -398,7 +413,9 @@ const Host = struct {
         }
         if (std.mem.eql(u8, action, "refresh")) {
             if (session.grid == null) return error.GridRequired;
-            try self.refresh(session, std.time.milliTimestamp());
+            if (self.terminal.outputQueued()) {
+                session.restore_pending = true;
+            } else try self.refresh(session, std.time.milliTimestamp());
             return .{};
         }
         if (std.mem.eql(u8, action, "grid")) {
@@ -497,6 +514,7 @@ const Host = struct {
         try control.writeViewportControl(session.producer.channel.writer(), .{ .rect_cells = target.localRect(), .placeholder = target, .refresh_placements = true });
         session.last_target_px = target.target_px;
         session.last_refresh_at = now;
+        session.restore_pending = false;
     }
 
     // Button state belongs to each producer session, never to the HTTP connection.
@@ -515,6 +533,10 @@ const Host = struct {
 fn processExists(pid: i32) bool {
     std.posix.kill(pid, 0) catch |err| return err != error.ProcessNotFound;
     return true;
+}
+
+fn restoreDue(session: *const Session, now: i64, interval: u32, output_queued: bool) bool {
+    return !output_queued and session.grid != null and session.closing_at == null and session.exited_at == null and (session.restore_pending or refreshDue(session, now, interval));
 }
 
 fn refreshDue(session: *const Session, now: i64, interval: u32) bool {
@@ -705,4 +727,24 @@ test "idle refresh waits for silence, throttles requests and skips closed sessio
     session.closing_at = null;
     session.grid = null;
     try std.testing.expect(!refreshDue(&session, 3000, 500));
+}
+
+test "busy output defers recovery without losing it when idle refresh is disabled" {
+    var session: Session = undefined;
+    session.ready = true;
+    session.grid = .{ .cols = 30, .rows = 10 };
+    session.closing_at = null;
+    session.exited_at = null;
+    session.last_frame_at = 1000;
+    session.last_refresh_at = 1000;
+    session.restore_pending = true;
+    try std.testing.expect(!restoreDue(&session, 1100, 0, true));
+    try std.testing.expect(restoreDue(&session, 1100, 0, false));
+    session.closing_at = 1050;
+    try std.testing.expect(!restoreDue(&session, 1100, 0, false));
+    session.closing_at = null;
+    session.restore_pending = false;
+    try std.testing.expect(!restoreDue(&session, 1100, 0, false));
+    try std.testing.expect(!restoreDue(&session, 1600, 500, true));
+    try std.testing.expect(restoreDue(&session, 1600, 500, false));
 }
