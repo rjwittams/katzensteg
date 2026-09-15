@@ -1,0 +1,4 @@
+{
+  "description": "Katzensteg hosted panels; builds without function hooks ignore the modules key.",
+  "modules": ["./register.tsx"]
+}
