@@ -38,7 +38,7 @@ test("a new title drag starts at the last clamped bounds", () => {
 	);
 	assert.deepEqual(controls.handle(pointer("press", 4, 1, 8, 4)), {
 		capture: true,
-		focus: true,
+		handled: true,
 	});
 	controls.handle(pointer("drag", 4, 30, 8, 33));
 	assert.equal(updates.at(-1)?.row, 32);

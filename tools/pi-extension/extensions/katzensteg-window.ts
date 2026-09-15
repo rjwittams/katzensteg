@@ -77,7 +77,7 @@ export class PanelWindowControls {
 			bounds: { ...bounds },
 			edges: resize ? edges : undefined,
 		};
-		return { capture: true, focus: true };
+		return { capture: true, handled: true };
 	}
 
 	cancel(): void {

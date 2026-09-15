@@ -82,8 +82,12 @@ test("floating panels coexist at separate depths and close independently", async
 		) => {
 			command = definition.handler;
 		},
-		on: (_event: string, handler: () => void) => {
-			shutdown = handler;
+		on: (
+			event: string,
+			handler: (event: { type: string; reason: string }) => void,
+		) => {
+			if (event === "session_shutdown")
+				shutdown = () => handler({ type: event, reason: "quit" });
 		},
 	} as unknown as ExtensionAPI);
 	try {
