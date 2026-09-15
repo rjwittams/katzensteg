@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 const max_connections = 16;
 const max_request_bytes = 64 * 1024;
@@ -24,7 +25,7 @@ pub const Response = struct {
 };
 
 const Connection = struct {
-    file: std.fs.File,
+    file: system_io.fs.File,
     started: i64,
     input: std.ArrayList(u8) = .empty,
     output: std.ArrayList(u8) = .empty,
@@ -43,22 +44,22 @@ const Connection = struct {
 // An incomplete request or slow reader must not stop producer frame draining.
 pub const Server = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: system_io.fs.File,
     port: u16,
     connections: [max_connections]Connection = undefined,
     count: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, address: []const u8) !Server {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, address: []const u8) !Server {
         if (!std.mem.startsWith(u8, address, "127.0.0.1:")) return error.LoopbackRequired;
         const port = try std.fmt.parseInt(u16, address[10..], 10);
-        var addr = try std.net.Address.parseIp4("127.0.0.1", port);
-        const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
-        errdefer std.posix.close(fd);
-        try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-        try std.posix.listen(fd, max_connections);
+        var addr = try system_io.net.Address.parseIp4("127.0.0.1", port);
+        const fd = try system_io.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
+        errdefer system_io.posix.close(fd);
+        try system_io.posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try system_io.posix.listen(fd, max_connections);
         var len = addr.getOsSockLen();
-        try std.posix.getsockname(fd, &addr.any, &len);
-        return .{ .allocator = allocator, .file = .{ .handle = fd }, .port = addr.getPort() };
+        try system_io.posix.getsockname(fd, &addr.any, &len);
+        return .{ .allocator = allocator, .file = .{ .io = io, .handle = fd }, .port = addr.getPort() };
     }
 
     pub fn deinit(self: *Server) void {
@@ -67,17 +68,18 @@ pub const Server = struct {
     }
 
     pub fn poll(self: *Server, now: i64, context: anytype) !void {
+        const io = self.file.io;
         for (0..max_connections) |_| {
-            const fd = std.posix.accept(self.file.handle, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC) catch |err| switch (err) {
+            const fd = system_io.posix.accept(self.file.handle, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => break,
                 error.ConnectionAborted => continue,
                 else => return err,
             };
             if (self.count == max_connections) {
-                std.posix.close(fd);
+                system_io.posix.close(fd);
                 continue;
             }
-            self.connections[self.count] = .{ .file = .{ .handle = fd }, .started = now };
+            self.connections[self.count] = .{ .file = .{ .io = io, .handle = fd }, .started = now };
             self.count += 1;
         }
         var i: usize = 0;
@@ -234,6 +236,7 @@ test "HTTP size budget includes the separator and accepts fragmented maximum hea
 }
 
 test "HTTP handler memory pressure returns 503 while invalid input remains 400" {
+    const io = std.testing.io;
     const Context = struct {
         failure: anyerror,
         pub fn handle(self: *@This(), _: std.mem.Allocator, _: Request) anyerror!Response {
@@ -244,14 +247,14 @@ test "HTTP handler memory pressure returns 503 while invalid input remains 400" 
         }
         pub fn cancelResponse(_: *@This(), _: u32) void {}
     };
-    var server = try Server.init(std.testing.allocator, "127.0.0.1:0");
+    var server = try Server.init(io, std.testing.allocator, "127.0.0.1:0");
     defer server.deinit();
     for ([_]anyerror{ error.OutOfMemory, error.InvalidInput }) |failure| {
         var fds: [2]std.posix.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
-        const client = std.fs.File{ .handle = fds[0] };
+        const client = system_io.fs.File{ .io = io, .handle = fds[0] };
         defer client.close();
-        var connection = Connection{ .file = .{ .handle = fds[1] }, .started = 0 };
+        var connection = Connection{ .file = .{ .io = io, .handle = fds[1] }, .started = 0 };
         defer connection.deinit(std.testing.allocator);
         try client.writeAll("GET /v1/test HTTP/1.1\r\n\r\n");
         var context = Context{ .failure = failure };

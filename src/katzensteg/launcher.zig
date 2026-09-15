@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const attach_host = @import("attach_host.zig");
 const launcher_context = @import("launcher/context.zig");
 const destination_mod = @import("launcher/destination.zig");
@@ -32,10 +33,11 @@ var embed_signal_wait_for_child = std.atomic.Value(bool).init(false);
 var embed_signal_child_pgid = std.atomic.Value(std.posix.pid_t).init(0);
 
 const FileSink = struct {
-    file: std.fs.File,
-    mutex: std.Thread.Mutex = .{},
+    file: system_io.fs.File,
+    mutex: system_io.Mutex = .{},
 
     fn deinit(self: *FileSink) void {
+        defer self.mutex.deinit();
         self.file.close();
     }
 
@@ -47,32 +49,32 @@ const FileSink = struct {
 };
 
 const DrainArgs = struct {
-    source: std.fs.File,
+    source: system_io.fs.File,
     sink: *FileSink,
     stop: *std.atomic.Value(bool),
 };
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
+    const io = process_init.io;
     const allocator = std.heap.page_allocator;
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try process_init.minimal.args.toSlice(process_init.arena.allocator());
 
     if (args.len > 0 and isProxyExecutablePath(args[0])) {
-        const exit_code = try runProxy(allocator, args[1..]);
+        const exit_code = try runProxy(io, allocator, args[1..]);
         std.process.exit(exit_code);
     }
 
     switch (parseCommand(args)) {
-        .help => try std.fs.File.stdout().writeAll(usageText()),
-        .menu => try showProfiles(allocator),
+        .help => try system_io.fs.File.stdout(io).writeAll(usageText()),
+        .menu => try showProfiles(io, allocator),
         .run => {
             const target_idx = targetArgIndex(args) orelse unreachable;
             const target = args[target_idx];
             if (launcherDryRun(args)) {
-                try dryRunTarget(allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
+                try dryRunTarget(io, allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
                 return;
             }
-            const exit_code = try runTarget(allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
+            const exit_code = try runTarget(io, allocator, target, args[target_idx + 1 ..], launcherEmbedJsonl(args));
             std.process.exit(exit_code);
         },
         .attach => {
@@ -80,14 +82,14 @@ pub fn main() !void {
                 std.debug.print("{s}", .{usageText()});
                 std.process.exit(64);
             };
-            const exit_code = try attach_host.runExec(allocator, attach.exec_argv, .{
+            const exit_code = try attach_host.runExec(io, allocator, attach.exec_argv, .{
                 .rect_cells = attach.rect_cells,
                 .aspect = attach.aspect,
             });
             std.process.exit(exit_code);
         },
         .wm => {
-            const exit_code = try runWmBinary(allocator, args[2..]);
+            const exit_code = try runWmBinary(io, allocator, args[2..]);
             std.process.exit(exit_code);
         },
         .unknown => {
@@ -240,22 +242,22 @@ fn hasArg(args: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-fn runWmBinary(allocator: std.mem.Allocator, wm_args: []const []const u8) !u8 {
-    const wm_exe = try siblingExecutablePath(allocator, "katzensteg-wm");
+fn runWmBinary(io: std.Io, allocator: std.mem.Allocator, wm_args: []const []const u8) !u8 {
+    const wm_exe = try siblingExecutablePath(io, allocator, "katzensteg-wm");
     defer allocator.free(wm_exe);
 
     const argv = try buildWmArgv(allocator, wm_exe, wm_args);
     defer allocator.free(argv);
 
-    var child = std.process.Child.init(argv, allocator);
+    var child = system_io.process.Child.init(io, argv, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
     return childTermExitCode(try child.spawnAndWait());
 }
 
-fn siblingExecutablePath(allocator: std.mem.Allocator, basename: []const u8) ![]const u8 {
-    const self_exe = try std.fs.selfExePathAlloc(allocator);
+fn siblingExecutablePath(io: std.Io, allocator: std.mem.Allocator, basename: []const u8) ![]const u8 {
+    const self_exe = try system_io.fs.selfExePathAlloc(io, allocator);
     defer allocator.free(self_exe);
 
     const dir = std.fs.path.dirname(self_exe) orelse ".";
@@ -269,7 +271,7 @@ fn buildWmArgv(allocator: std.mem.Allocator, wm_exe: []const u8, wm_args: []cons
     return argv;
 }
 
-fn childTermExitCode(term: std.process.Child.Term) u8 {
+fn childTermExitCode(term: system_io.process.Child.Term) u8 {
     return switch (term) {
         .Exited => |code| @intCast(@min(code, 255)),
         .Signal => |sig| @as(u8, 128) + @as(u8, @intCast(@min(sig, 127))),
@@ -278,11 +280,11 @@ fn childTermExitCode(term: std.process.Child.Term) u8 {
     };
 }
 
-fn showProfiles(allocator: std.mem.Allocator) !void {
-    var catalog = try loadProfileCatalog(allocator);
+fn showProfiles(io: std.Io, allocator: std.mem.Allocator) !void {
+    var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
-    const stdout = std.fs.File.stdout();
+    const stdout = system_io.fs.File.stdout(io);
     var writer = stdout.writerStreaming(&.{});
     try writer.interface.writeAll("katzensteg profiles:\n");
     for (catalog.profiles) |profile| {
@@ -299,17 +301,17 @@ fn showProfiles(allocator: std.mem.Allocator) !void {
 
 fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !destination_mod.Destination {
     if (explicit_stdio) return .stdio;
-    const value = std.process.getEnvVarOwned(allocator, "KATZENSTEG_TARGET") catch |err| switch (err) {
+    const value = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_TARGET") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return .standalone,
         else => return err,
     };
     defer allocator.free(value);
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    const home = system_io.process.getEnvVarOwned(allocator, "HOME") catch null;
     defer if (home) |path| allocator.free(path);
     return destination_mod.Destination.resolve(allocator, false, value, home);
 }
 
-fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !void {
+fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !void {
     const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
         std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
         std.process.exit(64);
@@ -317,7 +319,7 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     defer destination.deinit(allocator);
     const embed_jsonl = destination != .standalone;
     if (destination == .jsonl) std.debug.print("destination=jsonl:{s} (dry-run; not connected)\n", .{destination.jsonl});
-    var catalog = try loadProfileCatalog(allocator);
+    var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
@@ -331,7 +333,7 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
         std.process.exit(66);
     }
 
-    var expansion = try ExpansionContext.init(allocator);
+    var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
@@ -388,14 +390,14 @@ fn dryRunTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []
     );
 }
 
-fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !u8 {
+fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !u8 {
     const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
         std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
         return 64;
     };
     defer destination.deinit(allocator);
     const embed_jsonl = destination != .standalone;
-    var catalog = try loadProfileCatalog(allocator);
+    var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
@@ -403,20 +405,20 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
             std.debug.print("katzensteg: hosted launch requires a known profile: {s}\n", .{target});
             return 66;
         }
-        return runCommand(allocator, target, extra_args);
+        return runCommand(io, allocator, target, extra_args);
     };
     if (profileLaunchProblem(profile)) |problem| {
         printProfileLaunchProblem(target, problem);
         return 66;
     }
 
-    var expansion = try ExpansionContext.init(allocator);
+    var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
-    const host: ?std.fs.File = if (destination == .jsonl)
-        destination_mod.connectJsonl(allocator, destination.jsonl, plan.profile_name) catch |err| {
+    const host: ?system_io.fs.File = if (destination == .jsonl)
+        destination_mod.connectJsonl(io, allocator, destination.jsonl, plan.profile_name) catch |err| {
             std.debug.print("katzensteg: cannot connect to target {s}: {s}\n", .{ destination.jsonl, @errorName(err) });
             return 69;
         }
@@ -426,16 +428,16 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
 
     var embed_pipes: ?EmbedPipes = null;
     if (embed_jsonl) {
-        embed_pipes = try EmbedPipes.init();
+        embed_pipes = try EmbedPipes.init(io);
         applyEmbedJsonlRuntime(&plan.runtime, embed_pipes.?.runtimeFds());
     }
     defer if (embed_pipes) |*pipes| pipes.deinit();
 
-    const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
+    const runtime_config_path = try writeRuntimeConfig(io, allocator, plan.runtime);
     defer allocator.free(runtime_config_path);
-    defer std.fs.deleteFileAbsolute(runtime_config_path) catch {};
+    defer system_io.fs.deleteFileAbsolute(io, runtime_config_path) catch {};
 
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try system_io.process.getEnvMap(allocator);
     defer env_map.deinit();
     for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
@@ -446,9 +448,9 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
         std.debug.print("  runtime config: {s}\n", .{runtime_config_path});
         std.debug.print("  output: {s}\n", .{outputSpecLabel(plan.stdout)});
     }
-    try ensureSeedFiles(allocator, plan.seed_files);
+    try ensureSeedFiles(io, allocator, plan.seed_files);
 
-    var child = std.process.Child.init(plan.argv, allocator);
+    var child = system_io.process.Child.init(io, plan.argv, allocator);
     child.env_map = &env_map;
     child.cwd = plan.cwd;
     child.stdin_behavior = if (destination == .stdio) .Ignore else .Inherit;
@@ -462,17 +464,17 @@ fn runTarget(allocator: std.mem.Allocator, target: []const u8, extra_args: []con
         }
     else
         spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
-            resetTerminalBestEffort();
+            resetTerminalBestEffort(io);
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
         };
     if (!embed_jsonl) {
-        resetTerminalBestEffort();
+        resetTerminalBestEffort(io);
     }
     const exit_code = childExitCode(term);
     if (exit_code != 0 and !embed_jsonl) {
         reportExecutedCommand(allocator, plan.argv);
-        reportOutputTail(allocator, plan.stdout, plan.stderr);
+        reportOutputTail(io, allocator, plan.stdout, plan.stderr);
     }
     return exit_code;
 }
@@ -495,27 +497,27 @@ fn printProfileLaunchProblem(name: []const u8, problem: ProfileLaunchProblem) vo
     }
 }
 
-fn runCommand(allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) !u8 {
+fn runCommand(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8) !u8 {
     const argv = try buildCommandArgv(allocator, target, extra_args);
     defer freeChildArgv(allocator, argv);
 
     std.debug.print("katzensteg: launching command {s}\n", .{target});
-    var child = std.process.Child.init(argv, allocator);
+    var child = system_io.process.Child.init(io, argv, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
 
     const term = child.spawnAndWait() catch |err| {
-        resetTerminalBestEffort();
+        resetTerminalBestEffort(io);
         printSpawnFailure(allocator, "command", argv, err);
         return spawnFailureExitCode(err);
     };
-    resetTerminalBestEffort();
+    resetTerminalBestEffort(io);
     return childExitCode(term);
 }
 
-fn runProxy(allocator: std.mem.Allocator, extra_args: []const []const u8) !u8 {
-    const profile_name = std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROXY_PROFILE") catch |err| switch (err) {
+fn runProxy(io: std.Io, allocator: std.mem.Allocator, extra_args: []const []const u8) !u8 {
+    const profile_name = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_PROXY_PROFILE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
             std.debug.print("katzensteg-proxy: missing KATZENSTEG_PROXY_PROFILE\n", .{});
             return 64;
@@ -524,7 +526,7 @@ fn runProxy(allocator: std.mem.Allocator, extra_args: []const []const u8) !u8 {
     };
     defer allocator.free(profile_name);
 
-    var catalog = try loadProfileCatalog(allocator);
+    var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(profile_name) orelse {
@@ -536,29 +538,29 @@ fn runProxy(allocator: std.mem.Allocator, extra_args: []const []const u8) !u8 {
         return 66;
     }
 
-    var expansion = try ExpansionContext.init(allocator);
+    var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
     var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
-    const runtime_config_path = try writeRuntimeConfig(allocator, plan.runtime);
+    const runtime_config_path = try writeRuntimeConfig(io, allocator, plan.runtime);
     defer {
-        std.fs.deleteFileAbsolute(runtime_config_path) catch {};
+        system_io.fs.deleteFileAbsolute(io, runtime_config_path) catch {};
         allocator.free(runtime_config_path);
     }
 
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try system_io.process.getEnvMap(allocator);
     defer env_map.deinit();
     for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
-    try ensureSeedFiles(allocator, plan.seed_files);
+    try ensureSeedFiles(io, allocator, plan.seed_files);
 
-    const err = std.process.execve(allocator, plan.argv, &env_map);
+    const err = system_io.process.execve(io, allocator, plan.argv, &env_map);
     std.debug.print("katzensteg-proxy: exec failed for {s}: {s}\n", .{ plan.target, @errorName(err) });
     return 127;
 }
 
-fn childExitCode(term: std.process.Child.Term) u8 {
+fn childExitCode(term: system_io.process.Child.Term) u8 {
     return switch (term) {
         .Exited => |code| @intCast(@min(code, 255)),
         .Signal => |signal| blk: {
@@ -607,21 +609,21 @@ fn usesPathLookup(executable: []const u8) bool {
     return std.mem.indexOfScalar(u8, executable, '/') == null;
 }
 
-fn loadProfileCatalog(allocator: std.mem.Allocator) !profiles_mod.ProfileCatalog {
-    var dirs = try resolveProfileDirs(allocator);
+fn loadProfileCatalog(io: std.Io, allocator: std.mem.Allocator) !profiles_mod.ProfileCatalog {
+    var dirs = try resolveProfileDirs(io, allocator);
     defer {
         for (dirs.items) |dir| allocator.free(dir);
         dirs.deinit(allocator);
     }
-    return profiles_mod.ProfileCatalog.parseDirectories(allocator, dirs.items);
+    return profiles_mod.ProfileCatalog.parseDirectories(io, allocator, dirs.items);
 }
 
-fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    return launcher_context.resolveProfileDirs(allocator);
+fn resolveProfileDirs(io: std.Io, allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+    return launcher_context.resolveProfileDirs(io, allocator);
 }
 
-fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {
-    return launcher_context.resolveRepoRoot(allocator);
+fn resolveRepoRoot(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+    return launcher_context.resolveRepoRoot(io, allocator);
 }
 
 fn repoRootFromExecutablePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
@@ -666,10 +668,11 @@ fn applyEmbedJsonlRuntime(runtime: *RuntimeConfig, fds: EmbedRuntimeFds) void {
     runtime.presentation_control_fd = fds.control_fd;
 }
 
-fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec) !std.process.Child.Term {
-    var stdout_sink: ?FileSink = try openStdoutSink(stdout_spec);
+fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *system_io.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec) !system_io.process.Child.Term {
+    const io = child.io;
+    var stdout_sink: ?FileSink = try openStdoutSink(io, stdout_spec);
     defer if (stdout_sink) |*sink| sink.deinit();
-    var stderr_sink: ?FileSink = try openStderrSink(stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
+    var stderr_sink: ?FileSink = try openStderrSink(io, stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
     defer if (stderr_sink) |*sink| sink.deinit();
 
     try child.spawn();
@@ -703,28 +706,28 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *std.process.Child, stdou
 const embed_fd_min: std.posix.fd_t = 100;
 
 const EmbedPipes = struct {
-    render_read: ?std.fs.File,
-    control_write: ?std.fs.File,
+    render_read: ?system_io.fs.File,
+    control_write: ?system_io.fs.File,
     child_render_fd: ?std.posix.fd_t,
     child_control_fd: ?std.posix.fd_t,
 
-    fn init() !EmbedPipes {
-        const render_pipe = try std.posix.pipe();
+    fn init(io: std.Io) !EmbedPipes {
+        const render_pipe = try system_io.posix.pipe();
         errdefer destroyRawPipe(render_pipe);
-        const control_pipe = try std.posix.pipe();
+        const control_pipe = try system_io.posix.pipe();
         errdefer destroyRawPipe(control_pipe);
 
         const child_render_fd = try dupFdAtLeast(render_pipe[1], embed_fd_min);
-        errdefer std.posix.close(child_render_fd);
+        errdefer system_io.posix.close(child_render_fd);
         const child_control_fd = try dupFdAtLeast(control_pipe[0], child_render_fd + 1);
-        errdefer std.posix.close(child_control_fd);
+        errdefer system_io.posix.close(child_control_fd);
 
-        std.posix.close(render_pipe[1]);
-        std.posix.close(control_pipe[0]);
+        system_io.posix.close(render_pipe[1]);
+        system_io.posix.close(control_pipe[0]);
 
         return .{
-            .render_read = .{ .handle = render_pipe[0] },
-            .control_write = .{ .handle = control_pipe[1] },
+            .render_read = .{ .io = io, .handle = render_pipe[0] },
+            .control_write = .{ .io = io, .handle = control_pipe[1] },
             .child_render_fd = child_render_fd,
             .child_control_fd = child_control_fd,
         };
@@ -738,19 +741,19 @@ const EmbedPipes = struct {
     }
 
     fn closeChildFds(self: *EmbedPipes) void {
-        if (self.child_render_fd) |fd| std.posix.close(fd);
-        if (self.child_control_fd) |fd| std.posix.close(fd);
+        if (self.child_render_fd) |fd| system_io.posix.close(fd);
+        if (self.child_control_fd) |fd| system_io.posix.close(fd);
         self.child_render_fd = null;
         self.child_control_fd = null;
     }
 
-    fn takeRenderRead(self: *EmbedPipes) std.fs.File {
+    fn takeRenderRead(self: *EmbedPipes) system_io.fs.File {
         const file = self.render_read.?;
         self.render_read = null;
         return file;
     }
 
-    fn takeControlWrite(self: *EmbedPipes) std.fs.File {
+    fn takeControlWrite(self: *EmbedPipes) system_io.fs.File {
         const file = self.control_write.?;
         self.control_write = null;
         return file;
@@ -763,10 +766,11 @@ const EmbedPipes = struct {
     }
 };
 
-fn spawnAndWaitEmbedTransport(child: *std.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, pipes: *EmbedPipes, host: ?std.fs.File) !std.process.Child.Term {
-    var stdout_sink: ?FileSink = try openStdoutSink(stdout_spec);
+fn spawnAndWaitEmbedTransport(child: *system_io.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, pipes: *EmbedPipes, host: ?system_io.fs.File) !system_io.process.Child.Term {
+    const io = child.io;
+    var stdout_sink: ?FileSink = try openStdoutSink(io, stdout_spec);
     defer if (stdout_sink) |*sink| sink.deinit();
-    var stderr_sink: ?FileSink = try openStderrSink(stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
+    var stderr_sink: ?FileSink = try openStderrSink(io, stdout_spec, stderr_spec, if (stdout_sink) |*sink| sink else null);
     defer if (stderr_sink) |*sink| sink.deinit();
 
     child.pgid = 0;
@@ -797,12 +801,12 @@ fn spawnAndWaitEmbedTransport(child: *std.process.Child, stdout_spec: OutputSpec
     var control_stop = std.atomic.Value(bool).init(false);
     const render_thread = try std.Thread.spawn(.{}, copyFileToFile, .{CopyFileArgs{
         .source = pipes.takeRenderRead(),
-        .dest = host orelse std.fs.File.stdout(),
+        .dest = host orelse system_io.fs.File.stdout(io),
         .close_source = true,
         .close_dest = false,
     }});
     const control_thread = try std.Thread.spawn(.{}, forwardEmbedControl, .{EmbedControlForwardArgs{
-        .source = host orelse std.fs.File.stdin(),
+        .source = host orelse system_io.fs.File.stdin(io),
         .dest = pipes.takeControlWrite(),
         .child_pgid = child.id,
         .stop = if (host != null) &control_stop else null,
@@ -817,7 +821,7 @@ fn spawnAndWaitEmbedTransport(child: *std.process.Child, stdout_spec: OutputSpec
     if (stderr_thread) |thread| thread.join();
     render_thread.join();
     if (host) |file| {
-        std.posix.shutdown(file.handle, .send) catch {};
+        system_io.posix.shutdown(file.handle, .send) catch {};
         const signal = embed_signal_received.load(.seq_cst);
         if (signal != 0) return .{ .Exited = 128 + signal };
     }
@@ -850,21 +854,21 @@ fn installEmbedSignalHandlers(child_pgid: std.posix.pid_t, wait_for_child: bool)
     return handlers;
 }
 
-fn embedSignalHandler(sig: i32) callconv(.c) void {
+fn embedSignalHandler(sig: std.posix.SIG) callconv(.c) void {
     const pgid = embed_signal_child_pgid.load(.seq_cst);
     if (pgid > 0) {
         std.posix.kill(-pgid, std.posix.SIG.TERM) catch {};
     }
     if (embed_signal_wait_for_child.load(.seq_cst)) {
-        embed_signal_received.store(@intCast(sig), .seq_cst);
+        embed_signal_received.store(@intCast(@intFromEnum(sig)), .seq_cst);
         return;
     }
-    std.posix.exit(@intCast(128 + sig));
+    std.process.exit(@intCast(128 + @intFromEnum(sig)));
 }
 
 const EmbedControlForwardArgs = struct {
-    source: std.fs.File,
-    dest: std.fs.File,
+    source: system_io.fs.File,
+    dest: system_io.fs.File,
     child_pgid: std.posix.pid_t,
     stop: ?*std.atomic.Value(bool) = null,
 };
@@ -886,7 +890,7 @@ fn forwardEmbedControl(args: EmbedControlForwardArgs) void {
                 return;
             }
             var poll = [_]std.posix.pollfd{.{ .fd = source.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-            if ((std.posix.poll(&poll, 50) catch 0) == 0) continue;
+            if ((system_io.posix.poll(&poll, 50) catch 0) == 0) continue;
         }
         const n = source.read(&buf) catch {
             terminateEmbedChildAfterGrace(args.child_pgid, args.stop);
@@ -933,19 +937,19 @@ fn terminateEmbedChildAfterGrace(child_pgid: std.posix.pid_t, stop: ?*std.atomic
     if (child_pgid <= 0) return;
     for (0..60) |_| {
         if (stop) |flag| if (flag.load(.seq_cst)) return;
-        std.Thread.sleep(25 * std.time.ns_per_ms);
+        system_io.time.sleep(25 * std.time.ns_per_ms);
     }
     std.posix.kill(-child_pgid, std.posix.SIG.TERM) catch {};
     for (0..10) |_| {
         if (stop) |flag| if (flag.load(.seq_cst)) return;
-        std.Thread.sleep(25 * std.time.ns_per_ms);
+        system_io.time.sleep(25 * std.time.ns_per_ms);
     }
     std.posix.kill(-child_pgid, std.posix.SIG.KILL) catch {};
 }
 
 const CopyFileArgs = struct {
-    source: std.fs.File,
-    dest: std.fs.File,
+    source: system_io.fs.File,
+    dest: system_io.fs.File,
     close_source: bool,
     close_dest: bool,
 };
@@ -964,12 +968,12 @@ fn copyFileToFile(args: CopyFileArgs) void {
 }
 
 fn dupFdAtLeast(fd: std.posix.fd_t, min: std.posix.fd_t) !std.posix.fd_t {
-    return @intCast(try std.posix.fcntl(fd, std.posix.F.DUPFD, @intCast(min)));
+    return @intCast(try system_io.posix.fcntl(fd, std.posix.F.DUPFD, @intCast(min)));
 }
 
 fn destroyRawPipe(pipe: [2]std.posix.fd_t) void {
-    std.posix.close(pipe[0]);
-    std.posix.close(pipe[1]);
+    system_io.posix.close(pipe[0]);
+    system_io.posix.close(pipe[1]);
 }
 
 fn drainPipeToSink(args: DrainArgs) void {
@@ -980,7 +984,7 @@ fn drainPipeToSink(args: DrainArgs) void {
         const n = args.source.read(&buf) catch |err| switch (err) {
             error.WouldBlock => {
                 if (args.stop.load(.seq_cst)) return;
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                system_io.time.sleep(10 * std.time.ns_per_ms);
                 continue;
             },
             else => return,
@@ -991,51 +995,51 @@ fn drainPipeToSink(args: DrainArgs) void {
 }
 
 fn setNonBlocking(fd: std.posix.fd_t) void {
-    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    const flags = system_io.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
     var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
     typed_flags.NONBLOCK = true;
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
+    _ = system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
-fn openStdoutSink(spec: OutputSpec) !?FileSink {
+fn openStdoutSink(io: std.Io, spec: OutputSpec) !?FileSink {
     return switch (spec) {
-        .file => |path| .{ .file = try createOutputFile(path) },
+        .file => |path| .{ .file = try createOutputFile(io, path) },
         else => null,
     };
 }
 
-fn openStderrSink(stdout_spec: OutputSpec, stderr_spec: OutputSpec, stdout_sink: ?*FileSink) !?FileSink {
+fn openStderrSink(io: std.Io, stdout_spec: OutputSpec, stderr_spec: OutputSpec, stdout_sink: ?*FileSink) !?FileSink {
     _ = stdout_spec;
     return switch (stderr_spec) {
-        .file => |path| .{ .file = try createOutputFile(path) },
+        .file => |path| .{ .file = try createOutputFile(io, path) },
         .stdout => if (stdout_sink != null) null else null,
         else => null,
     };
 }
 
-fn createOutputFile(path: []const u8) !std.fs.File {
+fn createOutputFile(io: std.Io, path: []const u8) !system_io.fs.File {
     if (std.fs.path.dirname(path)) |parent| {
-        try std.fs.cwd().makePath(parent);
+        try system_io.fs.cwd(io).makePath(parent);
     }
-    if (std.fs.path.isAbsolute(path)) return std.fs.createFileAbsolute(path, .{ .truncate = true, .read = false });
-    return std.fs.cwd().createFile(path, .{ .truncate = true, .read = false });
+    if (std.fs.path.isAbsolute(path)) return system_io.fs.createFileAbsolute(io, path, .{ .truncate = true, .read = false });
+    return system_io.fs.cwd(io).createFile(path, .{ .truncate = true, .read = false });
 }
 
-fn ensureSeedFiles(allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile) !void {
-    return launcher_exec.ensureSeedFiles(allocator, seed_files);
+fn ensureSeedFiles(io: std.Io, allocator: std.mem.Allocator, seed_files: []const profiles_mod.SeedFile) !void {
+    return launcher_exec.ensureSeedFiles(io, allocator, seed_files);
 }
 
-fn readWholeFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return launcher_exec.readWholeFile(allocator, path);
+fn readWholeFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return launcher_exec.readWholeFile(io, allocator, path);
 }
 
-fn reportOutputTail(allocator: std.mem.Allocator, stdout_spec: OutputSpec, stderr_spec: OutputSpec) void {
+fn reportOutputTail(io: std.Io, allocator: std.mem.Allocator, stdout_spec: OutputSpec, stderr_spec: OutputSpec) void {
     switch (stdout_spec) {
-        .file => |path| reportFileTail(allocator, path),
+        .file => |path| reportFileTail(io, allocator, path),
         else => {},
     }
     switch (stderr_spec) {
-        .file => |path| reportFileTail(allocator, path),
+        .file => |path| reportFileTail(io, allocator, path),
         .stdout => {},
         else => {},
     }
@@ -1091,8 +1095,8 @@ fn shellArgCanBeBare(arg: []const u8) bool {
     return true;
 }
 
-fn reportFileTail(allocator: std.mem.Allocator, path: []const u8) void {
-    const bytes = readTailFile(allocator, path) catch return;
+fn reportFileTail(io: std.Io, allocator: std.mem.Allocator, path: []const u8) void {
+    const bytes = readTailFile(io, allocator, path) catch return;
     defer allocator.free(bytes);
     const tail = lastLines(allocator, bytes, 20) catch return;
     defer allocator.free(tail);
@@ -1101,12 +1105,12 @@ fn reportFileTail(allocator: std.mem.Allocator, path: []const u8) void {
     if (tail[tail.len - 1] != '\n') std.debug.print("\n", .{});
 }
 
-fn readTailFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+fn readTailFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const max_tail_bytes: u64 = 64 * 1024;
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+        try system_io.fs.openFileAbsolute(io, path, .{ .mode = .read_only })
     else
-        try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+        try system_io.fs.cwd(io).openFile(path, .{ .mode = .read_only });
     defer file.close();
 
     const size = try file.getEndPos();
@@ -1131,7 +1135,7 @@ fn lastLines(allocator: std.mem.Allocator, bytes: []const u8, line_count: usize)
     return allocator.dupe(u8, bytes);
 }
 
-fn stdioForStdout(spec: OutputSpec) std.process.Child.StdIo {
+fn stdioForStdout(spec: OutputSpec) system_io.process.Child.StdIo {
     return switch (spec) {
         .inherit, .stdout => .Inherit,
         .ignore => .Ignore,
@@ -1139,7 +1143,7 @@ fn stdioForStdout(spec: OutputSpec) std.process.Child.StdIo {
     };
 }
 
-fn stdioForStderr(stdout_spec: OutputSpec, stderr_spec: OutputSpec) std.process.Child.StdIo {
+fn stdioForStderr(stdout_spec: OutputSpec, stderr_spec: OutputSpec) system_io.process.Child.StdIo {
     return switch (stderr_spec) {
         .inherit => .Inherit,
         .ignore => .Ignore,
@@ -1168,10 +1172,10 @@ fn freeChildArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
     launcher_plan.freeChildArgv(allocator, argv);
 }
 
-fn writeRuntimeConfig(allocator: std.mem.Allocator, runtime: RuntimeConfig) ![]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-runtime-{d}.json", .{std.time.nanoTimestamp()});
+fn writeRuntimeConfig(io: std.Io, allocator: std.mem.Allocator, runtime: RuntimeConfig) ![]const u8 {
+    const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-runtime-{d}.json", .{system_io.time.nanoTimestamp()});
     errdefer allocator.free(path);
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true, .read = true });
+    const file = try system_io.fs.createFileAbsolute(io, path, .{ .truncate = true, .read = true });
     defer file.close();
     var writer = file.writerStreaming(&.{});
     try writeRuntimeConfigJson(&writer.interface, runtime);
@@ -1216,8 +1220,8 @@ fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: RuntimeConfig) !void 
     try writer.writeAll("}\n");
 }
 
-fn resetTerminalBestEffort() void {
-    const file = std.fs.openFileAbsolute("/dev/tty", .{ .mode = .write_only }) catch return;
+fn resetTerminalBestEffort(io: std.Io) void {
+    const file = system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .write_only }) catch return;
     defer file.close();
     var writer = file.writerStreaming(&.{});
     writer.interface.writeAll(terminalResetSequence()) catch return;
@@ -1368,6 +1372,7 @@ test "launcher resolved plan expands profile env and preserves explicit output" 
 }
 
 test "launcher resolves and seeds missing files without overwriting existing files" {
+    const io = std.testing.io;
     const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
     var profile = profiles_mod.LaunchProfile{
         .allocator = std.testing.allocator,
@@ -1382,26 +1387,27 @@ test "launcher resolves and seeds missing files without overwriting existing fil
     defer plan.deinit();
     try std.testing.expectEqualStrings("/tmp/katzensteg-launcher-seed-test.cfg", plan.seed_files[0].path);
 
-    std.fs.deleteFileAbsolute(plan.seed_files[0].path) catch {};
-    defer std.fs.deleteFileAbsolute(plan.seed_files[0].path) catch {};
+    system_io.fs.deleteFileAbsolute(io, plan.seed_files[0].path) catch {};
+    defer system_io.fs.deleteFileAbsolute(io, plan.seed_files[0].path) catch {};
 
-    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
-    const seeded = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    try ensureSeedFiles(io, std.testing.allocator, plan.seed_files);
+    const seeded = try readWholeFile(io, std.testing.allocator, plan.seed_files[0].path);
     defer std.testing.allocator.free(seeded);
     try std.testing.expectEqualStrings("video_driver = \"sdl2\"\n", seeded);
 
     {
-        const file = try std.fs.createFileAbsolute(plan.seed_files[0].path, .{ .truncate = true });
+        const file = try system_io.fs.createFileAbsolute(io, plan.seed_files[0].path, .{ .truncate = true });
         defer file.close();
         try file.writeAll("keep\n");
     }
-    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
-    const preserved = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    try ensureSeedFiles(io, std.testing.allocator, plan.seed_files);
+    const preserved = try readWholeFile(io, std.testing.allocator, plan.seed_files[0].path);
     defer std.testing.allocator.free(preserved);
     try std.testing.expectEqualStrings("keep\n", preserved);
 }
 
 test "launcher creates seed file parent directories" {
+    const io = std.testing.io;
     const expansion = ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
     var profile = profiles_mod.LaunchProfile{
         .allocator = std.testing.allocator,
@@ -1415,33 +1421,34 @@ test "launcher creates seed file parent directories" {
     var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
     defer plan.deinit();
 
-    std.fs.deleteFileAbsolute("/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
-    std.fs.deleteDirAbsolute("/tmp/katzensteg-launcher-seed-parent-test") catch {};
-    defer std.fs.deleteFileAbsolute("/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
-    defer std.fs.deleteDirAbsolute("/tmp/katzensteg-launcher-seed-parent-test") catch {};
+    system_io.fs.deleteFileAbsolute(io, "/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
+    system_io.fs.deleteDirAbsolute(io, "/tmp/katzensteg-launcher-seed-parent-test") catch {};
+    defer system_io.fs.deleteFileAbsolute(io, "/tmp/katzensteg-launcher-seed-parent-test/layer.json") catch {};
+    defer system_io.fs.deleteDirAbsolute(io, "/tmp/katzensteg-launcher-seed-parent-test") catch {};
 
-    try ensureSeedFiles(std.testing.allocator, plan.seed_files);
-    const seeded = try readWholeFile(std.testing.allocator, plan.seed_files[0].path);
+    try ensureSeedFiles(io, std.testing.allocator, plan.seed_files);
+    const seeded = try readWholeFile(io, std.testing.allocator, plan.seed_files[0].path);
     defer std.testing.allocator.free(seeded);
     try std.testing.expectEqualStrings("{}\n", seeded);
 }
 
 test "launcher output drain does not wait for orphaned descendants" {
+    const io = std.testing.io;
     const output_path = "/tmp/katzensteg-launcher-orphan-output-test.out";
-    std.fs.deleteFileAbsolute(output_path) catch {};
-    defer std.fs.deleteFileAbsolute(output_path) catch {};
+    system_io.fs.deleteFileAbsolute(io, output_path) catch {};
+    defer system_io.fs.deleteFileAbsolute(io, output_path) catch {};
 
     const argv = [_][]const u8{ "/bin/sh", "-c", "sleep 2 & exit 0" };
-    var child = std.process.Child.init(&argv, std.testing.allocator);
+    var child = system_io.process.Child.init(io, &argv, std.testing.allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
 
-    const start = try std.time.Instant.now();
+    const start = try system_io.time.Instant.now();
     const term = try spawnAndWaitWithOutput(std.testing.allocator, &child, .{ .file = output_path }, .stdout);
-    const elapsed = (try std.time.Instant.now()).since(start);
+    const elapsed = (try system_io.time.Instant.now()).since(start);
 
-    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
+    try std.testing.expectEqual(system_io.process.Child.Term{ .Exited = 0 }, term);
     try std.testing.expect(elapsed < 1500 * std.time.ns_per_ms);
 }
 

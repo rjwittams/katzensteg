@@ -1,15 +1,16 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 const cli = @import("cli.zig");
 const wm_host = @import("wm_host");
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
+    const io = process_init.io;
     const allocator = std.heap.page_allocator;
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try process_init.minimal.args.toSlice(process_init.arena.allocator());
 
     if (hasArg(args[1..], "--help") or hasArg(args[1..], "-h")) {
-        try std.fs.File.stdout().writeAll(usage_text);
+        try system_io.fs.File.stdout(io).writeAll(usage_text);
         return;
     }
 
@@ -19,18 +20,18 @@ pub fn main() !void {
     };
     defer parsed.deinit();
 
-    const producer_exe = try siblingProducerExecutablePath(allocator);
+    const producer_exe = try siblingProducerExecutablePath(io, allocator);
     defer allocator.free(producer_exe);
 
     if (parsed.headless) {
         var parent_pid = parsed.parent_pid;
         if (parent_pid == null) {
-            if (std.process.getEnvVarOwned(allocator, "CLAUDE_PID")) |value| {
+            if (system_io.process.getEnvVarOwned(allocator, "CLAUDE_PID")) |value| {
                 defer allocator.free(value);
                 parent_pid = std.fmt.parseInt(i32, value, 10) catch null;
             } else |_| {}
         }
-        const code = try wm_host.runHeadless(allocator, producer_exe, .{
+        const code = try wm_host.runHeadless(io, allocator, producer_exe, .{
             .http_address = parsed.http_address orelse "127.0.0.1:0",
             .tty_path = parsed.tty_path,
             .host_file = parsed.host_file,
@@ -50,7 +51,7 @@ pub fn main() !void {
         };
     }
 
-    const exit_code = try wm_host.runSessionSpecsWithOptions(allocator, producer_exe, specs, .{
+    const exit_code = try wm_host.runSessionSpecsWithOptions(io, allocator, producer_exe, specs, .{
         .listen_path = parsed.listen_path,
         .presentation = switch (parsed.presentation) {
             .positioned => .positioned,
@@ -67,8 +68,8 @@ fn hasArg(args: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-fn siblingProducerExecutablePath(allocator: std.mem.Allocator) ![]const u8 {
-    const self_exe = try std.fs.selfExePathAlloc(allocator);
+fn siblingProducerExecutablePath(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+    const self_exe = try system_io.fs.selfExePathAlloc(io, allocator);
     defer allocator.free(self_exe);
 
     const dir = std.fs.path.dirname(self_exe) orelse ".";

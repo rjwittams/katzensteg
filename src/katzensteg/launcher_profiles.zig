@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const config = @import("config.zig");
 
 pub const EnvVar = struct {
@@ -118,19 +119,19 @@ pub const ProfileCatalog = struct {
         };
     }
 
-    pub fn parseDirectory(allocator: std.mem.Allocator, dir_path: []const u8) !ProfileCatalog {
-        return parseDirectoryForPlatform(allocator, dir_path, currentProfilePlatform());
+    pub fn parseDirectory(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8) !ProfileCatalog {
+        return parseDirectoryForPlatform(io, allocator, dir_path, currentProfilePlatform());
     }
 
-    pub fn parseDirectoryForPlatform(allocator: std.mem.Allocator, dir_path: []const u8, platform: ProfilePlatform) !ProfileCatalog {
-        return parseDirectoriesForPlatform(allocator, &.{dir_path}, platform);
+    pub fn parseDirectoryForPlatform(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8, platform: ProfilePlatform) !ProfileCatalog {
+        return parseDirectoriesForPlatform(io, allocator, &.{dir_path}, platform);
     }
 
-    pub fn parseDirectories(allocator: std.mem.Allocator, dir_paths: []const []const u8) !ProfileCatalog {
-        return parseDirectoriesForPlatform(allocator, dir_paths, currentProfilePlatform());
+    pub fn parseDirectories(io: std.Io, allocator: std.mem.Allocator, dir_paths: []const []const u8) !ProfileCatalog {
+        return parseDirectoriesForPlatform(io, allocator, dir_paths, currentProfilePlatform());
     }
 
-    pub fn parseDirectoriesForPlatform(allocator: std.mem.Allocator, dir_paths: []const []const u8, platform: ProfilePlatform) !ProfileCatalog {
+    pub fn parseDirectoriesForPlatform(io: std.Io, allocator: std.mem.Allocator, dir_paths: []const []const u8, platform: ProfilePlatform) !ProfileCatalog {
         if (dir_paths.len == 0) return error.MissingProfiles;
 
         var profiles = std.ArrayList(LaunchProfile).empty;
@@ -140,7 +141,7 @@ pub const ProfileCatalog = struct {
         }
 
         for (dir_paths) |dir_path| {
-            var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+            var dir = system_io.fs.cwd(io).openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => return err,
             };
@@ -1098,7 +1099,8 @@ test "profile parser keeps loading documents after a malformed document" {
 }
 
 test "bundled retroarch profiles use neutral ROM paths" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const sonic = catalog.find("sonic").?;
@@ -1116,7 +1118,8 @@ test "bundled retroarch profiles use neutral ROM paths" {
 }
 
 test "parseDirectories silently skips non-existent directories" {
-    var catalog = try ProfileCatalog.parseDirectories(
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectories(io,
         std.testing.allocator,
         &.{ "profiles", "/tmp/katzensteg-nonexistent-profiles-dir-xyzzy" },
     );
@@ -1127,7 +1130,8 @@ test "parseDirectories silently skips non-existent directories" {
 }
 
 test "parseDirectories overlays profiles from multiple directories" {
-    var tmp = std.testing.tmpDir(.{});
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
     defer tmp.cleanup();
 
     const overlay_json =
@@ -1145,7 +1149,7 @@ test "parseDirectories overlays profiles from multiple directories" {
     const overlay_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(overlay_dir);
 
-    var catalog = try ProfileCatalog.parseDirectories(
+    var catalog = try ProfileCatalog.parseDirectories(io,
         std.testing.allocator,
         &.{ "profiles", overlay_dir },
     );
@@ -1160,7 +1164,8 @@ test "parseDirectories overlays profiles from multiple directories" {
 }
 
 test "bundled profile directory ignores non-profile JSON documents" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     try std.testing.expect(catalog.find("external-projects.json") == null);
@@ -1168,7 +1173,8 @@ test "bundled profile directory ignores non-profile JSON documents" {
 }
 
 test "bundled profiles include Cannonball launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("cannonball").?;
@@ -1178,7 +1184,8 @@ test "bundled profiles include Cannonball launch target" {
 }
 
 test "bundled profiles include ffplay passthrough launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("ffplay").?;
@@ -1191,9 +1198,10 @@ test "bundled profiles include ffplay passthrough launch target" {
 }
 
 test "bundled Vulkan capture profile resolves platform layer paths" {
-    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    const io = std.testing.io;
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
-    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
 
     const linux_profile = linux_catalog.find("capture.vulkan").?;
@@ -1208,9 +1216,10 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
 }
 
 test "bundled SDL2 preload adapter resolves platform preload environment" {
-    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    const io = std.testing.io;
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
-    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
 
     const linux_profile = linux_catalog.find("adapter.sdl2_preload").?;
@@ -1223,9 +1232,10 @@ test "bundled SDL2 preload adapter resolves platform preload environment" {
 }
 
 test "bundled SDL3 preload adapter resolves platform preload environment" {
-    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    const io = std.testing.io;
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
-    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
 
     const linux_profile = linux_catalog.find("adapter.sdl3_preload").?;
@@ -1238,9 +1248,10 @@ test "bundled SDL3 preload adapter resolves platform preload environment" {
 }
 
 test "bundled SDL3 input probe profile resolves SDL3 probe target and preload" {
-    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .linux);
+    const io = std.testing.io;
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
-    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
 
     const linux_profile = linux_catalog.find("probe.input.sdl3").?;
@@ -1255,7 +1266,8 @@ test "bundled SDL3 input probe profile resolves SDL3 probe target and preload" {
 }
 
 test "bundled profiles include experimental macOS SDL2 rebind adapter" {
-    var catalog = try ProfileCatalog.parseDirectoryForPlatform(std.testing.allocator, "profiles", .macos);
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer catalog.deinit();
 
     const profile = catalog.find("adapter.sdl2_rebind_preload").?;
@@ -1268,7 +1280,8 @@ test "bundled profiles include experimental macOS SDL2 rebind adapter" {
 }
 
 test "bundled RetroArch profiles disable pause when inactive" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     for ([_][]const u8{ "sonic", "jsr", "spyro" }) |name| {
@@ -1291,7 +1304,8 @@ fn envValue(profile: *const LaunchProfile, name: []const u8) ?[]const u8 {
 }
 
 test "bundled profiles include gamescope SDL Vulkan probe" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("probe.gamescope").?;
@@ -1305,7 +1319,8 @@ test "bundled profiles include gamescope SDL Vulkan probe" {
 }
 
 test "bundled profiles include embed basic SDL probe" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("probe.embed.basic_sdl").?;
@@ -1316,7 +1331,8 @@ test "bundled profiles include embed basic SDL probe" {
 }
 
 test "bundled profiles include embed luchs static probe" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("probe.embed.luchs_static").?;
@@ -1329,7 +1345,8 @@ test "bundled profiles include embed luchs static probe" {
 }
 
 test "bundled profiles include embed luchs interactive probe" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("probe.embed.luchs_interactive").?;
@@ -1346,7 +1363,8 @@ test "bundled profiles include embed luchs interactive probe" {
 }
 
 test "bundled profiles include Tempest Rising gamescope launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("steam.tempest_rising").?;
@@ -1356,7 +1374,8 @@ test "bundled profiles include Tempest Rising gamescope launch target" {
 }
 
 test "bundled profiles include Space Marine 2 gamescope launch target" {
-    var catalog = try ProfileCatalog.parseDirectory(std.testing.allocator, "profiles");
+    const io = std.testing.io;
+    var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
     defer catalog.deinit();
 
     const profile = catalog.find("steam.space_marine_2").?;

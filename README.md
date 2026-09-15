@@ -21,7 +21,7 @@ OpenGL and Vulkan capture work exists in the tree for specific experiments and p
 
 ## Try It
 
-Build with Zig 0.15.2:
+Build with Zig 0.16.0:
 
 ```sh
 zig build
@@ -59,7 +59,7 @@ For real app profiles, start with `--dry-run`. Many of them expect local app che
 
 ## Requirements
 
-- Zig 0.15.2.
+- Zig 0.16.0.
 - SDL2 development headers and libraries.
 - A terminal with kitty graphics protocol support.
 - libyuv on Linux.

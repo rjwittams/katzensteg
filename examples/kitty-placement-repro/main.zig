@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const termscene = @import("termscene");
 
 const kitty = termscene.kitty;
@@ -27,17 +28,18 @@ fn writeStatus(out: *std.Io.Writer, frame: usize, active: ActivePlacement, rows:
     try out.print("strategy: delete exact old (image, placement) pair, then place new image with fresh placement id  terminal={d}x{d}", .{ cols, rows });
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(process_init: std.process.Init) !void {
+    const io = process_init.io;
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    const stdout_file = std.fs.File.stdout();
+    const stdout_file = system_io.fs.File.stdout(io);
     var writer_state = stdout_file.writerStreaming(&.{});
     const writer = &writer_state.interface;
-    const stdin_fd = std.fs.File.stdin().handle;
-    const original_termios = try std.posix.tcgetattr(stdin_fd);
-    defer std.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
+    const stdin_fd = system_io.fs.File.stdin(io).handle;
+    const original_termios = try system_io.posix.tcgetattr(stdin_fd);
+    defer system_io.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
 
     var raw = original_termios;
     raw.lflag.ECHO = false;
@@ -46,9 +48,9 @@ pub fn main() !void {
     raw.iflag.IXON = false;
     raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
     raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(stdin_fd, .FLUSH, raw);
+    try system_io.posix.tcsetattr(stdin_fd, .FLUSH, raw);
 
-    if (!try kitty.detectGraphicsSupport(allocator, writer)) {
+    if (!try kitty.detectGraphicsSupport(io, allocator, writer)) {
         std.debug.print("kitty-placement-repro: kitty graphics protocol not detected.\n", .{});
         return;
     }
@@ -65,7 +67,7 @@ pub fn main() !void {
     var placement_counter: u32 = 1;
     var active: ?ActivePlacement = null;
     var frame: usize = 0;
-    var reader = std.fs.File.stdin().deprecatedReader();
+    var reader = system_io.fs.File.stdin(io);
     var buf: [16]u8 = undefined;
 
     while (true) {
@@ -102,6 +104,6 @@ pub fn main() !void {
                 if (ch == 'q' or ch == 'Q') return;
             }
         }
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        system_io.time.sleep(300 * std.time.ns_per_ms);
     }
 }

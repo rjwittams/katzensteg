@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const core = @import("core_types.zig");
 const commands = @import("core_commands.zig");
 const inspect_model = @import("inspect_model.zig");
@@ -12,12 +13,12 @@ pub fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start
     rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
-    const duration = std.time.nanoTimestamp() - start_ns;
+    const duration = system_io.time.nanoTimestamp() - start_ns;
     rt.notePresentDuration(duration);
     const summary = rt.frame_builder.inspectSummary();
     const whiskers_frame: inspect_model.FrameRecord = .{
         .id = 0,
-        .ts_ns = std.time.nanoTimestamp(),
+        .ts_ns = system_io.time.nanoTimestamp(),
         .present_ns = duration,
         .queue_depth = rt.currentQueueDepth(),
         .skipped_presents = rt.skipped_presents,
@@ -160,7 +161,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
                     rt.notePresentationLayout(.{});
                     return;
                 }
-                onRenderPresentCore(rt, c.renderer, std.time.nanoTimestamp());
+                onRenderPresentCore(rt, c.renderer, system_io.time.nanoTimestamp());
             }
         },
         .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),

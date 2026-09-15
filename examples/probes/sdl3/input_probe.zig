@@ -22,12 +22,12 @@ fn expectCondition(name: []const u8, ok: bool) !void {
     return error.ProbeAssertionFailed;
 }
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
     var log_events = false;
     var custom_cursor = false;
     var max_frames: i32 = 240;
 
-    var args = std.process.args();
+    var args = process_init.minimal.args.iterate();
     _ = args.skip();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--log-events")) {

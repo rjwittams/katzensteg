@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const types = @import("../types.zig");
 const backend = @import("../backend.zig");
 const protocol = @import("protocol.zig");
@@ -41,7 +42,7 @@ pub const Backend = struct {
     };
 
     const FileUploadState = struct {
-        file: std.fs.File,
+        file: system_io.fs.File,
         path: []u8,
         high_water: u64,
         next_offset: u64,
@@ -61,8 +62,8 @@ pub const Backend = struct {
     };
 
     allocator: std.mem.Allocator,
-    file: std.fs.File,
-    output: std.fs.File.Writer,
+    file: system_io.fs.File,
+    output: system_io.fs.File.Writer,
     sprites: std.AutoHashMap(u64, SpriteState),
     texts: std.AutoHashMap(u64, TextState),
     known_images: std.AutoHashMap(u32, void),
@@ -71,11 +72,12 @@ pub const Backend = struct {
     quiet: protocol.Quiet,
     upload: UploadState,
 
-    pub fn init(allocator: std.mem.Allocator, file: std.fs.File) Backend {
+    pub fn init(allocator: std.mem.Allocator, file: system_io.fs.File) Backend {
         return initWithOptions(allocator, file, .{}) catch unreachable;
     }
 
-    pub fn initWithOptions(allocator: std.mem.Allocator, file: std.fs.File, options: Options) !Backend {
+    pub fn initWithOptions(allocator: std.mem.Allocator, file: system_io.fs.File, options: Options) !Backend {
+        const io = file.io;
         return .{
             .allocator = allocator,
             .file = file,
@@ -86,22 +88,23 @@ pub const Backend = struct {
             .retransmitted_images = std.AutoHashMap(u32, void).init(allocator),
             .next_placement_id = 1,
             .quiet = options.quiet,
-            .upload = try initUploadState(allocator, options),
+            .upload = try initUploadState(io, allocator, options),
         };
     }
 
     pub fn deinit(self: *Backend) void {
+        const io = self.file.io;
         switch (self.upload) {
             .direct => {},
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
-                    std.fs.deleteFileAbsolute(path.*) catch {};
+                    system_io.fs.deleteFileAbsolute(io, path.*) catch {};
                     self.allocator.free(path.*);
                 }
             },
             .file_offset => |*state| {
                 state.file.close();
-                std.fs.deleteFileAbsolute(state.path) catch {};
+                system_io.fs.deleteFileAbsolute(io, state.path) catch {};
                 self.allocator.free(state.path);
             },
         }
@@ -116,6 +119,7 @@ pub const Backend = struct {
     }
 
     pub fn registerRawImage(self: *Backend, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
+        const io = self.file.io;
         if (self.known_images.contains(image_id)) {
             try self.retransmitted_images.put(image_id, {});
         }
@@ -124,7 +128,7 @@ pub const Backend = struct {
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
-                var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
+                var file = try system_io.fs.createFileAbsolute(io, state.paths[index], .{ .read = true, .truncate = false });
                 defer file.close();
                 try file.pwriteAll(rgba, 0);
                 const rgba_len_u64: u64 = @intCast(rgba.len);
@@ -266,21 +270,21 @@ pub const Backend = struct {
         }
     }
 
-    fn initUploadState(allocator: std.mem.Allocator, options: Options) !UploadState {
+    fn initUploadState(io: std.Io, allocator: std.mem.Allocator, options: Options) !UploadState {
         switch (options.upload_medium) {
             .direct => return .direct,
             .file_whole, .file_offset => {
                 const path = options.upload_file_path orelse return error.MissingUploadFilePath;
                 return switch (options.upload_medium) {
-                    .file_whole => .{ .file_whole = try initRotatingFileUploadState(allocator, path) },
-                    .file_offset => .{ .file_offset = try initSingleFileUploadState(allocator, path, options.upload_file_high_water) },
+                    .file_whole => .{ .file_whole = try initRotatingFileUploadState(io, allocator, path) },
+                    .file_offset => .{ .file_offset = try initSingleFileUploadState(io, allocator, path, options.upload_file_high_water) },
                     else => unreachable,
                 };
             },
         }
     }
 
-    fn initRotatingFileUploadState(allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
+    fn initRotatingFileUploadState(io: std.Io, allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
         var paths: [rotating_file_count][]u8 = undefined;
         const file_lens: [rotating_file_count]u64 = [_]u64{0} ** rotating_file_count;
         var initialized: usize = 0;
@@ -292,7 +296,7 @@ pub const Backend = struct {
         }
         for (0..rotating_file_count) |i| {
             paths[i] = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ base_path, i });
-            std.fs.deleteFileAbsolute(paths[i]) catch {};
+            system_io.fs.deleteFileAbsolute(io, paths[i]) catch {};
             initialized += 1;
         }
         return .{
@@ -302,10 +306,10 @@ pub const Backend = struct {
         };
     }
 
-    fn initSingleFileUploadState(allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
+    fn initSingleFileUploadState(io: std.Io, allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
         const duped_path = try allocator.dupe(u8, path);
         errdefer allocator.free(duped_path);
-        const upload_file = try std.fs.createFileAbsolute(duped_path, .{ .read = true, .truncate = false });
+        const upload_file = try system_io.fs.createFileAbsolute(io, duped_path, .{ .read = true, .truncate = false });
         errdefer upload_file.close();
         return .{
             .file = upload_file,

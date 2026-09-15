@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const builtin = @import("builtin");
 const termscene = @import("termscene");
 const config_mod = @import("config.zig");
@@ -40,7 +41,7 @@ const worker_control_poll_interval_ns = 5 * std.time.ns_per_ms;
 var terminal_resize_pending = std.atomic.Value(bool).init(false);
 var terminal_resize_handler_installed = std.atomic.Value(bool).init(false);
 
-fn handleTerminalResizeSignal(_: c_int) callconv(.c) void {
+fn handleTerminalResizeSignal(_: std.posix.SIG) callconv(.c) void {
     terminal_resize_pending.store(true, .release);
 }
 
@@ -67,7 +68,8 @@ const QueuedLockCapture = struct {
 const ts_scene = termscene.scene;
 const ts_kitty = termscene.kitty;
 
-var global_mutex: std.Thread.Mutex = .{};
+var preload_io: std.Io.Threaded = .init_single_threaded;
+var global_mutex: system_io.Mutex = .{};
 var global_runtime: ?Runtime = null;
 var global_shutdown_started: bool = false;
 var global_runtime_is_stub: bool = false;
@@ -111,6 +113,7 @@ fn optionalEqual(comptime T: type, a: ?T, b: ?T) bool {
 }
 
 pub const Runtime = struct {
+    io: std.Io,
     observation: @import("frame_observation.zig").FrameObservation = .{},
     observation_enabled: bool = false,
     placeholder_scene: @import("frame_builder.zig").PresentationSnapshot = .{},
@@ -119,17 +122,17 @@ pub const Runtime = struct {
     tty: ?DirectTty = null,
     engine: ?ts_scene.SceneEngine = null,
     backend: ?ts_kitty.Backend = null,
-    batch_writer: ?std.fs.File = null,
-    batch_control: ?std.fs.File = null,
+    batch_writer: ?system_io.fs.File = null,
+    batch_control: ?system_io.fs.File = null,
     batch_control_line: std.ArrayList(u8),
     batch_sink: ?RenderBatchSink = null,
     // Serializes batch presentation state and terminal-input projection.
     // In queued batch mode, control messages are applied from the worker path;
     // app-side SDL input calls may read snapshots but must not drain control.
-    presentation_mutex: std.Thread.Mutex = .{},
+    presentation_mutex: system_io.Mutex = .{},
     // Protects terminal input parser state and mouse ownership without making
     // app-side SDL input queries wait behind presentation/reproject work.
-    input_mutex: std.Thread.Mutex = .{},
+    input_mutex: system_io.Mutex = .{},
     batch_presentation_reset_pending: bool = false,
     last_batch_presentation_status: ?render_batch_protocol.PresentationStatusView = null,
     frame_builder: FrameBuilder,
@@ -151,8 +154,8 @@ pub const Runtime = struct {
     output_profile_name: []const u8 = "unknown",
     logged_queued_replay_stub: bool = false,
     active: bool = false,
-    queue_mutex: std.Thread.Mutex = .{},
-    queue_cond: std.Thread.Condition = .{},
+    queue_mutex: system_io.Mutex = .{},
+    queue_cond: system_io.Condition = .{},
     queue: std.ArrayList(Command),
     payload_pool: PayloadBufferPool = .{},
     renderer_output_sizes: std.AutoHashMapUnmanaged(core.CoreHandle, PixelSize) = .{},
@@ -187,9 +190,10 @@ pub const Runtime = struct {
     file_transport_max_bytes: u64 = config_mod.default_file_transport_max_bytes,
 
     fn init() Runtime {
+        const io = preload_io.io();
         const allocator = std.heap.c_allocator;
         const logger = Logger.init(allocator);
-        const config = config_mod.loadRuntimeConfig(allocator);
+        const config = config_mod.loadRuntimeConfig(io, allocator);
         const bg_only = std.c.getenv("KATZENSTEG_BG_ONLY") != null;
         const stats = config.stats;
         const debug_protocol_replies = config.debug_protocol_replies;
@@ -201,10 +205,11 @@ pub const Runtime = struct {
         const debug_composite = config.debug_composite;
         const trace_blocking = blocking_trace.settingsFromEnv();
         var runtime = Runtime{
+            .io = io,
             .observation_enabled = std.c.getenv("KATZENSTEG_OBSERVE") != null,
             .allocator = allocator,
             .logger = logger,
-            .frame_builder = FrameBuilder.init(allocator, stats, config.composite_mode, dump_composites, debug_composite),
+            .frame_builder = FrameBuilder.init(io, allocator, stats, config.composite_mode, dump_composites, debug_composite),
             .cursor_state = cursor_mod.State.init(allocator),
             .batch_control_line = .empty,
             .bg_only = bg_only,
@@ -228,7 +233,7 @@ pub const Runtime = struct {
             .queued_lock_captures = std.AutoHashMap(usize, QueuedLockCapture).init(allocator),
             .sdl_window_ids = std.AutoHashMap(u32, core.CoreHandle).init(allocator),
             .present_interval_ns = if (config.present_fps > 0) @divTrunc(std.time.ns_per_s, config.present_fps) else 0,
-            .producer_stats = .{ .enabled = stats, .last_report_ns = std.time.nanoTimestamp() },
+            .producer_stats = .{ .enabled = stats, .last_report_ns = system_io.time.nanoTimestamp() },
             .gl_capture_mode = mapGlCaptureMode(config.gl_capture),
             .forced_output_profile = config.output_profile,
             .file_transport_enabled = config.file_transport,
@@ -257,7 +262,7 @@ pub const Runtime = struct {
             };
             log.info("whiskers socket configured: {s}", .{std.mem.span(path_z)});
             defer if (free_producer_hello) runtime.freeWhiskersHello(producer_hello);
-            runtime.whiskers_client = WhiskersClient.init(allocator, std.mem.span(path_z), producer_hello) catch |err| blk: {
+            runtime.whiskers_client = WhiskersClient.init(io, allocator, std.mem.span(path_z), producer_hello) catch |err| blk: {
                 log.warn("whiskers client init failed: {any}", .{err});
                 break :blk null;
             };
@@ -282,7 +287,7 @@ pub const Runtime = struct {
             return runtime;
         }
 
-        runtime.tty = DirectTty.init() catch |err| {
+        runtime.tty = DirectTty.init(io) catch |err| {
             log.warn("direct tty init failed: {any}", .{err});
             return runtime;
         };
@@ -358,11 +363,13 @@ pub const Runtime = struct {
     }
 
     pub fn initShutdownStub() Runtime {
+        const io = preload_io.io();
         const allocator = std.heap.c_allocator;
         return .{
+            .io = io,
             .allocator = allocator,
             .logger = Logger.init(allocator),
-            .frame_builder = FrameBuilder.init(allocator, false, .fullscreen, false, false),
+            .frame_builder = FrameBuilder.init(io, allocator, false, .fullscreen, false, false),
             .cursor_state = cursor_mod.State.init(allocator),
             .batch_control_line = .empty,
             .input_enabled = false,
@@ -387,8 +394,9 @@ pub const Runtime = struct {
     }
 
     fn buildWhiskersHello(self: *Runtime) !whiskers_client_mod.ProducerHello {
-        const argv = try std.process.argsAlloc(self.allocator);
-        defer std.process.argsFree(self.allocator, argv);
+        const io = self.io;
+        const argv = try system_io.process.argsAlloc(io, self.allocator);
+        defer system_io.process.argsFree(self.allocator, argv);
         const cmdline = try self.allocator.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, i| cmdline[i] = try self.allocator.dupe(u8, arg);
         errdefer {
@@ -400,7 +408,7 @@ pub const Runtime = struct {
         errdefer if (program) |p| self.allocator.free(p);
         const producer_name_hint = try std.fmt.allocPrint(self.allocator, "katzensteg: {s}", .{program_name});
         errdefer self.allocator.free(producer_name_hint);
-        const cwd = std.process.getCwdAlloc(self.allocator) catch null;
+        const cwd = system_io.process.getCwdAlloc(io, self.allocator) catch null;
         return .{
             .producer_kind = "katzensteg",
             .producer_name_hint = producer_name_hint,
@@ -420,6 +428,10 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        defer self.presentation_mutex.deinit();
+        defer self.input_mutex.deinit();
+        defer self.queue_mutex.deinit();
+        defer self.queue_cond.deinit();
         self.payload_pool.close();
         self.queue_mutex.lock();
         self.shutdown_worker = true;
@@ -462,12 +474,13 @@ pub const Runtime = struct {
     }
 
     fn initBatchPresentation(self: *Runtime, options: PresentationOptions) !void {
+        const io = self.io;
         const presentation_fd = options.presentation_fd orelse return error.MissingPresentationFd;
         const control_fd = options.control_fd orelse return error.MissingPresentationControlFd;
-        self.batch_writer = std.fs.File{ .handle = @intCast(presentation_fd) };
-        self.batch_control = std.fs.File{ .handle = @intCast(control_fd) };
+        self.batch_writer = system_io.fs.File{ .io = io, .handle = @intCast(presentation_fd) };
+        self.batch_control = system_io.fs.File{ .io = io, .handle = @intCast(control_fd) };
         setNonblocking(self.batch_control.?.handle);
-        self.batch_sink = RenderBatchSink.init(self.allocator, "main");
+        self.batch_sink = RenderBatchSink.init(io, self.allocator, "main");
         self.batch_sink.?.enableBlockingTrace(self.blocking_trace_settings);
         if (std.c.getenv("KATZENSTEG_TRACE_PLACEMENTS") != null or std.c.getenv("KATZENSTEG_PLACEMENT_INVARIANTS") != null) {
             self.batch_sink.?.enablePlacementTrace();
@@ -553,7 +566,7 @@ pub const Runtime = struct {
         const tty = &(self.tty orelse return);
         var buf: [256]u8 = undefined;
         while (true) {
-            const n = std.posix.read(tty.file.handle, &buf) catch |err| {
+            const n = system_io.posix.read(tty.file.handle, &buf) catch |err| {
                 switch (err) {
                     error.WouldBlock => return,
                     else => {
@@ -650,12 +663,12 @@ pub const Runtime = struct {
         self.lockTraced(&self.queue_mutex, "queue_mutex", context);
     }
 
-    fn lockTraced(self: *Runtime, mutex: *std.Thread.Mutex, comptime name: []const u8, comptime context: []const u8) void {
+    fn lockTraced(self: *Runtime, mutex: *system_io.Mutex, comptime name: []const u8, comptime context: []const u8) void {
         if (!self.blocking_trace_settings.enabled) {
             mutex.lock();
             return;
         }
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = system_io.time.nanoTimestamp();
         mutex.lock();
         self.traceBlockingSpan(name, context, blocking_trace.elapsedSince(start_ns));
     }
@@ -694,7 +707,7 @@ pub const Runtime = struct {
             self.lockPresentation("present_external_framebuffer");
             defer self.presentation_mutex.unlock();
             if (!self.batch_sink.?.isAttached()) return;
-            const start_ns = std.time.nanoTimestamp();
+            const start_ns = system_io.time.nanoTimestamp();
             self.queuePendingBatchPresentationReset();
             self.placeholder_scene.valid = false;
             self.observation.pixels.clearRetainingCapacity(); // Positioned external capture has no observation yet.
@@ -704,17 +717,17 @@ pub const Runtime = struct {
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
             self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
             self.writeExternalFramebufferBatchPresentationStatus(width, height);
-            const duration = std.time.nanoTimestamp() - start_ns;
+            const duration = system_io.time.nanoTimestamp() - start_ns;
             self.traceBlockingSpan("batch_present", "present_external_framebuffer_locked", duration);
             self.notePresentDuration(duration);
             return;
         }
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = system_io.time.nanoTimestamp();
         self.refreshTerminalSizeIfNeeded();
         self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
-        const duration = std.time.nanoTimestamp() - start_ns;
+        const duration = system_io.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);
     }
 
@@ -756,7 +769,7 @@ pub const Runtime = struct {
         }
         if (!self.batch_sink.?.isAttached()) return;
 
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = system_io.time.nanoTimestamp();
         var virtual_tty = self.batchVirtualTty();
         var job = (if (self.batch_sink.?.placeholder != null)
             self.buildPlaceholderJob(renderer)
@@ -782,7 +795,7 @@ pub const Runtime = struct {
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
         self.writeBatchPresentationStatus(renderer, &job);
         self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
-        const duration = std.time.nanoTimestamp() - start_ns;
+        const duration = system_io.time.nanoTimestamp() - start_ns;
         self.traceBlockingSpan("batch_present", "render_batch_present_locked", duration);
         self.notePresentDuration(duration);
     }
@@ -819,9 +832,9 @@ pub const Runtime = struct {
 
     fn waitForInitialBatchAttach(self: *Runtime) void {
         if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
-        const deadline = std.time.nanoTimestamp() + 100 * std.time.ns_per_ms;
-        while (std.time.nanoTimestamp() < deadline) {
-            std.Thread.sleep(std.time.ns_per_ms);
+        const deadline = system_io.time.nanoTimestamp() + 100 * std.time.ns_per_ms;
+        while (system_io.time.nanoTimestamp() < deadline) {
+            system_io.time.sleep(std.time.ns_per_ms);
             self.pollBatchControlLocked();
             if (self.batch_sink == null or self.batch_sink.?.isAttached()) return;
         }
@@ -1044,8 +1057,8 @@ pub const Runtime = struct {
                 const writer = &writer_state.interface;
                 const observation = if (sink.placeholder != null and self.placeholder_scene.valid) self.placeholder_scene.observation(self.allocator) catch return else if (sink.placeholder != null) &sink.placeholder_frame else &self.observation;
                 const result = switch (request.format) {
-                    .rgba => observation.write(request.path),
-                    .png => observation.writePng(self.allocator, request.path),
+                    .rgba => observation.writeRgba(self.io, request.path),
+                    .png => observation.writePng(self.io, self.allocator, request.path),
                 };
                 result catch |err| {
                     writer.print("{{\"type\":\"observation\",\"request_id\":{d},\"error\":\"{s}\"}}\n", .{ request.request_id, @errorName(err) }) catch {};
@@ -1191,7 +1204,7 @@ pub const Runtime = struct {
 
     fn maybeReportProducerStats(self: *Runtime) void {
         if (!self.producer_stats.enabled) return;
-        const now = std.time.nanoTimestamp();
+        const now = system_io.time.nanoTimestamp();
         if (now - self.producer_stats.last_report_ns < std.time.ns_per_s) return;
         const g = self.producer_stats.generic;
         const u = self.producer_stats.update_texture;
@@ -1217,7 +1230,7 @@ pub const Runtime = struct {
     }
 
     pub fn shouldPresent(self: *Runtime) bool {
-        const now = std.time.nanoTimestamp();
+        const now = system_io.time.nanoTimestamp();
         if (now < self.next_present_ns) {
             self.skipped_presents += 1;
             if ((self.skipped_presents % 120) == 1) {
@@ -1233,7 +1246,7 @@ pub const Runtime = struct {
         if (self.present_interval_ns > 0) return;
         if (duration_ns <= self.adaptive_present_target_ns) return;
         const extra = duration_ns - self.adaptive_present_target_ns;
-        self.next_present_ns = std.time.nanoTimestamp() + extra;
+        self.next_present_ns = system_io.time.nanoTimestamp() + extra;
     }
 
     pub fn rememberQueuedLock(self: *Runtime, texture: core.CoreHandle, rect: ?core.CoreRect, pixels: ?*anyopaque, pitch: i32) void {
@@ -1661,11 +1674,12 @@ test "sync dispatch recycles cloned external framebuffer payload" {
 }
 
 test "queued batch texture update reaches frame builder without terminal backend" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
     runtime.active = true;
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
 
     const texture: core.CoreHandle = 0x1234;
     core_dispatch.handleCommand(&runtime, .{ .create_texture = .{
@@ -1691,11 +1705,12 @@ test "queued batch texture update reaches frame builder without terminal backend
 }
 
 test "queued batch texture unlock reaches frame builder without terminal backend" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
     runtime.active = true;
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
 
     const texture: core.CoreHandle = 0x5678;
     core_dispatch.handleCommand(&runtime, .{ .create_texture = .{
@@ -1722,10 +1737,11 @@ test "queued batch texture unlock reaches frame builder without terminal backend
 }
 
 test "batch input terminal bytes map through attached rect" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.input_enabled = true;
     runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
     runtime.input_window_w = 320;
@@ -1740,10 +1756,11 @@ test "batch input terminal bytes map through attached rect" {
 }
 
 test "batch viewport marks presentation reset pending without immediate flush" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.input_enabled = true;
     runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
 
@@ -1756,19 +1773,20 @@ test "batch viewport marks presentation reset pending without immediate flush" {
 }
 
 test "app-side input state reads do not apply batch control messages" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[1]);
-    runtime.batch_control = .{ .handle = pipe[0] };
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[1]);
+    runtime.batch_control = .{ .io = io, .handle = pipe[0] };
     setNonblocking(pipe[0]);
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 6, .col = 11, .rows = 30, .cols = 80 });
     runtime.input_enabled = true;
     runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
 
-    const control_writer = std.fs.File{ .handle = pipe[1] };
+    const control_writer = system_io.fs.File{ .io = io, .handle = pipe[1] };
     try control_writer.writeAll(
         "{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":7,\"col\":12,\"rows\":28,\"cols\":76},\"aspect\":\"fit\"}\n",
     );
@@ -1802,20 +1820,21 @@ test "app-side input state reads do not wait on presentation work" {
     var done = std.atomic.Value(bool).init(false);
     runtime.presentation_mutex.lock();
     const thread = try std.Thread.spawn(.{}, readMouseStateForProbe, .{MouseStateReadProbe{ .runtime = &runtime, .done = &done }});
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    system_io.time.sleep(10 * std.time.ns_per_ms);
     try std.testing.expect(done.load(.acquire));
     runtime.presentation_mutex.unlock();
     thread.join();
 }
 
 test "batch viewport immediately reprojects retained presentation when writer is available" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
 
     const window: core.CoreHandle = 0x6666;
@@ -1840,19 +1859,20 @@ test "batch viewport immediately reprojects retained presentation when writer is
     runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\"}");
 
     var buf: [4096]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=15") != null);
     try std.testing.expect(!runtime.batch_presentation_reset_pending);
 }
 
 test "batch generation fences pending bytes and refreshes unchanged retained placements" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.processBatchControlLine(
         \\{"type":"attach","window_id":"main","presentation_generation":1,"rect_cells":{"row":5,"col":11,"rows":20,"cols":40},"aspect":"fit","id_ranges":{"image":[[100000,100010]],"placement":[[200000,200010]]}}
     );
@@ -1883,7 +1903,7 @@ test "batch generation fences pending bytes and refreshes unchanged retained pla
     );
     setNonblocking(pipe[0]);
     var buf: [16384]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
     const pending = lines.next().?;
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"presentation_generation\":1") != null);
@@ -1898,14 +1918,15 @@ test "batch generation fences pending bytes and refreshes unchanged retained pla
 }
 
 test "batch present reports source pixels and effective fitted rect" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
 
     const window: core.CoreHandle = 0x6680;
@@ -1920,7 +1941,7 @@ test "batch present reports source pixels and effective fitted rect" {
     runtime.renderBatchPresent(renderer);
 
     var buf: [8192]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"frame_batch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"presentation_status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
@@ -1929,14 +1950,15 @@ test "batch present reports source pixels and effective fitted rect" {
 }
 
 test "batch present emits presentation status only when it changes" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
 
     const window: core.CoreHandle = 0x6683;
@@ -1957,20 +1979,21 @@ test "batch present emits presentation status only when it changes" {
     runtime.renderBatchPresent(renderer);
 
     var buf: [32768]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf[0..n], "\"type\":\"frame_batch\""));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, buf[0..n], "\"type\":\"presentation_status\""));
 }
 
 test "external framebuffer batch present reports presentation status" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
     runtime.frame_builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     runtime.frame_builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -1981,7 +2004,7 @@ test "external framebuffer batch present reports presentation status" {
     runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
 
     var buf: [8192]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"frame_batch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"type\":\"presentation_status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"ready_to_show\":true") != null);
@@ -1990,14 +2013,15 @@ test "external framebuffer batch present reports presentation status" {
 }
 
 test "external framebuffer batch present skips detached sink" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
     runtime.batch_sink.?.detach();
 
@@ -2007,18 +2031,19 @@ test "external framebuffer batch present skips detached sink" {
     runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
 
     var buf: [128]u8 = undefined;
-    try std.testing.expectError(error.WouldBlock, std.posix.read(pipe[0], &buf));
+    try std.testing.expectError(error.WouldBlock, system_io.posix.read(pipe[0], &buf));
 }
 
 test "batch present uses host terminal pixels for effective fitted rect" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.processBatchControlLine("{\"type\":\"attach\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\",\"terminal_cells\":{\"rows\":40,\"cols\":160},\"terminal_px\":{\"w\":1280,\"h\":800},\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}");
 
     const window: core.CoreHandle = 0x6681;
@@ -2033,18 +2058,19 @@ test "batch present uses host terminal pixels for effective fitted rect" {
     runtime.renderBatchPresent(renderer);
 
     var buf: [8192]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"effective_rect_cells\":{\"row\":9,\"col\":11,\"rows\":12,\"cols\":40}") != null);
 }
 
 test "batch renderer destroy emits retained placement deletes before forgetting state" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
 
     const window: core.CoreHandle = 0x6666;
@@ -2071,20 +2097,21 @@ test "batch renderer destroy emits retained placement deletes before forgetting 
     runtime.destroyRenderer(renderer);
 
     var buf: [4096]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
 }
 
 test "batch runtime deinit emits split placement deletes without renderer destroy" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     var runtime_deinited = false;
     defer if (!runtime_deinited) runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
     const occlusions = [_]render_batch_protocol.PresentationRectCells{
         .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
@@ -2109,7 +2136,7 @@ test "batch runtime deinit emits split placement deletes without renderer destro
     runtime_deinited = true;
 
     var buf: [4096]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200000") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "i=100000,p=200001") != null);
@@ -2118,13 +2145,14 @@ test "batch runtime deinit emits split placement deletes without renderer destro
 }
 
 test "batch renderer replacement emits retained placement deletes before overwriting state" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.batch_sink.?.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
 
     const window: core.CoreHandle = 0x6667;
@@ -2151,22 +2179,23 @@ test "batch renderer replacement emits retained placement deletes before overwri
     runtime.createRenderer(window, renderer);
 
     var buf: [4096]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "p=200000") != null);
 }
 
 test "batch input poll drains control pipe before SDL event reads" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
 
-    const pipe = try std.posix.pipe();
-    runtime.batch_control = .{ .handle = pipe[0] };
+    const pipe = try system_io.posix.pipe();
+    runtime.batch_control = .{ .io = io, .handle = pipe[0] };
     setNonblocking(runtime.batch_control.?.handle);
-    const control_writer = std.fs.File{ .handle = pipe[1] };
+    const control_writer = system_io.fs.File{ .io = io, .handle = pipe[1] };
     defer control_writer.close();
 
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.input_enabled = true;
     runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
     runtime.input_window_w = 320;
@@ -2293,8 +2322,8 @@ fn presentationOptionsFromConfig(config: config_mod.RuntimeConfig) PresentationO
 }
 
 fn setNonblocking(fd: std.posix.fd_t) void {
-    const flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, flags | (1 << @bitOffsetOf(std.posix.O, "NONBLOCK"))) catch {};
+    const flags = system_io.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
+    _ = system_io.posix.fcntl(fd, std.posix.F.SETFL, flags | (1 << @bitOffsetOf(std.posix.O, "NONBLOCK"))) catch {};
 }
 
 pub fn shutdownGlobal() callconv(.c) void {
@@ -2311,6 +2340,7 @@ pub fn shutdownGlobal() callconv(.c) void {
 }
 
 fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kitty.Options {
+    const io = runtime.io;
     const tty = runtime.tty.?.file;
     const forced_profile = mapOutputProfile(runtime.forced_output_profile);
     if (!runtime.file_transport_enabled) return .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
@@ -2319,7 +2349,7 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
     const upload_path = try makeUploadPath(allocator);
     errdefer allocator.free(upload_path);
 
-    const probe_file = try std.fs.createFileAbsolute(upload_path, .{ .read = true, .truncate = true });
+    const probe_file = try system_io.fs.createFileAbsolute(io, upload_path, .{ .read = true, .truncate = true });
     defer probe_file.close();
     const probe_pixel = [_]u8{ 0, 0, 0, 255 };
     try probe_file.writeAll(&probe_pixel);
@@ -2457,13 +2487,14 @@ test "runtime input target includes latest presentation layout" {
 }
 
 test "placeholder runtime composes scenes and resizes without uploading or deleting" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.processBatchControlLine(
         \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":60,"rows":20}}
     );
@@ -2474,7 +2505,7 @@ test "placeholder runtime composes scenes and resizes without uploading or delet
     runtime.renderBatchPresent(renderer);
     setNonblocking(pipe[0]);
     var buf: [8192]u8 = undefined;
-    var n = try std.posix.read(pipe[0], &buf);
+    var n = try system_io.posix.read(pipe[0], &buf);
     var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
     const first = lines.next().?;
     var batch = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first, .{});
@@ -2487,7 +2518,7 @@ test "placeholder runtime composes scenes and resizes without uploading or delet
     runtime.processBatchControlLine(
         \\{"type":"viewport","window_id":"main","placeholder":{"image_id":777,"cols":40,"rows":12}}
     );
-    n = try std.posix.read(pipe[0], &buf);
+    n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=12") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=t") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") == null);
@@ -2495,7 +2526,7 @@ test "placeholder runtime composes scenes and resizes without uploading or delet
     runtime.processBatchControlLine(
         \\{"type":"viewport","window_id":"main","placeholder":{"image_id":777,"cols":40,"rows":12},"refresh_placements":true}
     );
-    n = try std.posix.read(pipe[0], &buf);
+    n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=t") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=12") != null);
     runtime.processBatchControlLine(
@@ -2503,19 +2534,20 @@ test "placeholder runtime composes scenes and resizes without uploading or delet
     );
     try std.testing.expectEqual(@as(u32, 777), runtime.batch_sink.?.placeholder.?.image_id);
     runtime.processBatchControlLine("{\"type\":\"detach\",\"window_id\":\"main\"}");
-    n = try std.posix.read(pipe[0], &buf);
+    n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "d=I,i=777") != null);
     try std.testing.expect(!runtime.batch_sink.?.isAttached());
 }
 
 test "placeholder input maps the whole local grid independently of scene layout" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
     runtime.input_enabled = true;
     runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
     runtime.input_window_w = 800;
     runtime.input_window_h = 400;
-    var sink = RenderBatchSink.init(runtime.allocator, "main");
+    var sink = RenderBatchSink.init(io, runtime.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 42, .cols = 40, .rows = 10 };
     sink.attach(sink.placeholder.?.localRect());
@@ -2528,13 +2560,14 @@ test "placeholder input maps the whole local grid independently of scene layout"
 }
 
 test "placeholder presentation uses target pixels without changing source coordinates" {
+    const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
-    const pipe = try std.posix.pipe();
-    defer std.posix.close(pipe[0]);
+    const pipe = try system_io.posix.pipe();
+    defer system_io.posix.close(pipe[0]);
     runtime.active = true;
-    runtime.batch_writer = .{ .handle = pipe[1] };
-    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.batch_writer = .{ .io = io, .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
     runtime.processBatchControlLine(
         \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":2,"rows":2,"target_px":{"w":2,"h":2}}}
     );
@@ -2544,7 +2577,7 @@ test "placeholder presentation uses target pixels without changing source coordi
     runtime.renderBatchPresent(0x7799);
     setNonblocking(pipe[0]);
     var buf: [8192]u8 = undefined;
-    const n = try std.posix.read(pipe[0], &buf);
+    const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "s=2,v=2,i=777") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
 }

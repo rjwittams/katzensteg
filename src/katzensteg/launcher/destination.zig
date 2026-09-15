@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const Destination = union(enum) {
     standalone,
@@ -26,15 +27,15 @@ pub const Destination = union(enum) {
 // Destination discovery is independent of this terminal-specific transport.
 // Consume only registration acknowledgement: hello/attach stay in the socket
 // for the normal runtime control reader. No app is spawned until acceptance.
-pub fn connectJsonl(allocator: std.mem.Allocator, path: []const u8, title: []const u8) !std.fs.File {
-    const address = try std.net.Address.initUnix(path);
-    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
-    errdefer std.posix.close(fd);
-    var timer = try std.time.Timer.start();
-    std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+pub fn connectJsonl(io: std.Io, allocator: std.mem.Allocator, path: []const u8, title: []const u8) !system_io.fs.File {
+    const address = try system_io.net.Address.initUnix(path);
+    const fd = try system_io.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
+    errdefer system_io.posix.close(fd);
+    var timer = try system_io.time.Timer.start();
+    system_io.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
         error.WouldBlock, error.ConnectionPending => {
             try awaitReady(fd, std.posix.POLL.OUT, &timer);
-            try std.posix.getsockoptError(fd);
+            try system_io.posix.getsockoptError(fd);
         },
         else => return err,
     };
@@ -47,7 +48,7 @@ pub fn connectJsonl(allocator: std.mem.Allocator, path: []const u8, title: []con
     var len: usize = 0;
     while (len < line.len) {
         try awaitReady(fd, std.posix.POLL.IN, &timer);
-        const n = std.posix.read(fd, line[len..][0..1]) catch |err| switch (err) {
+        const n = system_io.posix.read(fd, line[len..][0..1]) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -61,25 +62,25 @@ pub fn connectJsonl(allocator: std.mem.Allocator, path: []const u8, title: []con
     defer parsed.deinit();
     if (!std.mem.eql(u8, parsed.value.type, "registered") or parsed.value.version != 1 or parsed.value.session_id == 0) return error.InvalidRegistrationReply;
     // Relay workers use blocking I/O on their own threads.
-    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    const flags = try system_io.posix.fcntl(fd, std.posix.F.GETFL, 0);
     var typed: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
     typed.NONBLOCK = false;
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
-    return .{ .handle = fd };
+    _ = try system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
+    return .{ .io = io, .handle = fd };
 }
 
-fn awaitReady(fd: std.posix.fd_t, events: i16, timer: *std.time.Timer) !void {
+fn awaitReady(fd: std.posix.fd_t, events: i16, timer: *system_io.time.Timer) !void {
     const elapsed = timer.read() / std.time.ns_per_ms;
     if (elapsed >= 5000) return error.HostTimeout;
     var poll = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-    if (try std.posix.poll(&poll, @intCast(5000 - elapsed)) == 0) return error.HostTimeout;
+    if (try system_io.posix.poll(&poll, @intCast(5000 - elapsed)) == 0) return error.HostTimeout;
 }
 
-fn writeTimed(fd: std.posix.fd_t, bytes: []const u8, timer: *std.time.Timer) !void {
+fn writeTimed(fd: std.posix.fd_t, bytes: []const u8, timer: *system_io.time.Timer) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         try awaitReady(fd, std.posix.POLL.OUT, timer);
-        offset += std.posix.write(fd, bytes[offset..]) catch |err| switch (err) {
+        offset += system_io.posix.write(fd, bytes[offset..]) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };

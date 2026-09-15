@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const termscene = @import("termscene");
 const core = @import("core.zig");
 
@@ -62,7 +63,7 @@ const Atlas = struct { block: [8]Rect, glow: [3]Rect, ghost: [2]Rect, sweep: [4]
 
 pub const Renderer = struct {
     allocator: std.mem.Allocator, atlas: Atlas, hud_engine: ts_scene.SceneEngine, hud_backend: ts_kitty.Backend,
-    pub fn init(allocator: std.mem.Allocator, stdout_file: std.fs.File, writer: anytype) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, stdout_file: system_io.fs.File, writer: anytype) !Renderer {
         const bg = try allocator.alloc(u8, @as(usize, @intCast(bg_w * bg_h * 4))); defer allocator.free(bg);
         const atlas_buf = try allocator.alloc(u8, @as(usize, @intCast(atlas_w * atlas_h * 4))); defer allocator.free(atlas_buf);
         try ansiClear(writer); buildBackground(bg, bg_w, bg_h); const atlas = buildAtlas(atlas_buf, atlas_w, atlas_h); try kittyUpload(writer, image_bg, bg, bg_w, bg_h); try kittyUpload(writer, image_atlas, atlas_buf, atlas_w, atlas_h); try placeBackground(writer); try drawStaticHud(writer);

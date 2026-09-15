@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
@@ -485,7 +486,7 @@ pub const PresentationSnapshot = struct {
             self.cursor_position = snapshot.position;
         }
         self.frame_id += 1;
-        self.timestamp_ms = std.time.milliTimestamp();
+        self.timestamp_ms = system_io.time.milliTimestamp();
         self.valid = true;
     }
 
@@ -536,6 +537,7 @@ pub const PresentationSnapshot = struct {
 };
 
 pub const FrameBuilder = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     windows: std.AutoHashMap(usize, WindowRecord),
     renderers: std.AutoHashMap(usize, RendererState),
@@ -559,8 +561,9 @@ pub const FrameBuilder = struct {
     composite_placement_id_end: u32 = std.math.maxInt(u32),
     placement_audit_enabled: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, stats_enabled: bool, composite_mode: CompositeMode, dump_composites: bool, debug_composite: bool) FrameBuilder {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, stats_enabled: bool, composite_mode: CompositeMode, dump_composites: bool, debug_composite: bool) FrameBuilder {
         return .{
+            .io = io,
             .allocator = allocator,
             .windows = std.AutoHashMap(usize, WindowRecord).init(allocator),
             .renderers = std.AutoHashMap(usize, RendererState).init(allocator),
@@ -568,7 +571,7 @@ pub const FrameBuilder = struct {
             .published_assets = std.AutoHashMap(u64, u32).init(allocator),
             .solid_images = std.AutoHashMap(u32, u32).init(allocator),
             .retired_image_ids = .empty,
-            .stats = .{ .enabled = stats_enabled, .last_report_ns = std.time.nanoTimestamp() },
+            .stats = .{ .enabled = stats_enabled, .last_report_ns = system_io.time.nanoTimestamp() },
             .composite_mode = composite_mode,
             .dump_composites = dump_composites,
             .debug_composite = debug_composite,
@@ -2797,7 +2800,7 @@ pub const FrameBuilder = struct {
                 copy.alpha_mod,
             });
         }
-        const now = std.time.nanoTimestamp();
+        const now = system_io.time.nanoTimestamp();
         if (self.dump_composites and now - self.last_composite_dump_ns >= 2 * std.time.ns_per_s) {
             self.dumpCompositeFrame(logger, buf, state.output_w, state.output_h);
             self.last_composite_dump_ns = now;
@@ -2860,9 +2863,9 @@ pub const FrameBuilder = struct {
     }
 
     fn dumpCompositeFrame(self: *FrameBuilder, logger: *Logger, buf: []const u8, w: i32, h: i32) void {
-        _ = self;
+        const io = self.io;
         const path = "/tmp/katzensteg-composite.ppm";
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+        const file = system_io.fs.createFileAbsolute(io, path, .{ .truncate = true }) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "failed to create composite dump: {any}", .{err});
             return;
         };
@@ -3014,7 +3017,7 @@ pub const FrameBuilder = struct {
     }
 
     fn maybeReportStats(self: *FrameBuilder, logger: *Logger) void {
-        const now = std.time.nanoTimestamp();
+        const now = system_io.time.nanoTimestamp();
         if (now - self.stats.last_report_ns < std.time.ns_per_s) return;
         const elapsed_ns = now - self.stats.last_report_ns;
         const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
@@ -4027,7 +4030,8 @@ test "texture mod state reports only real changes" {
 }
 
 test "identity texture publication borrows base rgba without modulation copy" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     const base = try std.testing.allocator.alloc(u8, 8);
@@ -4055,7 +4059,8 @@ test "identity texture publication borrows base rgba without modulation copy" {
 }
 
 test "modded texture publication owns modulated rgba copy" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     const base = try std.testing.allocator.alloc(u8, 4);
@@ -4305,7 +4310,8 @@ test "fullscreen composite presentation region matches placed image rect" {
 }
 
 test "fullscreen sprite path preserves source aspect in terminal cells" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var tty: DirectTty = undefined;
@@ -4350,7 +4356,8 @@ test "fullscreen sprite path preserves source aspect in terminal cells" {
 }
 
 test "fullscreen sprite clear follows source aspect in terminal cells" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var tty: DirectTty = undefined;
@@ -4375,7 +4382,8 @@ test "fullscreen sprite clear follows source aspect in terminal cells" {
 }
 
 test "fullscreen sprite path uses resized window dimensions for copy mapping" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var tty: DirectTty = undefined;
@@ -4430,7 +4438,8 @@ test "fullscreen composite upload size falls back to source without terminal pix
 }
 
 test "frame builder allocates image ids from configured range" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
@@ -4441,7 +4450,8 @@ test "frame builder allocates image ids from configured range" {
 }
 
 test "frame builder allocates composite placement ids from configured range" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
@@ -4452,7 +4462,8 @@ test "frame builder allocates composite placement ids from configured range" {
 }
 
 test "frame builder renders framebuffer present jobs to batch sink" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
@@ -4460,7 +4471,7 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     const renderer: core.CoreHandle = 0x2000;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
 
@@ -4482,12 +4493,13 @@ test "frame builder renders framebuffer present jobs to batch sink" {
 }
 
 test "frame builder renders external framebuffer to batch sink" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 5, .rows = 12, .cols = 40 });
     try sink.setUploadPolicy(.{ .profile = .file_whole, .path = "/tmp/katzensteg-external-fb-batch-test" });
@@ -4513,7 +4525,8 @@ test "frame builder renders external framebuffer to batch sink" {
 }
 
 test "frame builder detach flushes known batch placements and suppresses future frames" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4521,7 +4534,7 @@ test "frame builder detach flushes known batch placements and suppresses future 
     const renderer: core.CoreHandle = 0x2100;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
 
@@ -4551,7 +4564,8 @@ test "frame builder detach flushes known batch placements and suppresses future 
 }
 
 test "frame builder queues presentation reset deletes into next batch frame" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4559,7 +4573,7 @@ test "frame builder queues presentation reset deletes into next batch frame" {
     const renderer: core.CoreHandle = 0x2200;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
 
@@ -4589,7 +4603,8 @@ test "frame builder queues presentation reset deletes into next batch frame" {
 }
 
 test "frame builder emits retained fullscreen batch eviction after replacement frame" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4597,7 +4612,7 @@ test "frame builder emits retained fullscreen batch eviction after replacement f
     const renderer: core.CoreHandle = 0x2201;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
 
@@ -4631,7 +4646,8 @@ test "frame builder emits retained fullscreen batch eviction after replacement f
 }
 
 test "frame builder gives replacement fullscreen images distinct retained placement ids" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4639,7 +4655,7 @@ test "frame builder gives replacement fullscreen images distinct retained placem
     const renderer: core.CoreHandle = 0x2202;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 2, 2));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 4, .col = 1, .rows = 2, .cols = 2 });
 
@@ -4663,7 +4679,8 @@ test "frame builder gives replacement fullscreen images distinct retained placem
 }
 
 test "frame builder batch placement contains source inside attached rect" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
@@ -4671,7 +4688,7 @@ test "frame builder batch placement contains source inside attached rect" {
     const renderer: core.CoreHandle = 0x2001;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 });
 
@@ -4692,7 +4709,8 @@ test "frame builder batch placement contains source inside attached rect" {
 }
 
 test "frame builder batch framebuffer restricts placement to clip_cells" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4700,7 +4718,7 @@ test "frame builder batch framebuffer restricts placement to clip_cells" {
     const renderer: core.CoreHandle = 0x2003;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     // 4x4 rect, clip restricts to top-left 2x2.
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
@@ -4728,7 +4746,8 @@ test "frame builder batch framebuffer restricts placement to clip_cells" {
 }
 
 test "frame builder batch framebuffer emits nothing when clip_cells misses rect" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4736,7 +4755,7 @@ test "frame builder batch framebuffer emits nothing when clip_cells misses rect"
     const renderer: core.CoreHandle = 0x2004;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
     // Clip is entirely outside the rect — no placements should be emitted.
@@ -4758,7 +4777,8 @@ test "frame builder batch framebuffer emits nothing when clip_cells misses rect"
 }
 
 test "frame builder batch framebuffer splits placement around occlusion" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4766,7 +4786,7 @@ test "frame builder batch framebuffer splits placement around occlusion" {
     const renderer: core.CoreHandle = 0x2002;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
     const occlusions = [_]render_batch_protocol.PresentationRectCells{
@@ -4794,7 +4814,8 @@ test "frame builder batch framebuffer splits placement around occlusion" {
 }
 
 test "frame builder deletes retained framebuffer placements when occlusion changes" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4802,7 +4823,7 @@ test "frame builder deletes retained framebuffer placements when occlusion chang
     const renderer: core.CoreHandle = 0x2003;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
 
@@ -4832,7 +4853,8 @@ test "frame builder deletes retained framebuffer placements when occlusion chang
 }
 
 test "frame builder placement audit survives occlusion piece count transitions" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.enablePlacementAudit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
@@ -4841,7 +4863,7 @@ test "frame builder placement audit survives occlusion piece count transitions" 
     const renderer: core.CoreHandle = 0x2009;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
 
@@ -4878,7 +4900,8 @@ test "frame builder placement audit survives occlusion piece count transitions" 
 }
 
 test "frame builder deletes active split framebuffer placements on renderer cleanup" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4886,7 +4909,7 @@ test "frame builder deletes active split framebuffer placements on renderer clea
     const renderer: core.CoreHandle = 0x2004;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 4, 4));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 1, .col = 1, .rows = 4, .cols = 4 }, .stretch);
     const occlusions = [_]render_batch_protocol.PresentationRectCells{
@@ -4918,7 +4941,8 @@ test "frame builder deletes active split framebuffer placements on renderer clea
 }
 
 test "frame builder batch scene placements are translated into attached rect" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4926,7 +4950,7 @@ test "frame builder batch scene placements are translated into attached rect" {
     const renderer: core.CoreHandle = 0x2005;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
 
@@ -4967,7 +4991,8 @@ test "frame builder batch scene placements are translated into attached rect" {
 }
 
 test "frame builder batch scene deletes placements that disappear" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -4975,7 +5000,7 @@ test "frame builder batch scene deletes placements that disappear" {
     const renderer: core.CoreHandle = 0x2005;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
 
@@ -5024,7 +5049,8 @@ test "frame builder batch scene deletes placements that disappear" {
 }
 
 test "frame builder reprojects retained batch scene placements after viewport resize" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -5033,7 +5059,7 @@ test "frame builder reprojects retained batch scene placements after viewport re
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 640, 480));
     builder.onRenderClear(renderer);
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
 
@@ -5063,7 +5089,8 @@ test "frame builder reprojects retained batch scene placements after viewport re
 }
 
 test "frame builder reprojects retained batch scene placements after viewport move without resizing" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -5072,7 +5099,7 @@ test "frame builder reprojects retained batch scene placements after viewport mo
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 640, 480));
     builder.onRenderClear(renderer);
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 });
     sink.setTerminalGeometry(.{
@@ -5103,7 +5130,8 @@ test "frame builder reprojects retained batch scene placements after viewport mo
 }
 
 test "frame builder reprojects retained clear against current source window size" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100010 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200010 });
@@ -5114,7 +5142,7 @@ test "frame builder reprojects retained clear against current source window size
     builder.onCreateRenderer(window, renderer);
     builder.onRenderClear(renderer);
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attach(.{ .row = 5, .col = 11, .rows = 40, .cols = 100 });
 
@@ -5144,7 +5172,8 @@ test "frame builder reprojects retained clear against current source window size
 }
 
 test "frame builder batch placement stretches source to attached rect" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
@@ -5152,7 +5181,7 @@ test "frame builder batch placement stretches source to attached rect" {
     const renderer: core.CoreHandle = 0x2002;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 }, .stretch);
 
@@ -5173,7 +5202,8 @@ test "frame builder batch placement stretches source to attached rect" {
 }
 
 test "frame builder batch placement covers attached rect by cropping source" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.setImageIdRange(.{ .start = 100000, .end = 100001 });
     builder.setCompositePlacementIdRange(.{ .start = 200000, .end = 200001 });
@@ -5181,7 +5211,7 @@ test "frame builder batch placement covers attached rect by cropping source" {
     const renderer: core.CoreHandle = 0x2003;
     try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 320, 240));
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.attachWithAspect(.{ .row = 3, .col = 5, .rows = 40, .cols = 100 }, .cover);
 
@@ -5204,7 +5234,8 @@ test "frame builder batch placement covers attached rect by cropping source" {
 }
 
 test "composite builder can start at last full framebuffer overwrite" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     try builder.textures.put(1, .{ .w = 8, .h = 8, .format = default_texture_format, .image_id = 0, .blend_mode = blend_mode_blend });
@@ -5229,7 +5260,8 @@ test "composite builder can start at last full framebuffer overwrite" {
 }
 
 test "framebuffer composite requirement is based on copy-time render state" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     try builder.renderers.put(1, RendererState.init(std.testing.allocator, 8, 8));
@@ -5271,7 +5303,8 @@ test "framebuffer composite requirement is based on copy-time render state" {
 }
 
 test "primitive-heavy frames force framebuffer composition" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     try builder.renderers.put(1, RendererState.init(std.testing.allocator, 640, 480));
@@ -5289,7 +5322,8 @@ test "primitive-heavy frames force framebuffer composition" {
 }
 
 test "active SDL color cursor forces final framebuffer composition" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     const renderer: core.CoreHandle = 1;
@@ -5330,7 +5364,8 @@ test "active SDL color cursor forces final framebuffer composition" {
 }
 
 test "composite tile strip images retire only after all placements stop referencing them" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .tiled_strip, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .tiled_strip, false, false);
     defer builder.deinit();
 
     var state = RendererState.init(std.testing.allocator, 64, 64);
@@ -5374,7 +5409,8 @@ test "fullscreen composite retains a bounded placement fallback window" {
 }
 
 test "present decision debug logging is change-driven" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, true);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, true);
     defer builder.deinit();
 
     try builder.renderers.put(1, RendererState.init(std.testing.allocator, 8, 8));
@@ -5399,7 +5435,8 @@ test "present decision debug logging is change-driven" {
 }
 
 test "recorded copy snapshots unsupported blend mode without sticking renderer" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     const texture: core.CoreHandle = 0x1000;
@@ -5455,7 +5492,8 @@ test "xrgb8888 texture conversion produces opaque rgba" {
 }
 
 test "texture capture reuses same-sized base storage and swaps on resize" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var record = TextureRecord{
@@ -5490,7 +5528,8 @@ test "texture capture reuses same-sized base storage and swaps on resize" {
 }
 
 test "unsupported texture capture preserves previous base storage" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var record = TextureRecord{
@@ -5515,7 +5554,8 @@ test "unsupported texture capture preserves previous base storage" {
 }
 
 test "IYUV texture planes convert to RGBA texture storage" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var record = TextureRecord{
@@ -5542,7 +5582,8 @@ test "IYUV texture planes convert to RGBA texture storage" {
 }
 
 test "NV12 texture planes convert to RGBA texture storage" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var record = TextureRecord{
@@ -5568,7 +5609,8 @@ test "NV12 texture planes convert to RGBA texture storage" {
 }
 
 test "YUV converters preserve output for padded odd-sized neutral chroma frames" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
 
     var yuv_record = TextureRecord{
@@ -5690,7 +5732,8 @@ test "axis-aligned render geometry raw maps textured quad to copy rect" {
 }
 
 test "observation composes a sprite-mode frame without consuming presentation commands" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
@@ -5709,7 +5752,8 @@ test "observation composes a sprite-mode frame without consuming presentation co
 }
 
 test "renderer pixel size preserves all quadrants across display scale changes" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
@@ -5735,7 +5779,8 @@ test "renderer pixel size preserves all quadrants across display scale changes" 
 }
 
 test "renderer output scaling leaves terminal input in logical window coordinates" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     builder.onCreateWindow(1, 200, 100);
     builder.onCreateRenderer(1, 2);
@@ -5755,9 +5800,10 @@ test "renderer output scaling leaves terminal input in logical window coordinate
 }
 
 test "external BGRA placeholder frame preserves source size and converts pixels" {
-    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 42, .cols = 60, .rows = 20 };
     sink.attach(sink.placeholder.?.localRect());
@@ -5779,8 +5825,9 @@ test "external BGRA placeholder frame preserves source size and converts pixels"
 }
 
 test "retained scene composes at target size and observes original completed pixels on demand" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var builder = FrameBuilder.init(allocator, false, .fullscreen, false, false);
+    var builder = FrameBuilder.init(io, allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     var logger = Logger.init(allocator);
     defer logger.deinit();
@@ -5819,8 +5866,9 @@ test "retained scene composes at target size and observes original completed pix
 }
 
 test "retained observation preserves fills and cursor pixels" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var builder = FrameBuilder.init(allocator, false, .fullscreen, false, false);
+    var builder = FrameBuilder.init(io, allocator, false, .fullscreen, false, false);
     defer builder.deinit();
     var logger = Logger.init(allocator);
     defer logger.deinit();

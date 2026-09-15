@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const kitty_protocol = @import("termscene").kitty.protocol;
 const blocking_trace = @import("blocking_trace.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
@@ -28,7 +29,7 @@ pub const RenderBatchSink = struct {
     };
 
     const FileUploadState = struct {
-        file: std.fs.File,
+        file: system_io.fs.File,
         path: []u8,
         high_water: u64,
         next_offset: u64,
@@ -47,6 +48,7 @@ pub const RenderBatchSink = struct {
         file_offset_ring: FileUploadState,
     };
 
+    io: std.Io,
     allocator: std.mem.Allocator,
     window_id: []const u8,
     seq: u64 = 0,
@@ -77,8 +79,9 @@ pub const RenderBatchSink = struct {
     placement_trace_enabled: bool = false,
     blocking_trace_settings: blocking_trace.Settings = .{},
 
-    pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
         return .{
+            .io = io,
             .allocator = allocator,
             .window_id = window_id,
             .frame_json = .init(allocator),
@@ -248,6 +251,7 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
+        const io = self.io;
         var out = std.Io.Writer.Allocating.init(self.allocator);
         errdefer out.deinit();
         const upload_start_ns = self.traceBlockingStart();
@@ -256,7 +260,7 @@ pub const RenderBatchSink = struct {
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
-                var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
+                var file = try system_io.fs.createFileAbsolute(io, state.paths[index], .{ .read = true, .truncate = false });
                 defer file.close();
                 const write_start_ns = self.traceBlockingStart();
                 try file.pwriteAll(rgba, 0);
@@ -462,50 +466,52 @@ pub const RenderBatchSink = struct {
     }
 
     fn initUploadState(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !UploadState {
+        const io = self.io;
         return switch (policy.profile) {
             .direct_apc => .direct_apc,
             .file_whole => blk: {
                 const path = policy.path orelse return error.MissingUploadFilePath;
-                break :blk .{ .file_whole = try initRotatingFileUploadState(self.allocator, path) };
+                break :blk .{ .file_whole = try initRotatingFileUploadState(io, self.allocator, path) };
             },
             .file_offset_ring => blk: {
                 const path = policy.path orelse return error.MissingUploadFilePath;
-                break :blk .{ .file_offset_ring = try initSingleFileUploadState(self.allocator, path, policy.high_water) };
+                break :blk .{ .file_offset_ring = try initSingleFileUploadState(io, self.allocator, path, policy.high_water) };
             },
         };
     }
 
     fn deinitUploadState(self: *RenderBatchSink) void {
+        const io = self.io;
         switch (self.upload) {
             .direct_apc => {},
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
-                    upload_path.deleteBasePath(path.*);
+                    upload_path.deleteBasePath(io, path.*);
                     self.allocator.free(path.*);
                 }
             },
             .file_offset_ring => |*state| {
                 state.file.close();
-                upload_path.deleteBasePath(state.path);
+                upload_path.deleteBasePath(io, state.path);
                 self.allocator.free(state.path);
             },
         }
         self.upload = .direct_apc;
     }
 
-    fn initRotatingFileUploadState(allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
+    fn initRotatingFileUploadState(io: std.Io, allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
         var paths: [rotating_file_count][]u8 = undefined;
         var initialized: usize = 0;
         errdefer {
             for (paths[0..initialized]) |path| {
-                std.fs.deleteFileAbsolute(path) catch {};
+                system_io.fs.deleteFileAbsolute(io, path) catch {};
                 allocator.free(path);
             }
         }
         for (&paths, 0..) |*path, index| {
             path.* = try upload_path.makeRotatingFilePath(allocator, base_path, index);
             initialized += 1;
-            upload_path.deleteBasePath(path.*);
+            upload_path.deleteBasePath(io, path.*);
         }
         return .{
             .paths = paths,
@@ -514,10 +520,10 @@ pub const RenderBatchSink = struct {
         };
     }
 
-    fn initSingleFileUploadState(allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
+    fn initSingleFileUploadState(io: std.Io, allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
         const duped_path = try allocator.dupe(u8, path);
         errdefer allocator.free(duped_path);
-        const upload_file = try std.fs.createFileAbsolute(duped_path, .{ .read = true, .truncate = false });
+        const upload_file = try system_io.fs.createFileAbsolute(io, duped_path, .{ .read = true, .truncate = false });
         return .{
             .file = upload_file,
             .path = duped_path,
@@ -563,9 +569,10 @@ fn divRound(numerator: i32, denominator: i32) i32 {
 }
 
 test "batch sink groups upload place and delete bytes" {
+    const io = std.testing.io;
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try sink.uploadRgba(100000, &[_]u8{ 255, 0, 0, 255 }, 1, 1);
@@ -589,7 +596,8 @@ test "batch sink groups upload place and delete bytes" {
 }
 
 test "batch sink reports pending frame byte count" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), sink.pendingFrameBytes());
@@ -598,9 +606,10 @@ test "batch sink reports pending frame byte count" {
 }
 
 test "batch sink placement trace records and clears frame operations" {
+    const io = std.testing.io;
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.enablePlacementTrace();
 
@@ -633,7 +642,8 @@ test "batch sink placement trace records and clears frame operations" {
 }
 
 test "batch sink viewport updates geometry without changing attach state" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try std.testing.expect(!sink.isAttached());
@@ -650,7 +660,8 @@ test "batch sink viewport updates geometry without changing attach state" {
 }
 
 test "batch sink derives presentation tty pixels from host terminal geometry" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attach(.{ .row = 3, .col = 5, .rows = 20, .cols = 40 });
@@ -667,7 +678,8 @@ test "batch sink derives presentation tty pixels from host terminal geometry" {
 }
 
 test "batch sink applies presentation z base to placements" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attachWithPresentation(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 }, .fit, 2000);
@@ -687,7 +699,8 @@ test "batch sink applies presentation z base to placements" {
 }
 
 test "batch sink detach suppresses attachment without clearing pending deletes" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attach(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 });
@@ -700,7 +713,8 @@ test "batch sink detach suppresses attachment without clearing pending deletes" 
 }
 
 test "batch sink file whole upload writes image bytes to path and emits file APC" {
-    var tmp = std.testing.tmpDir(.{});
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
     defer tmp.cleanup();
 
     const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -710,7 +724,7 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
     const uploaded_path = try std.fmt.allocPrint(std.testing.allocator, "{s}.0", .{path});
     defer std.testing.allocator.free(uploaded_path);
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.setUploadPolicy(.{ .profile = .file_whole, .path = path, .high_water = 4096 });
 
@@ -718,12 +732,13 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
 
     try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
     try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "t=f") != null);
-    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, uploaded_path, 16);
+    const bytes = try system_io.fs.cwd(io).readFileAlloc(std.testing.allocator, uploaded_path, 16);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, bytes);
 }
 
 test "batch sink writes a complete JSON frame at once and handles partial writes" {
+    const io = std.testing.io;
     const Output = struct {
         bytes: std.ArrayList(u8) = .empty,
         calls: usize = 0,
@@ -750,7 +765,7 @@ test "batch sink writes a complete JSON frame at once and handles partial writes
     };
     var output: Output = .{};
     defer output.bytes.deinit(std.testing.allocator);
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.deleteImageData(42);
     try sink.flushFrame(output.writer());
@@ -775,7 +790,8 @@ test "batch sink writes a complete JSON frame at once and handles partial writes
 }
 
 test "placeholder frames keep one id with only upload and virtual placement" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 777, .cols = 60, .rows = 20 };
     sink.attach(sink.placeholder.?.localRect());
@@ -803,7 +819,8 @@ test "placeholder frames keep one id with only upload and virtual placement" {
 }
 
 test "placeholder restore owns pixels and retransmits after a terminal clear" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 77, .cols = 3, .rows = 2 };
     var rgba = [_]u8{ 1, 2, 3, 255 };
@@ -824,7 +841,8 @@ test "placeholder restore owns pixels and retransmits after a terminal clear" {
 }
 
 test "placeholder upload bounds leave native framebuffer available for observation and resize" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 77, .cols = 2, .rows = 1, .target_px = .{ .w = 2, .h = 1 } };
     const rgba = [_]u8{255} ** (4 * 2 * 4);

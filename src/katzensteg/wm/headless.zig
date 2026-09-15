@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const http = @import("http.zig");
 const producer_mod = @import("producer.zig");
 const Producer = producer_mod.Producer;
@@ -24,7 +25,7 @@ const idle_ms = 30_000;
 const max_clients = 16;
 const max_sessions = 128;
 var stopping = std.atomic.Value(bool).init(false);
-fn stop(_: c_int) callconv(.c) void {
+fn stop(_: std.posix.SIG) callconv(.c) void {
     stopping.store(true, .seq_cst);
 }
 
@@ -37,6 +38,7 @@ const Client = struct {
 };
 const Grid = struct { cols: i32, rows: i32 };
 const Session = struct {
+    io: std.Io,
     id: u32,
     owner: [32]u8,
     title: []const u8,
@@ -64,9 +66,10 @@ const Session = struct {
     }
 
     fn deinit(self: *Session, allocator: std.mem.Allocator) void {
+        const io = self.io;
         self.producer.deinit();
         self.line.deinit(allocator);
-        std.fs.cwd().deleteTree(self.directory) catch {};
+        system_io.fs.cwd(io).deleteTree(self.directory) catch {};
         allocator.free(self.directory);
         allocator.free(self.upload_path);
         allocator.free(self.observation_path);
@@ -119,7 +122,7 @@ const Host = struct {
 
     fn loop(self: *Host) !void {
         while (!stopping.load(.seq_cst)) {
-            const now = std.time.milliTimestamp();
+            const now = system_io.time.milliTimestamp();
             try self.server.poll(now, self);
             try self.tick(now);
             if (self.clients.items.len > 0) self.idle_since = now;
@@ -140,22 +143,23 @@ const Host = struct {
                 fds[count] = .{ .fd = file.handle, .events = std.posix.POLL.IN, .revents = 0 };
                 count += 1;
             };
-            _ = std.posix.poll(fds[0..count], 20) catch {};
+            _ = system_io.posix.poll(fds[0..count], 20) catch {};
         }
-        const deadline = std.time.milliTimestamp() + 2100;
-        while (self.clients.items.len > 0) self.closeClient(0, std.time.milliTimestamp());
-        for (self.sessions.items) |*session| session.close(std.time.milliTimestamp());
-        while (std.time.milliTimestamp() < deadline) {
-            try self.tick(std.time.milliTimestamp());
+        const deadline = system_io.time.milliTimestamp() + 2100;
+        while (self.clients.items.len > 0) self.closeClient(0, system_io.time.milliTimestamp());
+        for (self.sessions.items) |*session| session.close(system_io.time.milliTimestamp());
+        while (system_io.time.milliTimestamp() < deadline) {
+            try self.tick(system_io.time.milliTimestamp());
             const alive = for (self.sessions.items) |session| {
                 if (session.exited_at == null) break true;
             } else false;
             if (!alive) break;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            system_io.time.sleep(10 * std.time.ns_per_ms);
         }
     }
 
     fn tick(self: *Host, now: i64) !void {
+        const io = self.terminal.file.io;
         var ci: usize = 0;
         while (ci < self.clients.items.len) {
             const client = &self.clients.items[ci];
@@ -207,7 +211,7 @@ const Host = struct {
                 graphics.delete(&output_writer.interface, session.image_id) catch |err| {
                     self.logger.writeFmtScoped(.warn, .wm, "producer {d} graphics cleanup failed: {s}", .{ session.id, @errorName(err) });
                 };
-                std.fs.cwd().deleteTree(session.directory) catch {};
+                system_io.fs.cwd(io).deleteTree(session.directory) catch {};
             } else if (eof or term != null) session.close(now);
             const target_changed = if (session.grid) |grid| !std.meta.eql(session.last_target_px, self.placeholderTarget(session, grid).target_px) else false;
             if ((target_changed and session.closing_at == null and session.exited_at == null) or restoreDue(session, now, self.idle_refresh_ms, self.terminal.outputQueued())) {
@@ -243,14 +247,15 @@ const Host = struct {
     // Takes producer ownership only on success. New sessions receive a private
     // image ID and upload directory; the plugin supplies the eventual grid.
     fn addSession(self: *Host, owner: [32]u8, title: []const u8, producer: *Producer) !*Session {
+        const io = self.terminal.file.io;
         if (self.sessions.items.len >= max_sessions) return error.SessionLimit;
         if (self.next_session > 0xffffff - 100000) return error.ImageIdsExhausted;
         const id = self.next_session;
         self.next_session += 1;
         const directory = try std.fmt.allocPrint(self.allocator, "{s}/s{d}", .{ self.directory, id });
         errdefer self.allocator.free(directory);
-        try std.posix.mkdir(directory, 0o700);
-        errdefer std.fs.cwd().deleteTree(directory) catch {};
+        try system_io.posix.mkdir(directory, 0o700);
+        errdefer system_io.fs.cwd(io).deleteTree(directory) catch {};
         const path = try std.fmt.allocPrint(self.allocator, "{s}/frame.rgba", .{directory});
         errdefer self.allocator.free(path);
         const observation_path = try std.fmt.allocPrint(self.allocator, "{s}/obs-{d}.png", .{ directory, id });
@@ -266,7 +271,7 @@ const Host = struct {
         graphics.delete(&output_writer.interface, image_id) catch |err| {
             self.logger.writeFmtScoped(.warn, .wm, "session {d} stale graphics cleanup failed: {s}", .{ id, @errorName(err) });
         };
-        try self.sessions.append(self.allocator, .{ .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .observation_path = observation_path });
+        try self.sessions.append(self.allocator, .{ .io = io, .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .observation_path = observation_path });
         producer.* = .{};
         return &self.sessions.items[self.sessions.items.len - 1];
     }
@@ -327,7 +332,7 @@ const Host = struct {
                     }
                     var output_writer = self.terminal.file.writerStreaming(&.{});
                     try graphics.apply(self.allocator, &output_writer.interface, session.image_id, .{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after });
-                    session.last_frame_at = std.time.milliTimestamp();
+                    session.last_frame_at = system_io.time.milliTimestamp();
                     if (batch.groups.uploads.len != 0) session.restore_pending = false;
                 },
                 .detached => {},
@@ -336,6 +341,7 @@ const Host = struct {
     }
 
     pub fn handle(self: *Host, allocator: std.mem.Allocator, request: http.Request) !http.Response {
+        const io = self.terminal.file.io;
         if (!http.authorized(request.authorization, &self.token)) return .{ .status = 401, .body = "" };
         const post = std.mem.eql(u8, request.method, "POST");
         const get = std.mem.eql(u8, request.method, "GET");
@@ -347,21 +353,21 @@ const Host = struct {
             if (parent_pid) |pid| if (pid <= 1 or !processExists(pid)) {
                 return error.InvalidParentPid;
             };
-            const id = terminal_mod.randomId();
+            const id = terminal_mod.randomId(io);
             const path = try std.fmt.allocPrint(allocator, "{s}/c{s}.sock", .{ self.directory, id[0..12] });
-            var listener = try Listener.init(self.allocator, path);
+            var listener = try Listener.init(io, self.allocator, path);
             errdefer listener.deinit();
-            try self.clients.append(self.allocator, .{ .id = id, .listener = listener, .seen = std.time.milliTimestamp(), .parent_pid = parent_pid });
+            try self.clients.append(self.allocator, .{ .id = id, .listener = listener, .seen = system_io.time.milliTimestamp(), .parent_pid = parent_pid });
             return json(allocator, .{ .id = &id, .target = try std.fmt.allocPrint(allocator, "jsonl:{s}", .{path}), .lease_ms = lease_ms });
         }
         const client_index = for (self.clients.items, 0..) |client, i| {
             if (std.mem.eql(u8, &client.id, request.client)) break i;
         } else return .{ .status = 403, .body = "" };
-        self.clients.items[client_index].seen = std.time.milliTimestamp();
+        self.clients.items[client_index].seen = system_io.time.milliTimestamp();
         const owner = self.clients.items[client_index].id;
         if (post and std.mem.eql(u8, request.path, "/v1/client/heartbeat")) return .{};
         if (post and std.mem.eql(u8, request.path, "/v1/client/close")) {
-            self.closeClient(client_index, std.time.milliTimestamp());
+            self.closeClient(client_index, system_io.time.milliTimestamp());
             return .{};
         }
         if (std.mem.eql(u8, request.path, "/v1/sessions")) {
@@ -380,11 +386,11 @@ const Host = struct {
                 const parsed = try std.json.parseFromSlice(Open, allocator, request.body, .{});
                 const spec = parsed.value;
                 if (spec.profile.len == 0 or spec.profile.len > 128 or spec.profile[0] == '-' or spec.args.len > 64) return error.InvalidProfile;
-                var producer = try Producer.spawn(self.allocator, self.executable, spec.profile, spec.args);
+                var producer = try Producer.spawn(io, self.allocator, self.executable, spec.profile, spec.args);
                 defer producer.deinit();
                 const session = try self.addSession(owner, spec.profile, &producer);
                 self.attach(session) catch |err| {
-                    session.close(std.time.milliTimestamp());
+                    session.close(system_io.time.milliTimestamp());
                     return err;
                 };
                 return json(allocator, .{ .id = session.id });
@@ -399,7 +405,7 @@ const Host = struct {
             if (item.id == id and std.mem.eql(u8, &item.owner, &owner)) break item;
         } else return .{ .status = 404 };
         if (std.mem.eql(u8, action, "close")) {
-            session.close(std.time.milliTimestamp());
+            session.close(system_io.time.milliTimestamp());
             return .{};
         }
         if (session.closing_at != null or session.exited_at != null) return .{ .status = 409 };
@@ -414,14 +420,14 @@ const Host = struct {
             if (self.next_observation == std.math.maxInt(u32)) return error.ObservationIdsExhausted;
             const request_id = self.next_observation;
             self.next_observation += 1;
-            slot.* = .{ .id = request_id, .session_id = id, .owner = owner, .after_frame = parsed.value.after_frame, .deadline = std.time.milliTimestamp() + 2000 };
+            slot.* = .{ .id = request_id, .session_id = id, .owner = owner, .after_frame = parsed.value.after_frame, .deadline = system_io.time.milliTimestamp() + 2000 };
             return .{ .pending = request_id };
         }
         if (std.mem.eql(u8, action, "refresh")) {
             if (session.grid == null) return error.GridRequired;
             if (self.terminal.outputQueued()) {
                 session.restore_pending = true;
-            } else try self.refresh(session, std.time.milliTimestamp());
+            } else try self.refresh(session, system_io.time.milliTimestamp());
             return .{};
         }
         if (std.mem.eql(u8, action, "grid")) {
@@ -437,7 +443,7 @@ const Host = struct {
             try control.writeViewportControl(session.producer.channel.writer(), .{ .rect_cells = target.localRect(), .placeholder = target, .refresh_placements = true });
             session.grid = grid;
             session.last_target_px = target.target_px;
-            session.last_refresh_at = std.time.milliTimestamp();
+            session.last_refresh_at = system_io.time.milliTimestamp();
             return .{};
         }
         if (std.mem.eql(u8, action, "input")) {
@@ -543,7 +549,7 @@ const Host = struct {
 // Liveness only: EPERM still means a process exists. Client authorization is
 // checked separately; this probe does not assert process ownership.
 fn processExists(pid: i32) bool {
-    std.posix.kill(pid, 0) catch |err| return err != error.ProcessNotFound;
+    std.posix.kill(pid, @enumFromInt(0)) catch |err| return err != error.ProcessNotFound;
     return true;
 }
 
@@ -595,38 +601,38 @@ fn encodeInput(allocator: std.mem.Allocator, writer: anytype, value: std.json.Va
     try writer.writeAll("\n");
 }
 
-fn readLiveDescriptor(allocator: std.mem.Allocator, lock: std.fs.File, tty: []const u8) ![]const u8 {
-    const deadline = std.time.milliTimestamp() + 8000;
-    while (std.time.milliTimestamp() < deadline) {
+fn readLiveDescriptor(io: std.Io, allocator: std.mem.Allocator, lock: system_io.fs.File, tty: []const u8) ![]const u8 {
+    const deadline = system_io.time.milliTimestamp() + 8000;
+    while (system_io.time.milliTimestamp() < deadline) {
         try lock.seekTo(0);
         const bytes = try lock.readToEndAlloc(allocator, 8192);
-        if (descriptorIsLive(allocator, bytes, tty)) return bytes;
+        if (descriptorIsLive(io, allocator, bytes, tty)) return bytes;
         allocator.free(bytes);
-        std.Thread.sleep(20 * std.time.ns_per_ms);
+        system_io.time.sleep(20 * std.time.ns_per_ms);
     }
     return error.HostStarting;
 }
 
-fn descriptorIsLive(allocator: std.mem.Allocator, bytes: []const u8, tty: []const u8) bool {
+fn descriptorIsLive(io: std.Io, allocator: std.mem.Allocator, bytes: []const u8, tty: []const u8) bool {
     const Descriptor = struct { port: u16, token: []const u8, tty: []const u8 };
     const parsed = std.json.parseFromSlice(Descriptor, allocator, bytes, .{ .ignore_unknown_fields = true }) catch return false;
     defer parsed.deinit();
     if (!std.mem.eql(u8, tty, parsed.value.tty) or parsed.value.token.len != 32) return false;
-    const address = std.net.Address.parseIp4("127.0.0.1", parsed.value.port) catch return false;
-    const stream = std.net.tcpConnectToAddress(address) catch return false;
+    const address = system_io.net.Address.parseIp4("127.0.0.1", parsed.value.port) catch return false;
+    const stream = system_io.net.tcpConnectToAddress(io, address) catch return false;
     defer stream.close();
     producer_mod.nonblocking(stream.handle) catch return false;
     var buffer: [512]u8 = undefined;
     const request = std.fmt.bufPrint(&buffer, "GET /v1/health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nConnection: close\r\n\r\n", .{parsed.value.token}) catch return false;
     stream.writeAll(request) catch return false;
     var fds = [_]std.posix.pollfd{.{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-    if ((std.posix.poll(&fds, 250) catch return false) == 0) return false;
+    if ((system_io.posix.poll(&fds, 250) catch return false) == 0) return false;
     const n = stream.read(&buffer) catch return false;
     return std.mem.startsWith(u8, buffer[0..n], "HTTP/1.1 200 ");
 }
 
-pub fn run(allocator: std.mem.Allocator, executable: []const u8, options: Options) !u8 {
-    var terminal = try terminal_mod.Terminal.open(allocator, options.tty_path, options.parent_pid);
+pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, options: Options) !u8 {
+    var terminal = try terminal_mod.Terminal.open(io, allocator, options.tty_path, options.parent_pid);
     defer terminal.deinit();
     const root = try terminal_mod.privateRoot(allocator);
     defer allocator.free(root);
@@ -635,72 +641,72 @@ pub fn run(allocator: std.mem.Allocator, executable: []const u8, options: Option
     defer allocator.free(lock_path);
     const discovery = if (options.host_file) |path| try allocator.dupe(u8, path) else try std.fmt.allocPrint(allocator, "{s}/{x}.json", .{ root, identity });
     defer allocator.free(discovery);
-    const lock = try std.fs.createFileAbsolute(lock_path, .{ .read = true, .truncate = false, .mode = 0o600 });
+    const lock = try system_io.fs.createFileAbsolute(io, lock_path, .{ .read = true, .truncate = false, .mode = 0o600 });
     defer lock.close();
     if (!(try lock.tryLock(.exclusive))) {
         if (!options.background) return error.HostAlreadyRunning;
         // The live host owns the lock for its entire lifetime. Discovery is also
         // stored here, so callers using different --host-file paths converge.
-        const bytes = try readLiveDescriptor(allocator, lock, terminal.path);
+        const bytes = try readLiveDescriptor(io, allocator, lock, terminal.path);
         defer allocator.free(bytes);
-        try std.fs.File.stdout().writeAll(bytes);
+        try system_io.fs.File.stdout(io).writeAll(bytes);
         return 0;
     }
     try lock.setEndPos(0);
-    var ready: ?std.fs.File = null;
+    var ready: ?system_io.fs.File = null;
     if (options.background) {
-        const pipe = try std.posix.pipe();
-        const pid = std.posix.fork() catch |err| {
-            std.posix.close(pipe[0]);
-            std.posix.close(pipe[1]);
+        const pipe = try system_io.posix.pipe();
+        const pid = system_io.posix.fork() catch |err| {
+            system_io.posix.close(pipe[0]);
+            system_io.posix.close(pipe[1]);
             return err;
         };
         if (pid != 0) {
-            std.posix.close(pipe[1]);
-            const input = std.fs.File{ .handle = pipe[0] };
+            system_io.posix.close(pipe[1]);
+            const input = system_io.fs.File{ .io = io, .handle = pipe[0] };
             defer input.close();
             var pollfd = [_]std.posix.pollfd{.{ .fd = input.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&pollfd, 8000) == 0) {
+            if (try system_io.posix.poll(&pollfd, 8000) == 0) {
                 std.posix.kill(pid, std.posix.SIG.TERM) catch {};
                 return error.HostStartupTimeout;
             }
             const bytes = try input.readToEndAlloc(allocator, 8192);
             defer allocator.free(bytes);
             if (bytes.len == 0) return error.HostStartupFailed;
-            try std.fs.File.stdout().writeAll(bytes);
+            try system_io.fs.File.stdout(io).writeAll(bytes);
             return 0;
         }
-        std.posix.close(pipe[0]);
-        ready = .{ .handle = pipe[1] };
+        system_io.posix.close(pipe[0]);
+        ready = .{ .io = io, .handle = pipe[1] };
         // The concrete terminal device is already open; it survives detach.
-        _ = try std.posix.setsid();
-        const null_file = try std.fs.openFileAbsolute("/dev/null", .{ .mode = .read_write });
+        _ = try system_io.posix.setsid();
+        const null_file = try system_io.fs.openFileAbsolute(io, "/dev/null", .{ .mode = .read_write });
         defer null_file.close();
-        inline for (.{ 0, 1, 2 }) |fd| try std.posix.dup2(null_file.handle, fd);
+        inline for (.{ 0, 1, 2 }) |fd| try system_io.posix.dup2(null_file.handle, fd);
     }
     defer if (ready) |file| file.close();
-    const token = terminal_mod.randomId();
+    const token = terminal_mod.randomId(io);
     const directory = try std.fmt.allocPrint(allocator, "{s}/h{s}", .{ root, token[0..12] });
     defer allocator.free(directory);
-    try std.posix.mkdir(directory, 0o700);
-    defer std.fs.cwd().deleteTree(directory) catch {};
-    var host = Host{ .allocator = allocator, .executable = executable, .terminal = &terminal, .directory = directory, .token = token, .server = try http.Server.init(allocator, options.http_address), .logger = Logger.init(allocator), .idle_since = std.time.milliTimestamp(), .idle_refresh_ms = options.idle_refresh_ms };
+    try system_io.posix.mkdir(directory, 0o700);
+    defer system_io.fs.cwd(io).deleteTree(directory) catch {};
+    var host = Host{ .allocator = allocator, .executable = executable, .terminal = &terminal, .directory = directory, .token = token, .server = try http.Server.init(io, allocator, options.http_address), .logger = Logger.init(allocator), .idle_since = system_io.time.milliTimestamp(), .idle_refresh_ms = options.idle_refresh_ms };
     defer host.deinit();
     stopping.store(false, .seq_cst);
     const action = std.posix.Sigaction{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
-    for ([_]u6{ std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.HUP }) |signal| std.posix.sigaction(signal, &action, null);
+    for ([_]std.posix.SIG{ std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.HUP }) |signal| std.posix.sigaction(signal, &action, null);
     const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1 }, .{});
     defer allocator.free(descriptor);
     // Publish only after HTTP is listening. The lock file is never unlinked.
     const temporary = try std.fmt.allocPrint(allocator, "{s}.{s}.tmp", .{ discovery, token[0..8] });
     defer allocator.free(temporary);
-    const file = try std.fs.createFileAbsolute(temporary, .{ .mode = 0o600, .exclusive = true });
+    const file = try system_io.fs.createFileAbsolute(io, temporary, .{ .mode = 0o600, .exclusive = true });
     {
         defer file.close();
         try file.writeAll(descriptor);
     }
-    try std.fs.renameAbsolute(temporary, discovery);
-    defer std.fs.deleteFileAbsolute(discovery) catch {};
+    try system_io.fs.renameAbsolute(io, temporary, discovery);
+    defer system_io.fs.deleteFileAbsolute(io, discovery) catch {};
     try lock.setEndPos(0);
     try lock.writeAll(descriptor);
     if (ready) |output| {

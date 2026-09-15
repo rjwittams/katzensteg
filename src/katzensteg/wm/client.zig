@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 const ControlWriter = struct {
     interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
@@ -22,8 +23,8 @@ const ControlWriter = struct {
 pub const SessionId = u32;
 
 pub const StdioChannel = struct {
-    control: ?std.fs.File = null,
-    presentation: ?std.fs.File = null,
+    control: ?system_io.fs.File = null,
+    presentation: ?system_io.fs.File = null,
     control_open: bool = true,
     allocator: std.mem.Allocator = std.heap.page_allocator,
     pending: std.ArrayList(u8) = .empty,
@@ -32,7 +33,7 @@ pub const StdioChannel = struct {
 };
 
 pub const SocketChannel = struct {
-    file: ?std.fs.File,
+    file: ?system_io.fs.File,
     control_open: bool = true,
     presentation_open: bool = true,
     allocator: std.mem.Allocator = std.heap.page_allocator,
@@ -56,14 +57,14 @@ pub const ClientChannel = union(enum) {
     stdio: StdioChannel,
     socket: SocketChannel,
 
-    pub fn controlFile(self: ClientChannel) ?std.fs.File {
+    pub fn controlFile(self: ClientChannel) ?system_io.fs.File {
         return switch (self) {
             .stdio => |pipes| if (pipes.control_open) pipes.control else null,
             .socket => |socket| if (socket.control_open) socket.file else null,
         };
     }
 
-    pub fn presentationFile(self: ClientChannel) ?std.fs.File {
+    pub fn presentationFile(self: ClientChannel) ?system_io.fs.File {
         return switch (self) {
             .stdio => |pipes| pipes.presentation,
             .socket => |socket| if (socket.presentation_open) socket.file else null,
@@ -140,7 +141,7 @@ pub const ClientChannel = union(enum) {
                             socket.pending.clearRetainingCapacity();
                             socket.sent = 0;
                             socket.control_open = false;
-                            std.posix.shutdown(file.handle, .send) catch {};
+                            system_io.posix.shutdown(file.handle, .send) catch {};
                             socket.closeIfFinished();
                             return err;
                         },
@@ -149,7 +150,7 @@ pub const ClientChannel = union(enum) {
                 }
                 socket.pending.clearRetainingCapacity();
                 socket.sent = 0;
-                if (!socket.control_open) std.posix.shutdown(file.handle, .send) catch {};
+                if (!socket.control_open) system_io.posix.shutdown(file.handle, .send) catch {};
                 socket.closeIfFinished();
             },
         }
@@ -176,7 +177,7 @@ pub const ClientChannel = union(enum) {
             },
             .socket => |*socket| {
                 if (socket.presentation_open) {
-                    if (socket.file) |file| std.posix.shutdown(file.handle, .recv) catch {};
+                    if (socket.file) |file| system_io.posix.shutdown(file.handle, .recv) catch {};
                     socket.presentation_open = false;
                 }
                 socket.closeIfFinished();
@@ -210,39 +211,41 @@ pub const ClientChannel = union(enum) {
 };
 
 test "stdio control close preserves final presentation bytes" {
-    const control = try std.posix.pipe();
-    defer std.posix.close(control[0]);
-    const presentation = try std.posix.pipe();
-    defer std.posix.close(presentation[1]);
+    const io = std.testing.io;
+    const control = try system_io.posix.pipe();
+    defer system_io.posix.close(control[0]);
+    const presentation = try system_io.posix.pipe();
+    defer system_io.posix.close(presentation[1]);
     var channel = ClientChannel{ .stdio = .{
-        .control = .{ .handle = control[1] },
-        .presentation = .{ .handle = presentation[0] },
+        .control = .{ .io = io, .handle = control[1] },
+        .presentation = .{ .io = io, .handle = presentation[0] },
     } };
     defer channel.deinit();
 
     channel.closeControl();
     channel.closeControl();
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), try std.posix.read(control[0], &buf));
+    try std.testing.expectEqual(@as(usize, 0), try system_io.posix.read(control[0], &buf));
     try std.testing.expect(channel.controlFile() == null);
-    _ = try std.posix.write(presentation[1], "final batch");
+    _ = try system_io.posix.write(presentation[1], "final batch");
     const n = try channel.presentationFile().?.read(&buf);
     try std.testing.expectEqualStrings("final batch", buf[0..n]);
 }
 
 test "socket control half close preserves final batches and closes once" {
+    const io = std.testing.io;
     var fds: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
-    defer std.posix.close(fds[1]);
-    var channel = ClientChannel{ .socket = .{ .file = .{ .handle = fds[0] } } };
+    defer system_io.posix.close(fds[1]);
+    var channel = ClientChannel{ .socket = .{ .file = .{ .io = io, .handle = fds[0] } } };
     defer channel.deinit();
 
     channel.closeControl();
     channel.closeControl();
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), try std.posix.read(fds[1], &buf));
-    _ = try std.posix.write(fds[1], "final batch");
-    try std.posix.shutdown(fds[1], .send);
+    try std.testing.expectEqual(@as(usize, 0), try system_io.posix.read(fds[1], &buf));
+    _ = try system_io.posix.write(fds[1], "final batch");
+    try system_io.posix.shutdown(fds[1], .send);
     const n = try channel.presentationFile().?.read(&buf);
     try std.testing.expectEqualStrings("final batch", buf[0..n]);
     try std.testing.expectEqual(@as(usize, 0), try channel.presentationFile().?.read(&buf));
@@ -255,37 +258,39 @@ test "socket control half close preserves final batches and closes once" {
 }
 
 test "socket presentation EOF leaves control available until retirement" {
+    const io = std.testing.io;
     var fds: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
-    defer std.posix.close(fds[1]);
-    var channel = ClientChannel{ .socket = .{ .file = .{ .handle = fds[0] } } };
+    defer system_io.posix.close(fds[1]);
+    var channel = ClientChannel{ .socket = .{ .file = .{ .io = io, .handle = fds[0] } } };
     defer channel.deinit();
 
-    try std.posix.shutdown(fds[1], .send);
+    try system_io.posix.shutdown(fds[1], .send);
     var buf: [16]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try channel.presentationFile().?.read(&buf));
     channel.closePresentation();
     try std.testing.expect(channel.presentationFile() == null);
     try channel.controlFile().?.writeAll("shutdown");
-    const n = try std.posix.read(fds[1], &buf);
+    const n = try system_io.posix.read(fds[1], &buf);
     try std.testing.expectEqualStrings("shutdown", buf[0..n]);
     channel.closeControl();
     try std.testing.expect(channel.socket.file == null);
 }
 
 test "socket control backpressure preserves bytes through graceful half close" {
+    const io = std.testing.io;
     var fds: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
-    defer std.posix.close(fds[1]);
+    defer system_io.posix.close(fds[1]);
     const small_buffer: c_int = 1024;
-    try std.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&small_buffer));
+    try system_io.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&small_buffer));
     for (fds) |fd| {
-        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+        const flags = try system_io.posix.fcntl(fd, std.posix.F.GETFL, 0);
         var typed: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
         typed.NONBLOCK = true;
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
+        _ = try system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
     }
-    var channel = ClientChannel{ .socket = .{ .file = .{ .handle = fds[0] }, .allocator = std.testing.allocator } };
+    var channel = ClientChannel{ .socket = .{ .file = .{ .io = io, .handle = fds[0] }, .allocator = std.testing.allocator } };
     defer channel.deinit();
     const payload = try std.testing.allocator.alloc(u8, 128 * 1024);
     defer std.testing.allocator.free(payload);
@@ -307,7 +312,7 @@ test "socket control backpressure preserves bytes through graceful half close" {
     for (0..10000) |_| {
         try channel.flushControl();
         var buf: [4096]u8 = undefined;
-        const n = std.posix.read(fds[1], &buf) catch |err| switch (err) {
+        const n = system_io.posix.read(fds[1], &buf) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -323,15 +328,16 @@ test "socket control backpressure preserves bytes through graceful half close" {
 }
 
 test "stdio backpressure preserves bytes through graceful control close" {
-    const fds = try std.posix.pipe();
-    defer std.posix.close(fds[0]);
+    const io = std.testing.io;
+    const fds = try system_io.posix.pipe();
+    defer system_io.posix.close(fds[0]);
     for (fds) |fd| {
-        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+        const flags = try system_io.posix.fcntl(fd, std.posix.F.GETFL, 0);
         var typed: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
         typed.NONBLOCK = true;
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
+        _ = try system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
     }
-    var channel = ClientChannel{ .stdio = .{ .control = .{ .handle = fds[1] }, .allocator = std.testing.allocator } };
+    var channel = ClientChannel{ .stdio = .{ .control = .{ .io = io, .handle = fds[1] }, .allocator = std.testing.allocator } };
     defer channel.deinit();
     const payload = try std.testing.allocator.alloc(u8, 128 * 1024);
     defer std.testing.allocator.free(payload);
@@ -353,7 +359,7 @@ test "stdio backpressure preserves bytes through graceful control close" {
     for (0..10000) |_| {
         try channel.flushControl();
         var buf: [4096]u8 = undefined;
-        const n = std.posix.read(fds[0], &buf) catch |err| switch (err) {
+        const n = system_io.posix.read(fds[0], &buf) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -369,10 +375,11 @@ test "stdio backpressure preserves bytes through graceful control close" {
 }
 
 test "native control writer handles vectors, repetitions and closed channels" {
-    const fds = try std.posix.pipe();
-    const reader = std.fs.File{ .handle = fds[0] };
+    const io = std.testing.io;
+    const fds = try system_io.posix.pipe();
+    const reader = system_io.fs.File{ .io = io, .handle = fds[0] };
     defer reader.close();
-    var channel = ClientChannel{ .stdio = .{ .control = .{ .handle = fds[1] }, .allocator = std.testing.allocator } };
+    var channel = ClientChannel{ .stdio = .{ .control = .{ .io = io, .handle = fds[1] }, .allocator = std.testing.allocator } };
     defer channel.deinit();
     const output = channel.writer();
     var pieces: [3][]const u8 = .{ "head:", "", "ab" };

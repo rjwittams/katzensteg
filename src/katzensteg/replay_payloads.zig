@@ -1,10 +1,11 @@
 //! Owns copied command payloads from producer allocation through worker retirement.
 //! Reserve all planes of one command together: waiting between planes could deadlock.
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const Payloads = struct {
-    mutex: std.Thread.Mutex = .{},
-    changed: std.Thread.Condition = .{},
+    mutex: system_io.Mutex = .{},
+    changed: system_io.Condition = .{},
     closed: bool = false,
     waiters: usize = 0,
     live_bytes: usize = 0,
@@ -97,6 +98,8 @@ pub const Payloads = struct {
     // The caller must quiesce producers and release every live payload first;
     // close() wakes admission waiters but does not retire their owned buffers.
     pub fn deinit(self: *Payloads, allocator: std.mem.Allocator) void {
+        defer self.mutex.deinit();
+        defer self.changed.deinit();
         self.close();
         std.debug.assert(self.live_bytes == 0);
         for (self.buffers.items) |buf| allocator.free(buf);

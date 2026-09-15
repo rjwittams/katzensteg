@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const protocol_version = 1;
 const max_pending = 16;
@@ -6,7 +7,7 @@ const max_registration_bytes = 1024;
 const registration_timeout_ms = 5000;
 
 pub const Registration = struct {
-    file: std.fs.File,
+    file: system_io.fs.File,
     title: []const u8,
 
     pub fn deinit(self: Registration, allocator: std.mem.Allocator) void {
@@ -16,7 +17,7 @@ pub const Registration = struct {
 };
 
 const Pending = struct {
-    file: std.fs.File,
+    file: system_io.fs.File,
     started_ms: i64,
     bytes: [max_registration_bytes]u8 = undefined,
     len: usize = 0,
@@ -26,55 +27,57 @@ const Pending = struct {
 // and nonblocking; a peer never holds up existing windows while registering.
 pub const Listener = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: system_io.fs.File,
     path: []const u8,
-    inode: std.fs.File.INode,
+    inode: system_io.fs.File.INode,
     pending: [max_pending]Pending = undefined,
     count: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, address: []const u8) !Listener {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, address: []const u8) !Listener {
         const path = if (std.mem.startsWith(u8, address, "~/")) blk: {
-            const home = try std.process.getEnvVarOwned(allocator, "HOME");
+            const home = try system_io.process.getEnvVarOwned(allocator, "HOME");
             defer allocator.free(home);
             break :blk try std.fs.path.join(allocator, &.{ home, address[2..] });
         } else try allocator.dupe(u8, address);
         errdefer allocator.free(path);
         if (path.len == 0) return error.EmptyListenerPath;
-        const addr = try std.net.Address.initUnix(path);
-        const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
-        errdefer std.posix.close(fd);
+        const addr = try system_io.net.Address.initUnix(path);
+        const fd = try system_io.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC, 0);
+        errdefer system_io.posix.close(fd);
         // Never unlink an existing path: it may belong to another live host.
-        try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-        errdefer std.fs.cwd().deleteFile(path) catch {};
+        try system_io.posix.bind(fd, &addr.any, addr.getOsSockLen());
+        errdefer system_io.fs.cwd(io).deleteFile(path) catch {};
         const terminated_path = try allocator.dupeZ(u8, path);
         defer allocator.free(terminated_path);
         if (std.c.chmod(terminated_path, 0o600) != 0) return error.ListenerPermissionsFailed;
-        try std.posix.listen(fd, max_pending);
-        const stat = try std.fs.cwd().statFile(path);
-        return .{ .allocator = allocator, .file = .{ .handle = fd }, .path = path, .inode = stat.inode };
+        try system_io.posix.listen(fd, max_pending);
+        const stat = try system_io.fs.cwd(io).statFile(path);
+        return .{ .allocator = allocator, .file = .{ .io = io, .handle = fd }, .path = path, .inode = stat.inode };
     }
 
     pub fn deinit(self: *Listener) void {
+        const io = self.file.io;
         for (self.pending[0..self.count]) |pending| pending.file.close();
         self.file.close();
-        if (std.fs.cwd().statFile(self.path)) |stat| {
-            if (stat.inode == self.inode) std.fs.cwd().deleteFile(self.path) catch {};
+        if (system_io.fs.cwd(io).statFile(self.path)) |stat| {
+            if (stat.inode == self.inode) system_io.fs.cwd(io).deleteFile(self.path) catch {};
         } else |_| {}
         self.allocator.free(self.path);
     }
 
     pub fn acceptPending(self: *Listener, now_ms: i64) !void {
+        const io = self.file.io;
         for (0..max_pending) |_| {
-            const fd = std.posix.accept(self.file.handle, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC) catch |err| switch (err) {
+            const fd = system_io.posix.accept(self.file.handle, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => return,
                 error.ConnectionAborted => continue,
                 else => return err,
             };
             if (self.count == max_pending) {
-                std.posix.close(fd);
+                system_io.posix.close(fd);
                 continue;
             }
-            self.pending[self.count] = .{ .file = .{ .handle = fd }, .started_ms = now_ms };
+            self.pending[self.count] = .{ .file = .{ .io = io, .handle = fd }, .started_ms = now_ms };
             self.count += 1;
         }
     }
@@ -157,21 +160,22 @@ test "registration rejects wrong versions and terminal control characters" {
 }
 
 test "listener skips stalled and malformed clients and preserves post registration data" {
-    var tmp = std.testing.tmpDir(.{});
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir);
     const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "wm.sock" });
     defer std.testing.allocator.free(path);
-    var listener = try Listener.init(std.testing.allocator, path);
+    var listener = try Listener.init(io, std.testing.allocator, path);
     defer listener.deinit();
-    const stalled = try std.net.connectUnixSocket(path);
+    const stalled = try system_io.net.connectUnixSocket(io, path);
     defer stalled.close();
     try stalled.writeAll("{\"type\":");
-    const bad = try std.net.connectUnixSocket(path);
+    const bad = try system_io.net.connectUnixSocket(io, path);
     defer bad.close();
     try bad.writeAll("bad\n");
-    const good = try std.net.connectUnixSocket(path);
+    const good = try system_io.net.connectUnixSocket(io, path);
     defer good.close();
     try good.writeAll("{\"type\":\"register\",\"version\":1,\"title\":\"MI2\"}\nnext\n");
     try listener.acceptPending(0);
@@ -185,5 +189,5 @@ test "listener skips stalled and malformed clients and preserves post registrati
     try std.testing.expect((try listener.nextRegistration(registration_timeout_ms)) == null);
     try std.testing.expectEqual(@as(usize, 0), listener.count);
     // An existing listener must not be replaced by a second host.
-    try std.testing.expectError(error.AddressInUse, Listener.init(std.testing.allocator, path));
+    try std.testing.expectError(error.AddressInUse, Listener.init(io, std.testing.allocator, path));
 }

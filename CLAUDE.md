@@ -28,7 +28,7 @@ docs/              current project docs
 
 ## Build
 
-- Zig **0.15.2** is the expected toolchain for current work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
+- Zig **0.16.0** is the expected toolchain for current work. Verify with `zig version`; do not assume a distro Zig package is acceptable if it differs.
 - `build.zig.zon` pins the libxev fork used by the desktop WM. System libs (SDL2, libyuv on Linux) are also required.
 - Linux currently forces LLVM codegen in `build.zig`. Do not flip this back to non-LLVM/system-linker experiments casually: current Arch/CachyOS toolchains have hit `.sframe` relocation failures on that path.
 

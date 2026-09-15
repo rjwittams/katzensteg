@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    _ = b.addModule("platform", .{ .root_source_file = b.path("src/platform/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const is_macos = target.result.os.tag == .macos;
     const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
     const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
@@ -14,7 +15,7 @@ pub fn build(b: *std.Build) void {
     const rebind_preload_options = b.addOptions();
     rebind_preload_options.addOption(bool, "use_c_real_sdl", true);
 
-    const termscene_mod = b.createModule(.{
+    const termscene_mod = projectModule(b, .{
         .root_source_file = b.path("src/termscene/mod.zig"),
         .target = target,
         .optimize = optimize,
@@ -24,18 +25,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("xev");
 
-    const katzensteg_sdl2_mod = b.createModule(.{
+    const katzensteg_sdl2_mod = projectModule(b, .{
         .root_source_file = b.path("src/katzensteg/sdl2.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const katzensteg_sdl3_mod = b.createModule(.{
+    const katzensteg_sdl3_mod = projectModule(b, .{
         .root_source_file = b.path("src/katzensteg/sdl3.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
+    addUnitTest(b, test_step, "platform-test", "src/platform/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
 
     // On macOS, Zig emits debug-map binaries (no inline __DWARF); a UUID-matched
     // .dSYM bundle must sit next to each dylib for Instruments / lldb to symbolicate
@@ -49,7 +51,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "ttytris",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -68,7 +70,7 @@ pub fn build(b: *std.Build) void {
     const termscene_demo = b.addExecutable(.{
         .name = "termscene-demo",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/termscene-demo/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -80,7 +82,7 @@ pub fn build(b: *std.Build) void {
     const kitty_placement_repro = b.addExecutable(.{
         .name = "kitty-placement-repro",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/kitty-placement-repro/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -92,7 +94,7 @@ pub fn build(b: *std.Build) void {
     const kitty_show_ppm = b.addExecutable(.{
         .name = "kitty-show-ppm",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/kitty-show-ppm/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -105,7 +107,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg-core",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/core_exports.zig"),
             .target = target,
             .optimize = optimize,
@@ -132,7 +134,7 @@ pub fn build(b: *std.Build) void {
             .linkage = .dynamic,
             .name = "katzensteg-metal-layer",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -154,7 +156,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg-sdl2",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
             .optimize = optimize,
@@ -189,7 +191,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg-sdl3",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/preload_sdl3.zig"),
             .target = target,
             .optimize = optimize,
@@ -226,7 +228,7 @@ pub fn build(b: *std.Build) void {
             .linkage = .dynamic,
             .name = "katzensteg-sdl2-rebind",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .root_source_file = b.path("src/katzensteg/preload.zig"),
                 .target = target,
                 .optimize = optimize,
@@ -255,7 +257,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
             .optimize = optimize,
@@ -291,7 +293,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "katzensteg-unlinked",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/preload.zig"),
             .target = target,
             .optimize = optimize,
@@ -325,7 +327,7 @@ pub fn build(b: *std.Build) void {
     const basic_sdl_demo = b.addExecutable(.{
         .name = "basic-sdl-demo",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/probes/sdl2/basic_demo.zig"),
             .target = target,
             .optimize = optimize,
@@ -339,7 +341,7 @@ pub fn build(b: *std.Build) void {
     const basic_sdl3_demo = b.addExecutable(.{
         .name = "basic-sdl3-demo",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/probes/sdl3/basic_demo.zig"),
             .target = target,
             .optimize = optimize,
@@ -354,7 +356,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_input_probe = b.addExecutable(.{
         .name = "katzensteg-input-probe",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -371,7 +373,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_input_probe_sdl3 = b.addExecutable(.{
         .name = "katzensteg-input-probe-sdl3",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -387,7 +389,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_dlopen_probe_sdl3 = b.addExecutable(.{
         .name = "katzensteg-dlopen-probe-sdl3",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -405,7 +407,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_gl_probe = b.addExecutable(.{
         .name = "katzensteg-gl-probe",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -426,7 +428,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_gl_probe_sdl3 = b.addExecutable(.{
         .name = "katzensteg-gl-probe-sdl3",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -451,7 +453,7 @@ pub fn build(b: *std.Build) void {
         const probe = b.addExecutable(.{
             .name = "katzensteg-metal-probe",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -470,7 +472,7 @@ pub fn build(b: *std.Build) void {
         const probe_sdl3 = b.addExecutable(.{
             .name = "katzensteg-metal-probe-sdl3",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -490,7 +492,7 @@ pub fn build(b: *std.Build) void {
     const luchs = b.addExecutable(.{
         .name = "luchs",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("tools/luchs/src/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -519,7 +521,7 @@ pub fn build(b: *std.Build) void {
             .linkage = .dynamic,
             .name = "katzensteg-vulkan-layer",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -533,7 +535,7 @@ pub fn build(b: *std.Build) void {
         const katzensteg_vulkan_probe = b.addExecutable(.{
             .name = "katzensteg-vulkan-probe",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -552,7 +554,7 @@ pub fn build(b: *std.Build) void {
         const katzensteg_vulkan_probe_sdl3 = b.addExecutable(.{
             .name = "katzensteg-vulkan-probe-sdl3",
             .use_llvm = use_llvm,
-            .root_module = b.createModule(.{
+            .root_module = projectModule(b, .{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -588,7 +590,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_launcher = b.addExecutable(.{
         .name = "katzensteg",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
@@ -600,7 +602,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_wm = b.addExecutable(.{
         .name = "katzensteg-wm",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/wm/main.zig"),
             .target = target,
             .optimize = optimize,
@@ -608,7 +610,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_wm.root_module.addImport("termscene", termscene_mod);
-    const katzensteg_wm_host_mod = b.createModule(.{
+    const katzensteg_wm_host_mod = projectModule(b, .{
         .root_source_file = b.path("src/katzensteg/wm_host.zig"),
         .target = target,
         .optimize = optimize,
@@ -621,7 +623,7 @@ pub fn build(b: *std.Build) void {
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("src/katzensteg/launcher.zig"),
             .target = target,
             .optimize = optimize,
@@ -640,7 +642,7 @@ pub fn build(b: *std.Build) void {
     const debug_exe = b.addExecutable(.{
         .name = "ttytris-debug",
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path("examples/ttytris/main.zig"),
             .target = target,
             .optimize = .Debug,
@@ -833,7 +835,7 @@ fn addUnitTest(
     const unit_test = b.addTest(.{
         .name = name,
         .use_llvm = use_llvm,
-        .root_module = b.createModule(.{
+        .root_module = projectModule(b, .{
             .root_source_file = b.path(root_source_file),
             .target = target,
             .optimize = optimize,
@@ -877,4 +879,11 @@ fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Buil
     });
     b.getInstallStep().dependOn(&install_dsym.step);
     dsym_step.dependOn(&install_dsym.step);
+}
+
+fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Build.Module {
+    const module = b.createModule(options);
+    if (options.root_source_file != null) module.addImport("platform", b.modules.get("platform").?);
+    module.link_libc = true;
+    return module;
 }

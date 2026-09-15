@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const window_policy = @import("window_policy.zig");
 
 const log = std.log.scoped(.config);
@@ -97,11 +98,11 @@ pub fn getRuntimeFieldMetadata(name: []const u8) ?RuntimeFieldMetadata {
     return null;
 }
 
-pub fn loadRuntimeConfig(allocator: std.mem.Allocator) RuntimeConfig {
+pub fn loadRuntimeConfig(io: std.Io, allocator: std.mem.Allocator) RuntimeConfig {
     var config = RuntimeConfig{};
     if (getEnvOwned(allocator, "KATZENSTEG_CONFIG")) |path| {
         defer allocator.free(path);
-        const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| {
+        const bytes = system_io.fs.cwd(io).readFileAlloc(allocator, path, 64 * 1024) catch |err| {
             log.warn("failed to read config {s}: {any}", .{ path, err });
             return config;
         };
@@ -353,7 +354,7 @@ pub fn parseRealWindowVisibilityValue(value: ?[]const u8, fallback: window_polic
 }
 
 fn getEnvOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
-    return std.process.getEnvVarOwned(allocator, key) catch |err| switch (err) {
+    return system_io.process.getEnvVarOwned(allocator, key) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => null,
     };
