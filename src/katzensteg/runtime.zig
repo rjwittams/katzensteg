@@ -1299,6 +1299,8 @@ pub const Runtime = struct {
                 return;
             }
         }
+        // Deduplication is best-effort. A failed cache allocation must not
+        // suppress the size update needed for correct composition and input.
         self.renderer_output_sizes.put(self.allocator, renderer, size) catch {};
         self.queue_mutex.unlock();
         log.debug("renderer output size renderer={x} pixels={d}x{d}", .{ renderer, w, h });

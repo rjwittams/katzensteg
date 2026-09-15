@@ -93,6 +93,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
+          # TS tests require 22.18+ for type stripping enabled by default.
           node-version: 22
       - name: Test host parsing, layout and placeholders
         run: node --test tools/claude-code-plugin/hooks/*.test.ts

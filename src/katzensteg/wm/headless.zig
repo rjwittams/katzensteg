@@ -530,6 +530,8 @@ const Host = struct {
     }
 };
 
+// Liveness only: EPERM still means a process exists. Client authorization is
+// checked separately; this probe does not assert process ownership.
 fn processExists(pid: i32) bool {
     std.posix.kill(pid, 0) catch |err| return err != error.ProcessNotFound;
     return true;

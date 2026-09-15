@@ -2,6 +2,11 @@ const std = @import("std");
 
 const max_connections = 16;
 const max_request_bytes = 64 * 1024;
+const max_header_bytes = 8 * 1024;
+const header_separator = "\r\n\r\n";
+// Reserve the maximum header and its separator even for requests with shorter
+// headers, so the accepted body size is independent of header length.
+const max_body_bytes = max_request_bytes - max_header_bytes - header_separator.len;
 const timeout_ms = 2000;
 
 pub const Request = struct {
@@ -116,9 +121,14 @@ pub const Server = struct {
             const request = parsed orelse return true;
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
-            const response = context.handle(arena.allocator(), request) catch |err| Response{
-                .status = 400,
-                .body = try std.json.Stringify.valueAlloc(arena.allocator(), .{ .@"error" = @errorName(err) }, .{}),
+            const response = context.handle(arena.allocator(), request) catch |err| switch (err) {
+                // Do not ask the failing handler allocator for another JSON
+                // allocation just to report memory pressure as a server failure.
+                error.OutOfMemory => Response{ .status = 503, .body = "{\"error\":\"OutOfMemory\"}" },
+                else => Response{
+                    .status = 400,
+                    .body = try std.json.Stringify.valueAlloc(arena.allocator(), .{ .@"error" = @errorName(err) }, .{}),
+                },
             };
             if (response.pending) |id| {
                 connection.pending = id;
@@ -144,11 +154,11 @@ pub const Server = struct {
 };
 
 fn parse(bytes: []const u8) !?Request {
-    const header_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse {
-        if (bytes.len > 8192) return error.HeadersTooLarge;
+    const header_end = std.mem.indexOf(u8, bytes, header_separator) orelse {
+        if (bytes.len > max_header_bytes + header_separator.len - 1) return error.HeadersTooLarge;
         return null;
     };
-    if (header_end > 8192) return error.HeadersTooLarge;
+    if (header_end > max_header_bytes) return error.HeadersTooLarge;
     var lines = std.mem.splitSequence(u8, bytes[0..header_end], "\r\n");
     var first = std.mem.splitScalar(u8, lines.next() orelse return error.BadRequest, ' ');
     const method = first.next() orelse return error.BadRequest;
@@ -164,7 +174,7 @@ fn parse(bytes: []const u8) !?Request {
         if (std.ascii.eqlIgnoreCase(key, "Content-Length")) {
             if (length != null) return error.DuplicateLength;
             length = try std.fmt.parseInt(usize, value, 10);
-            if (length.? > max_request_bytes - 8196) return error.BodyTooLarge;
+            if (length.? > max_body_bytes) return error.BodyTooLarge;
         } else if (std.ascii.eqlIgnoreCase(key, "Transfer-Encoding")) {
             return error.ChunkedNotSupported;
         } else if (std.ascii.eqlIgnoreCase(key, "Authorization")) {
@@ -175,9 +185,9 @@ fn parse(bytes: []const u8) !?Request {
             request.client = value;
         }
     }
-    const end = header_end + 4 + (length orelse 0);
+    const end = header_end + header_separator.len + (length orelse 0);
     if (bytes.len < end) return null;
-    request.body = bytes[header_end + 4 .. end];
+    request.body = bytes[header_end + header_separator.len .. end];
     return request;
 }
 
@@ -202,4 +212,51 @@ test "HTTP token is mandatory and exact" {
     try std.testing.expect(!authorized("Bearer secrets", "secret"));
     try std.testing.expect(!authorized("Bearer secreT", "secret"));
     try std.testing.expect(authorized("Bearer secret", "secret"));
+}
+
+test "HTTP size budget includes the separator and accepts fragmented maximum headers" {
+    const allocator = std.testing.allocator;
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+    try bytes.writer(allocator).print("POST / HTTP/1.1\r\nContent-Length: {d}\r\nX-Pad: ", .{max_body_bytes});
+    try bytes.appendNTimes(allocator, 'a', max_header_bytes - bytes.items.len);
+    try bytes.appendSlice(allocator, header_separator[0..2]);
+    try std.testing.expect((try parse(bytes.items)) == null);
+    try bytes.appendSlice(allocator, header_separator[2..]);
+    try bytes.appendNTimes(allocator, 'b', max_body_bytes);
+    try std.testing.expectEqual(max_request_bytes, bytes.items.len);
+    try std.testing.expectEqual(max_body_bytes, (try parse(bytes.items)).?.body.len);
+    const excessive = try std.fmt.allocPrint(allocator, "POST / HTTP/1.1\r\nContent-Length: {d}\r\n\r\n", .{max_body_bytes + 1});
+    defer allocator.free(excessive);
+    try std.testing.expectError(error.BodyTooLarge, parse(excessive));
+}
+
+test "HTTP handler memory pressure returns 503 while invalid input remains 400" {
+    const Context = struct {
+        failure: anyerror,
+        pub fn handle(self: *@This(), _: std.mem.Allocator, _: Request) anyerror!Response {
+            return self.failure;
+        }
+        pub fn pollResponse(_: *@This(), _: std.mem.Allocator, _: u32, _: i64) !?Response {
+            return null;
+        }
+        pub fn cancelResponse(_: *@This(), _: u32) void {}
+    };
+    var server = try Server.init(std.testing.allocator, "127.0.0.1:0");
+    defer server.deinit();
+    for ([_]anyerror{ error.OutOfMemory, error.InvalidInput }) |failure| {
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+        const client = std.fs.File{ .handle = fds[0] };
+        defer client.close();
+        var connection = Connection{ .file = .{ .handle = fds[1] }, .started = 0 };
+        defer connection.deinit(std.testing.allocator);
+        try client.writeAll("GET /v1/test HTTP/1.1\r\n\r\n");
+        var context = Context{ .failure = failure };
+        try std.testing.expect(!try server.advance(&connection, &context, 0));
+        var response: [512]u8 = undefined;
+        const n = try client.read(&response);
+        try std.testing.expect(std.mem.startsWith(u8, response[0..n], if (failure == error.OutOfMemory) "HTTP/1.1 503 " else "HTTP/1.1 400 "));
+        try std.testing.expect(std.mem.indexOf(u8, response[0..n], @errorName(failure)) != null);
+    }
 }

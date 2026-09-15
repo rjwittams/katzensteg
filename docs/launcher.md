@@ -270,7 +270,8 @@ State is `starting`, `ready`, `closing` or `exited`. The list is authoritative;
 exited records remain for 30 seconds. Clients should remove cells for closing,
 exited or absent sessions. Access to another client's session returns 404.
 A launch response acknowledges acceptance: later application startup failures
-appear as exited sessions. Synchronous errors return 400 with an `error` field.
+appear as exited sessions. Synchronous errors return 400 with an `error` field, except handler memory
+exhaustion, which returns 503 `OutOfMemory`.
 
 A producer starts with a temporary 1×1 virtual grid so it can report source
 pixels. Its graphics are withheld until the client supplies the grid it drew.

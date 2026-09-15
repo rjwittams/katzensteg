@@ -94,6 +94,8 @@ pub const Payloads = struct {
         while (self.waiters != 0) self.changed.wait(&self.mutex);
     }
 
+    // The caller must quiesce producers and release every live payload first;
+    // close() wakes admission waiters but does not retire their owned buffers.
     pub fn deinit(self: *Payloads, allocator: std.mem.Allocator) void {
         self.close();
         std.debug.assert(self.live_bytes == 0);

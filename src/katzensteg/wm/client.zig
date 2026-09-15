@@ -29,6 +29,8 @@ pub const SocketChannel = struct {
 // Owns its descriptors. Files returned by the accessors are borrowed: callers
 // must close directions through this channel, never through the borrowed File.
 // A socket has one owner even though both protocol directions use the same FD.
+// The owning host event loop serializes writes, flushes and teardown. Channel
+// descriptors and pending bytes must not be accessed concurrently.
 pub const ClientChannel = union(enum) {
     stdio: StdioChannel,
     socket: SocketChannel,

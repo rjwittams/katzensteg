@@ -55,6 +55,16 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 | Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | `macos-sdl-client-build` | Stream client prototype | `chiaki.sdl` | Uses an SDL stream-only frontend branch. |
 | ANESE | upstream | `master` | Small SDL emulator target | `anese.test`, `smb3` | Currently useful without app-side patches. |
 
+## Jackstay capture viewer
+
+`jackstay-viewer` in `profiles/jackstay.json` is a local development profile.
+It expects a Porthole checkout under `~/dev/porthole` and a separately built
+SDL capture viewer at `target/capture-viewer-sdl/capture-viewer-sdl` inside that
+checkout. Katzensteg's build and bootstrap helper do not build this viewer.
+Follow the Porthole checkout's build instructions and pass its connection
+arguments after the profile name. Use a private profile override if the viewer
+is built elsewhere; `katzensteg --dry-run jackstay-viewer` shows the resolved path.
+
 ## Local Data
 
 Game data, ROMs, credentials, pairing state, and media are intentionally not tracked here. Profiles should use local paths or private profile directories for that data.
