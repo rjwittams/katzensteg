@@ -113,6 +113,7 @@ fn optionalEqual(comptime T: type, a: ?T, b: ?T) bool {
 pub const Runtime = struct {
     observation: @import("frame_observation.zig").FrameObservation = .{},
     observation_enabled: bool = false,
+    placeholder_scene: @import("frame_builder.zig").PresentationSnapshot = .{},
     allocator: std.mem.Allocator,
     logger: Logger,
     tty: ?DirectTty = null,
@@ -154,6 +155,7 @@ pub const Runtime = struct {
     queue_cond: std.Thread.Condition = .{},
     queue: std.ArrayList(Command),
     payload_pool: PayloadBufferPool = .{},
+    renderer_output_sizes: std.AutoHashMapUnmanaged(core.CoreHandle, PixelSize) = .{},
     inspect_resources: std.ArrayList(InspectResource),
     inspect_resource_records: std.ArrayList(ResourceRecord),
     queue_head: usize = 0,
@@ -427,6 +429,7 @@ pub const Runtime = struct {
         if (self.whiskers_client) |*client| client.deinit();
         for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);
         self.queue.deinit(self.allocator);
+        self.renderer_output_sizes.deinit(self.allocator);
         self.payload_pool.deinit(self.allocator);
         self.gl_capture_buffers.deinit(self.allocator);
         self.inspect_resources.deinit(self.allocator);
@@ -448,6 +451,7 @@ pub const Runtime = struct {
         }
         if (self.input_parser) |*parser| parser.deinit();
         self.observation.deinit(self.allocator);
+        self.placeholder_scene.deinit(self.allocator);
         self.frame_builder.deinit();
         self.cursor_state.deinit();
         if (self.backend) |*backend| backend.deinit();
@@ -691,7 +695,8 @@ pub const Runtime = struct {
             if (!self.batch_sink.?.isAttached()) return;
             const start_ns = std.time.nanoTimestamp();
             self.queuePendingBatchPresentationReset();
-            self.observation.pixels.clearRetainingCapacity(); // External capture observation is not supported yet.
+            self.placeholder_scene.valid = false;
+            self.observation.pixels.clearRetainingCapacity(); // Positioned external capture has no observation yet.
             self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, self.batch_writer.?.deprecatedWriter());
             var virtual_tty = self.batchVirtualTty();
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
@@ -749,12 +754,15 @@ pub const Runtime = struct {
 
         const start_ns = std.time.nanoTimestamp();
         var virtual_tty = self.batchVirtualTty();
-        var job = self.frame_builder.buildPresentJob(&self.logger, &virtual_tty, renderer, self.bg_only, self.cursor_state.snapshot()) catch |err| {
+        var job = (if (self.batch_sink.?.placeholder != null)
+            self.buildPlaceholderJob(renderer)
+        else
+            self.frame_builder.buildPresentJob(&self.logger, &virtual_tty, renderer, self.bg_only, self.cursor_state.snapshot())) catch |err| {
             self.logger.writeFmtScoped(.info, .runtime, "batch buildPresentJob failed: {any}", .{err});
             return;
         };
         defer job.deinit(self.allocator);
-        if (self.observation_enabled) {
+        if (self.batch_sink.?.placeholder == null and self.observation_enabled) {
             switch (job) {
                 .framebuffer => |fb| self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {},
                 .scene => {
@@ -767,11 +775,16 @@ pub const Runtime = struct {
         self.queuePendingBatchPresentationReset();
         self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
-        self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
         self.writeBatchPresentationStatus(renderer, &job);
+        self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
         const duration = std.time.nanoTimestamp() - start_ns;
         self.traceBlockingSpan("batch_present", "render_batch_present_locked", duration);
         self.notePresentDuration(duration);
+    }
+
+    fn buildPlaceholderJob(self: *Runtime, renderer: core.CoreHandle) !PresentJob {
+        try self.placeholder_scene.capture(&self.frame_builder, renderer, self.cursor_state.snapshot());
+        return .{ .framebuffer = try self.placeholder_scene.presentation(self.allocator, self.batch_sink.?.placeholder.?) };
     }
 
     fn writeBatchPresentationStatus(self: *Runtime, renderer: core.CoreHandle, job: *const PresentJob) void {
@@ -878,6 +891,7 @@ pub const Runtime = struct {
         const sink = &(self.batch_sink orelse return);
         switch (control) {
             .attach => |attach| {
+                self.placeholder_scene.valid = false;
                 if (!self.advanceBatchGeneration(sink, attach.presentation_generation)) return;
                 log.info(
                     "batch attach window={s} rect=({d},{d} {d}x{d}) aspect={s} z_base={d} image_ids={d}..{d} placement_ids={d}..{d} upload={s}",
@@ -896,6 +910,11 @@ pub const Runtime = struct {
                         @tagName(attach.upload.profile),
                     },
                 );
+                if (sink.isAttached()) {
+                    self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, self.batch_writer.?.deprecatedWriter());
+                }
+                sink.placeholder = attach.placeholder;
+                self.batch_presentation_reset_pending = false;
                 sink.attachWithPresentation(attach.rect_cells, attach.aspect, attach.z_base);
                 self.last_batch_presentation_status = null;
                 sink.setTerminalGeometry(attach.terminal);
@@ -923,6 +942,25 @@ pub const Runtime = struct {
                         "batch viewport ignored while detached window={s} rect=({d},{d} {d}x{d}) aspect={s}",
                         .{ viewport.window_id, viewport.rect_cells.row, viewport.rect_cells.col, viewport.rect_cells.cols, viewport.rect_cells.rows, @tagName(viewport.aspect) },
                     );
+                    return;
+                }
+                // Presentation kind and image ownership change only through attach.
+                if (sink.placeholder != null or viewport.placeholder != null) {
+                    const target = viewport.placeholder orelse return;
+                    const current = sink.placeholder orelse return;
+                    if (target.image_id != current.image_id) return;
+                    if (!self.advanceBatchGeneration(sink, viewport.presentation_generation)) return;
+                    sink.placeholder = target;
+                    sink.viewportWithPresentation(target.localRect(), .stretch, 0);
+                    self.last_batch_presentation_status = null;
+                    if (!std.meta.eql(current.target_px, target.target_px) and self.placeholder_scene.valid) {
+                        const frame = self.placeholder_scene.presentation(self.allocator, target) catch return;
+                        sink.presentPlaceholder(frame.rgba, frame.width, frame.height) catch return;
+                    } else if (viewport.refresh_placements or !std.meta.eql(current.target_px, target.target_px)) {
+                        sink.restorePlaceholder() catch return;
+                    } else sink.refreshPlaceholder() catch return;
+                    if (sink.hasPendingBytes()) sink.flushFrame(self.batch_writer.?.deprecatedWriter()) catch return;
+                    self.updateBatchInputTarget(sink);
                     return;
                 }
                 const previous = sink.presentationRect();
@@ -992,12 +1030,17 @@ pub const Runtime = struct {
             .observe => |request| {
                 const output = self.batch_writer orelse return;
                 const writer = output.deprecatedWriter();
-                self.observation.write(request.path) catch |err| {
+                const observation = if (sink.placeholder != null and self.placeholder_scene.valid) self.placeholder_scene.observation(self.allocator) catch return else if (sink.placeholder != null) &sink.placeholder_frame else &self.observation;
+                const result = switch (request.format) {
+                    .rgba => observation.write(request.path),
+                    .png => observation.writePng(self.allocator, request.path),
+                };
+                result catch |err| {
                     writer.print("{{\"type\":\"observation\",\"request_id\":{d},\"error\":\"{s}\"}}\n", .{ request.request_id, @errorName(err) }) catch {};
                     return;
                 };
                 writer.print("{{\"type\":\"observation\",\"request_id\":{d},\"width\":{d},\"height\":{d},\"frame_id\":{d},\"timestamp_ms\":{d}}}\n", .{
-                    request.request_id, self.observation.width, self.observation.height, self.observation.frame_id, self.observation.timestamp_ms,
+                    request.request_id, observation.width, observation.height, observation.frame_id, observation.timestamp_ms,
                 }) catch {};
             },
             .input => |input| {
@@ -1006,6 +1049,10 @@ pub const Runtime = struct {
                 defer self.input_mutex.unlock();
                 var parser = &(self.input_parser orelse return);
                 switch (input.payload) {
+                    .key => |key| parser.injectKey(key) catch |err| {
+                        log.warn("batch key inject failed: {any}", .{err});
+                        return;
+                    },
                     .terminal_bytes => |bytes| {
                         parser.feed(bytes) catch |err| {
                             log.warn("batch input parse failed: {any}", .{err});
@@ -1028,6 +1075,7 @@ pub const Runtime = struct {
                 if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             },
             .detach => {
+                self.placeholder_scene.valid = false;
                 self.detachBatchWindow(sink, "main");
             },
             .shutdown => {
@@ -1109,7 +1157,7 @@ pub const Runtime = struct {
             translated.tty_rect.row += rect.row - 1;
             layout.addRegion(translated);
         }
-        if (layout.len == 0) {
+        if (layout.len == 0 or sink.placeholder != null) {
             layout.setSingleSdlRegion(.{
                 .kind = .sdl_window,
                 .tty_rect = .{ .col = rect.col, .row = rect.row, .w = rect.cols, .h = rect.rows },
@@ -1123,6 +1171,7 @@ pub const Runtime = struct {
             .w = self.input_window_w,
             .h = self.input_window_h,
             .layout = layout,
+            .source_px = if (self.last_batch_presentation_status) |status| status.source_px else null,
         });
     }
 
@@ -1238,6 +1287,32 @@ pub const Runtime = struct {
         }
         self.maybeCompactQueue();
         return cmd;
+    }
+
+    pub fn noteRendererOutputSize(self: *Runtime, renderer: core.CoreHandle, w: i32, h: i32) void {
+        if (renderer == 0 or w <= 0 or h <= 0) return;
+        const size = PixelSize{ .w = w, .h = h };
+        self.queue_mutex.lock();
+        if (self.renderer_output_sizes.get(renderer)) |previous| {
+            if (std.meta.eql(previous, size)) {
+                self.queue_mutex.unlock();
+                return;
+            }
+        }
+        self.renderer_output_sizes.put(self.allocator, renderer, size) catch {};
+        self.queue_mutex.unlock();
+        log.debug("renderer output size renderer={x} pixels={d}x{d}", .{ renderer, w, h });
+        const cmd = Command{ .renderer_output_size = .{ .renderer = renderer, .w = w, .h = h } };
+        switch (self.intercept_mode) {
+            .sync_compose => core_dispatch.handleCommand(self, cmd),
+            .queued_replay => self.enqueueCommand(cmd),
+        }
+    }
+
+    pub fn forgetRendererOutputSize(self: *Runtime, renderer: core.CoreHandle) void {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        _ = self.renderer_output_sizes.remove(renderer);
     }
 
     pub fn acquirePayloadBuffer(self: *Runtime, len: usize) ![]u8 {
@@ -2363,4 +2438,97 @@ test "runtime input target includes latest presentation layout" {
     try std.testing.expectEqual(@as(i32, 320), target.w);
     try std.testing.expectEqual(@as(i32, 240), target.h);
     try std.testing.expectEqual(presentation_layout_mod.Point{ .x = 0, .y = 0 }, target.layout.mapCellToSdl(11, 6).?);
+}
+
+test "placeholder runtime composes scenes and resizes without uploading or deleting" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.processBatchControlLine(
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":60,"rows":20}}
+    );
+    const renderer: core.CoreHandle = 0x7799;
+    runtime.frame_builder.onCreateWindow(0x6699, 2, 2);
+    runtime.createRenderer(0x6699, renderer);
+    runtime.frame_builder.onRenderClear(renderer);
+    runtime.renderBatchPresent(renderer);
+    setNonblocking(pipe[0]);
+    var buf: [8192]u8 = undefined;
+    var n = try std.posix.read(pipe[0], &buf);
+    var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+    const first = lines.next().?;
+    var batch = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first, .{});
+    defer batch.deinit();
+    const groups = batch.value.object.get("groups").?.object;
+    try std.testing.expectEqual(@as(usize, 1), groups.get("uploads").?.array.items.len);
+    const placement = groups.get("placements").?.array.items[0].string;
+    try std.testing.expectEqualStrings("\x1b_Ga=p,U=1,i=777,p=1,c=60,r=20,q=2;\x1b\\", placement);
+    try std.testing.expect(std.mem.indexOf(u8, groups.get("uploads").?.array.items[0].string, "s=2,v=2,i=777") != null);
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","placeholder":{"image_id":777,"cols":40,"rows":12}}
+    );
+    n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=t") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=d") == null);
+    // A terminal clear can discard image data while the app is stationary.
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","placeholder":{"image_id":777,"cols":40,"rows":12},"refresh_placements":true}
+    );
+    n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a=t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "c=40,r=12") != null);
+    runtime.processBatchControlLine(
+        \\{"type":"viewport","window_id":"main","placeholder":{"image_id":778,"cols":40,"rows":12}}
+    );
+    try std.testing.expectEqual(@as(u32, 777), runtime.batch_sink.?.placeholder.?.image_id);
+    runtime.processBatchControlLine("{\"type\":\"detach\",\"window_id\":\"main\"}");
+    n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "d=I,i=777") != null);
+    try std.testing.expect(!runtime.batch_sink.?.isAttached());
+}
+
+test "placeholder input maps the whole local grid independently of scene layout" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    runtime.input_enabled = true;
+    runtime.input_parser = input_mod.TerminalInputParser.init(runtime.allocator);
+    runtime.input_window_w = 800;
+    runtime.input_window_h = 400;
+    var sink = RenderBatchSink.init(runtime.allocator, "main");
+    defer sink.deinit();
+    sink.placeholder = .{ .image_id = 42, .cols = 40, .rows = 10 };
+    sink.attach(sink.placeholder.?.localRect());
+    var unrelated = presentation_layout_mod.PresentationLayout{};
+    unrelated.setSingleSdlRegion(.{ .kind = .sdl_window, .tty_rect = .{ .col = 8, .row = 3, .w = 10, .h = 4 }, .sdl_rect = .{ .x = 0, .y = 0, .w = 800, .h = 400 }, .z = 0 });
+    runtime.updateBatchInputTargetFromLayout(&sink, unrelated);
+    const target = runtime.input_parser.?.target;
+    try std.testing.expectEqual(presentation_layout_mod.Point{ .x = 0, .y = 0 }, target.layout.mapCellToSdl(1, 1).?);
+    try std.testing.expect(target.layout.mapCellToSdl(40, 10) != null);
+}
+
+test "placeholder presentation uses target pixels without changing source coordinates" {
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    const pipe = try std.posix.pipe();
+    defer std.posix.close(pipe[0]);
+    runtime.active = true;
+    runtime.batch_writer = .{ .handle = pipe[1] };
+    runtime.batch_sink = RenderBatchSink.init(runtime.allocator, "main");
+    runtime.processBatchControlLine(
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":2,"rows":2,"target_px":{"w":2,"h":2}}}
+    );
+    runtime.frame_builder.onCreateWindow(0x6699, 4, 4);
+    runtime.createRenderer(0x6699, 0x7799);
+    runtime.frame_builder.onRenderClear(0x7799);
+    runtime.renderBatchPresent(0x7799);
+    setNonblocking(pipe[0]);
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(pipe[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "s=2,v=2,i=777") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
 }

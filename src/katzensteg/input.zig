@@ -20,6 +20,7 @@ pub const Target = struct {
     w: i32 = 640,
     h: i32 = 480,
     layout: presentation_layout.PresentationLayout = .{},
+    source_px: ?render_batch_protocol.SourcePixels = null,
 };
 
 pub const KeyEvent = struct {
@@ -161,6 +162,7 @@ pub const TerminalInputParser = struct {
             .w = @max(1, target.w),
             .h = @max(1, target.h),
             .layout = target.layout,
+            .source_px = target.source_px,
         };
     }
 
@@ -410,15 +412,18 @@ pub const TerminalInputParser = struct {
     }
 
     pub fn injectSourcePointer(self: *TerminalInputParser, event: render_batch_protocol.SourcePointer) !void {
-        // Source-image input is independent of terminal placement and clipping.
-        if (event.kind == .pointerup and (event.width != self.target.w or event.height != self.target.h)) {
+        // Image pixels and SDL window coordinates can differ on a scaled display.
+        const source = self.target.source_px orelse render_batch_protocol.SourcePixels{ .w = self.target.w, .h = self.target.h };
+        if (event.kind == .pointerup and (event.width != source.w or event.height != source.h)) {
             // A resize must not prevent a controller from releasing a held button.
             try self.injectPointerAt(.{ .kind = .pointerup, .row = 1, .col = 1, .button = event.button, .buttons = event.buttons }, self.last_mouse_x, self.last_mouse_y);
             return;
         }
-        if (event.width != self.target.w or event.height != self.target.h) return error.StaleSourceSize;
-        if (event.x < 0 or event.y < 0 or event.x >= self.target.w or event.y >= self.target.h) return error.InvalidSourcePoint;
-        try self.injectPointerAt(.{ .kind = event.kind, .row = 1, .col = 1, .button = event.button, .buttons = event.buttons }, event.x, event.y);
+        if (event.width != source.w or event.height != source.h) return error.StaleSourceSize;
+        if (event.x < 0 or event.y < 0 or event.x >= source.w or event.y >= source.h) return error.InvalidSourcePoint;
+        const x: i32 = @intCast(@divTrunc(@as(i64, event.x) * self.target.w, source.w));
+        const y: i32 = @intCast(@divTrunc(@as(i64, event.y) * self.target.h, source.h));
+        try self.injectPointerAt(.{ .kind = event.kind, .row = 1, .col = 1, .button = event.button, .buttons = event.buttons }, x, y);
     }
 
     fn injectPointerAt(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload, x: i32, y: i32) !void {
@@ -520,6 +525,51 @@ pub const TerminalInputParser = struct {
         self.last_mouse_x = x;
         self.last_mouse_y = y;
         self.mouse_activity = true;
+    }
+
+    pub fn injectKey(self: *TerminalInputParser, event: render_batch_protocol.KeyInput) !void {
+        if (!event.valid()) return error.InvalidKey;
+        const key_input = @import("key_input.zig");
+        var text: []const u8 = "";
+        var shifted: [1]u8 = undefined;
+        var key: KeyEvent = undefined;
+        if (key_input.namedScancode(event.key)) |scan| {
+            const code: i32 = switch (scan) {
+                40 => 13,
+                41 => 27,
+                42 => 8,
+                43 => 9,
+                44 => 32,
+                76 => 127,
+                else => sdlKeycodeFromScancode(scan),
+            };
+            key = .{ .keycode = code, .scancode = scan };
+            if (scan == 44) text = " ";
+        } else {
+            text = event.key;
+            if (event.key.len == 1) {
+                var char = event.key[0];
+                if (event.shift and std.ascii.isLower(char)) char = std.ascii.toUpper(char);
+                shifted[0] = char;
+                text = &shifted;
+                key = asciiKey(char);
+            } else {
+                key = .{ .keycode = @intCast(try std.unicode.utf8Decode(event.key)), .scancode = 0 };
+            }
+        }
+        if (event.shift) key.mods |= 0x1;
+        if (event.ctrl) key.mods |= 0x40;
+        if (event.alt) key.mods |= 0x100;
+        if (event.meta) key.mods |= 0x400;
+        if (event.action == .tap) {
+            if (text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.emitTextAndKey(text, key) else try self.emitKey(key);
+        } else {
+            const index: usize = @intCast(key.scancode);
+            self.keyboard_state[index] = if (event.action == .down) 1 else 0;
+            self.keyboard_deadline_ns[index] = if (event.action == .down) std.math.maxInt(i128) else 0;
+            try self.queue.append(self.allocator, if (event.action == .down) .{ .key_down = key } else .{ .key_up = key });
+            if (event.action == .down and text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.queue.append(self.allocator, .{ .text = TextEvent.init(text) });
+        }
     }
 
     fn emitTextAndKey(self: *TerminalInputParser, bytes: []const u8, key: KeyEvent) !void {
@@ -1198,4 +1248,37 @@ test "source pointer uses image pixels and shares mouse state with terminal inpu
     try std.testing.expect(!parser.pop().?.mouse_button.pressed);
     try std.testing.expectEqual(@as(u32, 0), parser.mouseState().buttons);
     try std.testing.expectError(error.StaleSourceSize, parser.injectSourcePointer(.{ .x = 1, .y = 1, .width = 320, .height = 200, .kind = .pointermove }));
+}
+
+test "source image pixels map into logical window input coordinates" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .w = 200, .h = 100, .source_px = .{ .w = 400, .h = 200 } });
+    try parser.injectSourcePointer(.{ .x = 300, .y = 100, .width = 400, .height = 200, .kind = .pointermove });
+    const event = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 150), event.x);
+    try std.testing.expectEqual(@as(i32, 50), event.y);
+    try std.testing.expectError(error.StaleSourceSize, parser.injectSourcePointer(.{ .x = 10, .y = 10, .width = 200, .height = 100, .kind = .pointermove }));
+}
+
+test "structured keys share tap events and polling state and support held keys" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.injectKey(.{ .key = "a", .shift = true });
+    try std.testing.expectEqual(@as(u16, 3), parser.pop().?.key_down.mods);
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).text, std.meta.activeTag(parser.pop().?));
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).key_up, std.meta.activeTag(parser.pop().?));
+    try parser.injectKey(.{ .key = "up", .action = .down, .ctrl = true });
+    const down = parser.pop().?.key_down;
+    try std.testing.expectEqual(@as(i32, 82), down.scancode);
+    try std.testing.expectEqual(@as(u16, 0x40), down.mods);
+    var state: [sdl_num_scancodes]u8 = undefined;
+    parser.copyKeyboardState(&state, std.time.nanoTimestamp() + 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(u8, 1), state[82]);
+    try parser.injectKey(.{ .key = "up", .action = .up });
+    try std.testing.expectEqual(@as(i32, 82), parser.pop().?.key_up.scancode);
+    parser.copyKeyboardState(&state, std.time.nanoTimestamp());
+    try std.testing.expectEqual(@as(u8, 0), state[82]);
+    try std.testing.expectError(error.InvalidKey, parser.injectKey(.{ .key = "not-a-key" }));
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
 }

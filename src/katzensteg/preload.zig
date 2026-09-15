@@ -439,9 +439,9 @@ pub export fn ks_SDL_Quit() callconv(.c) void {
 }
 
 pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Window {
-    const window = real_sdl.SDL_CreateWindow(title, x, y, w, h, flags);
-    const tracked_windows = noteTrackedSdlWindowCreate(window);
     const rt = runtime.get();
+    const window = real_sdl.SDL_CreateWindow(title, x, y, w, h, realWindowCreateFlags(flags, rt.realWindowCreateAction()));
+    const tracked_windows = noteTrackedSdlWindowCreate(window);
     if (window) |win| {
         const window_id = real_sdl.SDL_GetWindowID(win);
         rt.noteSdlWindowId(window_id, sdl_adapter.handleFromPtr(window));
@@ -454,6 +454,21 @@ pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c
     }
     applyRealWindowAction(rt.realWindowCreateAction(), window);
     return window;
+}
+
+fn realWindowCreateFlags(flags: sdl.Uint32, action: window_policy.RealWindowAction) sdl.Uint32 {
+    // Avoid briefly showing a host-owned window. On Cocoa, ordering the last
+    // visible window out can also trigger the application's termination policy.
+    const shown: sdl.Uint32 = 0x4;
+    const hidden: sdl.Uint32 = 0x8;
+    return if (action == .hide) (flags & ~shown) | hidden else flags;
+}
+
+test "hidden real windows are created hidden without changing other flags" {
+    try std.testing.expectEqual(@as(sdl.Uint32, 0x28), realWindowCreateFlags(0x24, .hide));
+    try std.testing.expectEqual(@as(sdl.Uint32, 0x28), realWindowCreateFlags(0x28, .hide));
+    try std.testing.expectEqual(@as(sdl.Uint32, 0x24), realWindowCreateFlags(0x24, .show));
+    try std.testing.expectEqual(@as(sdl.Uint32, 0x24), realWindowCreateFlags(0x24, .minimize));
 }
 
 pub export fn ks_SDL_SetWindowSize(window: ?*sdl.SDL_Window, w: c_int, h: c_int) callconv(.c) void {
@@ -534,7 +549,17 @@ pub export fn ks_SDL_CreateRenderer(window: ?*sdl.SDL_Window, index: c_int, flag
         .sync_compose => sink.onCreateRenderer(rt, window, renderer),
         .queued_replay => sink.dispatchCommand(rt, .{ .create_renderer = .{ .window = sdl_adapter.handleFromPtr(window), .renderer = sdl_adapter.handleFromPtr(renderer) } }),
     }
+    refreshRendererOutputSize(rt, renderer);
     return renderer;
+}
+
+fn refreshRendererOutputSize(rt: *runtime.Runtime, renderer: ?*sdl.SDL_Renderer) void {
+    if (renderer == null) return;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    if (real_sdl.SDL_GetRendererOutputSize(renderer, &w, &h) == 0) {
+        rt.noteRendererOutputSize(sdl_adapter.handleFromPtr(renderer), w, h);
+    }
 }
 
 pub export fn ks_SDL_GetRendererInfo(renderer: ?*sdl.SDL_Renderer, info: ?*sdl.SDL_RendererInfo) callconv(.c) c_int {
@@ -554,6 +579,7 @@ pub export fn ks_SDL_GetRendererInfo(renderer: ?*sdl.SDL_Renderer, info: ?*sdl.S
 
 pub export fn ks_SDL_DestroyRenderer(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
     const rt = runtime.get();
+    rt.forgetRendererOutputSize(sdl_adapter.handleFromPtr(renderer));
     switch (rt.intercept_mode) {
         .sync_compose => sink.onDestroyRenderer(rt, renderer),
         .queued_replay => sink.dispatchCommand(rt, .{ .destroy_renderer = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
@@ -695,6 +721,7 @@ pub export fn ks_SDL_SetRenderDrawColor(renderer: ?*sdl.SDL_Renderer, r: sdl.Uin
 
 pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_int {
     const rt = runtime.get();
+    refreshRendererOutputSize(rt, renderer);
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderClear(renderer) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_clear, "SDL_RenderClear renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
@@ -710,6 +737,7 @@ pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) c_in
 
 pub export fn ks_SDL_RenderCopy(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.SDL_Texture, srcrect: ?*const sdl.SDL_Rect, dstrect: ?*const sdl.SDL_Rect) callconv(.c) c_int {
     const rt = runtime.get();
+    refreshRendererOutputSize(rt, renderer);
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderCopy(renderer, texture, srcrect, dstrect) else 0;
     if (rc == 0) {
         traceLimited(rt, &trace_render_copy, "SDL_RenderCopy renderer={x} texture={x} src={s} dst={s}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, if (srcrect == null) "null" else "set", if (dstrect == null) "null" else "set" });
@@ -799,6 +827,7 @@ pub export fn ks_SDL_RenderSetViewport(renderer: ?*sdl.SDL_Renderer, rect: ?*con
     const rc = real_sdl.SDL_RenderSetViewport(renderer, rect);
     if (rc == 0) {
         const rt = runtime.get();
+        refreshRendererOutputSize(rt, renderer);
         switch (rt.intercept_mode) {
             .sync_compose => sink.onRenderSetViewport(rt, renderer, rect),
             .queued_replay => sink.dispatchCommand(rt, .{ .render_set_viewport = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .rect = sdl_adapter.rectFromSdl(rect) } }),
@@ -821,6 +850,7 @@ pub export fn ks_SDL_RenderSetClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*con
 
 pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
     const rt = runtime.get();
+    refreshRendererOutputSize(rt, renderer);
     traceLimited(rt, &trace_render_present, "SDL_RenderPresent renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
     if (rt.terminalRenderingEnabled()) {
         switch (rt.intercept_mode) {
@@ -1083,7 +1113,18 @@ fn ensureGlPboState(rt: *runtime.Runtime, len: usize) bool {
 }
 
 pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
-    const rt = runtime.get();
+    return pollForEvent(runtime.get(), event);
+}
+
+pub export fn ks_SDL_WaitEvent(event: ?*sdl.SDL_Event) callconv(.c) c_int {
+    return waitForEvent(runtime.get(), event, -1);
+}
+
+pub export fn ks_SDL_WaitEventTimeout(event: ?*sdl.SDL_Event, timeout: c_int) callconv(.c) c_int {
+    return waitForEvent(runtime.get(), event, timeout);
+}
+
+fn pollForEvent(rt: *runtime.Runtime, event: ?*sdl.SDL_Event) c_int {
     rt.pollTerminalInput();
     if (realMouseFocused()) {
         rt.claimRealWindowMouse();
@@ -1393,4 +1434,105 @@ test "SDL close diagnostics track successful window creates and destroys" {
     try std.testing.expectEqual(@as(i32, 1), nextTrackedSdlWindowCountAfterDestroy(@ptrFromInt(0x1000), 2));
     try std.testing.expectEqual(@as(i32, 0), nextTrackedSdlWindowCountAfterDestroy(@ptrFromInt(0x1000), 0));
     try std.testing.expectEqual(@as(i32, 2), nextTrackedSdlWindowCountAfterDestroy(null, 2));
+}
+
+fn waitForEvent(rt: *runtime.Runtime, event: ?*sdl.SDL_Event, timeout: c_int) c_int {
+    if (!rt.input_enabled) return real_sdl.SDL_WaitEventTimeout(event, timeout);
+    const start = real_sdl.SDL_GetTicks();
+    while (true) {
+        if (pollForEvent(rt, event) != 0) return 1;
+        var slice: c_int = 8;
+        if (timeout >= 0) {
+            const elapsed = real_sdl.SDL_GetTicks() -% start;
+            if (elapsed >= @as(u32, @intCast(timeout))) return 0;
+            slice = @intCast(@min(@as(u32, @intCast(slice)), @as(u32, @intCast(timeout)) - elapsed));
+        }
+        // Native waits keep OS input and application-defined events responsive.
+        // Short slices also admit terminal/host input without a second SDL queue.
+        real_sdl.SDL_ClearError();
+        if (real_sdl.SDL_WaitEventTimeout(event, slice) == 0) {
+            if (real_sdl.SDL_GetError()[0] != 0) return 0;
+            continue;
+        }
+        if (event) |out| {
+            if (sdl_input.shouldSuppressEvent(rt, out)) continue;
+            noteDeliveredWindowSizeEvent(rt, out);
+            sdl_input.noteRealEvent(rt, out);
+            traceSdlEvent("SDL_WaitEvent delivered", out, false);
+        }
+        return 1;
+    }
+}
+
+test "SDL wait returns canonical terminal input without native activity" {
+    try std.testing.expectEqual(@as(c_int, 0), sdl.SDL_Init(sdl.SDL_INIT_EVENTS));
+    defer sdl.SDL_Quit();
+    var rt = runtime.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_parser = @import("input.zig").TerminalInputParser.init(rt.allocator);
+    try rt.input_parser.?.feed("a");
+    var event: sdl.SDL_Event = undefined;
+    try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, &event, 0));
+    try std.testing.expectEqual(sdl.SDL_KEYDOWN, event.type);
+}
+
+test "SDL wait null event peeks and preserves native application events" {
+    try std.testing.expectEqual(@as(c_int, 0), sdl.SDL_Init(sdl.SDL_INIT_EVENTS));
+    defer sdl.SDL_Quit();
+    var rt = runtime.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_parser = @import("input.zig").TerminalInputParser.init(rt.allocator);
+    try rt.input_parser.?.feed("a");
+    const pending = rt.input_parser.?.pendingCount();
+    try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, null, 0));
+    try std.testing.expectEqual(pending, rt.input_parser.?.pendingCount());
+    var event: sdl.SDL_Event = undefined;
+    while (rt.input_parser.?.pendingCount() > 0) {
+        try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, &event, 0));
+    }
+    var native = std.mem.zeroes(sdl.SDL_Event);
+    native.type = 0x8000;
+    native.padding[20] = 0xa5;
+    try std.testing.expectEqual(@as(c_int, 1), sdl.SDL_PushEvent(&native));
+    try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, null, 0));
+    try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, &event, 0));
+    try std.testing.expectEqual(@as(u32, 0x8000), event.type);
+    try std.testing.expectEqual(@as(u8, 0xa5), event.padding[20]);
+}
+
+test "SDL wait wakes for delayed terminal and native input and respects timeout" {
+    try std.testing.expectEqual(@as(c_int, 0), sdl.SDL_Init(sdl.SDL_INIT_EVENTS));
+    defer sdl.SDL_Quit();
+    var rt = runtime.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_parser = @import("input.zig").TerminalInputParser.init(rt.allocator);
+    const Sender = struct {
+        fn run(target: *runtime.Runtime, native: bool) void {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            if (native) {
+                var event = std.mem.zeroes(sdl.SDL_Event);
+                event.type = 0x8000;
+                std.debug.assert(sdl.SDL_PushEvent(&event) == 1);
+            } else {
+                target.input_mutex.lock();
+                defer target.input_mutex.unlock();
+                target.input_parser.?.feed("\x1b[<35;5;6M") catch unreachable;
+            }
+        }
+    };
+    for ([_]bool{ false, true }) |native| {
+        const thread = try std.Thread.spawn(.{}, Sender.run, .{ &rt, native });
+        defer thread.join();
+        var event: sdl.SDL_Event = undefined;
+        // Negative timeout is SDL_WaitEvent's indefinite-wait behavior.
+        try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, &event, -1));
+        try std.testing.expectEqual(if (native) @as(u32, 0x8000) else sdl.SDL_MOUSEMOTION, event.type);
+    }
+    var timer = try std.time.Timer.start();
+    var event: sdl.SDL_Event = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), waitForEvent(&rt, &event, 25));
+    try std.testing.expect(timer.read() >= 20 * std.time.ns_per_ms);
 }

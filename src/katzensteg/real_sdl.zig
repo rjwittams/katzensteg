@@ -173,3 +173,12 @@ pub fn realDlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque {
     if (use_c_real) return ks_real_dlopen(path, mode);
     return dlopen(path, mode);
 }
+
+extern fn ks_real_SDL_GetRendererOutputSize(renderer: ?*sdl.SDL_Renderer, w: *c_int, h: *c_int) c_int;
+pub const SDL_GetRendererOutputSize = if (use_c_real) ks_real_SDL_GetRendererOutputSize else sdl.SDL_GetRendererOutputSize;
+
+extern fn ks_real_SDL_WaitEventTimeout(event: ?*sdl.SDL_Event, timeout: c_int) c_int;
+pub const SDL_WaitEventTimeout = if (use_c_real) ks_real_SDL_WaitEventTimeout else sdl.SDL_WaitEventTimeout;
+
+extern fn ks_real_SDL_ClearError() void;
+pub const SDL_ClearError = if (use_c_real) ks_real_SDL_ClearError else sdl.SDL_ClearError;

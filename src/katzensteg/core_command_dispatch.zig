@@ -68,6 +68,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
         .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
         .window_size => |c| rt.frame_builder.onWindowSize(c.window, c.w, c.h),
+        .renderer_output_size => |c| rt.frame_builder.onRendererOutputSize(c.renderer, c.w, c.h),
         .create_renderer => |c| rt.createRenderer(c.window, c.renderer),
         .destroy_renderer => |c| rt.destroyRenderer(c.renderer),
         .create_texture => |c| rt.frame_builder.onCreateTexture(c.texture, c.format, c.w, c.h),

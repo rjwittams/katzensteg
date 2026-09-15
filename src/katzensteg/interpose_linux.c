@@ -56,6 +56,8 @@ extern void ks_SDL_GL_SwapWindow(struct SDL_Window *);
 extern int ks_SDL_Vulkan_LoadLibrary(const char *);
 extern void ks_SDL_PumpEvents(void);
 extern int ks_SDL_PollEvent(union SDL_Event *);
+extern int ks_SDL_WaitEvent(union SDL_Event *);
+extern int ks_SDL_WaitEventTimeout(union SDL_Event *, int);
 extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern const unsigned char *ks_SDL_GetKeyboardState(int *);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
@@ -124,6 +126,8 @@ void SDL_GL_SwapWindow(struct SDL_Window *window) { ks_SDL_GL_SwapWindow(window)
 int SDL_Vulkan_LoadLibrary(const char *path) { return ks_SDL_Vulkan_LoadLibrary(path); }
 void SDL_PumpEvents(void) { ks_SDL_PumpEvents(); }
 int SDL_PollEvent(union SDL_Event *event) { return ks_SDL_PollEvent(event); }
+int SDL_WaitEvent(union SDL_Event *event) { return ks_SDL_WaitEvent(event); }
+int SDL_WaitEventTimeout(union SDL_Event *event, int timeout) { return ks_SDL_WaitEventTimeout(event, timeout); }
 int SDL_PeepEvents(union SDL_Event *events, int numevents, int action, unsigned int minType, unsigned int maxType) { return ks_SDL_PeepEvents(events, numevents, action, minType, maxType); }
 const unsigned char *SDL_GetKeyboardState(int *numkeys) { return ks_SDL_GetKeyboardState(numkeys); }
 unsigned int SDL_GetMouseState(int *x, int *y) { return ks_SDL_GetMouseState(x, y); }

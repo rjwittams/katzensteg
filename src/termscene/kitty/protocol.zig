@@ -75,6 +75,16 @@ pub fn writeQueryFileRgbaRegion(out: anytype, path: []const u8, file_offset: u64
     try writeEncodedPayloadApc(out, prefix, path);
 }
 
+// Virtual placement: no cursor addressing, source crop, offset, or z-order.
+// The placement id matters: a placement without one is anonymous, and terminals
+// keep every anonymous placement (ghostty assigns each an internal id), so a
+// re-place after a grid change adds a second placement and placeholder cells may
+// keep resolving to the old grid. With the same (image id, placement id) pair
+// the new placement replaces the old one.
+pub fn writeVirtualPlace(out: anytype, image_id: u32, placement_id: u32, cols: i32, rows: i32) !void {
+    try out.print("\x1b_Ga=p,U=1,i={d},p={d},c={d},r={d},q=2;\x1b\\", .{ image_id, placement_id, cols, rows });
+}
+
 /// Create or replace a placement for a specific (image_id, placement_id) pair.
 /// Spec mapping: sending a=p with the same image id and placement id replaces the prior placement.
 pub fn writePlace(out: anytype, row: i32, col: i32, placement: Placement) !void {

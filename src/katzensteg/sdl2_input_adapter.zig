@@ -11,6 +11,7 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
         var parser = &(rt.input_parser orelse break :blk false);
+        if (event == null) break :blk parser.pendingCount() > 0;
         const input_event = parser.pop() orelse break :blk false;
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {

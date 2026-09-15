@@ -53,6 +53,8 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_Vulkan_LoadLibrary",
     "SDL_PumpEvents",
     "SDL_PollEvent",
+    "SDL_WaitEvent",
+    "SDL_WaitEventTimeout",
     "SDL_PeepEvents",
     "SDL_GetKeyboardState",
     "SDL_GetMouseState",

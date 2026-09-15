@@ -193,8 +193,11 @@ const PresentDebugSignature = struct {
 
 const RendererState = struct {
     window: core.CoreHandle = 0,
-    window_w: i32,
-    window_h: i32,
+    output_w: i32,
+    output_h: i32,
+    logical_w: i32,
+    logical_h: i32,
+    output_size_known: bool = false,
     viewport: core.CoreRect,
     clip_rect: ?core.CoreRect = null,
     draw_color: [4]u8 = .{ 0, 0, 0, 255 },
@@ -219,11 +222,13 @@ const RendererState = struct {
     last_debug_present_signature: ?PresentDebugSignature = null,
     logged_debug_composite_unchanged: bool = false,
 
-    fn init(allocator: std.mem.Allocator, window_w: i32, window_h: i32) RendererState {
+    fn init(allocator: std.mem.Allocator, output_w: i32, output_h: i32) RendererState {
         return .{
-            .window_w = window_w,
-            .window_h = window_h,
-            .viewport = .{ .x = 0, .y = 0, .w = window_w, .h = window_h },
+            .output_w = output_w,
+            .output_h = output_h,
+            .logical_w = output_w,
+            .logical_h = output_h,
+            .viewport = .{ .x = 0, .y = 0, .w = output_w, .h = output_h },
             .scene_batch_placements = std.ArrayList(SceneBatchPlacement).empty,
             .placement_audit_live = std.AutoHashMap(PlacementKey, void).init(allocator),
             .composite_tiles = std.ArrayList(CompositeTileState).empty,
@@ -244,12 +249,12 @@ const RendererState = struct {
         self.lines.deinit(allocator);
     }
 
-    fn resizeWindow(self: *RendererState, w: i32, h: i32) void {
+    fn resizeOutput(self: *RendererState, w: i32, h: i32) void {
         const new_w = @max(1, w);
         const new_h = @max(1, h);
-        const old_full_viewport = self.viewport.x == 0 and self.viewport.y == 0 and self.viewport.w == self.window_w and self.viewport.h == self.window_h;
-        self.window_w = new_w;
-        self.window_h = new_h;
+        const old_full_viewport = self.viewport.x == 0 and self.viewport.y == 0 and self.viewport.w == self.output_w and self.viewport.h == self.output_h;
+        self.output_w = new_w;
+        self.output_h = new_h;
         if (old_full_viewport) self.viewport = .{ .x = 0, .y = 0, .w = new_w, .h = new_h };
         // The next composite present reallocates composite_rgba if needed; the
         // previous-frame cache must be invalidated immediately for full upload.
@@ -396,6 +401,138 @@ const Stats = struct {
     fill_ops: u64 = 0,
     line_ops: u64 = 0,
     last_report_ns: i128 = 0,
+};
+
+// Owns the last completed scene. Display and observation can be composed at
+// different resolutions without retaining a renderer-sized composite each frame.
+pub const PresentationSnapshot = struct {
+    const Texture = struct {
+        width: i32,
+        height: i32,
+        used: bool = false,
+        pixels: std.ArrayList(u8) = .empty,
+    };
+    source: render_batch_protocol.SourcePixels = .{ .w = 0, .h = 0 },
+    valid: bool = false,
+    frame_id: u64 = 0,
+    timestamp_ms: i64 = 0,
+    clear_color: [4]u8 = .{ 0, 0, 0, 255 },
+    copies: std.ArrayList(RenderCopyOp) = .empty,
+    fills: std.ArrayList(FillRectOp) = .empty,
+    textures: std.AutoArrayHashMapUnmanaged(usize, Texture) = .{},
+    cursor_image: ?cursor_mod.Image = null,
+    cursor_position: cursor_mod.Position = .{ .x = 0, .y = 0 },
+    display_pixels: std.ArrayList(u8) = .empty,
+    observed: @import("frame_observation.zig").FrameObservation = .{},
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.textures.values()) |*texture| texture.pixels.deinit(allocator);
+        self.textures.deinit(allocator);
+        self.copies.deinit(allocator);
+        self.fills.deinit(allocator);
+        self.display_pixels.deinit(allocator);
+        self.observed.deinit(allocator);
+        if (self.cursor_image) |*image| image.deinit(allocator);
+        self.* = .{};
+    }
+
+    pub fn capture(self: *@This(), builder: *FrameBuilder, renderer: core.CoreHandle, cursor: ?cursor_mod.Snapshot) !void {
+        const allocator = builder.allocator;
+        const state = builder.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
+        self.valid = false;
+        self.source = .{ .w = state.output_w, .h = state.output_h };
+        if (self.source.w <= 0 or self.source.h <= 0) return error.InvalidFrame;
+        self.clear_color = state.clear_color;
+        self.copies.clearRetainingCapacity();
+        self.fills.clearRetainingCapacity();
+        for (self.textures.values()) |*texture| texture.used = false;
+        const start = builder.findLastFramebufferOverwriteCopy(state) orelse blk: {
+            try self.fills.appendSlice(allocator, state.fills.items);
+            for (state.lines.items) |line| try self.fills.append(allocator, .{
+                .rect = .{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) },
+                .color = line.color,
+            });
+            break :blk 0;
+        };
+        for (state.copies.items[start..]) |copy| {
+            const original = builder.textures.get(copy.texture_key) orelse continue;
+            const pixels = original.base_rgba orelse continue;
+            const entry = try self.textures.getOrPut(allocator, copy.texture_key);
+            if (!entry.found_existing) entry.value_ptr.* = .{ .width = original.w, .height = original.h };
+            const texture = entry.value_ptr;
+            if (!texture.used) {
+                try texture.pixels.resize(allocator, pixels.len);
+                @memcpy(texture.pixels.items, pixels);
+                texture.width = original.w;
+                texture.height = original.h;
+                texture.used = true;
+            }
+            try self.copies.append(allocator, copy);
+        }
+        var i: usize = 0;
+        while (i < self.textures.count()) {
+            if (!self.textures.values()[i].used) {
+                self.textures.values()[i].pixels.deinit(allocator);
+                self.textures.swapRemoveAt(i);
+            } else i += 1;
+        }
+        if (self.cursor_image) |*image| image.deinit(allocator);
+        self.cursor_image = null;
+        if (FrameBuilder.rendererCursor(state, cursor)) |snapshot| {
+            var image = snapshot.image.*;
+            image.rgba = try allocator.dupe(u8, image.rgba);
+            self.cursor_image = image;
+            self.cursor_position = snapshot.position;
+        }
+        self.frame_id += 1;
+        self.timestamp_ms = std.time.milliTimestamp();
+        self.valid = true;
+    }
+
+    fn mapRect(self: *const @This(), rect: core.CoreRect, size: render_batch_protocol.SourcePixels) core.CoreRect {
+        const left = @divFloor(@as(i64, rect.x) * size.w, self.source.w);
+        const top = @divFloor(@as(i64, rect.y) * size.h, self.source.h);
+        const right = @divFloor((@as(i64, rect.x) + rect.w) * size.w, self.source.w);
+        const bottom = @divFloor((@as(i64, rect.y) + rect.h) * size.h, self.source.h);
+        return .{ .x = @intCast(left), .y = @intCast(top), .w = @intCast(right - left), .h = @intCast(bottom - top) };
+    }
+
+    fn compose(self: *const @This(), allocator: std.mem.Allocator, size: render_batch_protocol.SourcePixels, pixels: *std.ArrayList(u8)) !void {
+        if (!self.valid) return error.NoFrame;
+        const bytes = @as(i64, size.w) * size.h * 4;
+        if (size.w <= 0 or size.h <= 0 or bytes > 64 * 1024 * 1024) return error.InvalidFrame;
+        try pixels.resize(allocator, @intCast(bytes));
+        FrameBuilder.clearFramebuffer(pixels.items, size.w, size.h, self.clear_color);
+        for (self.fills.items) |fill| FrameBuilder.compositeFill(pixels.items, size.w, size.h, self.mapRect(fill.rect, size), fill.color);
+        for (self.copies.items) |copy| {
+            const texture = self.textures.get(copy.texture_key) orelse continue;
+            const dest = self.mapRect(copy.dst, size);
+            if (dest.w <= 0 or dest.h <= 0) continue;
+            FrameBuilder.compositeCopy(pixels.items, size.w, size.h, texture.pixels.items, texture.width, texture.height, copy.base_opaque, copy.src, dest, copy.blend_mode, copy.color_mod, copy.alpha_mod);
+        }
+        if (self.cursor_image) |image| {
+            const dest = self.mapRect(.{ .x = self.cursor_position.x - image.hot_x, .y = self.cursor_position.y - image.hot_y, .w = image.width, .h = image.height }, size);
+            if (dest.w > 0 and dest.h > 0) FrameBuilder.compositeCopy(pixels.items, size.w, size.h, image.rgba, image.width, image.height, false, .{ .x = 0, .y = 0, .w = image.width, .h = image.height }, dest, .{ .semantic = .blend }, .{ 255, 255, 255 }, 255);
+        }
+    }
+
+    pub fn presentation(self: *@This(), allocator: std.mem.Allocator, target: render_batch_protocol.PlaceholderPresentation) !FramebufferJob {
+        const size = target.uploadSize(self.source);
+        try self.compose(allocator, size, &self.display_pixels);
+        return .{ .width = size.w, .height = size.h, .rgba = self.display_pixels.items, .owns_rgba = false };
+    }
+
+    pub fn observation(self: *@This(), allocator: std.mem.Allocator) !*@import("frame_observation.zig").FrameObservation {
+        if (!self.valid) return error.NoFrame;
+        if (self.observed.frame_id != self.frame_id) {
+            try self.compose(allocator, self.source, &self.observed.pixels);
+            self.observed.width = self.source.w;
+            self.observed.height = self.source.h;
+            self.observed.frame_id = self.frame_id;
+            self.observed.timestamp_ms = self.timestamp_ms;
+        }
+        return &self.observed;
+    }
 };
 
 pub const FrameBuilder = struct {
@@ -686,8 +823,19 @@ pub const FrameBuilder = struct {
         self.windows.put(window, .{ .w = w, .h = h }) catch {};
         var it = self.renderers.valueIterator();
         while (it.next()) |state| {
-            if (state.window == window) state.resizeWindow(w, h);
+            if (state.window == window) {
+                state.logical_w = w;
+                state.logical_h = h;
+                if (!state.output_size_known) state.resizeOutput(w, h);
+            }
         }
+    }
+
+    pub fn onRendererOutputSize(self: *FrameBuilder, renderer: core.CoreHandle, w: i32, h: i32) void {
+        if (w <= 0 or h <= 0) return;
+        const state = self.renderers.getPtr(renderer) orelse return;
+        state.output_size_known = true;
+        if (state.output_w != w or state.output_h != h) state.resizeOutput(w, h);
     }
 
     pub fn onDestroyRenderer(self: *FrameBuilder, renderer: core.CoreHandle) void {
@@ -743,9 +891,9 @@ pub const FrameBuilder = struct {
         };
         if (!result.found_existing) {
             result.value_ptr.* = RendererState.init(self.allocator, width, height);
-        } else if (result.value_ptr.window_w != width or result.value_ptr.window_h != height) {
-            result.value_ptr.window_w = width;
-            result.value_ptr.window_h = height;
+        } else if (result.value_ptr.output_w != width or result.value_ptr.output_h != height) {
+            result.value_ptr.output_w = width;
+            result.value_ptr.output_h = height;
             result.value_ptr.viewport = .{ .x = 0, .y = 0, .w = width, .h = height };
             if (result.value_ptr.composite_last_presented) |last| @memset(last, 0);
         }
@@ -1012,7 +1160,7 @@ pub const FrameBuilder = struct {
 
     pub fn onRenderSetViewport(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
         const state = self.renderers.getPtr(renderer) orelse return;
-        state.viewport = if (rect) |r| r.* else core.CoreRect{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h };
+        state.viewport = if (rect) |r| r.* else core.CoreRect{ .x = 0, .y = 0, .w = state.output_w, .h = state.output_h };
     }
 
     pub fn onRenderSetClipRect(self: *FrameBuilder, renderer: core.CoreHandle, rect: ?*const core.CoreRect) void {
@@ -1169,8 +1317,8 @@ pub const FrameBuilder = struct {
         const dst_rect = dst orelse &core.CoreRect{
             .x = 0,
             .y = 0,
-            .w = if (state.viewport.w > 0) state.viewport.w else state.window_w,
-            .h = if (state.viewport.h > 0) state.viewport.h else state.window_h,
+            .w = if (state.viewport.w > 0) state.viewport.w else state.output_w,
+            .h = if (state.viewport.h > 0) state.viewport.h else state.output_h,
         };
         if (dst == null) {
             logger.writeOnceScoped(.warn, .frame_builder, "null destination rect approximated to full viewport");
@@ -1210,8 +1358,8 @@ pub const FrameBuilder = struct {
         const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
         try self.buildCompositeFrame(logger, state);
         const rgba = state.composite_rgba orelse return error.MissingCompositeBuffer;
-        compositeCursor(rgba, state.window_w, state.window_h, cursor);
-        return .{ .width = state.window_w, .height = state.window_h, .rgba = rgba, .owns_rgba = false };
+        compositeCursor(rgba, state.output_w, state.output_h, rendererCursor(state, cursor));
+        return .{ .width = state.output_w, .height = state.output_h, .rgba = rgba, .owns_rgba = false };
     }
 
     pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool, cursor: ?cursor_mod.Snapshot) !PresentJob {
@@ -1226,8 +1374,8 @@ pub const FrameBuilder = struct {
         if (use_composite) {
             try @call(.never_inline, FrameBuilder.buildCompositeFrame, .{ self, logger, state });
             const buf = state.composite_rgba orelse return error.MissingCompositeBuffer;
-            compositeCursor(buf, state.window_w, state.window_h, cursor);
-            return .{ .framebuffer = .{ .width = state.window_w, .height = state.window_h, .rgba = buf, .owns_rgba = false } };
+            compositeCursor(buf, state.output_w, state.output_h, rendererCursor(state, cursor));
+            return .{ .framebuffer = .{ .width = state.output_w, .height = state.output_h, .rgba = buf, .owns_rgba = false } };
         }
 
         var solids_list = std.ArrayList(SolidSprite).empty;
@@ -1240,7 +1388,7 @@ pub const FrameBuilder = struct {
         var published_in_job = std.AutoHashMap(u64, void).init(self.allocator);
         defer published_in_job.deinit();
 
-        const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
+        const sdl_region = fullscreenCompositeCellRect(state.output_w, state.output_h, tty);
         if (state.had_clear) {
             try solids_list.append(self.allocator, .{
                 .color = state.clear_color,
@@ -1253,7 +1401,7 @@ pub const FrameBuilder = struct {
             for (state.fills.items) |fill| {
                 try solids_list.append(self.allocator, .{
                     .color = fill.color,
-                    .dest_rect = mapRectToCellsInRegion(fill.rect, state.window_w, state.window_h, sdl_region),
+                    .dest_rect = mapRectToCellsInRegion(fill.rect, state.output_w, state.output_h, sdl_region),
                     .logical_dest = .{ .rect = fill.rect },
                     .z = 0,
                 });
@@ -1266,7 +1414,7 @@ pub const FrameBuilder = struct {
                 const line_rect = core.CoreRect{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) };
                 try solids_list.append(self.allocator, .{
                     .color = line.color,
-                    .dest_rect = mapRectToCellsInRegion(line_rect, state.window_w, state.window_h, sdl_region),
+                    .dest_rect = mapRectToCellsInRegion(line_rect, state.output_w, state.output_h, sdl_region),
                     .logical_dest = .{ .rect = line_rect },
                     .z = 1,
                 });
@@ -1288,7 +1436,7 @@ pub const FrameBuilder = struct {
                 try sprites_list.append(self.allocator, .{
                     .asset_id = texture.asset_id,
                     .source_rect = copy.src,
-                    .dest_rect = mapRectToCellsInRegion(copy.dst, state.window_w, state.window_h, sdl_region),
+                    .dest_rect = mapRectToCellsInRegion(copy.dst, state.output_w, state.output_h, sdl_region),
                     .logical_dest = .{ .rect = copy.dst },
                     .z = @intCast(100 + i),
                 });
@@ -1452,6 +1600,7 @@ pub const FrameBuilder = struct {
 
     pub fn queueBatchDeletesForRenderer(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, renderer: core.CoreHandle) void {
         const state = self.renderers.getPtr(renderer) orelse return;
+        sink.deletePlaceholder() catch |err| logger.writeFmtScoped(.info, .frame_builder, "placeholder renderer cleanup failed: {any}", .{err});
         self.deleteSceneBatchPlacementsBatch(sink, state, 0) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "renderer cleanup scene placement delete failed: {any}", .{err});
         };
@@ -1467,6 +1616,7 @@ pub const FrameBuilder = struct {
     }
 
     pub fn queueBatchDeletesForPresentationReset(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink) void {
+        sink.deletePlaceholder() catch |err| logger.writeFmtScoped(.info, .frame_builder, "placeholder cleanup failed: {any}", .{err});
         var renderer_it = self.renderers.iterator();
         while (renderer_it.next()) |entry| {
             const state = entry.value_ptr;
@@ -1511,6 +1661,14 @@ pub const FrameBuilder = struct {
     }
 
     fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
+        if (sink.placeholder != null) {
+            const fb = switch (job.*) {
+                .framebuffer => |fb| fb,
+                .scene => return error.PlaceholderRequiresFramebuffer,
+            };
+            try sink.presentPlaceholder(fb.rgba, fb.width, fb.height);
+            return;
+        }
         switch (job.*) {
             .framebuffer => |fb| {
                 try self.deleteSceneBatchPlacementsBatch(sink, state, 0);
@@ -1603,9 +1761,9 @@ pub const FrameBuilder = struct {
     }
 
     fn reprojectCompositeBatchPlacement(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState) !bool {
-        if (state.composite_image_id == 0 or state.composite_placement_id == 0 or state.window_w <= 0 or state.window_h <= 0) return false;
-        const dest = batchPlacementRect(state.window_w, state.window_h, sink, sink.presentationAspect());
-        const source = batchSourceRectForAspect(state.window_w, state.window_h, sink, sink.presentationAspect());
+        if (state.composite_image_id == 0 or state.composite_placement_id == 0 or state.output_w <= 0 or state.output_h <= 0) return false;
+        const dest = batchPlacementRect(state.output_w, state.output_h, sink, sink.presentationAspect());
+        const source = batchSourceRectForAspect(state.output_w, state.output_h, sink, sink.presentationAspect());
         const source_rect = core.CoreRect{ .x = source.x, .y = source.y, .w = source.w, .h = source.h };
         const placement_template = kitty_protocol.Placement{
             .image_id = state.composite_image_id,
@@ -1818,7 +1976,11 @@ pub const FrameBuilder = struct {
         var layout = presentation_layout.PresentationLayout{};
         const state = self.renderers.getPtr(renderer) orelse return layout;
         switch (self.composite_mode) {
-            .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty)),
+            .fullscreen, .tiled_strip => layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.output_w, state.output_h, tty)),
+        }
+        // Rendering uses drawable pixels; SDL mouse events use window coordinates.
+        for (layout.regions[0..layout.len]) |*region| {
+            region.sdl_rect = .{ .x = 0, .y = 0, .w = state.logical_w, .h = state.logical_h };
         }
         return layout;
     }
@@ -1827,14 +1989,15 @@ pub const FrameBuilder = struct {
         const state = self.renderers.getPtr(renderer) orelse return null;
         const source_px = switch (job.*) {
             .framebuffer => |fb| render_batch_protocol.SourcePixels{ .w = fb.width, .h = fb.height },
-            .scene => render_batch_protocol.SourcePixels{ .w = state.window_w, .h = state.window_h },
+            .scene => render_batch_protocol.SourcePixels{ .w = state.output_w, .h = state.output_h },
         };
+        if (sink.placeholder != null) return .{ .window_id = sink.window_id, .ready_to_show = true, .source_px = .{ .w = state.output_w, .h = state.output_h } };
         const effective = switch (job.*) {
             .framebuffer => |fb| batchPlacementRect(fb.width, fb.height, sink, sink.presentationAspect()),
             .scene => blk: {
                 const rect = sink.presentationRect();
                 const tty = sink.presentationTty();
-                break :blk batchSceneCellRect(fullscreenCompositeCellRect(state.window_w, state.window_h, &tty), rect);
+                break :blk batchSceneCellRect(fullscreenCompositeCellRect(state.output_w, state.output_h, &tty), rect);
             },
         };
         return .{
@@ -1876,12 +2039,12 @@ pub const FrameBuilder = struct {
         const rect = sink.presentationRect();
         if (placement.logical_dest) |logical_dest| {
             const tty = sink.presentationTty();
-            const sdl_region = fullscreenCompositeCellRect(state.window_w, state.window_h, &tty);
+            const sdl_region = fullscreenCompositeCellRect(state.output_w, state.output_h, &tty);
             const source_rect: core.CoreRect = switch (logical_dest) {
                 .rect => |source_rect| source_rect,
-                .full_window => .{ .x = 0, .y = 0, .w = state.window_w, .h = state.window_h },
+                .full_window => .{ .x = 0, .y = 0, .w = state.output_w, .h = state.output_h },
             };
-            return batchSceneCellRect(mapRectToCellsInRegion(source_rect, state.window_w, state.window_h, sdl_region), rect);
+            return batchSceneCellRect(mapRectToCellsInRegion(source_rect, state.output_w, state.output_h, sdl_region), rect);
         }
         return batchSceneCellRect(placement.dest_rect, rect);
     }
@@ -1890,7 +2053,7 @@ pub const FrameBuilder = struct {
         var layout = presentation_layout.PresentationLayout{};
         const state = self.renderers.getPtr(external_framebuffer_renderer_key) orelse return layout;
         if (!state.composite_mode_active) return layout;
-        layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.window_w, state.window_h, tty));
+        layout.setSingleSdlRegion(fullscreenCompositePresentationRegion(state.output_w, state.output_h, tty));
         return layout;
     }
 
@@ -1933,8 +2096,8 @@ pub const FrameBuilder = struct {
             if (state.composite_image_id != 0) {
                 try list.append(allocator, .{
                     .kind = .image,
-                    .w = state.window_w,
-                    .h = state.window_h,
+                    .w = state.output_w,
+                    .h = state.output_h,
                     .format = pixelFormatRawSdl2(default_texture_format),
                     .blend_mode = blendModeRawSdl2(default_blend_mode),
                     .update_count = 1,
@@ -1945,8 +2108,8 @@ pub const FrameBuilder = struct {
                 try list.append(allocator, .{
                     .kind = .placement,
                     .placement_id = state.composite_placement_id,
-                    .w = state.window_w,
-                    .h = state.window_h,
+                    .w = state.output_w,
+                    .h = state.output_h,
                     .format = pixelFormatRawSdl2(default_texture_format),
                     .blend_mode = blendModeRawSdl2(default_blend_mode),
                     .update_count = 1,
@@ -2055,20 +2218,20 @@ pub const FrameBuilder = struct {
         if (state.composite_last_presented) |last| {
             if (last.len == buf.len and std.mem.eql(u8, last, buf) and state.composite_image_id != 0 and state.composite_placement_id != 0) {
                 if (placementTraceEnabled()) {
-                    const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
-                    const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
+                    const dest = fullscreenCompositeCellRect(state.output_w, state.output_h, tty);
+                    const upload_size = fullscreenCompositeUploadSize(dest, state.output_w, state.output_h, tty);
                     logger.writeFmtScoped(
                         .info,
                         .frame_builder,
                         "placement trace direct_fullscreen op=skip_same_frame image={d} placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} tty={d}x{d} px={d}x{d}",
-                        .{ state.composite_image_id, state.composite_placement_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+                        .{ state.composite_image_id, state.composite_placement_id, state.output_w, state.output_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
                     );
                 }
                 return;
             }
         }
-        const dest = fullscreenCompositeCellRect(state.window_w, state.window_h, tty);
-        const upload_size = fullscreenCompositeUploadSize(dest, state.window_w, state.window_h, tty);
+        const dest = fullscreenCompositeCellRect(state.output_w, state.output_h, tty);
+        const upload_size = fullscreenCompositeUploadSize(dest, state.output_w, state.output_h, tty);
         if (state.composite_last_presented == null or state.composite_last_presented.?.len != buf.len) {
             if (state.composite_last_presented) |old| self.allocator.free(old);
             state.composite_last_presented = try self.allocator.alloc(u8, buf.len);
@@ -2081,20 +2244,20 @@ pub const FrameBuilder = struct {
         self.last_composite_image_id = state.composite_image_id;
         var scaled_buf: ?[]u8 = null;
         defer if (scaled_buf) |scratch| self.allocator.free(scratch);
-        const upload_buf = if (upload_size.w == state.window_w and upload_size.h == state.window_h)
+        const upload_buf = if (upload_size.w == state.output_w and upload_size.h == state.output_h)
             buf
         else blk: {
-            const scratch = try scaleRgba(self.allocator, buf, state.window_w, state.window_h, upload_size.w, upload_size.h);
+            const scratch = try scaleRgba(self.allocator, buf, state.output_w, state.output_h, upload_size.w, upload_size.h);
             scaled_buf = scratch;
             break :blk scratch;
         };
-        if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen upload image_id={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d}", .{ state.composite_image_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h });
+        if (self.debug_composite) logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen upload image_id={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d}", .{ state.composite_image_id, state.output_w, state.output_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h });
         if (placementTraceEnabled()) {
             logger.writeFmtScoped(
                 .info,
                 .frame_builder,
                 "placement trace direct_fullscreen op=place image={d} placement={d} old_image={d} old_placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} src=0,0 {d}x{d} z=100 tty={d}x{d} px={d}x{d}",
-                .{ state.composite_image_id, state.composite_placement_id, old_placement.image_id, old_placement.placement_id, state.window_w, state.window_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, upload_size.w, upload_size.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+                .{ state.composite_image_id, state.composite_placement_id, old_placement.image_id, old_placement.placement_id, state.output_w, state.output_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, upload_size.w, upload_size.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
             );
         }
         try backend.registerRawImage(state.composite_image_id, upload_buf, upload_size.w, upload_size.h);
@@ -2266,7 +2429,7 @@ pub const FrameBuilder = struct {
         var strip_w: i32 = 0;
         var strip_h: i32 = 0;
         for (state.composite_tiles.items, 0..) |*tile, tile_index| {
-            const changed = tile.placement_id == 0 or tileDiffers(buf, last, state.window_w, tile.src_rect);
+            const changed = tile.placement_id == 0 or tileDiffers(buf, last, state.output_w, tile.src_rect);
             if (!changed) continue;
 
             if (strip_w > 0 and strip_w + tile.src_rect.w > composite_strip_max_w) {
@@ -2292,7 +2455,7 @@ pub const FrameBuilder = struct {
 
         for (entries) |entry| {
             const tile = &state.composite_tiles.items[entry.tile_index];
-            blitTileIntoStrip(strip_rgba, strip_w, buf, state.window_w, tile.src_rect, entry.x, 0);
+            blitTileIntoStrip(strip_rgba, strip_w, buf, state.output_w, tile.src_rect, entry.x, 0);
         }
 
         const strip_image_id = self.allocImageId();
@@ -2325,7 +2488,7 @@ pub const FrameBuilder = struct {
                 };
                 self.retireCompositeTileImageIfUnreferenced(state, old_image_id);
             }
-            copyTileToLast(last, state.window_w, buf, tile.src_rect);
+            copyTileToLast(last, state.output_w, buf, tile.src_rect);
         }
         if (self.stats.enabled) {
             self.stats.texture_uploads += 1;
@@ -2363,7 +2526,7 @@ pub const FrameBuilder = struct {
     }
 
     fn ensureCompositeTiles(self: *FrameBuilder, state: *RendererState, tty: *const DirectTty) !void {
-        const contained = containedCellRect(state.window_w, state.window_h, tty);
+        const contained = containedCellRect(state.output_w, state.output_h, tty);
         const tiles_x = @divTrunc(contained.w + composite_tile_cols - 1, composite_tile_cols);
         const tiles_y = @divTrunc(contained.h + composite_tile_rows - 1, composite_tile_rows);
         const tile_count: usize = @intCast(tiles_x * tiles_y);
@@ -2377,10 +2540,10 @@ pub const FrameBuilder = struct {
                 while (cell_col_off < contained.w) : (cell_col_off += composite_tile_cols) {
                     const tile_cols = @min(composite_tile_cols, contained.w - cell_col_off);
                     const tile_rows = @min(composite_tile_rows, contained.h - cell_row_off);
-                    const src_x0 = @divTrunc(cell_col_off * state.window_w, contained.w);
-                    const src_x1 = @divTrunc((cell_col_off + tile_cols) * state.window_w, contained.w);
-                    const src_y0 = @divTrunc(cell_row_off * state.window_h, contained.h);
-                    const src_y1 = @divTrunc((cell_row_off + tile_rows) * state.window_h, contained.h);
+                    const src_x0 = @divTrunc(cell_col_off * state.output_w, contained.w);
+                    const src_x1 = @divTrunc((cell_col_off + tile_cols) * state.output_w, contained.w);
+                    const src_y0 = @divTrunc(cell_row_off * state.output_h, contained.h);
+                    const src_y1 = @divTrunc((cell_row_off + tile_rows) * state.output_h, contained.h);
                     const expected = CompositeTileState{
                         .src_rect = .{
                             .x = src_x0,
@@ -2420,10 +2583,10 @@ pub const FrameBuilder = struct {
             while (cell_col_off < contained.w) : (cell_col_off += composite_tile_cols) {
                 const tile_cols = @min(composite_tile_cols, contained.w - cell_col_off);
                 const tile_rows = @min(composite_tile_rows, contained.h - cell_row_off);
-                const src_x0 = @divTrunc(cell_col_off * state.window_w, contained.w);
-                const src_x1 = @divTrunc((cell_col_off + tile_cols) * state.window_w, contained.w);
-                const src_y0 = @divTrunc(cell_row_off * state.window_h, contained.h);
-                const src_y1 = @divTrunc((cell_row_off + tile_rows) * state.window_h, contained.h);
+                const src_x0 = @divTrunc(cell_col_off * state.output_w, contained.w);
+                const src_x1 = @divTrunc((cell_col_off + tile_cols) * state.output_w, contained.w);
+                const src_y0 = @divTrunc(cell_row_off * state.output_h, contained.h);
+                const src_y1 = @divTrunc((cell_row_off + tile_rows) * state.output_h, contained.h);
                 state.composite_tiles.items[idx] = .{
                     .src_rect = .{
                         .x = src_x0,
@@ -2449,20 +2612,20 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn tileDiffers(current: []const u8, previous: []const u8, window_w: i32, rect: core.CoreRect) bool {
+    fn tileDiffers(current: []const u8, previous: []const u8, output_w: i32, rect: core.CoreRect) bool {
         var row: i32 = 0;
         while (row < rect.h) : (row += 1) {
             const x: usize = @intCast(rect.x);
             const y: usize = @intCast(rect.y + row);
-            const start: usize = (y * @as(usize, @intCast(window_w)) + x) * 4;
+            const start: usize = (y * @as(usize, @intCast(output_w)) + x) * 4;
             const len: usize = @intCast(rect.w * 4);
             if (!std.mem.eql(u8, current[start .. start + len], previous[start .. start + len])) return true;
         }
         return false;
     }
 
-    fn extractTileRgba(dst: []u8, src: []const u8, window_w: i32, rect: core.CoreRect) void {
-        const src_w: usize = @intCast(window_w);
+    fn extractTileRgba(dst: []u8, src: []const u8, output_w: i32, rect: core.CoreRect) void {
+        const src_w: usize = @intCast(output_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
         while (row < rect.h) : (row += 1) {
@@ -2490,8 +2653,8 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn copyTileToLast(dst: []u8, window_w: i32, src: []const u8, rect: core.CoreRect) void {
-        const dst_w: usize = @intCast(window_w);
+    fn copyTileToLast(dst: []u8, output_w: i32, src: []const u8, rect: core.CoreRect) void {
+        const dst_w: usize = @intCast(output_w);
         const row_bytes: usize = @intCast(rect.w * 4);
         var row: i32 = 0;
         while (row < rect.h) : (row += 1) {
@@ -2511,6 +2674,13 @@ pub const FrameBuilder = struct {
             if (copy.src.w != copy.dst.w or copy.src.h != copy.dst.h) return true;
         }
         return false;
+    }
+
+    fn rendererCursor(state: *const RendererState, cursor: ?cursor_mod.Snapshot) ?cursor_mod.Snapshot {
+        var result = cursor orelse return null;
+        result.position.x = @intCast(@divTrunc(@as(i64, result.position.x) * state.output_w, @max(1, state.logical_w)));
+        result.position.y = @intCast(@divTrunc(@as(i64, result.position.y) * state.output_h, @max(1, state.logical_h)));
+        return result;
     }
 
     fn compositeCursor(rgba: []u8, width: i32, height: i32, cursor: ?cursor_mod.Snapshot) void {
@@ -2591,18 +2761,18 @@ pub const FrameBuilder = struct {
     }
 
     fn buildCompositeFrame(self: *FrameBuilder, logger: *Logger, state: *RendererState) !void {
-        const pixel_count: usize = @intCast(state.window_w * state.window_h * 4);
+        const pixel_count: usize = @intCast(state.output_w * state.output_h * 4);
         if (state.composite_rgba == null or state.composite_rgba.?.len != pixel_count) {
             if (state.composite_rgba) |buf| self.allocator.free(buf);
             state.composite_rgba = try self.allocator.alloc(u8, pixel_count);
         }
         const buf = state.composite_rgba.?;
         const first_copy_index = self.findLastFramebufferOverwriteCopy(state) orelse blk: {
-            @call(.never_inline, clearFramebuffer, .{ buf, state.window_w, state.window_h, state.clear_color });
-            for (state.fills.items) |fill| @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, fill.rect, fill.color });
+            @call(.never_inline, clearFramebuffer, .{ buf, state.output_w, state.output_h, state.clear_color });
+            for (state.fills.items) |fill| @call(.never_inline, compositeFill, .{ buf, state.output_w, state.output_h, fill.rect, fill.color });
             for (state.lines.items) |line| {
                 const rect = core.CoreRect{ .x = @min(line.x1, line.x2), .y = @min(line.y1, line.y2), .w = @max(1, @max(line.x1, line.x2) - @min(line.x1, line.x2) + 1), .h = @max(1, @max(line.y1, line.y2) - @min(line.y1, line.y2) + 1) };
-                @call(.never_inline, compositeFill, .{ buf, state.window_w, state.window_h, rect, line.color });
+                @call(.never_inline, compositeFill, .{ buf, state.output_w, state.output_h, rect, line.color });
             }
             break :blk 0;
         };
@@ -2611,8 +2781,8 @@ pub const FrameBuilder = struct {
             const src_rgba = texture.base_rgba orelse continue;
             @call(.never_inline, compositeCopy, .{
                 buf,
-                state.window_w,
-                state.window_h,
+                state.output_w,
+                state.output_h,
                 src_rgba,
                 texture.w,
                 texture.h,
@@ -2626,7 +2796,7 @@ pub const FrameBuilder = struct {
         }
         const now = std.time.nanoTimestamp();
         if (self.dump_composites and now - self.last_composite_dump_ns >= 2 * std.time.ns_per_s) {
-            self.dumpCompositeFrame(logger, buf, state.window_w, state.window_h);
+            self.dumpCompositeFrame(logger, buf, state.output_w, state.output_h);
             self.last_composite_dump_ns = now;
         }
         if (state.composite_last_presented) |last| {
@@ -2639,7 +2809,7 @@ pub const FrameBuilder = struct {
             }
         }
         state.logged_debug_composite_unchanged = false;
-        if (self.debug_composite) _ = self.logCompositeStats(logger, buf, state.window_w, state.window_h);
+        if (self.debug_composite) _ = self.logCompositeStats(logger, buf, state.output_w, state.output_h);
     }
 
     fn findLastFramebufferOverwriteCopy(self: *FrameBuilder, state: *const RendererState) ?usize {
@@ -2650,8 +2820,8 @@ pub const FrameBuilder = struct {
             const texture = self.textures.get(copy.texture_key) orelse continue;
             if (!copyFullyOverwritesDestination(texture, copy)) continue;
             if (copy.dst.x > 0 or copy.dst.y > 0) continue;
-            if (copy.dst.x + copy.dst.w < state.window_w) continue;
-            if (copy.dst.y + copy.dst.h < state.window_h) continue;
+            if (copy.dst.x + copy.dst.w < state.output_w) continue;
+            if (copy.dst.y + copy.dst.h < state.output_h) continue;
             return index;
         }
         return null;
@@ -3703,14 +3873,14 @@ pub const FrameBuilder = struct {
         return true;
     }
 
-    fn containedCellRect(window_w: i32, window_h: i32, tty: *const DirectTty) ts_types.CellRect {
+    fn containedCellRect(output_w: i32, output_h: i32, tty: *const DirectTty) ts_types.CellRect {
         const cols: i32 = @intCast(tty.cols);
         const rows: i32 = @intCast(tty.rows);
         const avail_w = if (tty.pixel_width > 0) @as(f64, @floatFromInt(tty.pixel_width)) else @as(f64, @floatFromInt(cols));
         const avail_h = if (tty.pixel_height > 0) @as(f64, @floatFromInt(tty.pixel_height)) else @as(f64, @floatFromInt(rows));
-        const scale = @min(avail_w / @as(f64, @floatFromInt(@max(window_w, 1))), avail_h / @as(f64, @floatFromInt(@max(window_h, 1))));
-        const display_w = @max(1, @as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(window_w)) * scale))));
-        const display_h = @max(1, @as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(window_h)) * scale))));
+        const scale = @min(avail_w / @as(f64, @floatFromInt(@max(output_w, 1))), avail_h / @as(f64, @floatFromInt(@max(output_h, 1))));
+        const display_w = @max(1, @as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(output_w)) * scale))));
+        const display_h = @max(1, @as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(output_h)) * scale))));
         const cell_w = if (tty.pixel_width > 0) @as(f64, @floatFromInt(tty.pixel_width)) / @as(f64, @floatFromInt(@max(cols, 1))) else 1.0;
         const cell_h = if (tty.pixel_height > 0) @as(f64, @floatFromInt(tty.pixel_height)) / @as(f64, @floatFromInt(@max(rows, 1))) else 1.0;
         const used_cols = std.math.clamp(@as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(display_w)) / cell_w))), 1, cols);
@@ -3723,16 +3893,16 @@ pub const FrameBuilder = struct {
         };
     }
 
-    fn fullscreenCompositeCellRect(window_w: i32, window_h: i32, tty: *const DirectTty) ts_types.CellRect {
-        return containedCellRect(window_w, window_h, tty);
+    fn fullscreenCompositeCellRect(output_w: i32, output_h: i32, tty: *const DirectTty) ts_types.CellRect {
+        return containedCellRect(output_w, output_h, tty);
     }
 
-    fn fullscreenCompositePresentationRegion(window_w: i32, window_h: i32, tty: *const DirectTty) presentation_layout.PresentationRegion {
-        const dest = fullscreenCompositeCellRect(window_w, window_h, tty);
+    fn fullscreenCompositePresentationRegion(output_w: i32, output_h: i32, tty: *const DirectTty) presentation_layout.PresentationRegion {
+        const dest = fullscreenCompositeCellRect(output_w, output_h, tty);
         return .{
             .kind = .sdl_window,
             .tty_rect = .{ .col = dest.col, .row = dest.row, .w = dest.w, .h = dest.h },
-            .sdl_rect = .{ .x = 0, .y = 0, .w = window_w, .h = window_h },
+            .sdl_rect = .{ .x = 0, .y = 0, .w = output_w, .h = output_h },
             .z = 0,
         };
     }
@@ -3755,38 +3925,38 @@ pub const FrameBuilder = struct {
         return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
     }
 
-    fn mapRectToCells(dst: core.CoreRect, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
+    fn mapRectToCells(dst: core.CoreRect, output_w: i32, output_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const cols: i32 = @intCast(tty_cols);
         const rows: i32 = @intCast(tty_rows);
-        const col = 1 + @divTrunc(dst.x * cols, @max(window_w, 1));
-        const row = 1 + @divTrunc(dst.y * rows, @max(window_h, 1));
-        const w = @max(1, @divTrunc(dst.w * cols, @max(window_w, 1)));
-        const h = @max(1, @divTrunc(dst.h * rows, @max(window_h, 1)));
+        const col = 1 + @divTrunc(dst.x * cols, @max(output_w, 1));
+        const row = 1 + @divTrunc(dst.y * rows, @max(output_h, 1));
+        const w = @max(1, @divTrunc(dst.w * cols, @max(output_w, 1)));
+        const h = @max(1, @divTrunc(dst.h * rows, @max(output_h, 1)));
         return .{ .col = col, .row = row, .w = w, .h = h };
     }
 
-    fn mapRectToCellsInRegion(dst: core.CoreRect, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
-        const col = region.col + @divTrunc(dst.x * region.w, @max(window_w, 1));
-        const row = region.row + @divTrunc(dst.y * region.h, @max(window_h, 1));
-        const w = @max(1, @divTrunc(dst.w * region.w, @max(window_w, 1)));
-        const h = @max(1, @divTrunc(dst.h * region.h, @max(window_h, 1)));
+    fn mapRectToCellsInRegion(dst: core.CoreRect, output_w: i32, output_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+        const col = region.col + @divTrunc(dst.x * region.w, @max(output_w, 1));
+        const row = region.row + @divTrunc(dst.y * region.h, @max(output_h, 1));
+        const w = @max(1, @divTrunc(dst.w * region.w, @max(output_w, 1)));
+        const h = @max(1, @divTrunc(dst.h * region.h, @max(output_h, 1)));
         return .{ .col = col, .row = row, .w = w, .h = h };
     }
 
-    fn mapLineToCells(line: LineOp, window_w: i32, window_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
+    fn mapLineToCells(line: LineOp, output_w: i32, output_h: i32, tty_cols: u16, tty_rows: u16) ts_types.CellRect {
         const min_x = @min(line.x1, line.x2);
         const min_y = @min(line.y1, line.y2);
         const max_x = @max(line.x1, line.x2);
         const max_y = @max(line.y1, line.y2);
-        return mapRectToCells(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, tty_cols, tty_rows);
+        return mapRectToCells(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, output_w, output_h, tty_cols, tty_rows);
     }
 
-    fn mapLineToCellsInRegion(line: LineOp, window_w: i32, window_h: i32, region: ts_types.CellRect) ts_types.CellRect {
+    fn mapLineToCellsInRegion(line: LineOp, output_w: i32, output_h: i32, region: ts_types.CellRect) ts_types.CellRect {
         const min_x = @min(line.x1, line.x2);
         const min_y = @min(line.y1, line.y2);
         const max_x = @max(line.x1, line.x2);
         const max_y = @max(line.y1, line.y2);
-        return mapRectToCellsInRegion(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, window_w, window_h, region);
+        return mapRectToCellsInRegion(.{ .x = min_x, .y = min_y, .w = @max(1, max_x - min_x + 1), .h = @max(1, max_y - min_y + 1) }, output_w, output_h, region);
     }
 
     fn applyViewportRect(rect: core.CoreRect, viewport: core.CoreRect) core.CoreRect {
@@ -5532,4 +5702,139 @@ test "observation composes a sprite-mode frame without consuming presentation co
     try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, frame.rgba[24..28]);
     try std.testing.expectEqual(@as(usize, 1), state.fills.items.len);
     try std.testing.expect(!state.composite_mode_active);
+}
+
+test "renderer pixel size preserves all quadrants across display scale changes" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    builder.onCreateWindow(1, 2, 2);
+    builder.onCreateRenderer(1, 2);
+    builder.onCreateTexture(3, core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }), 2, 2);
+    var pixels = [_]u8{ 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255 };
+    builder.onUpdateTextureBatch(&logger, 3, null, &pixels, 8);
+    for ([_]i32{ 4, 2, 4 }) |size| {
+        builder.onRendererOutputSize(2, size, size);
+        builder.onRenderClear(2);
+        var viewport = core.CoreRect{ .x = 0, .y = 0, .w = size, .h = size };
+        builder.onRenderSetViewport(2, &viewport);
+        builder.onRenderCopy(&logger, 2, 3, null, null);
+        builder.onRenderSetViewport(2, null);
+        var frame = try builder.buildObservationFrame(&logger, 2, null);
+        defer frame.deinit(std.testing.allocator);
+        try std.testing.expectEqual(size, frame.width);
+        try std.testing.expectEqual(size, frame.height);
+        const last: usize = @intCast((size * size - 1) * 4);
+        try std.testing.expectEqualSlices(u8, pixels[12..16], frame.rgba[last..][0..4]);
+    }
+}
+
+test "renderer output scaling leaves terminal input in logical window coordinates" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    builder.onCreateWindow(1, 200, 100);
+    builder.onCreateRenderer(1, 2);
+    builder.onRendererOutputSize(2, 400, 200);
+    builder.onWindowSize(1, 200, 100);
+    try std.testing.expectEqual(@as(i32, 400), builder.renderers.get(2).?.output_w);
+    var tty: DirectTty = undefined;
+    tty.cols = 80;
+    tty.rows = 24;
+    tty.pixel_width = 800;
+    tty.pixel_height = 480;
+    const layout = builder.presentationLayoutForRenderer(&tty, 2);
+    try std.testing.expectEqual(@as(i32, 200), layout.regions[0].sdl_rect.w);
+    try std.testing.expectEqual(@as(i32, 100), layout.regions[0].sdl_rect.h);
+    builder.onRendererOutputSize(2, 200, 100);
+    try std.testing.expectEqual(@as(i32, 200), builder.renderers.get(2).?.output_w);
+}
+
+test "external BGRA placeholder frame preserves source size and converts pixels" {
+    var builder = FrameBuilder.init(std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.placeholder = .{ .image_id = 42, .cols = 60, .rows = 20 };
+    sink.attach(sink.placeholder.?.localRect());
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    const bgra = [_]u8{ 56, 34, 12, 255 };
+    builder.renderExternalFramebufferBatch(&logger, &sink, 1, 1, .bgra8, &bgra, out.writer(std.testing.allocator));
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.items, .{});
+    defer parsed.deinit();
+    const groups = parsed.value.object.get("groups").?.object;
+    const upload = groups.get("uploads").?.array.items[0].string;
+    try std.testing.expect(std.mem.indexOf(u8, upload, "s=1,v=1,i=42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upload, ";DCI4/w==") != null);
+    try std.testing.expectEqual(@as(usize, 1), groups.get("uploads").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 1), groups.get("placements").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), groups.get("deletes").?.array.items.len);
+}
+
+test "retained scene composes at target size and observes original completed pixels on demand" {
+    const allocator = std.testing.allocator;
+    var builder = FrameBuilder.init(allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    var logger = Logger.init(allocator);
+    defer logger.deinit();
+    builder.onCreateWindow(1, 2, 2);
+    builder.onCreateRenderer(1, 2);
+    builder.onRendererOutputSize(2, 4, 4);
+    builder.onCreateTexture(3, core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }), 2, 2);
+    var pixels = [_]u8{ 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255 };
+    builder.onUpdateTextureBatch(&logger, 3, null, &pixels, 8);
+    builder.onRenderClear(2);
+    builder.onRenderCopy(&logger, 2, 3, null, null);
+    var snapshot: PresentationSnapshot = .{};
+    defer snapshot.deinit(allocator);
+    try snapshot.capture(&builder, 2, null);
+    // No native composite or observation buffer was needed for capture.
+    try std.testing.expect(builder.renderers.get(2).?.composite_rgba == null);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.observed.pixels.items.len);
+    const target = render_batch_protocol.PlaceholderPresentation{ .image_id = 42, .cols = 2, .rows = 2, .target_px = .{ .w = 2, .h = 2 } };
+    const small = try snapshot.presentation(allocator, target);
+    try std.testing.expectEqual(@as(i32, 2), small.width);
+    try std.testing.expectEqualSlices(u8, &pixels, small.rgba);
+    // The app can mutate and destroy its texture before the agent observes.
+    @memset(&pixels, 0);
+    builder.onUpdateTextureBatch(&logger, 3, null, &pixels, 8);
+    const observed = try snapshot.observation(allocator);
+    try std.testing.expectEqual(@as(i32, 4), observed.width);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, observed.pixels.items[0..4]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, observed.pixels.items[12..16]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, observed.pixels.items[48..52]);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, observed.pixels.items[60..64]);
+    var bigger = target;
+    bigger.target_px = .{ .w = 4, .h = 4 };
+    const resized = try snapshot.presentation(allocator, bigger);
+    try std.testing.expectEqualSlices(u8, observed.pixels.items, resized.rgba);
+    try std.testing.expectEqual(@as(u64, 1), (try snapshot.observation(allocator)).frame_id);
+}
+
+test "retained observation preserves fills and cursor pixels" {
+    const allocator = std.testing.allocator;
+    var builder = FrameBuilder.init(allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    var logger = Logger.init(allocator);
+    defer logger.deinit();
+    try builder.renderers.put(1, RendererState.init(allocator, 8, 8));
+    const state = builder.renderers.getPtr(1).?;
+    state.clear_color = .{ 20, 30, 40, 255 };
+    try state.fills.append(allocator, .{ .rect = .{ .x = 2, .y = 2, .w = 4, .h = 4 }, .color = .{ 255, 0, 0, 255 } });
+    try state.lines.append(allocator, .{ .x1 = 0, .y1 = 6, .x2 = 7, .y2 = 6, .color = .{ 0, 255, 0, 255 } });
+    var cursor_pixels = [_]u8{ 255, 255, 255, 128, 0, 0, 255, 255, 10, 20, 30, 0, 255, 255, 0, 255 };
+    const image = cursor_mod.Image{ .width = 2, .height = 2, .hot_x = 1, .hot_y = 1, .rgba = &cursor_pixels };
+    const cursor = cursor_mod.Snapshot{ .image = &image, .position = .{ .x = 3, .y = 3 } };
+    const reference = try builder.buildObservationFrame(&logger, 1, cursor);
+    var snapshot: PresentationSnapshot = .{};
+    defer snapshot.deinit(allocator);
+    try snapshot.capture(&builder, 1, cursor);
+    @memset(&cursor_pixels, 0);
+    state.fills.clearRetainingCapacity();
+    state.lines.clearRetainingCapacity();
+    const observed = try snapshot.observation(allocator);
+    try std.testing.expectEqualSlices(u8, reference.rgba, observed.pixels.items);
 }

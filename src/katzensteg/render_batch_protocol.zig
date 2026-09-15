@@ -68,7 +68,38 @@ pub const UploadPolicy = struct {
     high_water: u64 = 10 * 1024 * 1024,
 };
 
+// A host-owned Unicode placeholder grid. Its origin is deliberately absent.
+pub const PlaceholderPresentation = struct {
+    image_id: u32,
+    cols: i32,
+    rows: i32,
+    target_px: ?SourcePixels = null,
+
+    pub fn validate(self: @This()) !void {
+        if (self.target_px) |pixels| {
+            if (pixels.w <= 0 or pixels.h <= 0 or pixels.w > 16384 or pixels.h > 16384 or @as(i64, pixels.w) * pixels.h > 16 * 1024 * 1024) return error.InvalidMessage;
+        }
+        // First version uses the 24-bit foreground id and the diacritic table.
+        if (self.image_id == 0 or self.image_id > 0xffffff or self.cols <= 0 or self.rows <= 0 or self.cols > 297 or self.rows > 297) return error.InvalidMessage;
+    }
+
+    // An upper bound: preserve source aspect and never upscale for transport.
+    pub fn uploadSize(self: @This(), source: SourcePixels) SourcePixels {
+        const target = self.target_px orelse return source;
+        if (target.w >= source.w and target.h >= source.h) return source;
+        if (@as(i64, target.w) * source.h <= @as(i64, target.h) * source.w) {
+            return .{ .w = @min(target.w, source.w), .h = @intCast(@max(1, @divTrunc(@as(i64, source.h) * target.w, source.w))) };
+        }
+        return .{ .w = @intCast(@max(1, @divTrunc(@as(i64, source.w) * target.h, source.h))), .h = @min(target.h, source.h) };
+    }
+
+    pub fn localRect(self: @This()) PresentationRectCells {
+        return .{ .row = 1, .col = 1, .cols = self.cols, .rows = self.rows };
+    }
+};
+
 pub const AttachMessage = struct {
+    placeholder: ?PlaceholderPresentation = null,
     window_id: []const u8,
     presentation_generation: u64 = 0,
     rect_cells: PresentationRectCells,
@@ -87,10 +118,12 @@ pub const AttachMessage = struct {
 };
 
 pub const ViewportMessage = struct {
+    placeholder: ?PlaceholderPresentation = null,
     window_id: []const u8,
     presentation_generation: u64 = 0,
-    // Re-emit retained placements even when geometry is unchanged. Image data
-    // must still be present (or restored by the host) before applying them.
+    // Re-emit retained placements even when geometry is unchanged. Placeholder
+    // mode also re-uploads its retained frame, since a host repaint may have
+    // discarded image data. Positioned mode still requires existing image data.
     refresh_placements: bool = false,
     rect_cells: PresentationRectCells,
     aspect: PresentationAspect,
@@ -164,9 +197,12 @@ pub const SourcePointer = struct {
     buttons: u32 = 0,
 };
 
-pub const ObserveMessage = struct { request_id: u32, path: []const u8 };
+pub const ObserveMessage = struct { request_id: u32, path: []const u8, format: enum { rgba, png } = .rgba };
+
+pub const KeyInput = @import("key_input.zig").KeyInput;
 
 pub const InputPayload = union(enum) {
+    key: KeyInput,
     source_pointer: SourcePointer,
     terminal_bytes: []const u8,
     pointer: PointerEventPayload,
@@ -293,11 +329,24 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
         if (id > std.math.maxInt(u32)) return error.InvalidMessage;
         const path = root.get("path") orelse return error.InvalidMessage;
         if (path != .string or !std.fs.path.isAbsolute(path.string)) return error.InvalidMessage;
-        return .{ .observe = .{ .request_id = @intCast(id), .path = try allocator.dupe(u8, path.string) } };
+        var format: @FieldType(ObserveMessage, "format") = .rgba;
+        if (root.get("format")) |value| {
+            if (value != .string) return error.InvalidMessage;
+            format = std.meta.stringToEnum(@FieldType(ObserveMessage, "format"), value.string) orelse return error.InvalidMessage;
+        }
+        return .{ .observe = .{ .request_id = @intCast(id), .path = try allocator.dupe(u8, path.string), .format = format } };
     }
     if (std.mem.eql(u8, type_value.string, "input")) {
         const event_value = root.get("event") orelse return error.InvalidMessage;
         if (event_value != .string) return error.InvalidMessage;
+        if (std.mem.eql(u8, event_value.string, "key")) {
+            const key_parsed = try std.json.parseFromValue(KeyInput, allocator, parsed.value, .{ .ignore_unknown_fields = true });
+            defer key_parsed.deinit();
+            var key = key_parsed.value;
+            if (!key.valid()) return error.InvalidMessage;
+            key.key = try allocator.dupe(u8, key.key);
+            return .{ .input = .{ .window_id = "main", .payload = .{ .key = key } } };
+        }
         if (std.mem.eql(u8, event_value.string, "terminal_bytes")) {
             const bytes_value = root.get("bytes") orelse return error.InvalidMessage;
             if (bytes_value != .string) return error.InvalidMessage;
@@ -334,6 +383,40 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
             } };
         }
         return error.InvalidMessage;
+    }
+
+    if (root.get("placeholder")) |value| {
+        if (value != .object or root.contains("rect_cells") or root.contains("aspect") or root.contains("z_base") or root.contains("clip_cells") or root.contains("occlusion_rects") or root.contains("terminal_cells") or root.contains("terminal_px") or root.contains("id_ranges")) return error.InvalidMessage;
+        const placeholder = PlaceholderPresentation{
+            .image_id = std.math.cast(u32, try jsonU64(value.object.get("image_id") orelse return error.InvalidMessage)) orelse return error.InvalidMessage,
+            .cols = try jsonI32(value.object.get("cols") orelse return error.InvalidMessage),
+            .rows = try jsonI32(value.object.get("rows") orelse return error.InvalidMessage),
+            .target_px = if (value.object.get("target_px")) |pixels| blk: {
+                if (pixels != .object) return error.InvalidMessage;
+                break :blk .{ .w = try jsonI32(pixels.object.get("w") orelse return error.InvalidMessage), .h = try jsonI32(pixels.object.get("h") orelse return error.InvalidMessage) };
+            } else null,
+        };
+        try placeholder.validate();
+        const generation = if (root.get("presentation_generation")) |v| try jsonU64(v) else 0;
+        if (std.mem.eql(u8, type_value.string, "viewport")) return .{ .viewport = .{
+            .window_id = "main",
+            .placeholder = placeholder,
+            .rect_cells = placeholder.localRect(),
+            .aspect = .stretch,
+            .presentation_generation = generation,
+            .refresh_placements = if (root.get("refresh_placements")) |v| try jsonBool(v) else false,
+        } };
+        if (!std.mem.eql(u8, type_value.string, "attach")) return error.InvalidMessage;
+        return .{ .attach = .{
+            .window_id = "main",
+            .placeholder = placeholder,
+            .rect_cells = placeholder.localRect(),
+            .aspect = .stretch,
+            .presentation_generation = generation,
+            .image_ids = .{ .start = placeholder.image_id, .end = placeholder.image_id },
+            .placement_ids = .{ .start = 1, .end = 1 },
+            .upload = try parseUploadPolicy(allocator, root.get("upload")),
+        } };
     }
 
     const rect = try parseRect(root.get("rect_cells") orelse return error.InvalidMessage);
@@ -401,6 +484,7 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
                 allocator.free(bytes);
                 input.payload = .{ .terminal_bytes = "" };
             },
+            .key => |key| allocator.free(key.key),
             .pointer, .source_pointer => {},
         },
         .observe => |observe| allocator.free(observe.path),
@@ -854,4 +938,56 @@ test "observe and source pointer controls validate ownership and coordinates" {
     try std.testing.expectEqual(@as(i32, 123), pointer.input.payload.source_pointer.x);
     try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":7,\"path\":\"relative\"}"));
     try std.testing.expectError(error.InvalidMessage, parseAttachMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":7,\"path\":\"/tmp/frame.rgba\"}"));
+}
+
+test "placeholder attach needs only image identity and grid dimensions" {
+    var attach = try parseAttachMessage(std.testing.allocator,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":60,"rows":20}}
+    );
+    defer deinitAttachMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(@as(u32, 777), attach.placeholder.?.image_id);
+    try std.testing.expectEqual(@as(?TerminalGeometry, null), attach.terminal);
+    try std.testing.expectEqual(PresentationAspect.stretch, attach.aspect);
+    for ([_][]const u8{
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":0,"cols":60,"rows":20}}
+        ,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":16777216,"cols":60,"rows":20}}
+        ,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":1,"cols":0,"rows":20}}
+        ,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":1,"cols":60,"rows":298}}
+        ,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":1,"cols":60,"rows":20},"z_base":1}
+        ,
+    }) |line| try std.testing.expectError(error.InvalidMessage, parseAttachMessage(std.testing.allocator, line));
+}
+
+test "structured keyboard control preserves key action and modifiers" {
+    var message = try parseControlMessage(std.testing.allocator, "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"key\",\"key\":\"up\",\"action\":\"down\",\"ctrl\":true}");
+    defer deinitControlMessage(std.testing.allocator, &message);
+    try std.testing.expectEqualStrings("up", message.input.payload.key.key);
+    try std.testing.expect(message.input.payload.key.ctrl);
+    try std.testing.expectEqual(.down, message.input.payload.key.action);
+    try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator, "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"key\",\"key\":\"not-a-key\"}"));
+}
+
+test "observation format defaults to raw for existing hosts and accepts png" {
+    var raw = try parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":1,\"path\":\"/tmp/frame.rgba\"}");
+    defer deinitControlMessage(std.testing.allocator, &raw);
+    try std.testing.expect(raw.observe.format == .rgba);
+    var png = try parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":1,\"path\":\"/tmp/frame.png\",\"format\":\"png\"}");
+    defer deinitControlMessage(std.testing.allocator, &png);
+    try std.testing.expect(png.observe.format == .png);
+    try std.testing.expectError(error.InvalidMessage, parseControlMessage(std.testing.allocator, "{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":1,\"path\":\"/tmp/frame.png\",\"format\":\"jpg\"}"));
+}
+
+test "placeholder target pixels are bounded and preserve source aspect without upscaling" {
+    var target = PlaceholderPresentation{ .image_id = 1, .cols = 10, .rows = 5, .target_px = .{ .w = 300, .h = 300 } };
+    try target.validate();
+    try std.testing.expectEqual(SourcePixels{ .w = 300, .h = 168 }, target.uploadSize(.{ .w = 1920, .h = 1080 }));
+    try std.testing.expectEqual(SourcePixels{ .w = 20, .h = 10 }, target.uploadSize(.{ .w = 20, .h = 10 }));
+    target.target_px = .{ .w = 0, .h = 1 };
+    try std.testing.expectError(error.InvalidMessage, target.validate());
+    target.target_px = .{ .w = 16384, .h = 16384 };
+    try std.testing.expectError(error.InvalidMessage, target.validate());
 }
