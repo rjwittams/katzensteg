@@ -19,7 +19,7 @@ fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16 } {
     return .{ .rows = 24, .cols = 80 };
 }
 
-fn writeStatus(out: std.fs.File.DeprecatedWriter, frame: usize, active: ActivePlacement, rows: u16, cols: u16) !void {
+fn writeStatus(out: *std.Io.Writer, frame: usize, active: ActivePlacement, rows: u16, cols: u16) !void {
     try out.writeAll("\x1b[0m");
     try protocol.moveCursor(out, 1, 1);
     try out.print("kitty-placement-repro  q quits  frame={d}  image={d}  placement={d}", .{ frame, active.image_id, active.placement_id });
@@ -33,7 +33,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const stdout_file = std.fs.File.stdout();
-    var writer = stdout_file.deprecatedWriter();
+    var writer_state = stdout_file.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     const stdin_fd = std.fs.File.stdin().handle;
     const original_termios = try std.posix.tcgetattr(stdin_fd);
     defer std.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};

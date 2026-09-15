@@ -33,17 +33,17 @@ fn appendGroup(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), chunks: 
 }
 
 test "terminal batch applier writes groups in presentation order" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try applyFrameBatch(out.writer(std.testing.allocator), .{
+    try applyFrameBatch(&out.writer, .{
         .deletes = &.{"D"},
         .uploads = &.{"U"},
         .placements = &.{"P"},
         .after = &.{"A"},
     });
 
-    try std.testing.expectEqualStrings("DUPA", out.items);
+    try std.testing.expectEqualStrings("DUPA", out.written());
 }
 
 test "terminal batch applier can coalesce frame batch into one write" {

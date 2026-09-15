@@ -1,5 +1,24 @@
 const std = @import("std");
 
+const ControlWriter = struct {
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    channel: ?*ClientChannel = null,
+    err: ?anyerror = null,
+
+    fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ControlWriter = @fieldParentPtr("interface", interface);
+        for (data, 0..) |bytes, i| {
+            if (i == data.len - 1 and splat == 0) break;
+            if (bytes.len == 0) continue;
+            return self.channel.?.writeControl(bytes) catch |err| {
+                self.err = err;
+                return error.WriteFailed;
+            };
+        }
+        return 0;
+    }
+};
+
 pub const SessionId = u32;
 
 pub const StdioChannel = struct {
@@ -9,6 +28,7 @@ pub const StdioChannel = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
     pending: std.ArrayList(u8) = .empty,
     sent: usize = 0,
+    output: ControlWriter = .{},
 };
 
 pub const SocketChannel = struct {
@@ -18,6 +38,7 @@ pub const SocketChannel = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
     pending: std.ArrayList(u8) = .empty,
     sent: usize = 0,
+    output: ControlWriter = .{},
 
     fn closeIfFinished(self: *SocketChannel) void {
         if (self.control_open or self.presentation_open or self.pending.items.len != 0) return;
@@ -49,8 +70,22 @@ pub const ClientChannel = union(enum) {
         };
     }
 
-    pub fn writer(self: *ClientChannel) std.io.GenericWriter(*ClientChannel, anyerror, writeControl) {
-        return .{ .context = self };
+    // Borrowed until the channel moves or is destroyed. The interface has no
+    // buffer: writes enter the same bounded pending queue as before.
+    pub fn writer(self: *ClientChannel) *std.Io.Writer {
+        switch (self.*) {
+            inline else => |*transport| {
+                transport.output.channel = self;
+                transport.output.err = null;
+                return &transport.output.interface;
+            },
+        }
+    }
+
+    pub fn writeError(self: *const ClientChannel) ?anyerror {
+        return switch (self.*) {
+            inline else => |transport| transport.output.err,
+        };
     }
 
     fn writeControl(self: *ClientChannel, bytes: []const u8) !usize {
@@ -262,7 +297,8 @@ test "socket control backpressure preserves bytes through graceful half close" {
     const excessive = try std.testing.allocator.alloc(u8, 512 * 1024);
     defer std.testing.allocator.free(excessive);
     @memset(excessive, 0);
-    try std.testing.expectError(error.ControlBackpressure, channel.writer().writeAll(excessive));
+    try std.testing.expectError(error.WriteFailed, channel.writer().writeAll(excessive));
+    try std.testing.expectEqual(error.ControlBackpressure, channel.writeError().?);
     channel.closeControl();
     try std.testing.expect(channel.controlFile() == null);
     var received = std.ArrayList(u8).empty;
@@ -307,7 +343,8 @@ test "stdio backpressure preserves bytes through graceful control close" {
     const excessive = try std.testing.allocator.alloc(u8, 512 * 1024);
     defer std.testing.allocator.free(excessive);
     @memset(excessive, 0);
-    try std.testing.expectError(error.ControlBackpressure, channel.writer().writeAll(excessive));
+    try std.testing.expectError(error.WriteFailed, channel.writer().writeAll(excessive));
+    try std.testing.expectEqual(error.ControlBackpressure, channel.writeError().?);
     channel.closeControl();
     try std.testing.expect(channel.controlFile() == null);
     var received = std.ArrayList(u8).empty;
@@ -329,4 +366,24 @@ test "stdio backpressure preserves bytes through graceful control close" {
     try std.testing.expect(eof);
     try std.testing.expectEqualSlices(u8, payload, received.items);
     try std.testing.expect(channel.stdio.control == null);
+}
+
+test "native control writer handles vectors, repetitions and closed channels" {
+    const fds = try std.posix.pipe();
+    const reader = std.fs.File{ .handle = fds[0] };
+    defer reader.close();
+    var channel = ClientChannel{ .stdio = .{ .control = .{ .handle = fds[1] }, .allocator = std.testing.allocator } };
+    defer channel.deinit();
+    const output = channel.writer();
+    var pieces: [3][]const u8 = .{ "head:", "", "ab" };
+    try output.writeSplatAll(&pieces, 3);
+    try output.splatByteAll('!', 2);
+    var no_tail: [2][]const u8 = .{ "end", "ignored" };
+    try output.writeSplatAll(&no_tail, 0);
+    channel.closeControl();
+    const bytes = try reader.readToEndAlloc(std.testing.allocator, 128);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("head:ababab!!end", bytes);
+    try std.testing.expectError(error.WriteFailed, channel.writer().writeAll("closed"));
+    try std.testing.expectEqual(error.ControlClosed, channel.writeError().?);
 }

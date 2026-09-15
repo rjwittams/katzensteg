@@ -438,7 +438,8 @@ pub const Runtime = struct {
         self.sdl_window_ids.deinit();
         if (self.batch_sink) |*sink| {
             if (self.batch_writer) |writer| {
-                self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, writer.deprecatedWriter());
+                var output_writer = writer.writerStreaming(&.{});
+                self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, &output_writer.interface);
             }
             sink.deinit();
         }
@@ -697,7 +698,8 @@ pub const Runtime = struct {
             self.queuePendingBatchPresentationReset();
             self.placeholder_scene.valid = false;
             self.observation.pixels.clearRetainingCapacity(); // Positioned external capture has no observation yet.
-            self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, self.batch_writer.?.deprecatedWriter());
+            var output_writer = self.batch_writer.?.writerStreaming(&.{});
+            self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, &output_writer.interface);
             var virtual_tty = self.batchVirtualTty();
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
             self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
@@ -720,7 +722,8 @@ pub const Runtime = struct {
         if (self.batch_sink != null and self.batch_writer != null) {
             self.lockPresentation("create_renderer");
             defer self.presentation_mutex.unlock();
-            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+            var output_writer = self.batch_writer.?.writerStreaming(&.{});
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, &output_writer.interface);
             self.frame_builder.onCreateRenderer(window, renderer);
             return;
         }
@@ -731,7 +734,8 @@ pub const Runtime = struct {
         if (self.batch_sink != null and self.batch_writer != null) {
             self.lockPresentation("destroy_renderer");
             defer self.presentation_mutex.unlock();
-            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, self.batch_writer.?.deprecatedWriter());
+            var output_writer = self.batch_writer.?.writerStreaming(&.{});
+            self.frame_builder.flushBatchDeletesForRenderer(&self.logger, &self.batch_sink.?, renderer, &output_writer.interface);
             self.frame_builder.onDestroyRenderer(renderer);
             return;
         }
@@ -773,7 +777,8 @@ pub const Runtime = struct {
             }
         }
         self.queuePendingBatchPresentationReset();
-        self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, self.batch_writer.?.deprecatedWriter());
+        var output_writer = self.batch_writer.?.writerStreaming(&.{});
+        self.frame_builder.renderPresentJobBatch(&self.logger, &self.batch_sink.?, renderer, &job, &output_writer.interface);
         const layout = self.frame_builder.presentationLayoutForRenderer(&virtual_tty, renderer);
         self.writeBatchPresentationStatus(renderer, &job);
         self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
@@ -804,7 +809,8 @@ pub const Runtime = struct {
             if (presentationStatusEqual(previous, status)) return;
         }
         const writer = self.batch_writer orelse return;
-        render_batch_protocol.writePresentationStatusJsonl(writer.deprecatedWriter(), status) catch |err| {
+        var output_writer = writer.writerStreaming(&.{});
+        render_batch_protocol.writePresentationStatusJsonl(&output_writer.interface, status) catch |err| {
             self.logger.writeFmtScoped(.info, .runtime, "batch presentation status write failed: {any}", .{err});
             return;
         };
@@ -911,7 +917,8 @@ pub const Runtime = struct {
                     },
                 );
                 if (sink.isAttached()) {
-                    self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, self.batch_writer.?.deprecatedWriter());
+                    var file_output_7 = self.batch_writer.?.writerStreaming(&.{});
+                    self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, &file_output_7.interface);
                 }
                 sink.placeholder = attach.placeholder;
                 self.batch_presentation_reset_pending = false;
@@ -959,7 +966,10 @@ pub const Runtime = struct {
                     } else if (viewport.refresh_placements or !std.meta.eql(current.target_px, target.target_px)) {
                         sink.restorePlaceholder() catch return;
                     } else sink.refreshPlaceholder() catch return;
-                    if (sink.hasPendingBytes()) sink.flushFrame(self.batch_writer.?.deprecatedWriter()) catch return;
+                    if (sink.hasPendingBytes()) {
+                        var file_output_8 = self.batch_writer.?.writerStreaming(&.{});
+                        sink.flushFrame(&file_output_8.interface) catch return;
+                    }
                     self.updateBatchInputTarget(sink);
                     return;
                 }
@@ -1007,7 +1017,8 @@ pub const Runtime = struct {
                 var reprojected_flag = false;
                 if (presentation_changed) {
                     if (self.batch_writer) |writer| {
-                        if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, writer.deprecatedWriter())) {
+                        var file_output_9 = writer.writerStreaming(&.{});
+                        if (self.frame_builder.flushBatchPresentationReproject(&self.logger, sink, &file_output_9.interface)) {
                             self.batch_presentation_reset_pending = false;
                             reprojected_flag = true;
                         }
@@ -1029,7 +1040,8 @@ pub const Runtime = struct {
             },
             .observe => |request| {
                 const output = self.batch_writer orelse return;
-                const writer = output.deprecatedWriter();
+                var writer_state = output.writerStreaming(&.{});
+                const writer = &writer_state.interface;
                 const observation = if (sink.placeholder != null and self.placeholder_scene.valid) self.placeholder_scene.observation(self.allocator) catch return else if (sink.placeholder != null) &sink.placeholder_frame else &self.observation;
                 const result = switch (request.format) {
                     .rgba => observation.write(request.path),
@@ -1091,7 +1103,8 @@ pub const Runtime = struct {
         if (sink.presentation_generation == generation) return true;
         if (sink.hasPendingBytes()) {
             const writer = self.batch_writer orelse return false;
-            sink.flushFrame(writer.deprecatedWriter()) catch |err| {
+            var output_writer = writer.writerStreaming(&.{});
+            sink.flushFrame(&output_writer.interface) catch |err| {
                 log.warn("batch generation flush failed: {any}", .{err});
                 return false;
             };
@@ -1107,7 +1120,8 @@ pub const Runtime = struct {
             .{ window_id, previous.row, previous.col, previous.cols, previous.rows, @tagName(sink.presentationAspect()) },
         );
         if (self.batch_writer) |writer| {
-            const file_writer = writer.deprecatedWriter();
+            var file_writer_state = writer.writerStreaming(&.{});
+            const file_writer = &file_writer_state.interface;
             self.frame_builder.flushBatchDeletesForPresentationReset(&self.logger, sink, file_writer);
             render_batch_protocol.writeDetachedJsonl(file_writer, window_id) catch |err| {
                 log.warn("batch detached ack failed: {any}", .{err});
@@ -1818,9 +1832,9 @@ test "batch viewport immediately reprojects retained presentation when writer is
 
     var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
     defer job.deinit(runtime.allocator);
-    var first_out = std.ArrayList(u8).empty;
-    defer first_out.deinit(std.testing.allocator);
-    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+    var first_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer first_out.deinit();
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, &first_out.writer);
 
     setNonblocking(pipe[0]);
     runtime.processBatchControlLine("{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":5,\"col\":11,\"rows\":20,\"cols\":40},\"aspect\":\"fit\"}");
@@ -1849,10 +1863,10 @@ test "batch generation fences pending bytes and refreshes unchanged retained pla
     var tty = runtime.batch_sink.?.presentationTty();
     var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
     defer job.deinit(runtime.allocator);
-    var first = std.ArrayList(u8).empty;
-    defer first.deinit(std.testing.allocator);
-    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first.writer(std.testing.allocator));
-    try std.testing.expect(std.mem.indexOf(u8, first.items, "\"presentation_generation\":1") != null);
+    var first = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer first.deinit();
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, &first.writer);
+    try std.testing.expect(std.mem.indexOf(u8, first.written(), "\"presentation_generation\":1") != null);
 
     // Pending resource operations must keep their old generation; they cannot
     // silently inherit the next viewport's identity during the eventual flush.
@@ -2049,9 +2063,9 @@ test "batch renderer destroy emits retained placement deletes before forgetting 
 
     var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
     defer job.deinit(runtime.allocator);
-    var first_out = std.ArrayList(u8).empty;
-    defer first_out.deinit(std.testing.allocator);
-    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+    var first_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer first_out.deinit();
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, &first_out.writer);
 
     setNonblocking(pipe[0]);
     runtime.destroyRenderer(renderer);
@@ -2086,9 +2100,9 @@ test "batch runtime deinit emits split placement deletes without renderer destro
 
     var rgba = [_]u8{255} ** (4 * 4 * 4);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = &rgba, .owns_rgba = false } };
-    var first_out = std.ArrayList(u8).empty;
-    defer first_out.deinit(std.testing.allocator);
-    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+    var first_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer first_out.deinit();
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, &first_out.writer);
 
     setNonblocking(pipe[0]);
     runtime.deinit();
@@ -2129,9 +2143,9 @@ test "batch renderer replacement emits retained placement deletes before overwri
 
     var job = try runtime.frame_builder.buildPresentJob(&runtime.logger, &tty, renderer, false, null);
     defer job.deinit(runtime.allocator);
-    var first_out = std.ArrayList(u8).empty;
-    defer first_out.deinit(std.testing.allocator);
-    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, first_out.writer(std.testing.allocator));
+    var first_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer first_out.deinit();
+    runtime.frame_builder.renderPresentJobBatch(&runtime.logger, &runtime.batch_sink.?, renderer, &job, &first_out.writer);
 
     setNonblocking(pipe[0]);
     runtime.createRenderer(window, renderer);

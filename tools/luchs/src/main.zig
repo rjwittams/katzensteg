@@ -243,11 +243,13 @@ const NativeWebviewStream = struct {
     }
 
     fn sendInput(self: *NativeWebviewStream, event: WebInputEvent) void {
-        writeWebInputEventJson(self.stdin_file.deprecatedWriter(), event) catch {};
+        var output_writer = self.stdin_file.writerStreaming(&.{});
+        writeWebInputEventJson(&output_writer.interface, event) catch {};
     }
 
     fn sendReload(self: *NativeWebviewStream) void {
-        writeJsonLine(self.stdin_file.deprecatedWriter(), .{ .type = "reload" }) catch {};
+        var output_writer = self.stdin_file.writerStreaming(&.{});
+        writeJsonLine(&output_writer.interface, .{ .type = "reload" }) catch {};
     }
 };
 
@@ -414,16 +416,16 @@ test "native webview stream uses bounded frame cadence" {
 
 test "writeWebInputEventJson writes mouse input jsonl" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeWebInputEventJson(fbs.writer(), .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
-    try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&buf);
+    try writeWebInputEventJson(&fbs, .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
+    try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.buffered());
 }
 
 test "writeWebInputEventJson escapes text input jsonl" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeWebInputEventJson(fbs.writer(), .{ .text = "a\"b" });
-    try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":\"a\\\"b\"}\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&buf);
+    try writeWebInputEventJson(&fbs, .{ .text = "a\"b" });
+    try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":\"a\\\"b\"}\n", fbs.buffered());
 }
 
 pub fn main() !void {

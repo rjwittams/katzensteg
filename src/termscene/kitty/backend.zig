@@ -62,6 +62,7 @@ pub const Backend = struct {
 
     allocator: std.mem.Allocator,
     file: std.fs.File,
+    output: std.fs.File.Writer,
     sprites: std.AutoHashMap(u64, SpriteState),
     texts: std.AutoHashMap(u64, TextState),
     known_images: std.AutoHashMap(u32, void),
@@ -78,6 +79,7 @@ pub const Backend = struct {
         return .{
             .allocator = allocator,
             .file = file,
+            .output = file.writerStreaming(&.{}),
             .sprites = std.AutoHashMap(u64, SpriteState).init(allocator),
             .texts = std.AutoHashMap(u64, TextState).init(allocator),
             .known_images = std.AutoHashMap(u32, void).init(allocator),
@@ -109,8 +111,8 @@ pub const Backend = struct {
         self.retransmitted_images.deinit();
     }
 
-    fn writer(self: *Backend) std.fs.File.DeprecatedWriter {
-        return self.file.deprecatedWriter();
+    fn writer(self: *Backend) *std.Io.Writer {
+        return &self.output.interface;
     }
 
     pub fn registerRawImage(self: *Backend, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
@@ -343,7 +345,7 @@ pub const Backend = struct {
         return id;
     }
 
-    fn writeSpaces(out: std.fs.File.DeprecatedWriter, count: usize) !void {
+    fn writeSpaces(out: *std.Io.Writer, count: usize) !void {
         var buf: [128]u8 = [_]u8{' '} ** 128;
         var remaining = count;
         while (remaining > 0) {

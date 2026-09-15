@@ -104,7 +104,10 @@ const Host = struct {
 
     fn deinit(self: *Host) void {
         for (self.sessions.items) |*session| {
-            if (session.exited_at == null) graphics.delete(self.terminal.file.deprecatedWriter(), session.image_id) catch {};
+            if (session.exited_at == null) {
+                var output_writer = self.terminal.file.writerStreaming(&.{});
+                graphics.delete(&output_writer.interface, session.image_id) catch {};
+            }
             session.deinit(self.allocator);
         }
         for (self.clients.items) |*client| client.listener.deinit();
@@ -200,7 +203,8 @@ const Host = struct {
             if (timed_out or (eof and (session.producer.child == null or term != null))) {
                 session.producer.deinit();
                 session.exited_at = now;
-                graphics.delete(self.terminal.file.deprecatedWriter(), session.image_id) catch |err| {
+                var output_writer = self.terminal.file.writerStreaming(&.{});
+                graphics.delete(&output_writer.interface, session.image_id) catch |err| {
                     self.logger.writeFmtScoped(.warn, .wm, "producer {d} graphics cleanup failed: {s}", .{ session.id, @errorName(err) });
                 };
                 std.fs.cwd().deleteTree(session.directory) catch {};
@@ -258,7 +262,8 @@ const Host = struct {
         // image and virtual placements under this id from a host that did not
         // exit cleanly. Placeholder cells resolve to the first virtual placement
         // of the image, so stale ones would size (and briefly show) this session.
-        graphics.delete(self.terminal.file.deprecatedWriter(), image_id) catch |err| {
+        var output_writer = self.terminal.file.writerStreaming(&.{});
+        graphics.delete(&output_writer.interface, image_id) catch |err| {
             self.logger.writeFmtScoped(.warn, .wm, "session {d} stale graphics cleanup failed: {s}", .{ id, @errorName(err) });
         };
         try self.sessions.append(self.allocator, .{ .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .observation_path = observation_path });
@@ -320,7 +325,8 @@ const Host = struct {
                         session.restore_pending = true;
                         continue;
                     }
-                    try graphics.apply(self.allocator, self.terminal.file.deprecatedWriter(), session.image_id, .{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after });
+                    var output_writer = self.terminal.file.writerStreaming(&.{});
+                    try graphics.apply(self.allocator, &output_writer.interface, session.image_id, .{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after });
                     session.last_frame_at = std.time.milliTimestamp();
                     if (batch.groups.uploads.len != 0) session.restore_pending = false;
                 },
@@ -438,11 +444,15 @@ const Host = struct {
             const grid = session.grid orelse return error.GridRequired;
             const parsed = try std.json.parseFromSlice(struct { events: []const std.json.Value }, allocator, request.body, .{});
             if (parsed.value.events.len > 64) return error.TooManyEvents;
-            var bytes = std.ArrayList(u8).empty;
+            var bytes = std.Io.Writer.Allocating.init(allocator);
             var buttons = self.pointerButtons(session.id);
             // Validate the whole request before enqueuing any input.
-            for (parsed.value.events) |event| try encodeInput(allocator, bytes.writer(allocator), event, grid, &buttons);
-            try session.producer.channel.writer().writeAll(bytes.items);
+            for (parsed.value.events) |event| encodeInput(allocator, &bytes.writer, event, grid, &buttons) catch |err| {
+                // Allocating writers report allocation failure as WriteFailed.
+                // Keep resource failures on the HTTP 503 path.
+                return if (err == error.WriteFailed) error.OutOfMemory else err;
+            };
+            try session.producer.channel.writer().writeAll(bytes.written());
             self.setPointerButtons(session.id, buttons);
             return .{};
         }
@@ -485,13 +495,13 @@ const Host = struct {
         }
         if (now >= pending.deadline) return http.Response{ .status = 503, .body = "{\"error\":\"NoFrame\"}" };
         if (!pending.in_flight and now - pending.sent_at >= 100 and (pending.latest == null or session.last_frame_at >= pending.sent_at)) {
-            var bytes = std.ArrayList(u8).empty;
-            defer bytes.deinit(allocator);
-            const writer = bytes.writer(allocator);
-            try writer.print("{{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":{d},\"format\":\"png\",\"path\":", .{id});
-            try protocol.writeJsonString(writer, session.observation_path);
-            try writer.writeAll("}\n");
-            session.producer.channel.writer().writeAll(bytes.items) catch {
+            var bytes = std.Io.Writer.Allocating.init(allocator);
+            defer bytes.deinit();
+            const writer = &bytes.writer;
+            writer.print("{{\"type\":\"observe\",\"window_id\":\"main\",\"request_id\":{d},\"format\":\"png\",\"path\":", .{id}) catch return error.OutOfMemory;
+            protocol.writeJsonString(writer, session.observation_path) catch return error.OutOfMemory;
+            writer.writeAll("}\n") catch return error.OutOfMemory;
+            session.producer.channel.writer().writeAll(bytes.written()) catch {
                 session.close(now);
                 return http.Response{ .status = 409 };
             };

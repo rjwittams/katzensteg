@@ -423,13 +423,13 @@ pub const WhiskersClient = struct {
         self.control_fd = stream.handle;
         self.mutex.unlock();
 
-        var req_buf = std.ArrayList(u8).empty;
-        defer req_buf.deinit(self.allocator);
-        try req_buf.writer(self.allocator).print(
+        var req_buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer req_buf.deinit();
+        try req_buf.writer.print(
             "GET /v0/producers/control HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
             .{self.bearer_token},
         );
-        _ = try stream.write(req_buf.items);
+        _ = try stream.write(req_buf.written());
 
         var recv_buf = std.ArrayList(u8).empty;
         defer recv_buf.deinit(self.allocator);
@@ -557,13 +557,13 @@ fn requestForBody(allocator: std.mem.Allocator, socket_path: []const u8, method:
     var stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
 
-    var req = std.ArrayList(u8).empty;
-    defer req.deinit(allocator);
-    try req.writer(allocator).print("{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n", .{ method, path, body.len });
-    if (bearer_token) |token| try req.writer(allocator).print("Authorization: Bearer {s}\r\n", .{token});
-    try req.appendSlice(allocator, "Connection: close\r\n\r\n");
-    try req.appendSlice(allocator, body);
-    _ = try stream.write(req.items);
+    var req = std.Io.Writer.Allocating.init(allocator);
+    defer req.deinit();
+    try req.writer.print("{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n", .{ method, path, body.len });
+    if (bearer_token) |token| try req.writer.print("Authorization: Bearer {s}\r\n", .{token});
+    try req.writer.writeAll("Connection: close\r\n\r\n");
+    try req.writer.writeAll(body);
+    _ = try stream.write(req.written());
 
     const file = std.fs.File{ .handle = stream.handle };
     const response = try file.deprecatedReader().readAllAlloc(allocator, 1 << 20);

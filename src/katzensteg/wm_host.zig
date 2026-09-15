@@ -766,7 +766,8 @@ fn runMultiProfile(allocator: std.mem.Allocator, producer_exe: []const u8, specs
 
     var focused_index: usize = 0;
     var redraw_state = WmDesktopRedrawState{};
-    const writer = tty.file.deprecatedWriter();
+    var writer_state = tty.file.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized]) |*session| {
         try startSessionStdoutPolling(session);
@@ -1246,7 +1247,8 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
     if (child.stdin) |stdin_file| {
         child.stdin = null;
         const exec_rect = contentRectForOuter(outer).toPresentationRectCells();
-        try writeInitialControl(stdin_file.deprecatedWriter(), .{
+        var output_writer = stdin_file.writerStreaming(&.{});
+        try writeInitialControl(&output_writer.interface, .{
             .rect_cells = exec_rect,
             .aspect = options.aspect,
             .terminal = options.terminal,
@@ -1654,7 +1656,7 @@ pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
         try writeStatusPart(writer, &remaining, " last=none");
     }
 
-    if (remaining > 0) try writer.writeByteNTimes(' ', remaining);
+    if (remaining > 0) try writer.splatByteAll(' ', remaining);
     try writer.writeAll("\x1b[0m");
 }
 
@@ -2011,11 +2013,11 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
 fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session)) return;
     if (session.producer.channel.controlFile() == null) return;
-    var local_bytes = std.ArrayList(u8).empty;
-    defer local_bytes.deinit(events.allocator);
+    var local_bytes = std.Io.Writer.Allocating.init(events.allocator);
+    defer local_bytes.deinit();
     const forwarded = if (session.placeholder_image_id != null) blk: {
-        try translatePlaceholderInput(local_bytes.writer(events.allocator), bytes, placeholderGridRect(session, terminal));
-        break :blk local_bytes.items;
+        try translatePlaceholderInput(&local_bytes.writer, bytes, placeholderGridRect(session, terminal));
+        break :blk local_bytes.written();
     } else bytes;
     if (forwarded.len == 0) return;
     if (tryWriteInputControl(session.producer.channel.writer(), forwarded)) {
@@ -2367,10 +2369,10 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
 fn redrawDesktopManyLocked(tty_lock: *std.Thread.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     tty_lock.lock();
     defer tty_lock.unlock();
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(events.allocator);
-    try renderDesktopMany(bytes.writer(events.allocator), terminal, sessions, z_order, focused_index, events, redraw_state);
-    try writer.writeAll(bytes.items);
+    var bytes = std.Io.Writer.Allocating.init(events.allocator);
+    defer bytes.deinit();
+    try renderDesktopMany(&bytes.writer, terminal, sessions, z_order, focused_index, events, redraw_state);
+    try writer.writeAll(bytes.written());
 }
 
 fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
@@ -2432,7 +2434,7 @@ fn clearCellSpan(writer: anytype, row: i32, col: i32, cols: i32, terminal: Termi
     const end_col = @min(terminal.cols, requested_end);
     if (end_col < start_col) return;
     try moveCursor(writer, row, start_col);
-    try writer.writeByteNTimes(' ', @intCast(end_col - start_col + 1));
+    try writer.splatByteAll(' ', @intCast(end_col - start_col + 1));
 }
 
 fn visibleStatusSessionIndex(sessions: []const WmProducerSession, focused_index: usize) ?usize {
@@ -2477,7 +2479,7 @@ fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *
         try writeStatusPart(writer, &remaining, " last=none");
     }
 
-    if (remaining > 0) try writer.writeByteNTimes(' ', remaining);
+    if (remaining > 0) try writer.splatByteAll(' ', remaining);
     try writer.writeAll("\x1b[0m");
     try moveCursor(writer, @max(1, terminal.rows - 1), 1);
 }
@@ -2563,13 +2565,13 @@ test "wm clampOuterRect allows partly-off-screen windows" {
 }
 
 test "wm renderChrome clips writes to terminal bounds when window extends past edge" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
     // Window with right edge past terminal cols=20. Without clipping, the top
     // border would have repeated horizontal chars beyond col 20 and the
     // terminal would wrap to the next row.
-    try renderChrome(out.writer(std.testing.allocator), .{
+    try renderChrome(&out.writer, .{
         .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 40 },
         .title = "probe",
         .focused = true,
@@ -2578,9 +2580,9 @@ test "wm renderChrome clips writes to terminal bounds when window extends past e
 
     // No moveCursor sequence with a column outside [1, 20] should appear.
     var idx: usize = 0;
-    while (std.mem.indexOfPos(u8, out.items, idx, "\x1b[")) |start| {
+    while (std.mem.indexOfPos(u8, out.written(), idx, "\x1b[")) |start| {
         // Match \e[<row>;<col>H
-        const remainder = out.items[start + 2 ..];
+        const remainder = out.written()[start + 2 ..];
         const h_pos = std.mem.indexOfScalar(u8, remainder, 'H') orelse break;
         const semi_pos = std.mem.indexOfScalar(u8, remainder[0..h_pos], ';') orelse {
             idx = start + 2 + h_pos + 1;
@@ -2597,12 +2599,12 @@ test "wm renderChrome clips writes to terminal bounds when window extends past e
 }
 
 test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
     const rect = render_batch_protocol.PresentationRectCells{ .row = -1, .col = 2, .rows = 10, .cols = 30 };
     const terminal = TerminalSize{ .rows = 24, .cols = 80 };
-    try writeViewportControl(out.writer(std.testing.allocator), .{
+    try writeViewportControl(&out.writer, .{
         .rect_cells = rect,
         .aspect = .fit,
         .terminal = terminal,
@@ -2610,7 +2612,7 @@ test "wm writeViewportControl emits clip_cells when rect partly off-screen" {
     });
 
     // row=-1 with 10 rows in a 24-row terminal → visible rows are 1..8 (8 rows).
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":2,\"rows\":8,\"cols\":30}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"clip_cells\":{\"row\":1,\"col\":2,\"rows\":8,\"cols\":30}") != null);
 }
 
 test "wm reserves the status band row for windows" {
@@ -2689,51 +2691,51 @@ test "wm window attachment state tracks detach and reattach" {
 }
 
 test "wm chrome renders title and reserves content rect" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try renderChrome(out.writer(std.testing.allocator), .{
+    try renderChrome(&out.writer, .{
         .outer = .{ .row = 1, .col = 1, .rows = 6, .cols = 32 },
         .title = "probe",
         .focused = true,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "probe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "┌─┬") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "│╳│") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "├─┴") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "┌") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "─") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "│") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "├") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "┤") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "┘") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[4;2H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "probe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "katzensteg wm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "┌─┬") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "│╳│") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "├─┴") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "┌") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "─") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "│") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "├") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "┤") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "┘") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[4;2H") != null);
 }
 
 test "wm status band renders host geometry and last event outside content" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
     var log = try ProtocolEventLog.init(std.testing.allocator, 2);
     defer log.deinit();
     try log.record(.attach_sent, "main");
 
     const window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 });
-    try renderStatusBand(out.writer(std.testing.allocator), .{
+    try renderStatusBand(&out.writer, .{
         .terminal = .{ .rows = 24, .cols = 100 },
         .window = window,
         .upload_profile = .file_whole,
         .events = &log,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[24;1H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[2K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "upload=file_whole") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "outer=1,1 80x20") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "content=4,2 78x16") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "last=attach_sent main") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[24;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[2K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "upload=file_whole") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "outer=1,1 80x20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "content=4,2 78x16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "last=attach_sent main") != null);
 }
 
 test "wm producer argv includes profile arguments" {
@@ -2749,14 +2751,14 @@ test "wm producer argv includes profile arguments" {
 }
 
 test "wm status band renders producer presentation status" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
 
     const window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 });
-    try renderStatusBand(out.writer(std.testing.allocator), .{
+    try renderStatusBand(&out.writer, .{
         .terminal = .{ .rows = 24, .cols = 140 },
         .window = window,
         .upload_profile = .file_whole,
@@ -2769,9 +2771,9 @@ test "wm status band renders producer presentation status" {
         .events = &log,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "ready=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "src=640x480") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "eff=7,11 40x15") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "ready=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "src=640x480") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "eff=7,11 40x15") != null);
 }
 
 test "wm peer presentation status updates session cache" {
@@ -2782,20 +2784,20 @@ test "wm peer presentation status updates session cache" {
         .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var tty_lock = std.Thread.Mutex{};
 
     try applyPeerLineLocked(
         std.testing.allocator,
-        out.writer(std.testing.allocator),
+        &out.writer,
         &tty_lock,
         &session,
         null,
         "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":640,\"h\":480},\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}}",
     );
 
-    try std.testing.expectEqualStrings("", out.items);
+    try std.testing.expectEqualStrings("", out.written());
     try std.testing.expect(session.presentation_status.seen);
     try std.testing.expect(session.presentation_status.ready_to_show);
     try std.testing.expectEqual(render_batch_protocol.SourcePixels{ .w = 640, .h = 480 }, session.presentation_status.source_px.?);
@@ -2810,16 +2812,16 @@ test "wm peer presentation status only requests redraw on visible state changes"
         .producer = .{ .child = std.process.Child.init(&.{"true"}, std.testing.allocator) },
     };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var tty_lock = std.Thread.Mutex{};
     var redraw_requested = std.atomic.Value(bool).init(false);
     const line = "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":640,\"h\":480},\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}}";
 
-    try applyPeerLineLocked(std.testing.allocator, out.writer(std.testing.allocator), &tty_lock, &session, &redraw_requested, line);
+    try applyPeerLineLocked(std.testing.allocator, &out.writer, &tty_lock, &session, &redraw_requested, line);
     try std.testing.expect(redraw_requested.swap(false, .seq_cst));
 
-    try applyPeerLineLocked(std.testing.allocator, out.writer(std.testing.allocator), &tty_lock, &session, &redraw_requested, line);
+    try applyPeerLineLocked(std.testing.allocator, &out.writer, &tty_lock, &session, &redraw_requested, line);
     try std.testing.expect(!redraw_requested.load(.seq_cst));
 }
 
@@ -2837,15 +2839,15 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
     const line = "{\"type\":\"frame_batch\",\"window_id\":\"main\",\"seq\":1,\"groups\":{\"deletes\":[\"D\"],\"uploads\":[\"U\"],\"placements\":[\"P\"],\"after\":[\"A\"]}}";
     try queue.enqueueCopy(&session, line);
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("", out.items);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try std.testing.expectEqualStrings("", out.written());
 
     var tty_lock = std.Thread.Mutex{};
     var redraw_requested = std.atomic.Value(bool).init(false);
-    try std.testing.expect(try drainQueuedPeerLines(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, 8));
+    try std.testing.expect(try drainQueuedPeerLines(std.testing.allocator, &queue, &out.writer, &tty_lock, &redraw_requested, 8));
 
-    try std.testing.expectEqualStrings("DUPA", out.items);
+    try std.testing.expectEqualStrings("DUPA", out.written());
     try std.testing.expect(!redraw_requested.load(.seq_cst));
 }
 
@@ -2860,31 +2862,31 @@ test "wm main loop peer drain does not leave older queued frames behind input" {
     var queue = WmPeerLineQueue.init(std.testing.allocator);
     defer queue.deinit();
 
-    var expected = std.ArrayList(u8).empty;
-    defer expected.deinit(std.testing.allocator);
+    var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer expected.deinit();
     var index: usize = 0;
     while (index < 65) : (index += 1) {
-        var line = std.ArrayList(u8).empty;
-        defer line.deinit(std.testing.allocator);
-        try line.writer(std.testing.allocator).print(
+        var line = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer line.deinit();
+        try line.writer.print(
             "{{\"type\":\"frame_batch\",\"window_id\":\"main\",\"seq\":{d},\"groups\":{{\"deletes\":[\"D{d}\"],\"uploads\":[],\"placements\":[],\"after\":[]}}}}",
             .{ index + 1, index },
         );
-        try queue.enqueueCopy(&session, line.items);
-        try expected.writer(std.testing.allocator).print("D{d}", .{index});
+        try queue.enqueueCopy(&session, line.written());
+        try expected.writer.print("D{d}", .{index});
     }
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var tty_lock = std.Thread.Mutex{};
     var redraw_requested = std.atomic.Value(bool).init(false);
 
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    try std.testing.expect(try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
-    try std.testing.expectEqualStrings(expected.items, out.items);
-    try std.testing.expect(!try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, .{}, &logger));
+    try std.testing.expect(try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, &out.writer, &tty_lock, &redraw_requested, .{}, &logger));
+    try std.testing.expectEqualStrings(expected.written(), out.written());
+    try std.testing.expect(!try drainMainLoopPeerLinesWithTrace(std.testing.allocator, &queue, &out.writer, &tty_lock, &redraw_requested, .{}, &logger));
 }
 
 test "wm peer stdout polling queues complete lines and retains partial lines" {
@@ -3060,13 +3062,13 @@ test "wm queued presentation status still updates during drain" {
     const line = "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":640,\"h\":480},\"effective_rect_cells\":{\"row\":7,\"col\":11,\"rows\":15,\"cols\":40}}";
     try queue.enqueueCopy(&session, line);
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var tty_lock = std.Thread.Mutex{};
     var redraw_requested = std.atomic.Value(bool).init(false);
-    try std.testing.expect(try drainQueuedPeerLines(std.testing.allocator, &queue, out.writer(std.testing.allocator), &tty_lock, &redraw_requested, 8));
+    try std.testing.expect(try drainQueuedPeerLines(std.testing.allocator, &queue, &out.writer, &tty_lock, &redraw_requested, 8));
 
-    try std.testing.expectEqualStrings("", out.items);
+    try std.testing.expectEqualStrings("", out.written());
     try std.testing.expect(session.presentation_status.ready_to_show);
     try std.testing.expect(redraw_requested.load(.seq_cst));
 }
@@ -3106,24 +3108,24 @@ test "wm desktop waits for presentation ready before drawing producer chrome" {
     };
     const z_order = [_]usize{0};
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     var tty_lock = std.Thread.Mutex{};
     var redraw_state = WmDesktopRedrawState{};
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-ready") == null);
+    try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "not-ready") == null);
 
     sessions[0].presentation_status = .{ .seen = true, .ready_to_show = true, .source_px = .{ .w = 640, .h = 480 } };
     out.clearRetainingCapacity();
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-ready") != null);
+    try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "not-ready") != null);
 }
 
 test "wm desktop can render with no producer sessions" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     try log.record(.launch_prompt, "launch:");
@@ -3131,15 +3133,15 @@ test "wm desktop can render with no producer sessions" {
     const sessions = [_]WmProducerSession{};
     const z_order = [_]usize{};
     var redraw_state = WmDesktopRedrawState{};
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "windows=0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "last=launch_prompt launch:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "windows=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "last=launch_prompt launch:") != null);
 }
 
 test "wm desktop redraw avoids full screen clear" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     try log.record(.attach_sent, "main");
@@ -3147,10 +3149,10 @@ test "wm desktop redraw avoids full screen clear" {
     const sessions = [_]WmProducerSession{};
     const z_order = [_]usize{};
     var redraw_state = WmDesktopRedrawState{};
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[2J") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[2K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[2K") != null);
 }
 
 test "wm desktop redraw does not clear unchanged window chrome" {
@@ -3178,53 +3180,53 @@ test "wm desktop redraw does not clear unchanged window chrome" {
     var tty_lock = std.Thread.Mutex{};
     var redraw_state = WmDesktopRedrawState{};
 
-    var initial = std.ArrayList(u8).empty;
-    defer initial.deinit(std.testing.allocator);
-    try redrawDesktopManyLocked(&tty_lock, initial.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    var initial = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer initial.deinit();
+    try redrawDesktopManyLocked(&tty_lock, &initial.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
     sessions[0].window.outer.row += 1;
-    var moved = std.ArrayList(u8).empty;
-    defer moved.deinit(std.testing.allocator);
-    try redrawDesktopManyLocked(&tty_lock, moved.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    var moved = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer moved.deinit();
+    try redrawDesktopManyLocked(&tty_lock, &moved.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
-    try std.testing.expect(std.mem.indexOf(u8, moved.items, "\x1b[12;30H                        ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, moved.written(), "\x1b[12;30H                        ") == null);
 }
 
 test "wm initial control advertises file upload policy" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 16, .cols = 78 },
         .upload = .{ .profile = .file_whole, .path = "/tmp/katzensteg-wm-upload", .high_water = 4096 },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"file_whole\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"path\":\"/tmp/katzensteg-wm-upload\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"direct_apc\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"file_whole\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"path\":\"/tmp/katzensteg-wm-upload\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"direct_apc\"") == null);
 }
 
 test "wm attach and viewport controls advertise terminal geometry" {
     const terminal = TerminalSize{ .rows = 40, .cols = 160, .pixel_width = 1280, .pixel_height = 800 };
 
-    var attach = std.ArrayList(u8).empty;
-    defer attach.deinit(std.testing.allocator);
-    try writeInitialControl(attach.writer(std.testing.allocator), .{
+    var attach = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer attach.deinit();
+    try writeInitialControl(&attach.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 20, .cols = 40 },
         .terminal = terminal,
         .upload = .{ .profile = .direct_apc },
     });
-    try std.testing.expect(std.mem.indexOf(u8, attach.items, "\"terminal_cells\":{\"rows\":40,\"cols\":160}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, attach.items, "\"terminal_px\":{\"w\":1280,\"h\":800}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, attach.written(), "\"terminal_cells\":{\"rows\":40,\"cols\":160}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, attach.written(), "\"terminal_px\":{\"w\":1280,\"h\":800}") != null);
 
-    var viewport = std.ArrayList(u8).empty;
-    defer viewport.deinit(std.testing.allocator);
-    try writeViewportControl(viewport.writer(std.testing.allocator), .{
+    var viewport = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer viewport.deinit();
+    try writeViewportControl(&viewport.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 20, .cols = 40 },
         .terminal = terminal,
     });
-    try std.testing.expect(std.mem.indexOf(u8, viewport.items, "\"terminal_cells\":{\"rows\":40,\"cols\":160}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, viewport.items, "\"terminal_px\":{\"w\":1280,\"h\":800}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewport.written(), "\"terminal_cells\":{\"rows\":40,\"cols\":160}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewport.written(), "\"terminal_px\":{\"w\":1280,\"h\":800}") != null);
 }
 
 test "wm attach and viewport controls advertise occlusion rectangles" {
@@ -3233,22 +3235,22 @@ test "wm attach and viewport controls advertise occlusion rectangles" {
         .{ .row = 8, .col = 30, .rows = 5, .cols = 12 },
     };
 
-    var attach = std.ArrayList(u8).empty;
-    defer attach.deinit(std.testing.allocator);
-    try writeInitialControl(attach.writer(std.testing.allocator), .{
+    var attach = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer attach.deinit();
+    try writeInitialControl(&attach.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 20, .cols = 40 },
         .occlusion_rects = &occlusions,
         .upload = .{ .profile = .direct_apc },
     });
-    try std.testing.expect(std.mem.indexOf(u8, attach.items, "\"occlusion_rects\":[{\"row\":1,\"col\":1,\"rows\":3,\"cols\":20},{\"row\":8,\"col\":30,\"rows\":5,\"cols\":12}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, attach.written(), "\"occlusion_rects\":[{\"row\":1,\"col\":1,\"rows\":3,\"cols\":20},{\"row\":8,\"col\":30,\"rows\":5,\"cols\":12}]") != null);
 
-    var viewport = std.ArrayList(u8).empty;
-    defer viewport.deinit(std.testing.allocator);
-    try writeViewportControl(viewport.writer(std.testing.allocator), .{
+    var viewport = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer viewport.deinit();
+    try writeViewportControl(&viewport.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 20, .cols = 40 },
         .occlusion_rects = occlusions[0..1],
     });
-    try std.testing.expect(std.mem.indexOf(u8, viewport.items, "\"occlusion_rects\":[{\"row\":1,\"col\":1,\"rows\":3,\"cols\":20}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewport.written(), "\"occlusion_rects\":[{\"row\":1,\"col\":1,\"rows\":3,\"cols\":20}]") != null);
 }
 
 test "wm occlusion policy uses outer rects of higher running windows" {
@@ -3339,19 +3341,19 @@ test "wm exec path renders chrome and applies fake peer frame batch" {
     }
     defer std.fs.deleteFileAbsolute(script_path) catch {};
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    const code = try runExecWithWriter(std.testing.allocator, &.{ "sh", script_path }, out.writer(std.testing.allocator), .{
+    const code = try runExecWithWriter(std.testing.allocator, &.{ "sh", script_path }, &out.writer, .{
         .title = "fake",
         .terminal = .{ .rows = 24, .cols = 80 },
         .upload = .{ .profile = .file_whole, .path = "/tmp/katzensteg-wm-test-upload" },
     });
 
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "katzensteg wm") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "fake") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "DUPA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "katzensteg wm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "fake") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "DUPA") != null);
 }
 
 test "wm window actions move and resize within terminal bounds" {
@@ -3387,10 +3389,10 @@ test "wm resize preserves producer aspect using terminal cell pixels" {
 }
 
 test "wm viewport control writes content rect" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeViewportControl(out.writer(std.testing.allocator), .{
+    try writeViewportControl(&out.writer, .{
         .window_id = "main",
         .rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 78 },
         .aspect = .fit,
@@ -3398,38 +3400,38 @@ test "wm viewport control writes content rect" {
 
     try std.testing.expectEqualStrings(
         "{\"type\":\"viewport\",\"window_id\":\"main\",\"rect_cells\":{\"row\":4,\"col\":2,\"rows\":18,\"cols\":78},\"aspect\":\"fit\"}\n",
-        out.items,
+        out.written(),
     );
 }
 
 test "wm attach and viewport controls can carry z base" {
-    var attach = std.ArrayList(u8).empty;
-    defer attach.deinit(std.testing.allocator);
-    try writeInitialControl(attach.writer(std.testing.allocator), .{
+    var attach = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer attach.deinit();
+    try writeInitialControl(&attach.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 78 },
         .z_base = 2000,
         .upload = .{ .profile = .direct_apc },
     });
-    try std.testing.expect(std.mem.indexOf(u8, attach.items, "\"z_base\":2000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, attach.written(), "\"z_base\":2000") != null);
 
-    var viewport = std.ArrayList(u8).empty;
-    defer viewport.deinit(std.testing.allocator);
-    try writeViewportControl(viewport.writer(std.testing.allocator), .{
+    var viewport = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer viewport.deinit();
+    try writeViewportControl(&viewport.writer, .{
         .rect_cells = .{ .row = 4, .col = 2, .rows = 18, .cols = 78 },
         .z_base = 3000,
     });
-    try std.testing.expect(std.mem.indexOf(u8, viewport.items, "\"z_base\":3000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewport.written(), "\"z_base\":3000") != null);
 }
 
 test "wm input control writes terminal bytes" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInputControl(out.writer(std.testing.allocator), "\x1b[<35;11;6M");
+    try writeInputControl(&out.writer, "\x1b[<35;11;6M");
 
     try std.testing.expectEqualStrings(
         "{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"terminal_bytes\",\"bytes\":\"\\u001b[<35;11;6M\"}\n",
-        out.items,
+        out.written(),
     );
 }
 
@@ -3648,16 +3650,16 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
 
     try std.testing.expectEqual(@as(?usize, 0), hitSessionIndex(sessions[0..], z_order[0..], .{ .row = 5, .col = 10 }));
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var log = try ProtocolEventLog.init(std.testing.allocator, 1);
     defer log.deinit();
     var tty_lock = std.Thread.Mutex{};
     var redraw_state = WmDesktopRedrawState{};
-    try redrawDesktopManyLocked(&tty_lock, out.writer(std.testing.allocator), .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
+    try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "active") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "closed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "active") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "closed") == null);
 }
 
 test "wm reconciles externally exited producer sessions" {
@@ -3817,24 +3819,24 @@ test "wm focus bring to front mutates z order without moving sessions" {
 }
 
 test "wm chrome marks focused window with terminal styling" {
-    var active = std.ArrayList(u8).empty;
-    defer active.deinit(std.testing.allocator);
-    try renderChrome(active.writer(std.testing.allocator), .{
+    var active = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer active.deinit();
+    try renderChrome(&active.writer, .{
         .outer = .{ .row = 1, .col = 1, .rows = 8, .cols = 30 },
         .title = "active",
         .focused = true,
     });
 
-    var inactive = std.ArrayList(u8).empty;
-    defer inactive.deinit(std.testing.allocator);
-    try renderChrome(inactive.writer(std.testing.allocator), .{
+    var inactive = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer inactive.deinit();
+    try renderChrome(&inactive.writer, .{
         .outer = .{ .row = 1, .col = 1, .rows = 8, .cols = 30 },
         .title = "inactive",
         .focused = false,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, active.items, "\x1b[1;36m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, inactive.items, "\x1b[2m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active.written(), "\x1b[1;36m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inactive.written(), "\x1b[2m") != null);
 }
 
 test "wm mixed ownership retires child exit and external EOF independently" {
@@ -3959,21 +3961,21 @@ test "wm slots wait for EOF callbacks and queued output before reuse" {
     defer sessions[0].stdout_buffer.deinit(allocator);
     var queue = WmPeerLineQueue.init(allocator);
     defer queue.deinit();
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
     try queue.enqueueCopy(&sessions[0], "last");
-    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try retireFinishedSessions(allocator, &sessions, &queue, &out.writer);
     try std.testing.expect(availableSessionSlot(&sessions, 1) == null);
     sessions[0].stdout_poll_armed = false;
-    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try retireFinishedSessions(allocator, &sessions, &queue, &out.writer);
     try std.testing.expect(availableSessionSlot(&sessions, 1) == null);
     var batch = try queue.take(allocator, 0);
     defer batch.deinit(allocator);
     for (batch.items) |entry| allocator.free(entry.line);
     batch.clearRetainingCapacity();
-    try retireFinishedSessions(allocator, &sessions, &queue, out.writer(allocator));
+    try retireFinishedSessions(allocator, &sessions, &queue, &out.writer);
     try std.testing.expectEqual(@as(?usize, 0), availableSessionSlot(&sessions, 1));
-    try std.testing.expectEqualStrings("\x1b_Ga=d,d=R,x=100000,y=199999,q=2;\x1b\\", out.items);
+    try std.testing.expectEqualStrings("\x1b_Ga=d,d=R,x=100000,y=199999,q=2;\x1b\\", out.written());
     var initialized: usize = 1;
     var z_order = [_]usize{0};
     installSession(allocator, &sessions, &initialized, 0, .{
@@ -3988,20 +3990,20 @@ test "wm slots wait for EOF callbacks and queued output before reuse" {
 }
 
 test "WM selects placeholder presentation without sending window geometry" {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(std.testing.allocator);
-    try writeInitialControl(bytes.writer(std.testing.allocator), .{
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    try writeInitialControl(&bytes.writer, .{
         .placeholder = .{ .image_id = 100000, .cols = 40, .rows = 12 },
         .rect_cells = .{ .row = 6, .col = 10, .rows = 12, .cols = 40 },
         .terminal = .{ .rows = 40, .cols = 120 },
         .z_base = 1000,
         .upload = .{ .profile = .file_whole, .path = "/tmp/wm-placeholder-test" },
     });
-    const first_line = std.mem.indexOfScalar(u8, bytes.items, '\n').?;
-    var attach = try render_batch_protocol.parseAttachMessage(std.testing.allocator, bytes.items[first_line + 1 ..]);
+    const first_line = std.mem.indexOfScalar(u8, bytes.written(), '\n').?;
+    var attach = try render_batch_protocol.parseAttachMessage(std.testing.allocator, bytes.written()[first_line + 1 ..]);
     defer render_batch_protocol.deinitAttachMessage(std.testing.allocator, &attach);
     try std.testing.expectEqual(@as(u32, 100000), attach.placeholder.?.image_id);
-    for ([_][]const u8{ "rect_cells", "terminal_cells", "z_base", "id_ranges", "occlusion_rects" }) |key| try std.testing.expect(std.mem.indexOf(u8, bytes.items, key) == null);
+    for ([_][]const u8{ "rect_cells", "terminal_cells", "z_base", "id_ranges", "occlusion_rects" }) |key| try std.testing.expect(std.mem.indexOf(u8, bytes.written(), key) == null);
 }
 
 test "WM fits a placeholder grid and keeps image identity when moving" {
@@ -4028,10 +4030,10 @@ test "WM fits a placeholder grid and keeps image identity when moving" {
 }
 
 test "WM translates placeholder mouse coordinates and excludes letterboxing" {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(std.testing.allocator);
-    try translatePlaceholderInput(bytes.writer(std.testing.allocator), "a\x1b[<0;11;8M\x1b[<0;11;8m\x1b[<35;9;8M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 });
-    try std.testing.expectEqualStrings("a\x1b[<0;1;1M\x1b[<0;1;1m", bytes.items);
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    try translatePlaceholderInput(&bytes.writer, "a\x1b[<0;11;8M\x1b[<0;11;8m\x1b[<35;9;8M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 });
+    try std.testing.expectEqualStrings("a\x1b[<0;1;1M\x1b[<0;1;1m", bytes.written());
 }
 
 test "WM clipped placeholder text retains its source row and column indices" {
@@ -4041,13 +4043,13 @@ test "WM clipped placeholder text retains its source row and column indices" {
         .window = WmWindowState.init("main", .{ .row = -3, .col = -2, .rows = 8, .cols = 8 }),
         .upload = .{ .profile = .direct_apc },
     };
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(std.testing.allocator);
-    try renderPlaceholderGrid(bytes.writer(std.testing.allocator), &session, .{ .rows = 20, .cols = 40 });
-    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "38;2;18;52;86m") != null);
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    try renderPlaceholderGrid(&bytes.writer, &session, .{ .rows = 20, .cols = 40 });
+    try std.testing.expect(std.mem.indexOf(u8, bytes.written(), "38;2;18;52;86m") != null);
     // Grid origin is row 0, col -1. First visible cell is source row 1, col 2.
-    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "\x1b[1;1H\u{10eeee}\u{30d}\u{30e}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes.items, "\x1b_G") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes.written(), "\x1b[1;1H\u{10eeee}\u{30d}\u{30e}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes.written(), "\x1b_G") == null);
 }
 
 test {

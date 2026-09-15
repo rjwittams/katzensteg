@@ -146,7 +146,9 @@ pub const Server = struct {
     }
 
     fn respond(self: *Server, connection: *Connection, response: Response) !void {
-        const writer = connection.output.writer(self.allocator);
+        var output = std.Io.Writer.Allocating.fromArrayList(self.allocator, &connection.output);
+        defer connection.output = output.toArrayList();
+        const writer = &output.writer;
         try writer.print("HTTP/1.1 {d} Response\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", .{ response.status, response.body.len });
         try writer.writeAll(response.body);
         connection.responding = true;
@@ -216,16 +218,16 @@ test "HTTP token is mandatory and exact" {
 
 test "HTTP size budget includes the separator and accepts fragmented maximum headers" {
     const allocator = std.testing.allocator;
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(allocator);
-    try bytes.writer(allocator).print("POST / HTTP/1.1\r\nContent-Length: {d}\r\nX-Pad: ", .{max_body_bytes});
-    try bytes.appendNTimes(allocator, 'a', max_header_bytes - bytes.items.len);
-    try bytes.appendSlice(allocator, header_separator[0..2]);
-    try std.testing.expect((try parse(bytes.items)) == null);
-    try bytes.appendSlice(allocator, header_separator[2..]);
-    try bytes.appendNTimes(allocator, 'b', max_body_bytes);
-    try std.testing.expectEqual(max_request_bytes, bytes.items.len);
-    try std.testing.expectEqual(max_body_bytes, (try parse(bytes.items)).?.body.len);
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    try bytes.writer.print("POST / HTTP/1.1\r\nContent-Length: {d}\r\nX-Pad: ", .{max_body_bytes});
+    try bytes.writer.splatByteAll('a', max_header_bytes - bytes.written().len);
+    try bytes.writer.writeAll(header_separator[0..2]);
+    try std.testing.expect((try parse(bytes.written())) == null);
+    try bytes.writer.writeAll(header_separator[2..]);
+    try bytes.writer.splatByteAll('b', max_body_bytes);
+    try std.testing.expectEqual(max_request_bytes, bytes.written().len);
+    try std.testing.expectEqual(max_body_bytes, (try parse(bytes.written())).?.body.len);
     const excessive = try std.fmt.allocPrint(allocator, "POST / HTTP/1.1\r\nContent-Length: {d}\r\n\r\n", .{max_body_bytes + 1});
     defer allocator.free(excessive);
     try std.testing.expectError(error.BodyTooLarge, parse(excessive));

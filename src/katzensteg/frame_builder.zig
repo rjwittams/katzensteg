@@ -2261,7 +2261,8 @@ pub const FrameBuilder = struct {
             );
         }
         try backend.registerRawImage(state.composite_image_id, upload_buf, upload_size.w, upload_size.h);
-        try kitty_protocol.writePlace(tty.file.deprecatedWriter(), dest.row, dest.col, .{
+        var output_writer = tty.file.writerStreaming(&.{});
+        try kitty_protocol.writePlace(&output_writer.interface, dest.row, dest.col, .{
             .image_id = state.composite_image_id,
             .placement_id = state.composite_placement_id,
             .cols = dest.w,
@@ -2420,7 +2421,8 @@ pub const FrameBuilder = struct {
             }
         }
 
-        const writer = tty.file.deprecatedWriter();
+        var writer_state = tty.file.writerStreaming(&.{});
+        const writer = &writer_state.interface;
         const buf = state.composite_rgba.?;
         const last = state.composite_last_presented.?;
         var changed_entries = std.ArrayList(CompositeStripEntry).empty;
@@ -2447,7 +2449,7 @@ pub const FrameBuilder = struct {
         }
     }
 
-    fn flushCompositeStrip(self: *FrameBuilder, logger: *Logger, writer: std.fs.File.DeprecatedWriter, backend: *ts_kitty.Backend, state: *RendererState, buf: []const u8, last: []u8, entries: []const CompositeStripEntry, strip_w: i32, strip_h: i32) !void {
+    fn flushCompositeStrip(self: *FrameBuilder, logger: *Logger, writer: *std.Io.Writer, backend: *ts_kitty.Backend, state: *RendererState, buf: []const u8, last: []u8, entries: []const CompositeStripEntry, strip_w: i32, strip_h: i32) !void {
         const strip_len: usize = @intCast(strip_w * strip_h * 4);
         const strip_rgba = try self.allocator.alloc(u8, strip_len);
         defer self.allocator.free(strip_rgba);
@@ -2497,7 +2499,8 @@ pub const FrameBuilder = struct {
     }
 
     fn deleteCompositeTilesDirect(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, state: *RendererState) void {
-        const writer = tty.file.deprecatedWriter();
+        var writer_state = tty.file.writerStreaming(&.{});
+        const writer = &writer_state.interface;
         for (state.composite_tiles.items) |*tile| {
             if (tile.image_id != 0 and tile.placement_id != 0) {
                 kitty_protocol.writeDeleteExactPlacement(writer, .{ .image_id = tile.image_id, .placement_id = tile.placement_id }) catch |err| {
@@ -2943,7 +2946,8 @@ pub const FrameBuilder = struct {
 
     fn deleteCompositePlacement(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, placement: CompositePlacement) void {
         if (placement.image_id == 0 or placement.placement_id == 0) return;
-        kitty_protocol.writeDeleteExactPlacement(tty.file.deprecatedWriter(), .{ .image_id = placement.image_id, .placement_id = placement.placement_id }) catch |err| {
+        var output_writer = tty.file.writerStreaming(&.{});
+        kitty_protocol.writeDeleteExactPlacement(&output_writer.interface, .{ .image_id = placement.image_id, .placement_id = placement.placement_id }) catch |err| {
             logger.writeFmtScoped(.info, .frame_builder, "composite fullscreen delete failed: {any}", .{err});
         };
         self.retireImageId(placement.image_id);
@@ -4465,16 +4469,16 @@ test "frame builder renders framebuffer present jobs to batch sink" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"uploads\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"placements\":[") != null);
 }
 
 test "frame builder renders external framebuffer to batch sink" {
@@ -4495,17 +4499,17 @@ test "frame builder renders external framebuffer to batch sink" {
         255, 255, 255, 255,
     };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderExternalFramebufferBatch(&logger, &sink, 2, 2, .rgba8, &pixels, out.writer(std.testing.allocator));
+    builder.renderExternalFramebufferBatch(&logger, &sink, 2, 2, .rgba8, &pixels, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"direct_apc\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;13H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=24,r=12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"direct_apc\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[4;13H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=24,r=12") != null);
 }
 
 test "frame builder detach flushes known batch placements and suppresses future frames" {
@@ -4526,24 +4530,24 @@ test "frame builder detach flushes known batch placements and suppresses future 
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const after_present_len = out.items.len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const after_present_len = out.written().len;
 
-    builder.flushBatchDeletesForPresentationReset(&logger, &sink, out.writer(std.testing.allocator));
+    builder.flushBatchDeletesForPresentationReset(&logger, &sink, &out.writer);
     sink.detach();
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items[after_present_len..], "\"deletes\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items[after_present_len..], "a=d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written()[after_present_len..], "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written()[after_present_len..], "a=d") != null);
     try std.testing.expect(!sink.isAttached());
 
-    const after_detach_len = out.items.len;
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    try std.testing.expectEqual(after_detach_len, out.items.len);
+    const after_detach_len = out.written().len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    try std.testing.expectEqual(after_detach_len, out.written().len);
 }
 
 test "frame builder queues presentation reset deletes into next batch frame" {
@@ -4564,20 +4568,20 @@ test "frame builder queues presentation reset deletes into next batch frame" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const after_present_len = out.items.len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const after_present_len = out.written().len;
 
     builder.queueBatchDeletesForPresentationReset(&logger, &sink);
-    try std.testing.expectEqual(after_present_len, out.items.len);
+    try std.testing.expectEqual(after_present_len, out.written().len);
     try std.testing.expect(sink.hasPendingBytes());
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const next_frame = out.items[after_present_len..];
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const next_frame = out.written()[after_present_len..];
     try std.testing.expect(std.mem.indexOf(u8, next_frame, "\"deletes\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, next_frame, "\"placements\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, next_frame, "a=d") != null);
@@ -4602,17 +4606,17 @@ test "frame builder emits retained fullscreen batch eviction after replacement f
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
     var frame_index: usize = 0;
     while (frame_index < fullscreen_retained_placement_count + 2) : (frame_index += 1) {
-        const before_frame_len = out.items.len;
-        builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+        const before_frame_len = out.written().len;
+        builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
         if (frame_index == fullscreen_retained_placement_count + 1) {
-            const evicting_frame = out.items[before_frame_len..];
+            const evicting_frame = out.written()[before_frame_len..];
             try std.testing.expect(std.mem.indexOf(u8, evicting_frame, "\"deletes\":[]") != null);
             try std.testing.expect(std.mem.indexOf(u8, evicting_frame, "\"after\":[") != null);
             const upload_index = std.mem.indexOf(u8, evicting_frame, "\"uploads\":[") orelse return error.TestExpectedEqual;
@@ -4644,15 +4648,15 @@ test "frame builder gives replacement fullscreen images distinct retained placem
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 2, .height = 2, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const before_second_frame_len = out.items.len;
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const second_frame = out.items[before_second_frame_len..];
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const before_second_frame_len = out.written().len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const second_frame = out.written()[before_second_frame_len..];
 
     try std.testing.expect(std.mem.indexOf(u8, second_frame, "i=100001,p=200001") != null);
     try std.testing.expect(std.mem.indexOf(u8, second_frame, "i=100001,p=200000") == null);
@@ -4676,15 +4680,15 @@ test "frame builder batch placement contains source inside attached rect" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[4;5H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=38") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[4;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=100,r=38") != null);
 }
 
 test "frame builder batch framebuffer restricts placement to clip_cells" {
@@ -4707,20 +4711,20 @@ test "frame builder batch framebuffer restricts placement to clip_cells" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
     // Single placement at row=1,col=1 covering exactly 2x2 cells (not the full 4x4).
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "r=2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=4") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200001") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "r=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=4") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "p=200001") == null);
 }
 
 test "frame builder batch framebuffer emits nothing when clip_cells misses rect" {
@@ -4743,14 +4747,14 @@ test "frame builder batch framebuffer emits nothing when clip_cells misses rect"
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "p=200000") == null);
 }
 
 test "frame builder batch framebuffer splits placement around occlusion" {
@@ -4775,18 +4779,18 @@ test "frame builder batch framebuffer splits placement around occlusion" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;1H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;2H") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "p=200001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[2;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[2;2H") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "p=200000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "p=200001") != null);
 }
 
 test "frame builder deletes retained framebuffer placements when occlusion changes" {
@@ -4807,21 +4811,21 @@ test "frame builder deletes retained framebuffer placements when occlusion chang
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
     const occlusions = [_]render_batch_protocol.PresentationRectCells{
         .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
     };
     try sink.setOcclusionRects(&occlusions);
-    const before_reproject_len = out.items.len;
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
-    const reproject_frame = out.items[before_reproject_len..];
+    const before_reproject_len = out.written().len;
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
+    const reproject_frame = out.written()[before_reproject_len..];
 
     try std.testing.expect(std.mem.indexOf(u8, reproject_frame, "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, reproject_frame, "i=100000,p=200000") != null);
@@ -4846,30 +4850,30 @@ test "frame builder placement audit survives occlusion piece count transitions" 
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
     try builder.expectPlacementAuditConsistent(renderer);
 
     const middle_occlusion = [_]render_batch_protocol.PresentationRectCells{
         .{ .row = 2, .col = 2, .rows = 2, .cols = 2 },
     };
     try sink.setOcclusionRects(&middle_occlusion);
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
     try builder.expectPlacementAuditConsistent(renderer);
 
     const edge_occlusion = [_]render_batch_protocol.PresentationRectCells{
         .{ .row = 1, .col = 1, .rows = 1, .cols = 4 },
     };
     try sink.setOcclusionRects(&edge_occlusion);
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
     try builder.expectPlacementAuditConsistent(renderer);
 
     try sink.setOcclusionRects(&.{});
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
     try builder.expectPlacementAuditConsistent(renderer);
 }
 
@@ -4895,16 +4899,16 @@ test "frame builder deletes active split framebuffer placements on renderer clea
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 4, .height = 4, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    const before_cleanup_len = out.items.len;
-    builder.flushBatchDeletesForRenderer(&logger, &sink, renderer, out.writer(std.testing.allocator));
-    const cleanup_frame = out.items[before_cleanup_len..];
+    const before_cleanup_len = out.written().len;
+    builder.flushBatchDeletesForRenderer(&logger, &sink, renderer, &out.writer);
+    const cleanup_frame = out.written()[before_cleanup_len..];
 
     try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "a=d") != null);
     try std.testing.expect(std.mem.indexOf(u8, cleanup_frame, "i=100000,p=200000") != null);
@@ -4949,17 +4953,17 @@ test "frame builder batch scene placements are translated into attached rect" {
         .solids = &solids,
     } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[5;11H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[6;12H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[1;1H") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[2;2H") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[5;11H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[6;12H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[1;1H") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[2;2H") == null);
 }
 
 test "frame builder batch scene deletes placements that disappear" {
@@ -5005,16 +5009,16 @@ test "frame builder batch scene deletes placements that disappear" {
         .solids = &.{},
     } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &first_job, out.writer(std.testing.allocator));
-    const first_len = out.items.len;
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &second_job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &first_job, &out.writer);
+    const first_len = out.written().len;
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &second_job, &out.writer);
 
-    const second_frame = out.items[first_len..];
+    const second_frame = out.written()[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, second_frame, "\"deletes\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, second_frame, "a=d") != null);
 }
@@ -5045,15 +5049,15 @@ test "frame builder reprojects retained batch scene placements after viewport re
     var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
     defer job.deinit(std.testing.allocator);
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const first_len = out.items.len;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const first_len = out.written().len;
 
     sink.viewport(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 }, .fit);
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
 
-    const resized_frame = out.items[first_len..];
+    const resized_frame = out.written()[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "\\u001b[7;11H") != null);
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
 }
@@ -5084,15 +5088,15 @@ test "frame builder reprojects retained batch scene placements after viewport mo
     var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
     defer job.deinit(std.testing.allocator);
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const first_len = out.items.len;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const first_len = out.written().len;
 
     sink.viewport(.{ .row = 6, .col = 11, .rows = 20, .cols = 40 }, .fit);
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
 
-    const moved_frame = out.items[first_len..];
+    const moved_frame = out.written()[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, moved_frame, "\\u001b[10;11H") != null);
     try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=12") != null);
     try std.testing.expect(std.mem.indexOf(u8, moved_frame, "c=40,r=15") == null);
@@ -5126,16 +5130,16 @@ test "frame builder reprojects retained clear against current source window size
     var job = try builder.buildPresentJob(&logger, &tty, renderer, false, null);
     defer job.deinit(std.testing.allocator);
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
-    const first_len = out.items.len;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    const first_len = out.written().len;
 
     builder.onWindowSize(window, 640, 480);
     sink.viewport(.{ .row = 5, .col = 11, .rows = 20, .cols = 40 }, .fit);
-    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, out.writer(std.testing.allocator)));
+    try std.testing.expect(builder.flushBatchPresentationReproject(&logger, &sink, &out.writer));
 
-    const resized_frame = out.items[first_len..];
+    const resized_frame = out.written()[first_len..];
     try std.testing.expect(std.mem.indexOf(u8, resized_frame, "c=40,r=15") != null);
 }
 
@@ -5157,15 +5161,15 @@ test "frame builder batch placement stretches source to attached rect" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[3;5H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[3;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=100,r=40") != null);
 }
 
 test "frame builder batch placement covers attached rect by cropping source" {
@@ -5186,17 +5190,17 @@ test "frame builder batch placement covers attached rect by cropping source" {
     @memset(rgba, 255);
     var job = PresentJob{ .framebuffer = .{ .width = 320, .height = 240, .rgba = rgba, .owns_rgba = false } };
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, out.writer(std.testing.allocator));
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b[3;5H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "c=100,r=40") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "x=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "w=300,h=240") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b[3;5H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "c=100,r=40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "x=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "w=300,h=240") != null);
 }
 
 test "composite builder can start at last full framebuffer overwrite" {
@@ -5759,11 +5763,11 @@ test "external BGRA placeholder frame preserves source size and converts pixels"
     sink.attach(sink.placeholder.?.localRect());
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     const bgra = [_]u8{ 56, 34, 12, 255 };
-    builder.renderExternalFramebufferBatch(&logger, &sink, 1, 1, .bgra8, &bgra, out.writer(std.testing.allocator));
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.items, .{});
+    builder.renderExternalFramebufferBatch(&logger, &sink, 1, 1, .bgra8, &bgra, &out.writer);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
     defer parsed.deinit();
     const groups = parsed.value.object.get("groups").?.object;
     const upload = groups.get("uploads").?.array.items[0].string;

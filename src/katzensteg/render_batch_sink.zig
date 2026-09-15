@@ -55,7 +55,7 @@ pub const RenderBatchSink = struct {
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
     after: std.ArrayList([]u8) = .empty,
-    frame_json: std.ArrayList(u8) = .empty,
+    frame_json: std.Io.Writer.Allocating,
     trace_placements: std.ArrayList(PlacementTrace) = .empty,
     trace_deletes: std.ArrayList(PlacementTrace) = .empty,
     trace_after_deletes: std.ArrayList(PlacementTrace) = .empty,
@@ -81,6 +81,7 @@ pub const RenderBatchSink = struct {
         return .{
             .allocator = allocator,
             .window_id = window_id,
+            .frame_json = .init(allocator),
         };
     }
 
@@ -94,7 +95,7 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
-        self.frame_json.deinit(self.allocator);
+        self.frame_json.deinit();
         self.placeholder_frame.deinit(self.allocator);
         self.placeholder_scaled.deinit(self.allocator);
         self.trace_placements.deinit(self.allocator);
@@ -217,10 +218,10 @@ pub const RenderBatchSink = struct {
     pub fn refreshPlaceholder(self: *RenderBatchSink) !void {
         const target = self.placeholder orelse return;
         if (!self.placeholder_uploaded) return;
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeVirtualPlace(out.writer(self.allocator), target.image_id, placeholder_placement_id, target.cols, target.rows);
-        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeVirtualPlace(&out.writer, target.image_id, placeholder_placement_id, target.cols, target.rows);
+        try self.placements.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn restorePlaceholder(self: *RenderBatchSink) !void {
@@ -247,11 +248,11 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
         const upload_start_ns = self.traceBlockingStart();
         switch (self.upload) {
-            .direct_apc => try kitty_protocol.writeTransmitRgba(out.writer(self.allocator), image_id, rgba, w, h),
+            .direct_apc => try kitty_protocol.writeTransmitRgba(&out.writer, image_id, rgba, w, h),
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
@@ -268,7 +269,7 @@ pub const RenderBatchSink = struct {
                 const sync_start_ns = self.traceBlockingStart();
                 try file.sync();
                 self.traceBlockingWriteSince("upload_rgba_file_whole_sync", sync_start_ns, rgba.len);
-                try kitty_protocol.writeTransmitRgbaFileWhole(out.writer(self.allocator), image_id, state.paths[index], w, h);
+                try kitty_protocol.writeTransmitRgbaFileWhole(&out.writer, image_id, state.paths[index], w, h);
             },
             .file_offset_ring => |*state| {
                 const region = try reserveFileRegion(state, rgba.len);
@@ -278,20 +279,20 @@ pub const RenderBatchSink = struct {
                 const sync_start_ns = self.traceBlockingStart();
                 try state.file.sync();
                 self.traceBlockingWriteSince("upload_rgba_file_offset_sync", sync_start_ns, rgba.len);
-                try kitty_protocol.writeTransmitRgbaFileRegion(out.writer(self.allocator), image_id, state.path, region.offset, rgba.len, w, h);
+                try kitty_protocol.writeTransmitRgbaFileRegion(&out.writer, image_id, state.path, region.offset, rgba.len, w, h);
             },
         }
-        try self.uploads.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try self.uploads.append(self.allocator, try out.toOwnedSlice());
         self.traceBlockingWriteSince("upload_rgba_total", upload_start_ns, rgba.len);
     }
 
     pub fn place(self: *RenderBatchSink, row: i32, col: i32, placement: kitty_protocol.Placement) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
         var adjusted = placement;
         adjusted.z += self.z_base;
-        try kitty_protocol.writePlace(out.writer(self.allocator), row, col, adjusted);
-        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try kitty_protocol.writePlace(&out.writer, row, col, adjusted);
+        try self.placements.append(self.allocator, try out.toOwnedSlice());
         if (self.placement_trace_enabled) {
             try self.trace_placements.append(self.allocator, .{
                 .image_id = adjusted.image_id,
@@ -326,10 +327,10 @@ pub const RenderBatchSink = struct {
     }
 
     fn deletePlacementInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), target: kitty_protocol.ExactPlacement) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeDeleteExactPlacement(out.writer(self.allocator), target);
-        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeDeleteExactPlacement(&out.writer, target);
+        try group.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn deleteImageData(self: *RenderBatchSink, image_id: u32) !void {
@@ -341,10 +342,10 @@ pub const RenderBatchSink = struct {
     }
 
     fn deleteImageDataInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), image_id: u32) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeDeleteImageWithQuiet(out.writer(self.allocator), .suppress_fail, .free_data, image_id);
-        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeDeleteImageWithQuiet(&out.writer, .suppress_fail, .free_data, image_id);
+        try group.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {
@@ -354,7 +355,7 @@ pub const RenderBatchSink = struct {
         // Runtime supplies an unbuffered pipe writer. Encode in memory so JSON
         // escaping does not turn each character into a separate pipe write.
         defer self.frame_json.clearRetainingCapacity();
-        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, self.frame_json.writer(self.allocator), .{
+        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, &self.frame_json.writer, .{
             .window_id = self.window_id,
             .seq = self.seq,
             .presentation_generation = self.presentation_generation,
@@ -363,7 +364,7 @@ pub const RenderBatchSink = struct {
             .placements = self.placements.items,
             .after = self.after.items,
         });
-        try writer.writeAll(self.frame_json.items);
+        try writer.writeAll(self.frame_json.written());
         self.traceBlockingWriteSince("flush_frame_jsonl", start_ns, pending_bytes);
         self.clearRetainingCapacity();
     }
@@ -562,8 +563,8 @@ fn divRound(numerator: i32, denominator: i32) i32 {
 }
 
 test "batch sink groups upload place and delete bytes" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
 
@@ -580,11 +581,11 @@ test "batch sink groups upload place and delete bytes" {
         .z = 100,
     });
     try sink.deletePlacement(.{ .image_id = 100000, .placement_id = 200000 });
-    try sink.flushFrame(out.writer(std.testing.allocator));
+    try sink.flushFrame(&out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"uploads\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"deletes\":[") != null);
 }
 
 test "batch sink reports pending frame byte count" {
@@ -597,8 +598,8 @@ test "batch sink reports pending frame byte count" {
 }
 
 test "batch sink placement trace records and clears frame operations" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
     var sink = RenderBatchSink.init(std.testing.allocator, "main");
     defer sink.deinit();
     sink.enablePlacementTrace();
@@ -624,7 +625,7 @@ test "batch sink placement trace records and clears frame operations" {
     try std.testing.expectEqual(@as(u32, 200001), sink.trace_deletes.items[0].placement_id);
     try std.testing.expectEqual(@as(u32, 200002), sink.trace_after_deletes.items[0].placement_id);
 
-    try sink.flushFrame(out.writer(std.testing.allocator));
+    try sink.flushFrame(&out.writer);
 
     try std.testing.expectEqual(@as(usize, 0), sink.trace_placements.items.len);
     try std.testing.expectEqual(@as(usize, 0), sink.trace_deletes.items.len);
@@ -728,15 +729,23 @@ test "batch sink writes a complete JSON frame at once and handles partial writes
         calls: usize = 0,
         max_write: usize = std.math.maxInt(usize),
 
-        fn write(self: *@This(), bytes: []const u8) error{OutOfMemory}!usize {
-            self.calls += 1;
-            const count = @min(self.max_write, bytes.len);
-            try self.bytes.appendSlice(std.testing.allocator, bytes[0..count]);
-            return count;
+        output: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+        fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("output", interface);
+            for (data, 0..) |bytes, i| {
+                if (i == data.len - 1 and splat == 0) break;
+                if (bytes.len == 0) continue;
+                self.calls += 1;
+                const count = @min(self.max_write, bytes.len);
+                self.bytes.appendSlice(std.testing.allocator, bytes[0..count]) catch return error.WriteFailed;
+                return count;
+            }
+            return 0;
         }
 
-        fn writer(self: *@This()) std.io.GenericWriter(*@This(), error{OutOfMemory}, write) {
-            return .{ .context = self };
+        fn writer(self: *@This()) *std.Io.Writer {
+            return &self.output;
         }
     };
     var output: Output = .{};

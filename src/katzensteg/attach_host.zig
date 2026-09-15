@@ -54,7 +54,8 @@ pub fn runExec(allocator: std.mem.Allocator, argv: []const []const u8, options: 
     var upload = try selectUploadPolicy(allocator, tty.file);
     defer deinitUploadPolicy(allocator, &upload);
 
-    return runExecWithWriter(allocator, argv, tty.file.deprecatedWriter(), .{
+    var output_writer = tty.file.writerStreaming(&.{});
+    return runExecWithWriter(allocator, argv, &output_writer.interface, .{
         .rect_cells = options.rect_cells orelse .{
             .row = 1,
             .col = 1,
@@ -78,7 +79,8 @@ pub fn runExecWithWriter(allocator: std.mem.Allocator, argv: []const []const u8,
 
     if (child.stdin) |stdin_file| {
         child.stdin = null;
-        try writeInitialControl(stdin_file.deprecatedWriter(), options);
+        var output_writer = stdin_file.writerStreaming(&.{});
+        try writeInitialControl(&output_writer.interface, options);
         stdin_file.close();
     }
 
@@ -166,70 +168,70 @@ fn deinitUploadPolicy(allocator: std.mem.Allocator, upload: *render_batch_protoc
 }
 
 test "attach host writes hello and attach control messages" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .window_id = "main",
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
         .image_ids = .{ .start = 100000, .end = 199999 },
         .placement_ids = .{ .start = 200000, .end = 299999 },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"hello\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"attach\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aspect\":\"fit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"attach\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"aspect\":\"fit\"") != null);
 }
 
 test "attach host emits clip_cells when set" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .rect_cells = .{ .row = -2, .col = 1, .rows = 10, .cols = 20 },
         .clip_cells = .{ .row = 1, .col = 1, .rows = 8, .cols = 20 },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\":{\"row\":1,\"col\":1,\"rows\":8,\"cols\":20}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"clip_cells\":{\"row\":1,\"col\":1,\"rows\":8,\"cols\":20}") != null);
 }
 
 test "attach host omits clip_cells when not set" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"clip_cells\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"clip_cells\"") == null);
 }
 
 test "attach host advertises file upload policy" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
         .upload = .{ .profile = .file_whole, .path = "/tmp/katzensteg-embed-upload", .high_water = 4096 },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"upload\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"file_whole\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"path\":\"/tmp/katzensteg-embed-upload\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"high_water\":4096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"upload\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"file_whole\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"path\":\"/tmp/katzensteg-embed-upload\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"high_water\":4096") != null);
 }
 
 test "attach host writes requested aspect policy" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeInitialControl(out.writer(std.testing.allocator), .{
+    try writeInitialControl(&out.writer, .{
         .rect_cells = .{ .row = 3, .col = 5, .rows = 24, .cols = 80 },
         .aspect = .stretch,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"rect_cells\":{\"row\":3,\"col\":5,\"rows\":24,\"cols\":80}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aspect\":\"stretch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"rect_cells\":{\"row\":3,\"col\":5,\"rows\":24,\"cols\":80}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"aspect\":\"stretch\"") != null);
 }
 
 test "attach host exec loop applies fake peer frame batch" {
@@ -243,13 +245,13 @@ test "attach host exec loop applies fake peer frame batch" {
     }
     defer std.fs.deleteFileAbsolute(script_path) catch {};
 
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    const code = try runExecWithWriter(std.testing.allocator, &.{ "python3", script_path }, out.writer(std.testing.allocator), .{
+    const code = try runExecWithWriter(std.testing.allocator, &.{ "python3", script_path }, &out.writer, .{
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
     });
 
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expectEqualStrings("DUPA", out.items);
+    try std.testing.expectEqualStrings("DUPA", out.written());
 }

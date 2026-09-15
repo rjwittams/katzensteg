@@ -33,7 +33,8 @@ pub fn detectGraphicsSupport(allocator: std.mem.Allocator, writer: anytype) !boo
 }
 
 pub fn detectGraphicsSupportOnTty(allocator: std.mem.Allocator, tty: std.fs.File) !bool {
-    const writer = tty.deprecatedWriter();
+    var writer_state = tty.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     try writer.writeAll("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     const reply = try readRepliesFromFile(allocator, tty, 300);
     defer allocator.free(reply);
@@ -45,7 +46,8 @@ pub fn detectFileTransmissionSupport(allocator: std.mem.Allocator, tty: std.fs.F
 }
 
 pub fn detectFileTransmissionSupportWhole(allocator: std.mem.Allocator, tty: std.fs.File, path: []const u8) !bool {
-    const writer = tty.deprecatedWriter();
+    var writer_state = tty.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     try protocol.writeQueryFileRgbaWhole(writer, path, 1, 1);
     const reply = try readRepliesFromFile(allocator, tty, 300);
     defer allocator.free(reply);
@@ -59,7 +61,8 @@ pub fn detectFileTransmissionSupportOffset(allocator: std.mem.Allocator, tty: st
 }
 
 fn detectFileTransmissionSupportOffsetAt(allocator: std.mem.Allocator, tty: std.fs.File, path: []const u8, offset: u64) !bool {
-    const writer = tty.deprecatedWriter();
+    var writer_state = tty.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     try protocol.writeQueryFileRgbaRegion(writer, path, offset, 4, 1, 1);
     const reply = try readRepliesFromFile(allocator, tty, 300);
     defer allocator.free(reply);

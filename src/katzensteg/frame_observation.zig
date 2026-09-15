@@ -34,7 +34,8 @@ pub const FrameObservation = struct {
         const file = try std.fs.createFileAbsolute(temporary, .{ .mode = 0o600 });
         {
             defer file.close();
-            try @import("png.zig").write(allocator, file.deprecatedWriter(), self.width, self.height, self.pixels.items);
+            var output_writer = file.writerStreaming(&.{});
+            try @import("png.zig").write(allocator, &output_writer.interface, self.width, self.height, self.pixels.items);
         }
         try std.fs.renameAbsolute(temporary, path);
     }

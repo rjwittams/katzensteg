@@ -163,9 +163,9 @@ fn writeEncodedPayloadApc(out: anytype, prefix: []const u8, payload: []const u8)
 }
 
 test "protocol writers support memory writers" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    try writePlace(out.writer(std.testing.allocator), 4, 1, .{
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try writePlace(&out.writer, 4, 1, .{
         .image_id = 10,
         .placement_id = 20,
         .cols = 5,
@@ -176,6 +176,6 @@ test "protocol writers support memory writers" {
         .src_h = 16,
         .z = 100,
     });
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[4;1H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "a=p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[4;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "a=p") != null);
 }

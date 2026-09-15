@@ -89,7 +89,8 @@ pub fn main() !void {
     defer allocator.free(loaded.rgba);
 
     const stdout_file = std.fs.File.stdout();
-    var writer = stdout_file.deprecatedWriter();
+    var writer_state = stdout_file.writerStreaming(&.{});
+    const writer = &writer_state.interface;
     const stdin_fd = std.fs.File.stdin().handle;
     const original_termios = try std.posix.tcgetattr(stdin_fd);
     defer std.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
