@@ -5,7 +5,8 @@ const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
 const sdl = @import("katzensteg_sdl");
 const sdl_adapter = @import("sdl2_adapter.zig");
-const real_sdl = @import("real_sdl.zig");
+const is_sdl3 = @hasDecl(sdl, "SDL_DestroySurface");
+const real_sdl = if (is_sdl3) @import("real_sdl3.zig") else @import("real_sdl.zig");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
 const inspect_model = @import("inspect_model.zig");
@@ -17,20 +18,23 @@ pub const InterceptMode = config_mod.InterceptMode;
 const CoreHandle = core.CoreHandle;
 pub const Command = core_commands.Command;
 
+// Only the shared public prefix is read. SDL3 stores the format enum inline;
+// SDL2 stores a pointer to SDL_PixelFormat.
 const SurfaceView = extern struct {
     flags: u32,
-    format: ?*anyopaque,
+    format: if (is_sdl3) u32 else ?*anyopaque,
     w: i32,
     h: i32,
     pitch: i32,
     pixels: ?*anyopaque,
-    userdata: ?*anyopaque,
-    locked: i32,
-    lock_data: ?*anyopaque,
-    clip_rect: sdl.SDL_Rect,
-    map: ?*anyopaque,
-    refcount: i32,
 };
+
+fn convertSurface(surface: ?*sdl.SDL_Surface) ?*sdl.SDL_Surface {
+    return if (is_sdl3)
+        real_sdl.SDL_ConvertSurface(surface, sdl.SDL_PIXELFORMAT_ABGR8888)
+    else
+        real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0);
+}
 
 pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     const start_ns = system_io.time.nanoTimestamp();
@@ -347,7 +351,7 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
         } });
         return;
     }
-    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+    const converted = convertSurface(surface) orelse {
         log.warn("SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface", .{});
         const metadata = textureMetadataOrFallback(texture);
         rt.enqueueCommand(.{ .create_texture = .{
@@ -387,7 +391,7 @@ pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
         rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
         return;
     }
-    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+    const converted = convertSurface(surface) orelse {
         log.warn("SDL_ConvertSurfaceFormat failed in onCreateTextureFromSurface", .{});
         const metadata = textureMetadataOrFallback(texture);
         rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
