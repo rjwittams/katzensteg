@@ -687,6 +687,9 @@ pub const Runtime = struct {
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
             self.lockPresentation("should_capture_external_frame");
             defer self.presentation_mutex.unlock();
+            // Synchronous external producers have no worker to receive attach
+            // and viewport messages before the first captured frame.
+            if (self.intercept_mode == .sync_compose) self.pollBatchControlLocked();
             if (!self.batch_sink.?.isAttached()) return false;
             if (!self.terminalRenderingEnabled()) {
                 self.notePresentationLayout(.{});
@@ -2580,4 +2583,27 @@ test "placeholder presentation uses target pixels without changing source coordi
     const n = try system_io.posix.read(pipe[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "s=2,v=2,i=777") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
+}
+
+
+test "synchronous external capture receives attach without an SDL renderer or input polling" {
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
+    defer tmp.cleanup();
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    runtime.active = true;
+    runtime.input_enabled = false;
+    runtime.intercept_mode = .sync_compose;
+    runtime.batch_writer = try tmp.dir.createFile("frames", .{});
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
+    const pipe = try system_io.posix.pipe2(.{ .NONBLOCK = true });
+    runtime.batch_control = .{ .io = io, .handle = pipe[0] };
+    const peer = system_io.fs.File{ .io = io, .handle = pipe[1] };
+    defer peer.close();
+    try std.testing.expect(!runtime.shouldCaptureExternalFrame());
+    try peer.writeAll("{\"type\":\"attach\",\"window_id\":\"main\",\"aspect\":\"fit\",\"rect_cells\":{\"row\":1,\"col\":1,\"rows\":10,\"cols\":20},\"id_ranges\":{\"image\":[[100000,199999]],\"placement\":[[200000,299999]]},\"upload\":{\"profile\":\"direct_apc\",\"high_water\":4096}}\n");
+    try std.testing.expect(runtime.shouldCaptureExternalFrame());
+    try peer.writeAll("{\"type\":\"detach\",\"window_id\":\"main\"}\n");
+    try std.testing.expect(!runtime.shouldCaptureExternalFrame());
 }
