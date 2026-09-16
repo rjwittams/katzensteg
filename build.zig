@@ -884,6 +884,7 @@ fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Buil
 fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Build.Module {
     const module = b.createModule(options);
     if (options.root_source_file != null) module.addImport("platform", b.modules.get("platform").?);
+    // The platform adapters and C interposers use libc and pthread APIs.
     module.link_libc = true;
     return module;
 }
