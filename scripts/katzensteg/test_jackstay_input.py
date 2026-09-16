@@ -503,7 +503,7 @@ class PublisherInput(unittest.TestCase):
                     app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es) and any(e["event"] == "button" and e["down"] for e in es))
                     if abrupt: viewer.kill()
                     stdout, stderr = viewer.communicate(timeout=10)
-                    if not abrupt: self.assertEqual(viewer.returncode, 0, stderr.decode())
+                    if not abrupt: self.assertEqual(viewer.returncode, 0, f"stdout:\n{stdout.decode()}\nstderr:\n{stderr.decode()}")
                     events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
                     self.assertTrue(any(e["event"] == "key" and e["repeat"] for e in events))
                     self.assertEqual(b"".join(bytes.fromhex(e["hex"]) for e in events if e["event"] == "text"), "hé🙂".encode() + b"x" * 1024)

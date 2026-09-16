@@ -6,6 +6,8 @@ extern "c" fn forkpty(*c_int, ?[*]u8, ?*const std.posix.termios, ?*const std.pos
 extern "c" fn cfmakeraw(*std.posix.termios) void;
 
 const Buffer = struct {
+    // Fill only when empty, from index zero. Partial writes advance start;
+    // flushing the last byte resets both indices for the next fill.
     bytes: [65536]u8 = undefined,
     start: usize = 0,
     end: usize = 0,

@@ -124,7 +124,11 @@ pub const Boundary = struct {
                     const params = self.header[0..self.header_len];
                     if (byte == 'J' and !self.header_overflow and (std.mem.eql(u8, params, "2") or std.mem.eql(u8, params, "3"))) self.cleared = true;
                     self.state = .ground;
-                } else if (byte >= 0x20 and byte <= 0x3f) self.collect(byte);
+                } else if (byte >= 0x20 and byte <= 0x3f) {
+                    // Retain parameters AND intermediates: only exact "2"/"3"
+                    // with final J identify the clears handled above.
+                    self.collect(byte);
+                }
             },
             .string, .string_escape => unreachable,
         }

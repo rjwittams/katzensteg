@@ -142,7 +142,10 @@ const Host = struct {
         try self.flushDeletes();
     }
     fn flushDeletes(self: *Host) !void {
-        if (self.pending_deletes.items.len == 0 or self.terminal.outputQueued()) return;
+        if (self.pending_deletes.items.len == 0) return;
+        // Only deleteImage's relay path queues deletes; direct output is immediate.
+        std.debug.assert(self.terminal.relay != null);
+        if (self.terminal.outputQueued()) return;
         var bytes = std.Io.Writer.Allocating.init(self.allocator);
         defer bytes.deinit();
         for (self.pending_deletes.items) |id| try graphics.delete(&bytes.writer, id);
@@ -308,6 +311,9 @@ const Host = struct {
         // exit cleanly. Placeholder cells resolve to the first virtual placement
         // of the image, so stale ones would size (and briefly show) this session.
         self.deleteImage(image_id) catch |err| {
+            // A relay must reserve the delete before accepting a reused image id.
+            // Refuse the session if its bounded queue is full, rather than risk
+            // a stale placement or bypass serialization with a direct write.
             if (self.terminal.relay != null) return err;
             self.logger.writeFmtScoped(.warn, .wm, "session {d} stale graphics cleanup failed: {s}", .{ id, @errorName(err) });
         };
