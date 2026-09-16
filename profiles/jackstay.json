@@ -1,5 +1,16 @@
 {
   "profiles": {
+    "jackstay-source": {
+      "target": "{repo}/zig-out/bin/katzensteg-jackstay",
+      "runtime": {
+        "composite_mode": "fullscreen",
+        "intercept_mode": "sync_compose",
+        "input": false,
+        "output_profile": "file_whole"
+      },
+      "stdout": "/tmp/katzensteg-jackstay-source.out",
+      "stderr": "stdout"
+    },
     "jackstay-viewer": {
       "extends": [
         "adapter.sdl2_preload",

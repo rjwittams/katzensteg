@@ -47,6 +47,7 @@ pub const TerminalGeometry = struct {
 pub const PresentationStatusView = struct {
     window_id: []const u8,
     ready_to_show: bool = false,
+    input_supported: bool = true,
     source_px: ?SourcePixels = null,
     effective_rect_cells: ?PresentationRectCells = null,
 };
@@ -252,6 +253,7 @@ pub fn writePresentationStatusJsonl(writer: anytype, status: PresentationStatusV
     try writeJsonString(writer, status.window_id);
     try writer.writeAll(",\"ready_to_show\":");
     try writer.writeAll(if (status.ready_to_show) "true" else "false");
+    if (!status.input_supported) try writer.writeAll(",\"input_supported\":false");
     if (status.source_px) |source| {
         try writer.print(",\"source_px\":{{\"w\":{d},\"h\":{d}}}", .{ source.w, source.h });
     }

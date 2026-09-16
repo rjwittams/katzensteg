@@ -51,6 +51,7 @@ const Session = struct {
     last_target_px: ?protocol.SourcePixels = null,
     buttons: u32 = 0,
     source_px: ?protocol.SourcePixels = null,
+    input_supported: bool = true,
     ready: bool = false,
     restore_pending: bool = false,
     last_frame_at: i64 = 0,
@@ -318,6 +319,7 @@ const Host = struct {
                     };
                 },
                 .presentation_status => |status| {
+                    session.input_supported = status.input_supported;
                     session.source_px = status.source_px;
                     session.ready = status.ready_to_show;
                 },
@@ -376,7 +378,7 @@ const Host = struct {
                 for (self.sessions.items) |session| {
                     if (!std.mem.eql(u8, &session.owner, &owner)) continue;
                     const state: []const u8 = if (session.exited_at != null) "exited" else if (session.closing_at != null) "closing" else if (session.ready and session.grid != null) "ready" else "starting";
-                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .grid = session.grid }, .{}), .{});
+                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid }, .{}), .{});
                     try list.append(allocator, value.value);
                 }
                 return json(allocator, list.items);
@@ -447,6 +449,7 @@ const Host = struct {
             return .{};
         }
         if (std.mem.eql(u8, action, "input")) {
+            if (!session.input_supported) return error.InputUnsupported;
             const grid = session.grid orelse return error.GridRequired;
             const parsed = try std.json.parseFromSlice(struct { events: []const std.json.Value }, allocator, request.body, .{});
             if (parsed.value.events.len > 64) return error.TooManyEvents;

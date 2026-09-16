@@ -8,6 +8,32 @@ pub fn build(b: *std.Build) void {
     const is_macos = target.result.os.tag == .macos;
     const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
     const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
+    const enable_jackstay = b.option(bool, "jackstay", "Build optional CPU Jackstay connectors") orelse false;
+    const jackstay_prefix = b.option([]const u8, "jackstay-prefix", "Prepared pinned Jackstay dependency prefix");
+    const features = b.addOptions();
+    features.addOption(bool, "jackstay", enable_jackstay);
+    const jackstay_mod = b.addModule("jackstay", .{
+        .root_source_file = b.path("src/jackstay/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    jackstay_mod.addOptions("features", features);
+    jackstay_mod.addImport("platform", b.modules.get("platform").?);
+    if (enable_jackstay) {
+        if (target.result.os.tag != .macos and target.result.os.tag != .linux) @panic("Jackstay CPU connectors require macOS or Linux");
+        const prefix = jackstay_prefix orelse @panic("-Djackstay=true requires -Djackstay-prefix; see docs/jackstay.md");
+        const library = if (is_macos) "libjackstay.dylib" else "libjackstay.so";
+        jackstay_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        jackstay_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        jackstay_mod.linkSystemLibrary("jackstay", .{ .use_pkg_config = .no });
+        // Relocatable installed packages; the explicit prefix also serves test binaries.
+        jackstay_mod.addRPathSpecial(if (is_macos) "@loader_path/../lib" else "$ORIGIN/../lib");
+        jackstay_mod.addRPathSpecial(if (is_macos) "@loader_path" else "$ORIGIN");
+        jackstay_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
+        b.getInstallStep().dependOn(&install.step);
+    }
     const default_preload_options = b.addOptions();
     default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);
     const test_preload_options = b.addOptions();
@@ -37,6 +63,16 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
+    addUnitTest(b, test_step, "jackstay-test", "src/jackstay/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
+    if (enable_jackstay) {
+        const probe = b.addExecutable(.{ .name = "katzensteg-jackstay-probe", .use_llvm = use_llvm, .root_module = projectModule(b, .{
+            .root_source_file = b.path("src/jackstay/probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        b.installArtifact(probe);
+        b.step("jackstay-probe", "Build the Jackstay cross-process fixture").dependOn(&b.addInstallArtifact(probe, .{}).step);
+    }
     addUnitTest(b, test_step, "platform-test", "src/platform/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
 
     // On macOS, Zig emits debug-map binaries (no inline __DWARF); a UUID-matched
@@ -117,6 +153,22 @@ pub fn build(b: *std.Build) void {
     katzensteg_core_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_core_lib.root_module.strip = false;
     katzensteg_core_lib.root_module.omit_frame_pointer = false;
+    if (enable_jackstay) {
+        const consumer = b.addExecutable(.{ .name = "katzensteg-jackstay", .use_llvm = use_llvm, .root_module = projectModule(b, .{
+            .root_source_file = b.path("src/katzensteg/jackstay_consumer.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        consumer.root_module.addImport("termscene", termscene_mod);
+        if (is_macos) {
+            consumer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+            consumer.root_module.linkFramework("Accelerate", .{});
+        } else {
+            consumer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+            consumer.root_module.linkSystemLibrary("yuv", .{});
+        }
+        b.installArtifact(consumer);
+    }
     if (is_macos) {
         katzensteg_core_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
         katzensteg_core_lib.root_module.linkFramework("Accelerate", .{});
@@ -883,7 +935,10 @@ fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Buil
 
 fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Build.Module {
     const module = b.createModule(options);
-    if (options.root_source_file != null) module.addImport("platform", b.modules.get("platform").?);
+    if (options.root_source_file != null) {
+        module.addImport("platform", b.modules.get("platform").?);
+        module.addImport("jackstay", b.modules.get("jackstay").?);
+    }
     // The platform adapters and C interposers use libc and pthread APIs.
     module.link_libc = true;
     return module;

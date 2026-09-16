@@ -119,6 +119,7 @@ const usage_text =
     \\Targets:
     \\  A target can be a named profile or, later, a command/path/URL matched by the launcher.
     \\  With no target, Katzensteg lists available profiles.
+    \\  KATZENSTEG_TARGET=jackstay:/absolute/socket publishes CPU video (optional build).
     \\
     \\Environment:
     \\  KATZENSTEG_PROFILE_DIR    Profile directories, ':'-separated. First match wins;
@@ -317,8 +318,10 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
         std.process.exit(64);
     };
     defer destination.deinit(allocator);
-    const embed_jsonl = destination != .standalone;
+    const embed_jsonl = destination == .stdio or destination == .jsonl;
+    if (destination == .jackstay) std.debug.print("destination=jackstay:{s} (dry-run; not listening)\nKATZENSTEG_PUBLISH={s}\n", .{ destination.jackstay, destination.jackstay });
     if (destination == .jsonl) std.debug.print("destination=jsonl:{s} (dry-run; not connected)\n", .{destination.jsonl});
+    if (std.mem.eql(u8, target, "jackstay-source")) try @import("jackstay").checkAvailable();
     var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
@@ -396,12 +399,13 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
         return 64;
     };
     defer destination.deinit(allocator);
-    const embed_jsonl = destination != .standalone;
+    const embed_jsonl = destination == .stdio or destination == .jsonl;
+    if (std.mem.eql(u8, target, "jackstay-source")) try @import("jackstay").checkAvailable();
     var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
 
     const profile = catalog.find(target) orelse {
-        if (embed_jsonl) {
+        if (embed_jsonl or destination == .jackstay) {
             std.debug.print("katzensteg: hosted launch requires a known profile: {s}\n", .{target});
             return 66;
         }
@@ -441,6 +445,9 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     defer env_map.deinit();
     for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
+    if (destination == .jackstay) {
+        try env_map.put("KATZENSTEG_PUBLISH", destination.jackstay);
+    } else _ = env_map.swapRemove("KATZENSTEG_PUBLISH");
 
     if (!embed_jsonl) {
         std.debug.print("katzensteg: launching {s}\n", .{plan.profile_name});
@@ -464,12 +471,12 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
         }
     else
         spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
-            resetTerminalBestEffort(io);
+            if (destination == .standalone) resetTerminalBestEffort(io);
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
         };
     if (!embed_jsonl) {
-        resetTerminalBestEffort(io);
+        if (destination == .standalone) resetTerminalBestEffort(io);
     }
     const exit_code = childExitCode(term);
     if (exit_code != 0 and !embed_jsonl) {

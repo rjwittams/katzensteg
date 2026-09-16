@@ -70,3 +70,6 @@ is built elsewhere; `katzensteg --dry-run jackstay-viewer` shows the resolved pa
 Game data, ROMs, credentials, pairing state, and media are intentionally not tracked here. Profiles should use local paths or private profile directories for that data.
 
 Use `--dry-run` to inspect what a profile expects before launching it.
+
+Optional native CPU publishing and presentation are documented in
+[Jackstay connectors](jackstay.md), including the pinned dependency build.

@@ -872,10 +872,19 @@ pub const FrameBuilder = struct {
         }
     }
 
-    pub fn renderExternalFramebufferBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, writer: anytype) void {
-        const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, null) orelse return;
+    pub fn renderExternalFramebufferBatch(self: *FrameBuilder, logger: *Logger, sink: *RenderBatchSink, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, writer: anytype) ?FramebufferJob {
+        const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, null) orelse return null;
         var job = prepared.job;
         self.renderPresentJobBatch(logger, sink, external_framebuffer_renderer_key, &job, writer);
+        return job.framebuffer;
+    }
+
+    // Source-sized content, independent of terminal layout and image encoding.
+    // Borrows FrameBuilder storage until the next external-frame composition.
+    pub fn externalContentFrame(self: *FrameBuilder, logger: *Logger, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, cursor: ?cursor_mod.Snapshot) ?FramebufferJob {
+        if (width <= 0 or height <= 0 or @as(u64, @intCast(width)) * @as(u64, @intCast(height)) * 4 > 64 * 1024 * 1024) return null;
+        const prepared = self.prepareExternalFramebufferJob(logger, width, height, format, pixels, cursor) orelse return null;
+        return prepared.job.framebuffer;
     }
 
     const PreparedExternalFramebuffer = struct {
@@ -1355,14 +1364,22 @@ pub const FrameBuilder = struct {
         self.renderPresentJob(logger, tty, engine, backend, renderer, &job, debug_protocol_replies, image_gc);
     }
 
-    // Reconstruct a native-size observation even when terminal presentation uses
-    // separate sprites. Call before renderPresentJobBatch consumes frame commands.
-    pub fn buildObservationFrame(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, cursor: ?cursor_mod.Snapshot) !present_job.FramebufferJob {
+    // Compose source-sized content independently of terminal layout. The caller
+    // may observe, publish, or present it, then retire the frame's commands.
+    pub fn buildContentFrame(self: *FrameBuilder, logger: *Logger, renderer: core.CoreHandle, cursor: ?cursor_mod.Snapshot) !present_job.FramebufferJob {
         const state = self.renderers.getPtr(renderer) orelse return error.UnknownRenderer;
+        if (state.output_w <= 0 or state.output_h <= 0 or @as(u64, @intCast(state.output_w)) * @as(u64, @intCast(state.output_h)) * 4 > 64 * 1024 * 1024) return error.FrameTooLarge;
         try self.buildCompositeFrame(logger, state);
         const rgba = state.composite_rgba orelse return error.MissingCompositeBuffer;
         compositeCursor(rgba, state.output_w, state.output_h, rendererCursor(state, cursor));
         return .{ .width = state.output_w, .height = state.output_h, .rgba = rgba, .owns_rgba = false };
+    }
+
+    pub fn finishContentFrame(self: *FrameBuilder, renderer: core.CoreHandle) void {
+        const state = self.renderers.getPtr(renderer) orelse return;
+        state.copies.clearRetainingCapacity();
+        state.fills.clearRetainingCapacity();
+        state.lines.clearRetainingCapacity();
     }
 
     pub fn buildPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, renderer: core.CoreHandle, bg_only: bool, cursor: ?cursor_mod.Snapshot) !PresentJob {
@@ -4516,7 +4533,7 @@ test "frame builder renders external framebuffer to batch sink" {
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
 
-    builder.renderExternalFramebufferBatch(&logger, &sink, 2, 2, .rgba8, &pixels, &out.writer);
+    _ = builder.renderExternalFramebufferBatch(&logger, &sink, 2, 2, .rgba8, &pixels, &out.writer);
 
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"frame_batch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"direct_apc\"") == null);
@@ -5742,7 +5759,7 @@ test "observation composes a sprite-mode frame without consuming presentation co
     state.clear_color = .{ 0, 0, 0, 255 };
     try state.fills.append(std.testing.allocator, .{ .rect = .{ .x = 2, .y = 1, .w = 1, .h = 1 }, .color = .{ 255, 0, 0, 255 } });
     try std.testing.expect(!builder.needsFramebufferComposite(state));
-    var frame = try builder.buildObservationFrame(&logger, 1, null);
+    var frame = try builder.buildContentFrame(&logger, 1, null);
     defer frame.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(i32, 4), frame.width);
     try std.testing.expectEqual(@as(i32, 2), frame.height);
@@ -5769,7 +5786,7 @@ test "renderer pixel size preserves all quadrants across display scale changes" 
         builder.onRenderSetViewport(2, &viewport);
         builder.onRenderCopy(&logger, 2, 3, null, null);
         builder.onRenderSetViewport(2, null);
-        var frame = try builder.buildObservationFrame(&logger, 2, null);
+        var frame = try builder.buildContentFrame(&logger, 2, null);
         defer frame.deinit(std.testing.allocator);
         try std.testing.expectEqual(size, frame.width);
         try std.testing.expectEqual(size, frame.height);
@@ -5812,7 +5829,7 @@ test "external BGRA placeholder frame preserves source size and converts pixels"
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
     const bgra = [_]u8{ 56, 34, 12, 255 };
-    builder.renderExternalFramebufferBatch(&logger, &sink, 1, 1, .bgra8, &bgra, &out.writer);
+    _ = builder.renderExternalFramebufferBatch(&logger, &sink, 1, 1, .bgra8, &bgra, &out.writer);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
     defer parsed.deinit();
     const groups = parsed.value.object.get("groups").?.object;
@@ -5880,7 +5897,7 @@ test "retained observation preserves fills and cursor pixels" {
     var cursor_pixels = [_]u8{ 255, 255, 255, 128, 0, 0, 255, 255, 10, 20, 30, 0, 255, 255, 0, 255 };
     const image = cursor_mod.Image{ .width = 2, .height = 2, .hot_x = 1, .hot_y = 1, .rgba = &cursor_pixels };
     const cursor = cursor_mod.Snapshot{ .image = &image, .position = .{ .x = 3, .y = 3 } };
-    const reference = try builder.buildObservationFrame(&logger, 1, cursor);
+    const reference = try builder.buildContentFrame(&logger, 1, cursor);
     var snapshot: PresentationSnapshot = .{};
     defer snapshot.deinit(allocator);
     try snapshot.capture(&builder, 1, cursor);
