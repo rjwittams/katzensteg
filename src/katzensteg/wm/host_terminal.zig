@@ -6,6 +6,7 @@ pub const Terminal = struct {
     allocator: std.mem.Allocator,
     file: system_io.fs.File,
     path: []const u8,
+    relay: ?*@import("wrap.zig").Relay = null,
 
     pub fn open(io: std.Io, allocator: std.mem.Allocator, explicit: ?[]const u8, parent: ?i32) !Terminal {
         if (explicit) |path| {
@@ -56,6 +57,7 @@ pub const Terminal = struct {
     // Some PTY implementations cannot report pending output; keep the existing
     // small-write behavior there instead of starving presentation indefinitely.
     pub fn outputQueued(self: *const Terminal) bool {
+        if (self.relay) |relay| return !relay.canInject();
         // Darwin's _IOR('t', 115, int) is absent from Zig 0.15's std.c.T.
         const request = if (@import("builtin").os.tag == .macos) 0x40047473 else if (@hasDecl(std.posix.T, "IOCOUTQ")) std.posix.T.IOCOUTQ else return false;
         var pending: c_int = 0;

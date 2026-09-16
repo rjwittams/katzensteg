@@ -208,7 +208,7 @@ class PublisherInput(unittest.TestCase):
             fn = getattr(cls.lib, name); fn.argtypes = args
             fn.restype = None if name.endswith(("close", "destroy")) else C.c_int32
         assert (C.sizeof(Config), C.sizeof(Event), C.sizeof(Status)) == (56, 152, 56)
-        assert cls.lib.ft_abi_version() == 7
+        assert cls.lib.ft_abi_version() == 8
         cls.temp = tempfile.TemporaryDirectory(prefix="ks-input-", dir="/tmp")
         cls.folder = Path(cls.temp.name)
         profiles = {}
@@ -218,6 +218,11 @@ class PublisherInput(unittest.TestCase):
             subprocess.run(["cc", str(ROOT / "scripts/katzensteg/fixtures/jackstay_input_app.c"), "-o", str(binary)] + (["-DUSE_SDL3"] if version == 3 else []) + flags, check=True, capture_output=True)
             profiles[f"test.input{version}"] = {"extends": [f"adapter.sdl{version}_preload"], "target": str(binary), "stdout": "inherit", "stderr": "inherit"}
         (cls.folder / "profiles.json").write_text(json.dumps({"profiles": profiles}))
+        cls.input_source = cls.folder / "input-source"
+        subprocess.run(["cc", str(ROOT / "scripts/katzensteg/fixtures/jackstay_input_source.c"),
+                        "-o", str(cls.input_source), "-I" + str(prefix / "include"),
+                        "-L" + str(prefix / "lib"), "-ljackstay", "-Wl,-rpath," + str(prefix / "lib")],
+                       check=True, capture_output=True)
     @classmethod
     def tearDownClass(cls):
         cls.temp.cleanup()
@@ -323,14 +328,13 @@ class PublisherInput(unittest.TestCase):
                     app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 40 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
                     viewer.finish()
 
-    @unittest.skipUnless(os.environ.get("JACKSTAY_REFERENCE_SOURCE"), "set JACKSTAY_REFERENCE_SOURCE to the independent input source")
     def test_presenter_to_independent_reference_source(self):
         for abrupt in (False, True):
             with self.subTest(abrupt=abrupt), tempfile.TemporaryDirectory(prefix="ks-source-", dir="/tmp") as directory:
                 folder = Path(directory)
                 media, control = folder / "media", folder / "input"
                 with (folder / "source.log").open("w+") as report:
-                    source = subprocess.Popen([os.environ["JACKSTAY_REFERENCE_SOURCE"], str(media), str(control), "--report-state"], stdout=report, stderr=subprocess.PIPE)
+                    source = subprocess.Popen([str(self.input_source), str(media), str(control), "--report-state"], stdout=report, stderr=subprocess.PIPE)
                     viewer = None
                     try:
                         deadline = time.monotonic() + 8
@@ -503,7 +507,7 @@ class PublisherInput(unittest.TestCase):
                     app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es) and any(e["event"] == "button" and e["down"] for e in es))
                     if abrupt: viewer.kill()
                     stdout, stderr = viewer.communicate(timeout=10)
-                    if not abrupt: self.assertEqual(viewer.returncode, 0, stderr.decode())
+                    if not abrupt: self.assertEqual(viewer.returncode, 0, f"stdout:\n{stdout.decode()}\nstderr:\n{stderr.decode()}")
                     events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
                     self.assertTrue(any(e["event"] == "key" and e["repeat"] for e in events))
                     self.assertEqual(b"".join(bytes.fromhex(e["hex"]) for e in events if e["event"] == "text"), "hé🙂".encode() + b"x" * 1024)

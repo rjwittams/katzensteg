@@ -17,7 +17,7 @@ pub const Image = struct {
 };
 
 pub fn checkAbi() !void {
-    if (c.FT_ABI_VERSION != 7 or c.ft_abi_version() != 7) return error.JackstayAbiMismatch;
+    if (c.FT_ABI_VERSION != 8 or c.ft_abi_version() != 8) return error.JackstayAbiMismatch;
 }
 
 fn check(status: c.ft_status) !void {

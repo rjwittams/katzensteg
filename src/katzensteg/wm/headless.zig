@@ -18,15 +18,16 @@ pub const Options = struct {
     parent_pid: ?i32 = null,
     background: bool = false,
     idle_refresh_ms: u32 = 500,
+    wrap_command: []const []const u8 = &.{},
 };
 
 const lease_ms = 120_000;
 const idle_ms = 30_000;
 const max_clients = 16;
 const max_sessions = 128;
-var stopping = std.atomic.Value(bool).init(false);
-fn stop(_: std.posix.SIG) callconv(.c) void {
-    stopping.store(true, .seq_cst);
+var stopping = std.atomic.Value(u8).init(0);
+fn stop(signal: std.posix.SIG) callconv(.c) void {
+    stopping.store(@intCast(@intFromEnum(signal)), .seq_cst);
 }
 
 const Client = struct {
@@ -104,31 +105,70 @@ const Host = struct {
     next_observation: u32 = 1,
     observations: [16]?PendingObservation = @splat(null),
     idle_since: i64,
+    pending_deletes: std.ArrayList(u32) = .empty,
     idle_refresh_ms: u32 = 500,
 
     fn deinit(self: *Host) void {
         for (self.sessions.items) |*session| {
             if (session.exited_at == null) {
-                var output_writer = self.terminal.file.writerStreaming(&.{});
-                graphics.delete(&output_writer.interface, session.image_id) catch {};
+                self.deleteImage(session.image_id) catch {};
             }
             session.deinit(self.allocator);
         }
         for (self.clients.items) |*client| client.listener.deinit();
         self.clients.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
+        self.flushDeletes() catch {};
+        if (self.terminal.relay) |relay| {
+            const deadline = system_io.time.milliTimestamp() + 250;
+            while (self.pending_deletes.items.len > 0 and relay.boundary.safe() and system_io.time.milliTimestamp() < deadline) {
+                relay.tick() catch break;
+                self.flushDeletes() catch break;
+                if (self.pending_deletes.items.len > 0) system_io.time.sleep(std.time.ns_per_ms);
+            }
+        }
+        self.pending_deletes.deinit(self.allocator);
         self.server.deinit();
         self.logger.deinit();
     }
 
+    fn deleteImage(self: *Host, id: u32) !void {
+        if (self.terminal.relay == null) {
+            var writer = self.terminal.file.writerStreaming(&.{});
+            return graphics.delete(&writer.interface, id);
+        }
+        if (self.pending_deletes.items.len >= max_sessions) return error.DeferredDeletesFull;
+        try self.pending_deletes.append(self.allocator, id);
+        try self.flushDeletes();
+    }
+    fn flushDeletes(self: *Host) !void {
+        if (self.pending_deletes.items.len == 0) return;
+        // Only deleteImage's relay path queues deletes; direct output is immediate.
+        std.debug.assert(self.terminal.relay != null);
+        if (self.terminal.outputQueued()) return;
+        var bytes = std.Io.Writer.Allocating.init(self.allocator);
+        defer bytes.deinit();
+        for (self.pending_deletes.items) |id| try graphics.delete(&bytes.writer, id);
+        try self.terminal.relay.?.graphics(bytes.written());
+        self.pending_deletes.clearRetainingCapacity();
+    }
+
     fn loop(self: *Host) !void {
-        while (!stopping.load(.seq_cst)) {
+        while (stopping.load(.seq_cst) == 0) {
+            if (self.terminal.relay) |relay| {
+                try relay.tick();
+                if (relay.boundary.cleared) {
+                    relay.boundary.cleared = false;
+                    for (self.sessions.items) |*session| session.restore_pending = true;
+                }
+                if (relay.done()) break;
+            }
             const now = system_io.time.milliTimestamp();
             try self.server.poll(now, self);
             try self.tick(now);
             if (self.clients.items.len > 0) self.idle_since = now;
-            if (self.clients.items.len == 0 and now - self.idle_since >= idle_ms) break;
-            var fds: [max_sessions + max_clients + 18]std.posix.pollfd = undefined;
+            if (self.terminal.relay == null and self.clients.items.len == 0 and now - self.idle_since >= idle_ms) break;
+            var fds: [max_sessions + max_clients + 20]std.posix.pollfd = undefined;
             var count: usize = 0;
             fds[count] = .{ .fd = self.server.file.handle, .events = std.posix.POLL.IN, .revents = 0 };
             count += 1;
@@ -144,12 +184,14 @@ const Host = struct {
                 fds[count] = .{ .fd = file.handle, .events = std.posix.POLL.IN, .revents = 0 };
                 count += 1;
             };
+            if (self.terminal.relay) |relay| count += relay.pollDescriptors(fds[count..]);
             _ = system_io.posix.poll(fds[0..count], 20) catch {};
         }
         const deadline = system_io.time.milliTimestamp() + 2100;
         while (self.clients.items.len > 0) self.closeClient(0, system_io.time.milliTimestamp());
         for (self.sessions.items) |*session| session.close(system_io.time.milliTimestamp());
         while (system_io.time.milliTimestamp() < deadline) {
+            if (self.terminal.relay) |relay| relay.tick() catch {};
             try self.tick(system_io.time.milliTimestamp());
             const alive = for (self.sessions.items) |session| {
                 if (session.exited_at == null) break true;
@@ -161,6 +203,7 @@ const Host = struct {
 
     fn tick(self: *Host, now: i64) !void {
         const io = self.terminal.file.io;
+        try self.flushDeletes();
         var ci: usize = 0;
         while (ci < self.clients.items.len) {
             const client = &self.clients.items[ci];
@@ -208,8 +251,7 @@ const Host = struct {
             if (timed_out or (eof and (session.producer.child == null or term != null))) {
                 session.producer.deinit();
                 session.exited_at = now;
-                var output_writer = self.terminal.file.writerStreaming(&.{});
-                graphics.delete(&output_writer.interface, session.image_id) catch |err| {
+                self.deleteImage(session.image_id) catch |err| {
                     self.logger.writeFmtScoped(.warn, .wm, "producer {d} graphics cleanup failed: {s}", .{ session.id, @errorName(err) });
                 };
                 system_io.fs.cwd(io).deleteTree(session.directory) catch {};
@@ -268,8 +310,11 @@ const Host = struct {
         // image and virtual placements under this id from a host that did not
         // exit cleanly. Placeholder cells resolve to the first virtual placement
         // of the image, so stale ones would size (and briefly show) this session.
-        var output_writer = self.terminal.file.writerStreaming(&.{});
-        graphics.delete(&output_writer.interface, image_id) catch |err| {
+        self.deleteImage(image_id) catch |err| {
+            // A relay must reserve the delete before accepting a reused image id.
+            // Refuse the session if its bounded queue is full, rather than risk
+            // a stale placement or bypass serialization with a direct write.
+            if (self.terminal.relay != null) return err;
             self.logger.writeFmtScoped(.warn, .wm, "session {d} stale graphics cleanup failed: {s}", .{ id, @errorName(err) });
         };
         try self.sessions.append(self.allocator, .{ .io = io, .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .observation_path = observation_path });
@@ -332,8 +377,16 @@ const Host = struct {
                         session.restore_pending = true;
                         continue;
                     }
-                    var output_writer = self.terminal.file.writerStreaming(&.{});
-                    try graphics.apply(self.allocator, &output_writer.interface, session.image_id, .{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after });
+                    const groups = @import("../terminal_batch_applier.zig").BatchGroupsView{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after };
+                    if (self.terminal.relay) |relay| {
+                        var output_writer = std.Io.Writer.Allocating.init(self.allocator);
+                        defer output_writer.deinit();
+                        try graphics.apply(self.allocator, &output_writer.writer, session.image_id, groups);
+                        try relay.graphics(output_writer.written());
+                    } else {
+                        var output_writer = self.terminal.file.writerStreaming(&.{});
+                        try graphics.apply(self.allocator, &output_writer.interface, session.image_id, groups);
+                    }
                     session.last_frame_at = system_io.time.milliTimestamp();
                     if (batch.groups.uploads.len != 0) session.restore_pending = false;
                 },
@@ -693,9 +746,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     defer allocator.free(directory);
     try system_io.posix.mkdir(directory, 0o700);
     defer system_io.fs.cwd(io).deleteTree(directory) catch {};
+    var relay: ?@import("wrap.zig").Relay = null;
+    defer if (relay) |*value| value.deinit();
     var host = Host{ .allocator = allocator, .executable = executable, .terminal = &terminal, .directory = directory, .token = token, .server = try http.Server.init(io, allocator, options.http_address), .logger = Logger.init(allocator), .idle_since = system_io.time.milliTimestamp(), .idle_refresh_ms = options.idle_refresh_ms };
     defer host.deinit();
-    stopping.store(false, .seq_cst);
+    stopping.store(0, .seq_cst);
     const action = std.posix.Sigaction{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
     for ([_]std.posix.SIG{ std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.HUP }) |signal| std.posix.sigaction(signal, &action, null);
     const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1 }, .{});
@@ -717,11 +772,20 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
         output.close();
         ready = null;
     }
+    if (options.wrap_command.len != 0) {
+        relay = try @import("wrap.zig").Relay.init(allocator, terminal.path, options.wrap_command, descriptor);
+        terminal.relay = &relay.?;
+    }
     try host.loop();
+    if (relay) |value| {
+        const signal = stopping.load(.seq_cst);
+        return if (signal != 0) 128 + signal else value.exit_code orelse 128;
+    }
     return 0;
 }
 
 test {
+    _ = @import("wrap.zig");
     _ = @import("http.zig");
     _ = @import("graphics_output.zig");
     _ = @import("producer.zig");
