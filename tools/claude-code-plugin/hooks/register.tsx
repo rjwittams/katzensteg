@@ -79,6 +79,16 @@ const failure = (r: Reply | undefined, what: string) => (r ? `${what} ${r.status
 // one, printing its discovery record once HTTP is up. The child inherits the
 // terminal, so the host opens it itself before detaching.
 async function discover($: $): Promise<HostFile | undefined> {
+  parentPid = (await $.env.get('CLAUDE_PID')) ?? ''
+  const wrapped = await $.env.get('KATZENSTEG_WM_HOST')
+  if (wrapped != null) {
+    const parsed = parseHostFile(wrapped)
+    if (!parsed) hostError = 'Invalid KATZENSTEG_WM_HOST from wrapper'
+    // An explicit host is authoritative. A stale descriptor must not spawn a
+    // competing writer on the inner PTY; connectOnce reports health failures.
+    return parsed ?? undefined
+  }
+
   // Name the terminal explicitly. A `$.process.run` child has a controlling
   // terminal, which `ps` reports as its real device (ttys007, pts/3); the
   // host must open that path, since /dev/tty stops resolving once it detaches.
@@ -87,7 +97,6 @@ async function discover($: $): Promise<HostFile | undefined> {
   const device = /^(ttys\d+|pts\/\d+|tty[A-Za-z0-9]+)$/.test(name) && name !== '??' ? [`--tty`, `/dev/${name}`] : []
   // Claude Code's own pid: the host watches it and closes this client's
   // producers when it exits, since a plugin gets no hook on the way out.
-  parentPid = (await $.env.get('CLAUDE_PID')) ?? ''
   const parent = /^\d+$/.test(parentPid) ? ['--parent-pid', parentPid] : []
   const r = await $.process.run([hostBin, '--headless', '--background', ...device, ...parent], { timeoutMs: 8000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: String(err) }))
   if (r.exitCode !== 0) {

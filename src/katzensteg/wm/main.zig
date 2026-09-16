@@ -25,7 +25,7 @@ pub fn main(process_init: std.process.Init) !void {
 
     if (parsed.headless) {
         var parent_pid = parsed.parent_pid;
-        if (parent_pid == null) {
+        if (parent_pid == null and parsed.wrap_command.len == 0) {
             if (system_io.process.getEnvVarOwned(allocator, "CLAUDE_PID")) |value| {
                 defer allocator.free(value);
                 parent_pid = std.fmt.parseInt(i32, value, 10) catch null;
@@ -38,6 +38,7 @@ pub fn main(process_init: std.process.Init) !void {
             .parent_pid = parent_pid,
             .background = parsed.background,
             .idle_refresh_ms = parsed.idle_refresh_ms,
+            .wrap_command = parsed.wrap_command,
         });
         std.process.exit(code);
     }
@@ -63,6 +64,7 @@ pub fn main(process_init: std.process.Init) !void {
 
 fn hasArg(args: []const []const u8, needle: []const u8) bool {
     for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--wrap") or std.mem.eql(u8, arg, "--")) break;
         if (std.mem.eql(u8, arg, needle)) return true;
     }
     return false;
@@ -78,6 +80,7 @@ fn siblingProducerExecutablePath(io: std.Io, allocator: std.mem.Allocator) ![]co
 
 const usage_text =
     \\Usage:
+    \\  katzensteg-wm [--http 127.0.0.1:<port>] [--host-file <path>] --wrap [--] command [arg...]
     \\  katzensteg-wm --headless [--background] [--tty <device>] [--parent-pid <pid>] [--http 127.0.0.1:<port>] [--host-file <path>] [--idle-refresh-ms <ms; 0 disables>]
     \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] [profile...]
     \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]

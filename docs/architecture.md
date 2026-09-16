@@ -111,8 +111,11 @@ placeholder cells. The desktop and headless frontends share `wm/producer.zig`
 for process/channel ownership, `wm/client.zig` for buffered control output, and
 `wm/producer_control.zig` for attach, viewport and input serialization. Desktop
 layout and terminal input remain in `wm_host.zig`. The headless frontend never
-constructs `DirectTty`, so it cannot enter the alternate screen, change input
-modes or clear another application's graphics during cleanup.
+constructs `DirectTty` and deletes only its own images. The ordinary background
+host leaves input modes to the application. Optional `--wrap` mode uses
+`wm/wrap.zig` to run that application on an inner PTY and temporarily makes the
+outer terminal raw. It relays input unchanged and restores the saved modes on
+exit.
 
 The headless frontend exposes authenticated loopback HTTP. Each client owns a
 registration socket and a set of sessions; image IDs are allocated by the
@@ -126,6 +129,14 @@ exact grid drawn by its client and does no aspect fitting. Source metadata and
 terminal cell pixel dimensions let the client do that fitting. Graphics writes
 use file uploads and small APC batches; concurrent terminal writers remain a
 protocol limitation, not an atomicity guarantee.
+
+Wrap mode sends all host graphics through the same bounded output buffer as
+the child's bytes. `wm/output_boundary.zig` tracks insertion boundaries without
+buffering whole escape strings or modelling the screen. UTF-8, control strings
+and chunked kitty uploads can span reads; graphics wait until they complete.
+The host keeps servicing HTTP and draining producers under terminal backpressure.
+An explicit discovery descriptor in `KATZENSTEG_WM_HOST` lets plugins attach to
+the wrapping host instead of starting a second host for the inner PTY.
 
 Structured keyboard requests join terminal bytes and pointer requests at the
 canonical input model. That model owns key events, held state and modifier

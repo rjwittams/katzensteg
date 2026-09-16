@@ -21,6 +21,21 @@ cd ~/dev/katzensteg
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir tools/claude-code-plugin
 ```
 
+To serialize Claude's output and panel graphics through one terminal writer:
+
+```sh
+cd ~/dev/katzensteg
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 ./zig-out/bin/katzensteg-wm --wrap -- \
+  claude --plugin-dir tools/claude-code-plugin
+```
+
+The wrapper runs Claude on an inner PTY and forwards input unchanged, including
+Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin
+from the same checkout: it attaches through `KATZENSTEG_WM_HOST`, supplied by
+the wrapper. It refuses an invalid or unreachable explicit host instead of
+starting another writer. Start it in a terminal without an existing headless
+host; the host's per-terminal lock prevents a second host taking ownership.
+
 ```text
 /katzensteg open mi2 [args...]   # open a panel
 /katzensteg close [id]           # close the last or the named panel
@@ -43,12 +58,15 @@ also exports `KATZENSTEG_TARGET=jsonl:<host socket>` and
 Environment:
 
 - `KATZENSTEG_HOST_BIN`: host binary (default `<repo>/zig-out/bin/katzensteg-wm`),
-  built with the 0.15.2 toolchain and SDK selector noted in the repo.
+  built with the Zig toolchain noted in the repo.
 - `KATZENSTEG_REPO`: repo root when not `~/dev/katzensteg`.
+- `KATZENSTEG_WM_HOST`: discovery JSON inherited from `--wrap`. The plugin
+  uses this host before trying background discovery; do not set it manually.
 
 ## How the host is found and started
 
-At session start the plugin runs `katzensteg-wm --headless --background`,
+Without an explicit wrapper host, at session start the plugin runs
+`katzensteg-wm --headless --background`,
 which starts a host for this terminal or answers for the one already running,
 and prints its discovery record (pid, port, token). The child inherits the
 terminal and the host opens it before detaching, so `$.process.run` returns
@@ -135,6 +153,9 @@ by the host. Band redraws reuse the existing image instead of requesting another
 The host restores idle sessions every 500 ms by default, including after
 terminal clears. Use `--idle-refresh-ms 0` when measuring producer frame cadence;
 stationary images then need an explicit refresh after a clear.
+Wrap mode instead detects `CSI 2 J` / `CSI 3 J` in the child's output and
+requests retained frames after the clear. Its periodic idle refresh defaults
+to off; `--idle-refresh-ms 500` before `--wrap` enables it as a fallback.
 
 ## Findings that shaped this
 

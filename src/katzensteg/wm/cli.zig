@@ -13,6 +13,7 @@ pub const Parsed = struct {
     sessions: []SessionSpec,
     listen_path: ?[]const u8 = null,
     headless: bool = false,
+    wrap_command: []const []const u8 = &.{},
     background: bool = false,
     http_address: ?[]const u8 = null,
     tty_path: ?[]const u8 = null,
@@ -23,6 +24,8 @@ pub const Parsed = struct {
     pub fn deinit(self: *Parsed) void {
         for (self.sessions) |session| freeSession(self.allocator, session);
         self.allocator.free(self.sessions);
+        for (self.wrap_command) |arg| self.allocator.free(arg);
+        self.allocator.free(self.wrap_command);
         if (self.listen_path) |path| self.allocator.free(path);
         if (self.http_address) |value| self.allocator.free(value);
         if (self.tty_path) |value| self.allocator.free(value);
@@ -38,6 +41,7 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
     var presentation: PresentationMode = .positioned;
     var presentation_set = false;
     var headless = false;
+    var wrapping = false;
     var background = false;
     var http_address: ?[]const u8 = null;
     errdefer if (http_address) |value| allocator.free(value);
@@ -59,6 +63,12 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
             presentation = std.meta.stringToEnum(PresentationMode, args[1]) orelse return error.InvalidPresentationMode;
             presentation_set = true;
             args = args[2..];
+        } else if (std.mem.eql(u8, args[0], "--wrap")) {
+            wrapping = true;
+            headless = true;
+            args = args[1..];
+            if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args = args[1..];
+            break;
         } else if (std.mem.eql(u8, args[0], "--headless")) {
             if (headless) return error.DuplicateHeadless;
             headless = true;
@@ -85,6 +95,21 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
         } else if (std.mem.eql(u8, args[0], "--placeholder") or std.mem.eql(u8, args[0], "--control-stdin")) {
             return error.UnsupportedHostOption;
         } else break;
+    }
+    if (wrapping) {
+        if (args.len == 0) return error.MissingWrappedCommand;
+        if (background or listen_path != null or parent_pid != null or (presentation_set and presentation != .placeholder)) return error.InvalidWrapOption;
+        const command = try allocator.alloc([]const u8, args.len);
+        var owned: usize = 0;
+        errdefer {
+            for (command[0..owned]) |arg| allocator.free(arg);
+            allocator.free(command);
+        }
+        for (args, 0..) |arg, i| {
+            command[i] = try allocator.dupe(u8, arg);
+            owned += 1;
+        }
+        return .{ .allocator = allocator, .sessions = try allocator.alloc(SessionSpec, 0), .headless = true, .presentation = .placeholder, .wrap_command = command, .http_address = http_address, .tty_path = tty_path, .host_file = host_file, .idle_refresh_ms = idle_refresh_ms orelse 0 };
     }
     if (headless) {
         if (args.len != 0 or listen_path != null) return error.HeadlessClientsOwnSessions;
@@ -225,4 +250,14 @@ test "idle refresh defaults to 500 ms and can be disabled for headless hosts" {
     try std.testing.expectEqual(@as(u32, 0), disabled.idle_refresh_ms);
     try std.testing.expectError(error.InvalidIdleRefresh, parse(std.testing.allocator, &.{ "wm", "--headless", "--idle-refresh-ms", "-1" }));
     try std.testing.expectError(error.HeadlessRequired, parse(std.testing.allocator, &.{ "wm", "--idle-refresh-ms", "500" }));
+}
+
+test "wrap owns remaining argv including child help and rejects background mode" {
+    var args = try parse(std.testing.allocator, &.{ "wm", "--wrap", "--", "claude", "--help", "--headless" });
+    defer args.deinit();
+    try std.testing.expect(args.headless);
+    try std.testing.expectEqualStrings("--help", args.wrap_command[1]);
+    try std.testing.expectEqual(@as(u32, 0), args.idle_refresh_ms);
+    try std.testing.expectError(error.MissingWrappedCommand, parse(std.testing.allocator, &.{ "wm", "--wrap" }));
+    try std.testing.expectError(error.InvalidWrapOption, parse(std.testing.allocator, &.{ "wm", "--background", "--wrap", "claude" }));
 }

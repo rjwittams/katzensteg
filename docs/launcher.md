@@ -227,6 +227,47 @@ and deletes only its own images. Small writes reduce interference with the
 application's terminal output; they cannot guarantee atomic output between
 independent writers.
 
+### Wrapping the application
+
+`--wrap` runs a command on an inner PTY while the WM owns the outer terminal's
+output. Options for the WM go before `--wrap`; all arguments after it (and an
+optional `--`) belong to the child:
+
+```sh
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 ./zig-out/bin/katzensteg-wm --wrap -- \
+  claude --plugin-dir tools/claude-code-plugin
+```
+
+The child inherits `KATZENSTEG_WM_HOST`, containing the same discovery JSON as
+the background host returns. A cooperating plugin uses this descriptor instead
+of discovering a host on its inner PTY. HTTP, client registration, producer
+launch, placeholder grid sizing and panel input keep their existing contracts.
+Discovery and `/health` describe the outer terminal, including its cell pixels.
+
+The outer terminal is raw while wrapping. Input bytes, including Ctrl-C, pass
+unchanged to the child; the child's terminal modes determine their meaning.
+Cell and pixel dimensions propagate to the inner PTY. On child exit the WM
+drains output, closes its producers, restores the outer terminal modes and
+returns the child's exit status. Wrapper termination or terminal loss also
+cleans up the child. Wrapping is foreground-only and cannot share a terminal
+with another headless host.
+
+The relay keeps bounded input/output buffers and forwards child output without
+building a screen model. Its graphics enter the stream only after complete
+UTF-8 and escape sequences, including the last command of a chunked kitty
+upload. Incomplete sequences delay graphics, not child output. Producer frames
+are dropped while insertion is unsafe, then the latest retained frame is
+requested. Both uploads and image deletions use the relay. Graphics commands
+use quiet replies (`q=2`) and never move the cursor.
+
+Terminal clears (`CSI 2 J` / `CSI 3 J`) request retained frames. Periodic idle
+refresh defaults to off in wrap mode; pass `--idle-refresh-ms <ms>` before
+`--wrap` to enable a fallback. This serialization covers the child stream and
+WM graphics; unrelated processes writing directly to the outer device still
+bypass it.
+
+### Shared-terminal output
+
 Before presenting a frame, the host checks `TIOCOUTQ`. If output is queued,
 it drops the entire batch before writing any bytes and restores the producer's
 latest retained frame once the queue clears. Recovery also works when periodic
