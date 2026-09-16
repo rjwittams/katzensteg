@@ -28,6 +28,7 @@ export type Session = {
   id: string
   title: string
   image_id: number
+  input_supported: boolean
   state: SessionState
   source_px: { w: number; h: number } | null
   grid: { cols: number; rows: number } | null
@@ -58,6 +59,7 @@ export function parseSessions(text: string): Session[] {
       title: typeof v.title === 'string' ? v.title : id,
       image_id: v.image_id as number,
       state: v.state,
+      input_supported: v.input_supported !== false,
       source_px: px && Number.isFinite(px.w) && Number.isFinite(px.h) ? { w: px.w as number, h: px.h as number } : null,
       grid: grid && Number.isInteger(grid.cols) && Number.isInteger(grid.rows) ? { cols: grid.cols as number, rows: grid.rows as number } : null,
     })

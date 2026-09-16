@@ -12,6 +12,7 @@ export interface Observation {
 	png: Buffer;
 }
 export interface GameTransport {
+	inputSupported?(): boolean;
 	observe(signal: AbortSignal): Promise<Observation | undefined>;
 	input(message: object): void;
 }
@@ -140,6 +141,11 @@ export class GameInteraction {
 		return this.exclusive(signal, async (s) => {
 			if (actions.length < 1 || actions.length > 16)
 				throw new Error("Send between 1 and 16 actions.");
+			if (
+				actions.some((action) => action.type !== "wait") &&
+				this.transport.inputSupported?.() === false
+			)
+				throw new Error("Observation-only source: input is unsupported");
 			const before = await this.observeWithin({}, s);
 			let waitMs = 0;
 			// Validate the whole sequence before sending any input.
