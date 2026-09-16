@@ -141,6 +141,8 @@ KS_REAL(SDL_SetTextInputArea, _Bool, (struct SDL_Window *window, const struct SD
 KS_REAL(SDL_GetTextInputArea, _Bool, (struct SDL_Window *window, struct SDL_Rect *rect, int *cursor), (window, rect, cursor))
 KS_REAL(SDL_HasKeyboard, _Bool, (void), ())
 KS_REAL(SDL_GetKeyboardFocus, struct SDL_Window *, (void), ())
+KS_REAL(SDL_GetKeyFromScancode, unsigned int, (int scancode, unsigned short modifiers, _Bool key_event), (scancode, modifiers, key_event))
+KS_REAL(SDL_GetScancodeFromKey, int, (unsigned int key, unsigned short *modifiers), (key, modifiers))
 KS_REAL(SDL_GetKeyboardState, const _Bool *, (int *numkeys), (numkeys))
 KS_REAL(SDL_GetModState, unsigned short, (void), ())
 KS_REAL_VOID(SDL_SetModState, (unsigned short modstate), (modstate))

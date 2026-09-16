@@ -60,6 +60,7 @@ extern int ks_SDL_WaitEvent(union SDL_Event *);
 extern int ks_SDL_WaitEventTimeout(union SDL_Event *, int);
 extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern const unsigned char *ks_SDL_GetKeyboardState(int *);
+extern int ks_SDL_GetModState(void);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
@@ -130,6 +131,7 @@ int SDL_WaitEvent(union SDL_Event *event) { return ks_SDL_WaitEvent(event); }
 int SDL_WaitEventTimeout(union SDL_Event *event, int timeout) { return ks_SDL_WaitEventTimeout(event, timeout); }
 int SDL_PeepEvents(union SDL_Event *events, int numevents, int action, unsigned int minType, unsigned int maxType) { return ks_SDL_PeepEvents(events, numevents, action, minType, maxType); }
 const unsigned char *SDL_GetKeyboardState(int *numkeys) { return ks_SDL_GetKeyboardState(numkeys); }
+int SDL_GetModState(void) { return ks_SDL_GetModState(); }
 unsigned int SDL_GetMouseState(int *x, int *y) { return ks_SDL_GetMouseState(x, y); }
 unsigned int SDL_GetRelativeMouseState(int *x, int *y) { return ks_SDL_GetRelativeMouseState(x, y); }
 int SDL_UpperBlit(struct SDL_Surface *src, const struct SDL_Rect *srcrect, struct SDL_Surface *dst, struct SDL_Rect *dstrect) { return ks_SDL_UpperBlit(src, srcrect, dst, dstrect); }

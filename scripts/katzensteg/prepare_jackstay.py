@@ -25,8 +25,8 @@ def prepare(source, prefix, pin):
     subprocess.run(command, cwd=source, check=True)
     (prefix / "include").mkdir(parents=True, exist_ok=True)
     (prefix / "lib").mkdir(exist_ok=True)
-    header = source / "crates/jackstay/include/capture_transfer.h"
-    shutil.copy2(header, prefix / "include/capture_transfer.h")
+    for name in ("capture_transfer.h", "jackstay_input.h"):
+        shutil.copy2(source / "crates/jackstay/include" / name, prefix / "include" / name)
     library = "libjackstay.dylib" if sys.platform == "darwin" else "libjackstay.so"
     shutil.copy2(source / "target/release" / library, prefix / "lib" / library)
     if sys.platform == "darwin":

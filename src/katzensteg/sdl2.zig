@@ -268,3 +268,9 @@ pub fn sdlError() []const u8 {
 test "SDL_Event binding matches SDL2 ABI size" {
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(SDL_Event));
 }
+
+// Uninterposed layout lookup used only by the input binding adapter.
+pub extern fn SDL_GetKeyFromScancode(scancode: c_int) c_int;
+pub extern fn SDL_GetScancodeFromKey(key: c_int) c_int;
+
+pub extern fn SDL_GetModState() c_int;

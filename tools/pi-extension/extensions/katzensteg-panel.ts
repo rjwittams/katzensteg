@@ -564,6 +564,8 @@ export class SurfacePanel implements ActivePanel {
 	set focused(value: boolean) {
 		if (value && !this.inputFocused && !this.disposed)
 			this.producer?.game?.cancel();
+		if (!value && this.inputFocused && !this.disposed)
+			this.producer?.sendInput(makeTerminalBytesInputMessage(WINDOW_ID, "\x1b[O"));
 		this.inputFocused = value;
 	}
 	disposed = false;

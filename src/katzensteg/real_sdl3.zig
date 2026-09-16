@@ -63,6 +63,8 @@ extern fn ks_real_SDL_SetTextInputArea(window: ?*sdl.SDL_Window, rect: ?*const s
 extern fn ks_real_SDL_GetTextInputArea(window: ?*sdl.SDL_Window, rect: ?*sdl.SDL_Rect, cursor: ?*c_int) sdl.SDL_bool;
 extern fn ks_real_SDL_HasKeyboard() sdl.SDL_bool;
 extern fn ks_real_SDL_GetKeyboardFocus() ?*sdl.SDL_Window;
+extern fn ks_real_SDL_GetKeyFromScancode(scancode: c_int, modifiers: u16, key_event: bool) c_int;
+extern fn ks_real_SDL_GetScancodeFromKey(key: c_int, modifiers: ?*u16) c_int;
 extern fn ks_real_SDL_GetKeyboardState(numkeys: ?*c_int) ?[*]const sdl.SDL_bool;
 extern fn ks_real_SDL_GetModState() sdl.SDL_Keymod;
 extern fn ks_real_SDL_SetModState(modstate: sdl.SDL_Keymod) void;
@@ -167,6 +169,8 @@ pub const SDL_SetTextInputArea = if (use_c_real) ks_real_SDL_SetTextInputArea el
 pub const SDL_GetTextInputArea = if (use_c_real) ks_real_SDL_GetTextInputArea else sdl.SDL_GetTextInputArea;
 pub const SDL_HasKeyboard = if (use_c_real) ks_real_SDL_HasKeyboard else sdl.SDL_HasKeyboard;
 pub const SDL_GetKeyboardFocus = if (use_c_real) ks_real_SDL_GetKeyboardFocus else sdl.SDL_GetKeyboardFocus;
+pub const SDL_GetKeyFromScancode = if (use_c_real) ks_real_SDL_GetKeyFromScancode else sdl.SDL_GetKeyFromScancode;
+pub const SDL_GetScancodeFromKey = if (use_c_real) ks_real_SDL_GetScancodeFromKey else sdl.SDL_GetScancodeFromKey;
 pub const SDL_GetKeyboardState = if (use_c_real) ks_real_SDL_GetKeyboardState else sdl.SDL_GetKeyboardState;
 pub const SDL_GetModState = if (use_c_real) ks_real_SDL_GetModState else sdl.SDL_GetModState;
 pub const SDL_SetModState = if (use_c_real) ks_real_SDL_SetModState else sdl.SDL_SetModState;

@@ -6,7 +6,7 @@ const runtime_mod = @import("runtime.zig");
 const sdl = @import("katzensteg_sdl");
 const real_sdl = @import("real_sdl3.zig");
 
-threadlocal var synthetic_text_buf: [64]u8 = [_]u8{0} ** 64;
+threadlocal var synthetic_text_buf: [16385]u8 = [_]u8{0} ** 16385;
 
 pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
     if (!rt.input_enabled) return false;
@@ -15,7 +15,8 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
         var parser = &(rt.input_parser orelse break :blk false);
-        const input_event = parser.pop() orelse break :blk false;
+        if (event == null) break :blk parser.pendingCount() > 0;
+        const input_event = parser.popForAdapter(16384, 0, std.math.maxInt(u32)) orelse break :blk false;
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
@@ -35,7 +36,7 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
         var parser = &(rt.input_parser orelse break :blk false);
-        const input_event = parser.popSdlRange(min_type, max_type) orelse break :blk false;
+        const input_event = parser.popForAdapter(16384, min_type, max_type) orelse break :blk false;
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
@@ -48,7 +49,20 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
     return true;
 }
 
-pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) void {
+pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *sdl.SDL_Event) void {
+    if (rt.hasRemoteInput()) {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        if (rt.input_parser) |*model| {
+            switch (event.type) {
+                sdl.SDL_MOUSEMOTION => model.noteNativePointer(event.motion.x, event.motion.y),
+                sdl.SDL_MOUSEBUTTONDOWN, sdl.SDL_MOUSEBUTTONUP => model.noteNativePointer(event.button.x, event.button.y),
+                else => {},
+            }
+            if (event.type == sdl.SDL_MOUSEMOTION) event.motion.state |= model.remote_buttons;
+            if (event.type == sdl.SDL_KEYDOWN or event.type == sdl.SDL_KEYUP) event.key.mod |= model.heldModifiers();
+        }
+    }
     if (eventIsMouse(event.*)) {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
@@ -73,6 +87,7 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
     var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
     parser.copyKeyboardState(&terminal_state, system_io.time.nanoTimestamp());
     for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
+    parser.observeState(.keyboard);
     if (numkeys) |out| out.* = @intCast(rt.keyboard_state.len);
     return @ptrCast(&rt.keyboard_state[0]);
 }
@@ -82,7 +97,8 @@ pub fn claimedWindowFlags(rt: *const runtime_mod.Runtime, flags: sdl.SDL_WindowF
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
 }
 
-pub fn shouldSuppressEvent(rt: *const runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+pub fn shouldSuppressEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+    if (shouldSuppressRemoteRelease(rt, event)) return true;
     if (!rt.input_claimed) return false;
     return shouldSuppressClaimedWindowEvent(true, event.type);
 }
@@ -137,7 +153,7 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
             .mod = key.mods,
             .raw = 0,
             .down = true,
-            .repeat = false,
+            .repeat = key.repeat,
         },
         .key_up => |key| event.key = .{
             .type = sdl.SDL_KEYUP,
@@ -158,6 +174,11 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
             while (i + 1 < synthetic_text_buf.len and i < text.buf.len and text.buf[i] != 0) : (i += 1) synthetic_text_buf[i] = text.buf[i];
             event.text = .{ .type = sdl.SDL_TEXTINPUT, .reserved = 0, .timestamp = now, .windowID = 0, .text = @ptrCast(&synthetic_text_buf) };
         },
+        .text_commit => |text| {
+            @memcpy(synthetic_text_buf[0..text.len], text);
+            synthetic_text_buf[text.len] = 0;
+            event.text = .{ .type = sdl.SDL_TEXTINPUT, .reserved = 0, .timestamp = now, .windowID = 0, .text = @ptrCast(&synthetic_text_buf) };
+        },
         .mouse_motion => |motion| event.motion = .{
             .type = sdl.SDL_MOUSEMOTION,
             .reserved = 0,
@@ -165,10 +186,10 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
             .windowID = 0,
             .which = 0,
             .state = motion.buttons,
-            .x = @floatFromInt(motion.x),
-            .y = @floatFromInt(motion.y),
-            .xrel = @floatFromInt(motion.xrel),
-            .yrel = @floatFromInt(motion.yrel),
+            .x = motion.precise_x orelse @floatFromInt(motion.x),
+            .y = motion.precise_y orelse @floatFromInt(motion.y),
+            .xrel = motion.precise_xrel orelse @floatFromInt(motion.xrel),
+            .yrel = motion.precise_yrel orelse @floatFromInt(motion.yrel),
         },
         .mouse_button => |button| event.button = .{
             .type = if (button.pressed) sdl.SDL_MOUSEBUTTONDOWN else sdl.SDL_MOUSEBUTTONUP,
@@ -180,8 +201,8 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
             .down = button.pressed,
             .clicks = button.clicks,
             .padding = 0,
-            .x = @floatFromInt(button.x),
-            .y = @floatFromInt(button.y),
+            .x = button.precise_x orelse @floatFromInt(button.x),
+            .y = button.precise_y orelse @floatFromInt(button.y),
         },
         .mouse_wheel => |wheel| event.wheel = .{
             .type = sdl.SDL_MOUSEWHEEL,
@@ -189,11 +210,11 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
             .timestamp = now,
             .windowID = 0,
             .which = 0,
-            .x = @floatFromInt(wheel.x),
-            .y = @floatFromInt(wheel.y),
+            .x = wheel.precise_x orelse @floatFromInt(wheel.x),
+            .y = wheel.precise_y orelse @floatFromInt(wheel.y),
             .direction = sdl.SDL_MOUSEWHEEL_NORMAL,
-            .mouse_x = @floatFromInt(wheel.mouse_x),
-            .mouse_y = @floatFromInt(wheel.mouse_y),
+            .mouse_x = wheel.precise_mouse_x orelse @floatFromInt(wheel.mouse_x),
+            .mouse_y = wheel.precise_mouse_y orelse @floatFromInt(wheel.mouse_y),
             .integer_x = wheel.x,
             .integer_y = wheel.y,
         },
@@ -289,4 +310,75 @@ test "SDL input pop does not hold input mutex while queueing cursor position" {
 
     try std.testing.expect(pop_done.load(.acquire));
     try std.testing.expect(input_read_completed_while_queue_blocked);
+}
+
+// App-side source ingestion. Network processing is independent of presentation;
+// native snapshots are read here, never by the frame/composite path.
+pub fn refreshInput(rt: *runtime_mod.Runtime) void {
+    rt.pollTerminalInput();
+    if (@import("jackstay").enabled) {
+        if (rt.input_executor) |executor| {
+            rt.input_mutex.lock();
+            defer rt.input_mutex.unlock();
+            const model = &(rt.input_parser orelse return);
+            var count: c_int = 0;
+            @memset(&model.native_keys, 0);
+            if (real_sdl.SDL_GetKeyboardState(&count)) |keys| {
+                const n: usize = @min(model.native_keys.len, @as(usize, @intCast(@max(0, count))));
+                for (0..n) |i| model.native_keys[i] = @intFromBool(keys[i]);
+            }
+            var native_x: f32 = 0;
+            var native_y: f32 = 0;
+            const buttons = real_sdl.SDL_GetMouseState(&native_x, &native_y);
+            const x: f32 = native_x;
+            const y: f32 = native_y;
+            if (model.updateNativeMouse(x, y, buttons)) rt.mouse_ownership.claimRealWindow();
+            executor.pump(model, @import("sdl_input_binding.zig").bind) catch |err| {
+                std.log.err("Jackstay input execution failed: {any}", .{err});
+            };
+            if (model.takeMouseActivity()) rt.mouse_ownership.claimTerminal();
+        }
+    }
+}
+
+pub fn shouldSuppressRemoteRelease(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+    if (!rt.hasRemoteInput()) return false;
+    rt.input_mutex.lock();
+    defer rt.input_mutex.unlock();
+    const model = &(rt.input_parser orelse return false);
+    if (event.type == sdl.SDL_KEYUP) return model.remoteScanHeld(event.key.scancode);
+    if (event.type == sdl.SDL_MOUSEBUTTONUP and event.button.button >= 1 and event.button.button <= 5) {
+        return model.remote_buttons & (@as(u32, 1) << @as(u5, @intCast(event.button.button - 1))) != 0;
+    }
+    return false;
+}
+
+pub fn mergedModifiers(rt: *runtime_mod.Runtime, native: u16) u16 {
+    rt.input_mutex.lock();
+    defer rt.input_mutex.unlock();
+    const model = &(rt.input_parser orelse return native);
+    model.observeModifiers();
+    return native | model.heldModifiers();
+}
+
+test "native motion updates canonical remote-release position" {
+    if (!@import("jackstay").enabled) return;
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+    var executor = try @import("jackstay_input_executor.zig").Executor.init(std.testing.allocator);
+    defer executor.target.deinit() catch unreachable;
+    rt.input_executor = &executor;
+    defer rt.input_executor = null;
+    rt.input_parser = input.InputModel.init(rt.allocator);
+    rt.input_parser.?.last_mouse_x = 10;
+    rt.input_parser.?.last_mouse_y = 10;
+    rt.input_parser.?.remote_buttons = 1;
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.motion.type = sdl.SDL_MOUSEMOTION;
+    event.motion.x = 100;
+    event.motion.y = 120;
+    noteRealEvent(&rt, &event);
+    try std.testing.expectEqual(@as(i32, 100), rt.input_parser.?.mouseState().x);
+    try std.testing.expectEqual(@as(i32, 120), rt.input_parser.?.mouseState().y);
+    try std.testing.expectEqual(@as(u32, 1), rt.input_parser.?.mouseState().buttons);
 }

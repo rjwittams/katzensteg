@@ -148,6 +148,7 @@ pub const Runtime = struct {
     input_supported: bool = true,
     host_closed: bool = false,
     publisher: ?*jackstay.Publisher = null,
+    input_executor: ?*(if (jackstay.enabled) @import("jackstay_input_executor.zig").Executor else void) = null,
     publication_sequence: u64 = 0,
     input_claimed: bool = false,
     input_claim_focus: bool = false,
@@ -201,6 +202,31 @@ pub const Runtime = struct {
 
     pub fn initMediaSource() Runtime {
         return initWithInputSupport(false);
+    }
+
+    pub fn enableSourceInput(self: *Runtime) !void {
+        if (self.input_parser == null) self.input_parser = input_mod.InputModel.init(self.allocator);
+        if (self.tty) |*tty| {
+            try tty.enableInputCapture();
+            var writer = tty.file.writerStreaming(&.{});
+            try writer.interface.writeAll("\x1b[?1004h");
+        }
+        self.input_parser.?.queue_limit = 8192;
+        self.input_supported = true;
+        self.input_enabled = true;
+        self.updateInputTarget();
+        self.refreshSourceInputStatus();
+    }
+
+    pub fn disableSourceInput(self: *Runtime) void {
+        self.input_supported = false;
+        self.input_enabled = false;
+        if (self.tty) |*tty| tty.disableInputCapture() catch {};
+        self.refreshSourceInputStatus();
+    }
+
+    fn refreshSourceInputStatus(self: *Runtime) void {
+        if (self.last_batch_presentation_status) |status| self.writeBatchPresentationStatusView(status);
     }
 
     fn initWithInputSupport(input_supported: bool) Runtime {
@@ -303,6 +329,19 @@ pub const Runtime = struct {
                 runtime.input_enabled = false;
                 runtime.input_claimed = false;
                 runtime.input_supported = false;
+                if (if (input_supported) std.c.getenv("KATZENSTEG_INPUT_SOCKET") else null) |input_path| {
+                    runtime.input_executor = @import("jackstay_input_executor.zig").Executor.create(io, allocator, std.mem.span(input_path)) catch |err| blk: {
+                        log.err("Jackstay input listener init failed: {any}", .{err});
+                        break :blk null;
+                    };
+                    if (runtime.input_executor != null) {
+                        runtime.input_parser = input_mod.InputModel.init(allocator);
+                        runtime.input_enabled = true;
+                        runtime.mouse_ownership.claimRealWindow();
+                        runtime.input_supported = true;
+                        log.info("Jackstay input ready: {s}", .{std.mem.span(input_path)});
+                    }
+                }
                 runtime.output_profile_name = "jackstay";
                 log.info("Jackstay publication ready: {s}", .{std.mem.span(path)});
             } else log.err("Jackstay support is disabled", .{});
@@ -472,6 +511,12 @@ pub const Runtime = struct {
         self.queue_cond.signal();
         self.queue_mutex.unlock();
         if (self.worker_thread) |thread| thread.join();
+        if (jackstay.enabled) if (self.input_executor) |executor| {
+            executor.close() catch |err| {
+                log.err("Jackstay input cleanup unconfirmed, retaining stopped executor: {any}", .{err});
+            };
+            self.input_executor = null;
+        };
         if (jackstay.enabled) if (self.publisher) |publisher| {
             publisher.close() catch |err| {
                 // The stopped owner must remain allocated if remote leases have
@@ -530,7 +575,7 @@ pub const Runtime = struct {
         }
         // Batch mode enables the parser so hosts can forward terminal_bytes.
         // Consumers that never send input control messages observe no events.
-        self.input_enabled = true;
+        self.input_enabled = self.input_supported;
         self.input_parser = input_mod.TerminalInputParser.init(self.allocator);
     }
 
@@ -572,7 +617,25 @@ pub const Runtime = struct {
     pub fn noteInputWindowSize(self: *Runtime, w: i32, h: i32) void {
         self.input_window_w = @max(1, w);
         self.input_window_h = @max(1, h);
+        if (jackstay.enabled) if (self.input_executor) |executor| {
+            self.input_mutex.lock();
+            defer self.input_mutex.unlock();
+            executor.setSize(self.input_window_w, self.input_window_h) catch |err| log.err("Jackstay input geometry failed: {any}", .{err});
+        };
         self.updateInputTarget();
+    }
+
+    pub fn hasRemoteInput(self: *const Runtime) bool {
+        return jackstay.enabled and self.input_executor != null;
+    }
+
+    pub fn remoteMouseButtons(self: *Runtime) u32 {
+        if (!self.hasRemoteInput()) return 0;
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        const model = &(self.input_parser orelse return 0);
+        model.observeButtons();
+        return model.remote_buttons;
     }
 
     pub fn noteSdlWindowId(self: *Runtime, window_id: u32, window: core.CoreHandle) void {
@@ -651,6 +714,7 @@ pub const Runtime = struct {
         defer self.input_mutex.unlock();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
+        parser.observeState(.pointer);
         return parser.mouseState();
     }
 
@@ -660,6 +724,7 @@ pub const Runtime = struct {
         defer self.input_mutex.unlock();
         if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
+        parser.observeState(.pointer);
         return self.relative_mouse_baseline.snap(parser.mouseState());
     }
 
@@ -1195,6 +1260,9 @@ pub const Runtime = struct {
                 if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             },
             .detach => {
+                if (self.input_parser) |*model| {
+                    model.focus_generation +%= 1;
+                }
                 self.placeholder_scene.valid = false;
                 self.detachBatchWindow(sink, "main");
             },

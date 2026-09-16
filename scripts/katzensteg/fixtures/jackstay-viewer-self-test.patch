@@ -1,0 +1,21 @@
+--- a/tools/capture-viewer-sdl/src/viewer_input.c
++++ b/tools/capture-viewer-sdl/src/viewer_input.c
+@@ -132,14 +132,14 @@
+   return input->failed || !clean;
+ }
+ void viewer_input_self_test(viewer_input *input, SDL_Window *window) {
+-  SDL_Event e = {0}; e.type = SDL_KEYDOWN; e.key.state = SDL_PRESSED; e.key.windowID = SDL_GetWindowID(window); e.key.keysym.scancode = SDL_SCANCODE_A; SDL_PushEvent(&e);
++  SDL_Event e; memset(&e, 0, sizeof(e)); e.type = SDL_KEYDOWN; e.key.state = SDL_PRESSED; e.key.windowID = SDL_GetWindowID(window); e.key.keysym.scancode = SDL_SCANCODE_A; SDL_PushEvent(&e);
+   e.key.repeat = 1; SDL_PushEvent(&e); e.type = SDL_KEYUP; e.key.state = SDL_RELEASED; e.key.repeat = 0; SDL_PushEvent(&e);
+-  e = (SDL_Event){0}; e.type = SDL_TEXTINPUT; snprintf(e.text.text, sizeof(e.text.text), "hé🙂");
++  memset(&e, 0, sizeof(e)); e.type = SDL_TEXTINPUT; snprintf(e.text.text, sizeof(e.text.text), "hé🙂");
+   /* sdl2-compat explicitly cannot translate a pushed SDL2 TEXTINPUT to SDL3.
+    * Feed the captured-event fixture through the same translator as live input. */
+   viewer_input_event(input, &e, window);
+-  e = (SDL_Event){0}; e.type = SDL_KEYDOWN; e.key.state = SDL_PRESSED; e.key.windowID = SDL_GetWindowID(window); e.key.keysym.scancode = SDL_SCANCODE_LSHIFT; SDL_PushEvent(&e);
+-  e = (SDL_Event){0}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = 20; e.button.y = 30; SDL_PushEvent(&e);
++  memset(&e, 0, sizeof(e)); e.type = SDL_KEYDOWN; e.key.state = SDL_PRESSED; e.key.windowID = SDL_GetWindowID(window); e.key.keysym.scancode = SDL_SCANCODE_LSHIFT; SDL_PushEvent(&e);
++  memset(&e, 0, sizeof(e)); e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = 20; e.button.y = 30; SDL_PushEvent(&e);
+   uint8_t text[1024]; memset(text, 'x', sizeof(text));
+   ft_input_event long_text = {.kind = FT_INPUT_TEXT, .text = text, .text_len = sizeof(text)}; send_event(input, &long_text);
+ }
