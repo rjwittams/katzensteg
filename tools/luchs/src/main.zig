@@ -43,8 +43,10 @@ const WebInputEvent = union(enum) {
     mouse_down: struct { x: i32, y: i32, button: u8 },
     mouse_up: struct { x: i32, y: i32, button: u8 },
     wheel: struct { x: i32, y: i32, dx: i32, dy: i32 },
-    key_down: struct { keycode: i32, repeat: bool },
-    key_up: struct { keycode: i32 },
+    // mod carries SDL's KMOD bits so the viewer can tell shift+tab, ctrl+c
+    // and command shortcuts apart from the plain key.
+    key_down: struct { keycode: i32, repeat: bool, mod: u16 = 0 },
+    key_up: struct { keycode: i32, mod: u16 = 0 },
     text: []const u8,
 };
 
@@ -172,8 +174,8 @@ fn writeWebInputEventJson(writer: anytype, event: WebInputEvent) !void {
         .mouse_down => |e| try writeJsonLine(writer, .{ .type = "mouse_down", .x = e.x, .y = e.y, .button = e.button }),
         .mouse_up => |e| try writeJsonLine(writer, .{ .type = "mouse_up", .x = e.x, .y = e.y, .button = e.button }),
         .wheel => |e| try writeJsonLine(writer, .{ .type = "wheel", .x = e.x, .y = e.y, .dx = e.dx, .dy = e.dy }),
-        .key_down => |e| try writeJsonLine(writer, .{ .type = "key_down", .keycode = e.keycode, .repeat = e.repeat }),
-        .key_up => |e| try writeJsonLine(writer, .{ .type = "key_up", .keycode = e.keycode }),
+        .key_down => |e| try writeJsonLine(writer, .{ .type = "key_down", .keycode = e.keycode, .repeat = e.repeat, .mod = e.mod }),
+        .key_up => |e| try writeJsonLine(writer, .{ .type = "key_up", .keycode = e.keycode, .mod = e.mod }),
         .text => |text| try writeJsonLine(writer, .{ .type = "text", .text = text }),
     }
 }
@@ -271,8 +273,8 @@ fn forwardSdlEventToWebview(stream: *NativeWebviewStream, event: *const sdl.SDL_
         sdl.SDL_MOUSEBUTTONDOWN => stream.sendInput(.{ .mouse_down = .{ .x = event.button.x, .y = event.button.y, .button = event.button.button } }),
         sdl.SDL_MOUSEBUTTONUP => stream.sendInput(.{ .mouse_up = .{ .x = event.button.x, .y = event.button.y, .button = event.button.button } }),
         sdl.SDL_MOUSEWHEEL => stream.sendInput(.{ .wheel = .{ .x = event.wheel.mouseX, .y = event.wheel.mouseY, .dx = event.wheel.x, .dy = event.wheel.y } }),
-        sdl.SDL_KEYDOWN => stream.sendInput(.{ .key_down = .{ .keycode = event.key.keysym.sym, .repeat = event.key.repeat != 0 } }),
-        sdl.SDL_KEYUP => stream.sendInput(.{ .key_up = .{ .keycode = event.key.keysym.sym } }),
+        sdl.SDL_KEYDOWN => stream.sendInput(.{ .key_down = .{ .keycode = event.key.keysym.sym, .repeat = event.key.repeat != 0, .mod = event.key.keysym.mod } }),
+        sdl.SDL_KEYUP => stream.sendInput(.{ .key_up = .{ .keycode = event.key.keysym.sym, .mod = event.key.keysym.mod } }),
         sdl.SDL_TEXTINPUT => {
             const text = sdlTextInputSlice(&event.text.text);
             if (text.len > 0) stream.sendInput(.{ .text = text });
@@ -420,6 +422,13 @@ test "writeWebInputEventJson writes mouse input jsonl" {
     var fbs = std.Io.Writer.fixed(&buf);
     try writeWebInputEventJson(&fbs, .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
     try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.buffered());
+}
+
+test "writeWebInputEventJson carries key modifiers" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try writeWebInputEventJson(&fbs, .{ .key_down = .{ .keycode = 9, .repeat = false, .mod = 0x1 } });
+    try std.testing.expectEqualStrings("{\"type\":\"key_down\",\"keycode\":9,\"repeat\":false,\"mod\":1}\n", fbs.buffered());
 }
 
 test "writeWebInputEventJson escapes text input jsonl" {
