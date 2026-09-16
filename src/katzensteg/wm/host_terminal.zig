@@ -1,28 +1,29 @@
 const std = @import("std");
+const system_io = @import("platform");
 extern "c" fn ttyname_r(fd: std.c.fd_t, buf: [*]u8, len: usize) c_int;
 
 pub const Terminal = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: system_io.fs.File,
     path: []const u8,
 
-    pub fn open(allocator: std.mem.Allocator, explicit: ?[]const u8, parent: ?i32) !Terminal {
+    pub fn open(io: std.Io, allocator: std.mem.Allocator, explicit: ?[]const u8, parent: ?i32) !Terminal {
         if (explicit) |path| {
-            if (!std.mem.eql(u8, path, "/dev/tty")) return openPath(allocator, path);
+            if (!std.mem.eql(u8, path, "/dev/tty")) return openPath(io, allocator, path);
         }
         // /dev/tty is a controlling-terminal alias, not a stable device fd.
         // Resolve the real device before setsid, even for explicit /dev/tty.
-        if (try openForProcess(allocator, std.c.getpid(), 1)) |terminal| return terminal;
-        return (try openForProcess(allocator, parent orelse std.c.getppid(), 32)) orelse error.TerminalNotFound;
+        if (try openForProcess(io, allocator, std.c.getpid(), 1)) |terminal| return terminal;
+        return (try openForProcess(io, allocator, parent orelse std.c.getppid(), 32)) orelse error.TerminalNotFound;
     }
 
-    fn openForProcess(allocator: std.mem.Allocator, initial_pid: i32, depth: usize) !?Terminal {
+    fn openForProcess(io: std.Io, allocator: std.mem.Allocator, initial_pid: i32, depth: usize) !?Terminal {
         var pid = initial_pid;
         for (0..depth) |_| {
             if (pid <= 1) break;
             const number = try std.fmt.allocPrint(allocator, "{d}", .{pid});
             defer allocator.free(number);
-            const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "/bin/ps", "-o", "ppid=,tty=", "-p", number }, .max_output_bytes = 4096 });
+            const result = try system_io.process.Child.run(io, .{ .allocator = allocator, .argv = &.{ "/bin/ps", "-o", "ppid=,tty=", "-p", number }, .max_output_bytes = 4096 });
             defer allocator.free(result.stdout);
             defer allocator.free(result.stderr);
             var words = std.mem.tokenizeAny(u8, result.stdout, " \t\r\n");
@@ -31,13 +32,13 @@ pub const Terminal = struct {
             if (std.mem.eql(u8, tty, "??") or std.mem.eql(u8, tty, "?") or std.mem.eql(u8, tty, "-")) continue;
             const path = if (std.mem.startsWith(u8, tty, "/dev/")) try allocator.dupe(u8, tty) else try std.fmt.allocPrint(allocator, "/dev/{s}", .{tty});
             defer allocator.free(path);
-            return try openPath(allocator, path);
+            return try openPath(io, allocator, path);
         }
         return null;
     }
 
-    fn openPath(allocator: std.mem.Allocator, path: []const u8) !Terminal {
-        const file = std.fs.File{ .handle = try std.posix.open(path, .{ .ACCMODE = .WRONLY, .NOCTTY = true, .CLOEXEC = true }, 0) };
+    fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Terminal {
+        const file = system_io.fs.File{ .io = io, .handle = try system_io.posix.open(path, .{ .ACCMODE = .WRONLY, .NOCTTY = true, .CLOEXEC = true }, 0) };
         errdefer file.close();
         var name: [std.fs.max_path_bytes]u8 = undefined;
         if (ttyname_r(file.handle, &name, name.len) != 0) return error.NotATerminal;
@@ -72,17 +73,17 @@ pub const Terminal = struct {
 pub fn privateRoot(allocator: std.mem.Allocator) ![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-wm-{d}", .{std.c.getuid()});
     errdefer allocator.free(path);
-    std.posix.mkdir(path, 0o700) catch |err| switch (err) {
+    system_io.posix.mkdir(path, 0o700) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, path, std.posix.AT.SYMLINK_NOFOLLOW);
+    const stat = try system_io.posix.fstatat(std.posix.AT.FDCWD, path, std.posix.AT.SYMLINK_NOFOLLOW);
     if (stat.uid != std.c.getuid() or stat.mode & 0o777 != 0o700 or stat.mode & std.posix.S.IFMT != std.posix.S.IFDIR) return error.UnsafeRuntimeDirectory;
     return path;
 }
 
-pub fn randomId() [32]u8 {
+pub fn randomId(io: std.Io) [32]u8 {
     var random: [16]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    io.random(&random);
     return std.fmt.bytesToHex(random, .lower);
 }

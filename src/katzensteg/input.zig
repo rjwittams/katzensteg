@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const presentation_layout = @import("presentation_layout.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 
@@ -590,7 +591,7 @@ pub const TerminalInputParser = struct {
         const idx: usize = @intCast(key.scancode);
         if (idx >= self.keyboard_state.len) return;
         self.keyboard_state[idx] = 1;
-        self.keyboard_deadline_ns[idx] = std.time.nanoTimestamp() + keyboard_poll_hold_ns;
+        self.keyboard_deadline_ns[idx] = system_io.time.nanoTimestamp() + keyboard_poll_hold_ns;
     }
 
     fn expireKeyboardState(self: *TerminalInputParser, now_ns: i128) void {
@@ -763,10 +764,10 @@ test "terminal input parser exposes recent keys through polling state" {
     try parser.feed("a");
 
     var state = [_]u8{0} ** sdl_num_scancodes;
-    parser.copyKeyboardState(&state, std.time.nanoTimestamp());
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp());
     try std.testing.expectEqual(@as(u8, 1), state[4]);
 
-    parser.copyKeyboardState(&state, std.time.nanoTimestamp() + keyboard_poll_hold_ns + 1);
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp() + keyboard_poll_hold_ns + 1);
     try std.testing.expectEqual(@as(u8, 0), state[4]);
 }
 
@@ -1273,11 +1274,11 @@ test "structured keys share tap events and polling state and support held keys" 
     try std.testing.expectEqual(@as(i32, 82), down.scancode);
     try std.testing.expectEqual(@as(u16, 0x40), down.mods);
     var state: [sdl_num_scancodes]u8 = undefined;
-    parser.copyKeyboardState(&state, std.time.nanoTimestamp() + 10 * std.time.ns_per_s);
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp() + 10 * std.time.ns_per_s);
     try std.testing.expectEqual(@as(u8, 1), state[82]);
     try parser.injectKey(.{ .key = "up", .action = .up });
     try std.testing.expectEqual(@as(i32, 82), parser.pop().?.key_up.scancode);
-    parser.copyKeyboardState(&state, std.time.nanoTimestamp());
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp());
     try std.testing.expectEqual(@as(u8, 0), state[82]);
     try std.testing.expectError(error.InvalidKey, parser.injectKey(.{ .key = "not-a-key" }));
     try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());

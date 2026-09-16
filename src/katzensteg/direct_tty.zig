@@ -1,18 +1,19 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const DirectTty = struct {
     const Size = struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 };
 
-    file: std.fs.File,
+    file: system_io.fs.File,
     original_termios: std.posix.termios,
     rows: u16,
     cols: u16,
     pixel_width: u16,
     pixel_height: u16,
 
-    pub fn init() !DirectTty {
-        const file = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
-        const original_termios = try std.posix.tcgetattr(file.handle);
+    pub fn init(io: std.Io) !DirectTty {
+        const file = try system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
+        const original_termios = try system_io.posix.tcgetattr(file.handle);
 
         var raw = original_termios;
         raw.lflag.ECHO = false;
@@ -21,7 +22,7 @@ pub const DirectTty = struct {
         raw.iflag.IXON = false;
         raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
         raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-        try std.posix.tcsetattr(file.handle, .FLUSH, raw);
+        try system_io.posix.tcsetattr(file.handle, .FLUSH, raw);
 
         var writer = file.writerStreaming(&.{});
         try writer.interface.writeAll("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l");
@@ -39,7 +40,7 @@ pub const DirectTty = struct {
         self.disableInputCapture() catch {};
         self.drainInput();
         self.clearGraphics() catch {};
-        std.posix.tcsetattr(self.file.handle, .FLUSH, self.original_termios) catch {};
+        system_io.posix.tcsetattr(self.file.handle, .FLUSH, self.original_termios) catch {};
         var writer = self.file.writerStreaming(&.{});
         writer.interface.writeAll("\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
         writer.interface.writeAll(kittyGraphicsClearSequence()) catch {};
@@ -72,7 +73,7 @@ pub const DirectTty = struct {
     fn drainInput(self: *DirectTty) void {
         var buf: [256]u8 = undefined;
         while (true) {
-            const n = std.posix.read(self.file.handle, &buf) catch |err| switch (err) {
+            const n = system_io.posix.read(self.file.handle, &buf) catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => return,
             };

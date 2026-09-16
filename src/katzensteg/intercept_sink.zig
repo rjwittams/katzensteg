@@ -1,10 +1,12 @@
 const std = @import("std");
+const system_io = @import("platform");
 const core_commands = @import("core_commands.zig");
 const config_mod = @import("config.zig");
 const core = @import("core_types.zig");
 const sdl = @import("katzensteg_sdl");
 const sdl_adapter = @import("sdl2_adapter.zig");
-const real_sdl = @import("real_sdl.zig");
+const is_sdl3 = @hasDecl(sdl, "SDL_DestroySurface");
+const real_sdl = if (is_sdl3) @import("real_sdl3.zig") else @import("real_sdl.zig");
 const runtime_mod = @import("runtime.zig");
 const frame_builder_mod = @import("frame_builder.zig");
 const inspect_model = @import("inspect_model.zig");
@@ -16,27 +18,30 @@ pub const InterceptMode = config_mod.InterceptMode;
 const CoreHandle = core.CoreHandle;
 pub const Command = core_commands.Command;
 
+// Only the shared public prefix is read. SDL3 stores the format enum inline;
+// SDL2 stores a pointer to SDL_PixelFormat.
 const SurfaceView = extern struct {
     flags: u32,
-    format: ?*anyopaque,
+    format: if (is_sdl3) u32 else ?*anyopaque,
     w: i32,
     h: i32,
     pitch: i32,
     pixels: ?*anyopaque,
-    userdata: ?*anyopaque,
-    locked: i32,
-    lock_data: ?*anyopaque,
-    clip_rect: sdl.SDL_Rect,
-    map: ?*anyopaque,
-    refcount: i32,
 };
 
+fn convertSurface(surface: ?*sdl.SDL_Surface) ?*sdl.SDL_Surface {
+    return if (is_sdl3)
+        real_sdl.SDL_ConvertSurface(surface, sdl.SDL_PIXELFORMAT_ABGR8888)
+    else
+        real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0);
+}
+
 pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = system_io.time.nanoTimestamp();
     defer rt.noteProducerTime(switch (cmd) {
         .render_present => .render_present,
         else => .generic,
-    }, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    }, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
     switch (rt.intercept_mode) {
         .sync_compose => {
             var owned = cloneCommand(rt, cmd) catch {
@@ -213,8 +218,8 @@ pub fn onUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, r
 }
 
 pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
-    const start_ns = std.time.nanoTimestamp();
-    defer rt.noteProducerTime(.update_texture, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    const start_ns = system_io.time.nanoTimestamp();
+    defer rt.noteProducerTime(.update_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
     var copied: ?[]u8 = null;
     if (pixels) |p| {
         const byte_len: usize = if (rect) |r| @intCast(pitch * r.h) else blk: {
@@ -316,8 +321,8 @@ fn planeBytes(plane: ?[*]const u8, pitch: i32, rows: i32) ?[]const u8 {
 }
 
 pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
-    const start_ns = std.time.nanoTimestamp();
-    defer rt.noteProducerTime(.render_present, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    const start_ns = system_io.time.nanoTimestamp();
+    defer rt.noteProducerTime(.render_present, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
     if (width <= 0 or height <= 0) return;
     const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
     if (pixels.len < byte_len) {
@@ -333,8 +338,8 @@ pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, h
 }
 
 pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-    const start_ns = std.time.nanoTimestamp();
-    defer rt.noteProducerTime(.create_texture_from_surface, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    const start_ns = system_io.time.nanoTimestamp();
+    defer rt.noteProducerTime(.create_texture_from_surface, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
     const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (surface == null) {
         const metadata = textureMetadataOrFallback(texture);
@@ -346,7 +351,7 @@ pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.
         } });
         return;
     }
-    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+    const converted = convertSurface(surface) orelse {
         log.warn("SDL_ConvertSurfaceFormat failed in enqueueCreateTextureFromSurface", .{});
         const metadata = textureMetadataOrFallback(texture);
         rt.enqueueCommand(.{ .create_texture = .{
@@ -386,7 +391,7 @@ pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
         rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
         return;
     }
-    const converted = real_sdl.SDL_ConvertSurfaceFormat(surface, sdl.SDL_PIXELFORMAT_ABGR8888, 0) orelse {
+    const converted = convertSurface(surface) orelse {
         log.warn("SDL_ConvertSurfaceFormat failed in onCreateTextureFromSurface", .{});
         const metadata = textureMetadataOrFallback(texture);
         rt.frame_builder.onCreateTexture(texture_handle, sdl_adapter.pixelFormatFromSdl2(metadata.format), metadata.w, metadata.h);
@@ -405,8 +410,8 @@ pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
 }
 
 pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
-    const start_ns = std.time.nanoTimestamp();
-    defer rt.noteProducerTime(.unlock_texture, @intCast(@max(0, std.time.nanoTimestamp() - start_ns)));
+    const start_ns = system_io.time.nanoTimestamp();
+    defer rt.noteProducerTime(.unlock_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
     const texture_handle = sdl_adapter.handleFromPtr(texture);
     const capture = rt.takeQueuedLock(texture_handle) orelse {
         log.warn("queued unlock without remembered lock capture", .{});
@@ -549,7 +554,7 @@ pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) v
             rt.notePresentationLayout(.{});
             return;
         }
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = system_io.time.nanoTimestamp();
         const renderer_handle = sdl_adapter.handleFromPtr(renderer);
         onRenderPresentCore(rt, renderer_handle, start_ns);
     }
@@ -559,12 +564,12 @@ fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns:
     rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
-    const duration = std.time.nanoTimestamp() - start_ns;
+    const duration = system_io.time.nanoTimestamp() - start_ns;
     rt.notePresentDuration(duration);
     const summary = rt.frame_builder.inspectSummary();
     const whiskers_frame: inspect_model.FrameRecord = .{
         .id = 0,
-        .ts_ns = std.time.nanoTimestamp(),
+        .ts_ns = system_io.time.nanoTimestamp(),
         .present_ns = duration,
         .queue_depth = rt.currentQueueDepth(),
         .skipped_presents = rt.skipped_presents,
@@ -707,7 +712,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
                     rt.notePresentationLayout(.{});
                     return;
                 }
-                onRenderPresentCore(rt, c.renderer, std.time.nanoTimestamp());
+                onRenderPresentCore(rt, c.renderer, system_io.time.nanoTimestamp());
             }
         },
         .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),

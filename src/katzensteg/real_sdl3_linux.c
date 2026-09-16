@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 struct SDL_Window;
 struct SDL_Renderer;
@@ -89,7 +90,22 @@ KS_REAL(SDL_RenderTexture, _Bool, (struct SDL_Renderer *renderer, struct SDL_Tex
 KS_REAL(SDL_RenderTextureRotated, _Bool, (struct SDL_Renderer *renderer, struct SDL_Texture *texture, const struct SDL_FRect *srcrect, const struct SDL_FRect *dstrect, double angle, const struct SDL_FPoint *center, int flip), (renderer, texture, srcrect, dstrect, angle, center, flip))
 KS_REAL(SDL_RenderGeometryRaw, _Bool, (struct SDL_Renderer *renderer, struct SDL_Texture *texture, const float *xy, int xy_stride, const struct SDL_FColor *color, int color_stride, const float *uv, int uv_stride, int num_vertices, const void *indices, int num_indices, int size_indices), (renderer, texture, xy, xy_stride, color, color_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices))
 KS_REAL(SDL_RenderPresent, _Bool, (struct SDL_Renderer *renderer), (renderer))
-KS_REAL(SDL_QueryTexture, int, (struct SDL_Texture *texture, unsigned int *format, int *access, int *w, int *h), (texture, format, access, w, h))
+KS_REAL(SDL_GetTextureSize, _Bool, (struct SDL_Texture *texture, float *w, float *h), (texture, w, h))
+KS_REAL(SDL_GetTextureProperties, unsigned int, (struct SDL_Texture *texture), (texture))
+KS_REAL(SDL_GetNumberProperty, int64_t, (unsigned int props, const char *name, int64_t fallback), (props, name, fallback))
+
+// SDL3 removed SDL_QueryTexture. Keep the adapter's compatibility helper local
+// and implement it through SDL3's size and property APIs.
+int ks_real_SDL_QueryTexture(struct SDL_Texture *texture, unsigned int *format, int *access, int *w, int *h) {
+    float width = 0, height = 0;
+    if (!ks_real_SDL_GetTextureSize(texture, &width, &height)) return -1;
+    unsigned int props = ks_real_SDL_GetTextureProperties(texture);
+    if (w) *w = (int)width;
+    if (h) *h = (int)height;
+    if (format) *format = (unsigned int)ks_real_SDL_GetNumberProperty(props, "SDL.texture.format", 0);
+    if (access) *access = (int)ks_real_SDL_GetNumberProperty(props, "SDL.texture.access", 0);
+    return 0;
+}
 KS_REAL(SDL_RenderFillRect, _Bool, (struct SDL_Renderer *renderer, const struct SDL_FRect *rect), (renderer, rect))
 KS_REAL(SDL_RenderPoint, _Bool, (struct SDL_Renderer *renderer, float x, float y), (renderer, x, y))
 KS_REAL(SDL_RenderLine, _Bool, (struct SDL_Renderer *renderer, float x1, float y1, float x2, float y2), (renderer, x1, y1, x2, y2))

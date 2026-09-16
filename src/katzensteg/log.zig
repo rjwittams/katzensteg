@@ -1,7 +1,9 @@
 const std = @import("std");
+const system_io = @import("platform");
 
-var file_mutex: std.Thread.Mutex = .{};
-var file: ?std.fs.File = null;
+var file_io: std.Io.Threaded = .init_single_threaded;
+var file_mutex: system_io.Mutex = .{};
+var file: ?system_io.fs.File = null;
 var logger_ref_count: usize = 0;
 
 fn levelName(comptime level: std.log.Level) []const u8 {
@@ -13,23 +15,23 @@ fn levelName(comptime level: std.log.Level) []const u8 {
     };
 }
 
-fn formatStdLogLineInto(buffer: []u8, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), message: []const u8) ![]u8 {
+fn formatStdLogLineInto(buffer: []u8, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), message: []const u8) ![]u8 {
     return std.fmt.bufPrint(buffer, "katzensteg: " ++ levelName(level) ++ "(" ++ @tagName(scope) ++ "): {s}", .{message});
 }
 
-pub fn formatStdLogLineForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), message: []const u8) ![]u8 {
+pub fn formatStdLogLineForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), message: []const u8) ![]u8 {
     var line_buf: [1280]u8 = undefined;
     const line = try formatStdLogLineInto(&line_buf, level, scope, message);
     return allocator.dupe(u8, line);
 }
 
-pub fn formatStdLogMessageForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime format: []const u8, args: anytype) ![]u8 {
+pub fn formatStdLogMessageForTest(allocator: std.mem.Allocator, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime format: []const u8, args: anytype) ![]u8 {
     const message = try std.fmt.allocPrint(allocator, format, args);
     defer allocator.free(message);
     return formatStdLogLineForTest(allocator, level, scope, message);
 }
 
-pub fn stdLogFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime format: []const u8, args: anytype) void {
+pub fn stdLogFn(comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime format: []const u8, args: anytype) void {
     var message_buf: [1024]u8 = undefined;
     const message = std.fmt.bufPrint(&message_buf, format, args) catch return;
     var line_buf: [1280]u8 = undefined;
@@ -46,7 +48,7 @@ pub fn writeCLog(scope: []const u8, message: []const u8) void {
     writeCLogScoped(.c, message);
 }
 
-fn writeCLogScoped(comptime scope: @Type(.enum_literal), message: []const u8) void {
+fn writeCLogScoped(comptime scope: @TypeOf(.enum_literal), message: []const u8) void {
     var line_buf: [1280]u8 = undefined;
     const line = formatStdLogLineInto(&line_buf, .warn, scope, message) catch return;
     writeLine(line);
@@ -86,18 +88,18 @@ fn releaseLoggerFileUser() void {
     if (logger_ref_count == 0) closeFile();
 }
 
-fn ensureFileLocked() !*std.fs.File {
+fn ensureFileLocked() !*system_io.fs.File {
     if (file == null) {
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/katzensteg-{d}.log", .{std.c.getpid()});
-        file = try std.fs.createFileAbsolute(path, .{ .truncate = false, .read = false });
+        file = try system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = false, .read = false });
     }
     return &file.?;
 }
 
 pub const Logger = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: system_io.Mutex = .{},
     once: std.AutoHashMap(u64, void),
 
     pub fn init(allocator: std.mem.Allocator) Logger {
@@ -106,6 +108,7 @@ pub const Logger = struct {
     }
 
     pub fn deinit(self: *Logger) void {
+        defer self.mutex.deinit();
         self.mutex.lock();
         defer self.mutex.unlock();
         self.once.deinit();
@@ -123,14 +126,14 @@ pub const Logger = struct {
         self.write(msg);
     }
 
-    pub fn writeScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), message: []const u8) void {
+    pub fn writeScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), message: []const u8) void {
         _ = self;
         var line_buf: [1280]u8 = undefined;
         const line = formatStdLogLineInto(&line_buf, level, scope, message) catch return;
         writeLine(line);
     }
 
-    pub fn writeFmtScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
+    pub fn writeFmtScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime fmt: []const u8, args: anytype) void {
         var message_buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&message_buf, fmt, args) catch return;
         self.writeScoped(level, scope, message);
@@ -146,7 +149,7 @@ pub const Logger = struct {
         if (!gop.found_existing) writeLine(message);
     }
 
-    pub fn writeOnceScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @Type(.enum_literal), message: []const u8) void {
+    pub fn writeOnceScoped(self: *Logger, comptime level: std.log.Level, comptime scope: @TypeOf(.enum_literal), message: []const u8) void {
         var line_buf: [1280]u8 = undefined;
         const line = formatStdLogLineInto(&line_buf, level, scope, message) catch return;
         var hasher = std.hash.Wyhash.init(0);

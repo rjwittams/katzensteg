@@ -1,4 +1,5 @@
-KATZENSTEG_SDL3_1.0 {
+/* Unversioned interposers also satisfy callers linked to SDL3 versioned symbols. */
+{
     global:
         SDL_*;
         dlopen;

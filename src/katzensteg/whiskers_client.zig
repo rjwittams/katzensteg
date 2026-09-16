@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const inspect_model = @import("inspect_model.zig");
 
 const log = std.log.scoped(.whiskers);
@@ -93,6 +94,7 @@ const ParseProgress = enum {
 };
 
 pub const WhiskersClient = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     socket_path: []u8,
     producer_id: []u8,
@@ -104,7 +106,7 @@ pub const WhiskersClient = struct {
     control_fd: ?std.posix.fd_t = null,
     wake_read_fd: std.posix.fd_t = -1,
     wake_write_fd: std.posix.fd_t = -1,
-    mutex: std.Thread.Mutex = .{},
+    mutex: system_io.Mutex = .{},
     current_segment_id: ?[]u8 = null,
     next_segment_seq: u64 = 1,
     runtime_info_sent: bool = false,
@@ -112,19 +114,20 @@ pub const WhiskersClient = struct {
     next_frame_seq: u64 = 1,
     next_resource_seq: u64 = 1,
 
-    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8, hello: ProducerHello) !WhiskersClient {
-        const response_body = try postJsonForBody(allocator, socket_path, null, "/v0/producers/connect", hello);
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, hello: ProducerHello) !WhiskersClient {
+        const response_body = try postJsonForBody(io, allocator, socket_path, null, "/v0/producers/connect", hello);
         defer allocator.free(response_body);
         const parsed = try std.json.parseFromSlice(ProducerHelloResponse, allocator, response_body, .{});
         defer parsed.deinit();
 
         const wake = try createWakeSocketPair();
         errdefer {
-            std.posix.close(wake[0]);
-            std.posix.close(wake[1]);
+            system_io.posix.close(wake[0]);
+            system_io.posix.close(wake[1]);
         }
 
         return .{
+            .io = io,
             .allocator = allocator,
             .socket_path = try allocator.dupe(u8, socket_path),
             .producer_id = try allocator.dupe(u8, parsed.value.producer_id),
@@ -145,13 +148,14 @@ pub const WhiskersClient = struct {
     }
 
     pub fn deinit(self: *WhiskersClient) void {
+        defer self.mutex.deinit();
         self.shutdown.store(true, .release);
         if (self.wake_write_fd >= 0) {
-            _ = std.posix.write(self.wake_write_fd, &[1]u8{1}) catch {};
+            _ = system_io.posix.write(self.wake_write_fd, &[1]u8{1}) catch {};
         }
         self.mutex.lock();
         if (self.control_fd) |fd| {
-            std.posix.shutdown(fd, .both) catch {};
+            system_io.posix.shutdown(fd, .both) catch {};
         }
         self.mutex.unlock();
         if (self.control_thread) |thread| thread.join();
@@ -164,11 +168,11 @@ pub const WhiskersClient = struct {
             self.allocator.free(segment_id);
         }
         if (self.wake_read_fd >= 0) {
-            std.posix.close(self.wake_read_fd);
+            system_io.posix.close(self.wake_read_fd);
             self.wake_read_fd = -1;
         }
         if (self.wake_write_fd >= 0) {
-            std.posix.close(self.wake_write_fd);
+            system_io.posix.close(self.wake_write_fd);
             self.wake_write_fd = -1;
         }
         self.allocator.free(self.socket_path);
@@ -182,7 +186,8 @@ pub const WhiskersClient = struct {
     }
 
     pub fn updateRuntimeInfo(self: *WhiskersClient, terminal_identity: []const u8, composite_mode: []const u8, intercept_mode: []const u8, output_profile: []const u8, present_fps: u32) void {
-        postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/runtime/info", RuntimeInfoUpdateRequest{
+        const io = self.io;
+        postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/runtime/info", RuntimeInfoUpdateRequest{
             .terminal_identity = terminal_identity,
             .composite_mode = composite_mode,
             .intercept_mode = intercept_mode,
@@ -196,6 +201,7 @@ pub const WhiskersClient = struct {
     }
 
     pub fn notePresent(self: *WhiskersClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
+        const io = self.io;
         self.pollCaptureState() catch |err| {
             log.warn("capture poll failed: {any}", .{err});
         };
@@ -329,26 +335,27 @@ pub const WhiskersClient = struct {
         }
 
         if (maybe_start_segment_id) |sid| {
-            postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/segments/start", SegmentStartRequest{ .segment_id = sid }) catch |err| {
+            postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/segments/start", SegmentStartRequest{ .segment_id = sid }) catch |err| {
                 log.warn("segment start failed: {any}", .{err});
             };
         }
-        postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/frames/batch", FrameBatchRequest{ .segment_id = segment_id, .frames = frame_records.items }) catch |err| {
+        postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/frames/batch", FrameBatchRequest{ .segment_id = segment_id, .frames = frame_records.items }) catch |err| {
             log.warn("frame batch failed: {any}", .{err});
         };
         if (event_records.items.len > 0) {
-            postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/events/batch", EventBatchRequest{ .segment_id = segment_id, .events = event_records.items }) catch |err| {
+            postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/events/batch", EventBatchRequest{ .segment_id = segment_id, .events = event_records.items }) catch |err| {
                 log.warn("event batch failed: {any}", .{err});
             };
         }
         if (resource_records.items.len > 0) {
-            postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/resources/batch", ResourceBatchRequest{ .segment_id = segment_id, .resources = resource_records.items }) catch |err| {
+            postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/resources/batch", ResourceBatchRequest{ .segment_id = segment_id, .resources = resource_records.items }) catch |err| {
                 log.warn("resource batch failed: {any}", .{err});
             };
         }
     }
 
     fn stopActiveSegmentNow(self: *WhiskersClient) !void {
+        const io = self.io;
         var segment_id_owned: ?[]u8 = null;
         self.mutex.lock();
         if (self.current_segment_id) |segment_id| {
@@ -358,15 +365,16 @@ pub const WhiskersClient = struct {
         self.mutex.unlock();
         if (segment_id_owned) |segment_id| {
             defer self.allocator.free(segment_id);
-            try postJsonIgnoreBody(self.allocator, self.socket_path, self.bearer_token, "/v0/segments/stop", SegmentStopRequest{ .segment_id = segment_id });
+            try postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/segments/stop", SegmentStopRequest{ .segment_id = segment_id });
         }
     }
 
     fn pollCaptureState(self: *WhiskersClient) !void {
-        const now = std.time.nanoTimestamp();
+        const io = self.io;
+        const now = system_io.time.nanoTimestamp();
         if (now - self.last_capture_poll_ns < std.time.ns_per_s) return;
         self.last_capture_poll_ns = now;
-        const body = try requestForBody(self.allocator, self.socket_path, "GET", "/v0/producers/self", self.bearer_token, "");
+        const body = try requestForBody(io, self.allocator, self.socket_path, "GET", "/v0/producers/self", self.bearer_token, "");
         defer self.allocator.free(body);
         const parsed = try std.json.parseFromSlice(ProducerSelfResponse, self.allocator, body, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
@@ -404,7 +412,7 @@ pub const WhiskersClient = struct {
                     error.EndOfStream, error.ConnectionResetByPeer, error.BrokenPipe => continue,
                     else => {
                         log.warn("control loop error: {any}", .{err});
-                        std.Thread.sleep(250 * std.time.ns_per_ms);
+                        system_io.time.sleep(250 * std.time.ns_per_ms);
                     },
                 }
             };
@@ -412,7 +420,8 @@ pub const WhiskersClient = struct {
     }
 
     fn controlLoopOnce(self: *WhiskersClient) !void {
-        var stream = try std.net.connectUnixSocket(self.socket_path);
+        const io = self.io;
+        var stream = try system_io.net.connectUnixSocket(io, self.socket_path);
         defer {
             self.mutex.lock();
             if (self.control_fd != null and self.control_fd.? == stream.handle) self.control_fd = null;
@@ -423,13 +432,13 @@ pub const WhiskersClient = struct {
         self.control_fd = stream.handle;
         self.mutex.unlock();
 
-        var req_buf = std.ArrayList(u8).empty;
-        defer req_buf.deinit(self.allocator);
-        try req_buf.writer(self.allocator).print(
+        var req_buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer req_buf.deinit();
+        try req_buf.writer.print(
             "GET /v0/producers/control HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
             .{self.bearer_token},
         );
-        _ = try stream.write(req_buf.items);
+        _ = try stream.write(req_buf.written());
 
         var recv_buf = std.ArrayList(u8).empty;
         defer recv_buf.deinit(self.allocator);
@@ -454,7 +463,7 @@ pub const WhiskersClient = struct {
                 .{ .fd = self.wake_read_fd, .events = std.posix.POLL.IN, .revents = 0 },
             };
             if (self.shutdown.load(.acquire)) return;
-            _ = try std.posix.poll(&poll_fds, -1);
+            _ = try system_io.posix.poll(&poll_fds, -1);
             if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
                 self.drainWakeFd();
                 return;
@@ -465,7 +474,7 @@ pub const WhiskersClient = struct {
             if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
 
             var buf: [4096]u8 = undefined;
-            const n = try std.posix.read(stream.handle, &buf);
+            const n = try system_io.posix.read(stream.handle, &buf);
             if (n == 0) return error.EndOfStream;
             try recv_buf.appendSlice(self.allocator, buf[0..n]);
         }
@@ -473,7 +482,7 @@ pub const WhiskersClient = struct {
 
     fn drainWakeFd(self: *WhiskersClient) void {
         var buf: [64]u8 = undefined;
-        _ = std.posix.read(self.wake_read_fd, &buf) catch {};
+        _ = system_io.posix.read(self.wake_read_fd, &buf) catch {};
     }
 
     fn processControlBytes(
@@ -542,31 +551,31 @@ fn createWakeSocketPair() ![2]std.posix.fd_t {
     return fds;
 }
 
-fn postJsonIgnoreBody(allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) !void {
-    const body = try postJsonForBody(allocator, socket_path, bearer_token, path, payload);
+fn postJsonIgnoreBody(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) !void {
+    const body = try postJsonForBody(io, allocator, socket_path, bearer_token, path, payload);
     allocator.free(body);
 }
 
-fn postJsonForBody(allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) ![]u8 {
+fn postJsonForBody(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, bearer_token: ?[]const u8, path: []const u8, payload: anytype) ![]u8 {
     const json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(payload, .{})});
     defer allocator.free(json);
-    return requestForBody(allocator, socket_path, "POST", path, bearer_token, json);
+    return requestForBody(io, allocator, socket_path, "POST", path, bearer_token, json);
 }
 
-fn requestForBody(allocator: std.mem.Allocator, socket_path: []const u8, method: []const u8, path: []const u8, bearer_token: ?[]const u8, body: []const u8) ![]u8 {
-    var stream = try std.net.connectUnixSocket(socket_path);
+fn requestForBody(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, method: []const u8, path: []const u8, bearer_token: ?[]const u8, body: []const u8) ![]u8 {
+    var stream = try system_io.net.connectUnixSocket(io, socket_path);
     defer stream.close();
 
-    var req = std.ArrayList(u8).empty;
-    defer req.deinit(allocator);
-    try req.writer(allocator).print("{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n", .{ method, path, body.len });
-    if (bearer_token) |token| try req.writer(allocator).print("Authorization: Bearer {s}\r\n", .{token});
-    try req.appendSlice(allocator, "Connection: close\r\n\r\n");
-    try req.appendSlice(allocator, body);
-    _ = try stream.write(req.items);
+    var req = std.Io.Writer.Allocating.init(allocator);
+    defer req.deinit();
+    try req.writer.print("{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n", .{ method, path, body.len });
+    if (bearer_token) |token| try req.writer.print("Authorization: Bearer {s}\r\n", .{token});
+    try req.writer.writeAll("Connection: close\r\n\r\n");
+    try req.writer.writeAll(body);
+    _ = try stream.write(req.written());
 
-    const file = std.fs.File{ .handle = stream.handle };
-    const response = try file.deprecatedReader().readAllAlloc(allocator, 1 << 20);
+    const file = system_io.fs.File{ .io = io, .handle = stream.handle };
+    const response = try file.readToEndAlloc(allocator, 1 << 20);
     errdefer allocator.free(response);
     const header_end = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.BadHttpResponse;
     const header = response[0..header_end];
@@ -600,7 +609,7 @@ fn maybeCompactBuffer(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, par
 fn processSseData(line_buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, client: *WhiskersClient) !void {
     for (data) |byte| {
         if (byte == '\n') {
-            const trimmed = std.mem.trimRight(u8, line_buf.items, "\r");
+            const trimmed = std.mem.trimEnd(u8, line_buf.items, "\r");
             if (trimmed.len != 0 and std.mem.startsWith(u8, trimmed, "event:")) {
                 const event_name = std.mem.trim(u8, trimmed[6..], " ");
                 client.applyControlEvent(event_name);

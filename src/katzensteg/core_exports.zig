@@ -3,6 +3,8 @@ const runtime = @import("runtime.zig");
 const frame_builder = @import("frame_builder.zig");
 const log_mod = @import("log.zig");
 
+pub const std_options: std.Options = .{ .log_level = .info, .logFn = log_mod.stdLogFn };
+
 const ExternalFramebufferFormat = frame_builder.ExternalFramebufferFormat;
 
 pub export fn ks_katzensteg_shutdown() callconv(.c) void {

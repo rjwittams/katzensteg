@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const sdl = @import("katzensteg_sdl");
 const sdl_adapter = @import("sdl2_adapter.zig");
 const real_gl = @import("real_gl.zig");
@@ -1511,7 +1512,7 @@ test "SDL wait wakes for delayed terminal and native input and respects timeout"
     rt.input_parser = @import("input.zig").TerminalInputParser.init(rt.allocator);
     const Sender = struct {
         fn run(target: *runtime.Runtime, native: bool) void {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
+            system_io.time.sleep(20 * std.time.ns_per_ms);
             if (native) {
                 var event = std.mem.zeroes(sdl.SDL_Event);
                 event.type = 0x8000;
@@ -1531,7 +1532,7 @@ test "SDL wait wakes for delayed terminal and native input and respects timeout"
         try std.testing.expectEqual(@as(c_int, 1), waitForEvent(&rt, &event, -1));
         try std.testing.expectEqual(if (native) @as(u32, 0x8000) else sdl.SDL_MOUSEMOTION, event.type);
     }
-    var timer = try std.time.Timer.start();
+    var timer = try system_io.time.Timer.start();
     var event: sdl.SDL_Event = undefined;
     try std.testing.expectEqual(@as(c_int, 0), waitForEvent(&rt, &event, 25));
     try std.testing.expect(timer.read() >= 20 * std.time.ns_per_ms);

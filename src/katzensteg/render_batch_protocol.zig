@@ -667,10 +667,10 @@ fn jsonBool(value: std.json.Value) !bool {
 }
 
 test "frame batch JSON escapes terminal control bytes" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeFrameBatchJsonl(std.testing.allocator, out.writer(std.testing.allocator), .{
+    try writeFrameBatchJsonl(std.testing.allocator, &out.writer, .{
         .window_id = "main",
         .seq = 7,
         .presentation_generation = 12,
@@ -680,26 +680,26 @@ test "frame batch JSON escapes terminal control bytes" {
         .after = &.{},
     });
 
-    try std.testing.expect(std.mem.endsWith(u8, out.items, "\n"));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"type\":\"frame_batch\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"presentation_generation\":12") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\\u001b_G") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"type\":\"frame_batch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"presentation_generation\":12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\u001b_G") != null);
 }
 
 test "detached JSON names the completed window" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writeDetachedJsonl(out.writer(std.testing.allocator), "main");
+    try writeDetachedJsonl(&out.writer, "main");
 
-    try std.testing.expectEqualStrings("{\"type\":\"detached\",\"window_id\":\"main\"}\n", out.items);
+    try std.testing.expectEqualStrings("{\"type\":\"detached\",\"window_id\":\"main\"}\n", out.written());
 }
 
 test "presentation status JSON carries producer readiness and effective rect" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
 
-    try writePresentationStatusJsonl(out.writer(std.testing.allocator), .{
+    try writePresentationStatusJsonl(&out.writer, .{
         .window_id = "main",
         .ready_to_show = true,
         .source_px = .{ .w = 320, .h = 240 },
@@ -708,7 +708,7 @@ test "presentation status JSON carries producer readiness and effective rect" {
 
     try std.testing.expectEqualStrings(
         "{\"type\":\"presentation_status\",\"window_id\":\"main\",\"ready_to_show\":true,\"source_px\":{\"w\":320,\"h\":240},\"effective_rect_cells\":{\"row\":4,\"col\":2,\"rows\":18,\"cols\":64}}\n",
-        out.items,
+        out.written(),
     );
 }
 

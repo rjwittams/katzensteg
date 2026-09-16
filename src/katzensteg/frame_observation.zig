@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 // Owned pixels: upload buffers and compositor storage may be reused immediately.
 // Accessed only while the runtime holds its presentation mutex.
@@ -23,25 +24,26 @@ pub const FrameObservation = struct {
         self.width = width;
         self.height = height;
         self.frame_id += 1;
-        self.timestamp_ms = std.time.milliTimestamp();
+        self.timestamp_ms = system_io.time.milliTimestamp();
     }
 
-    pub fn writePng(self: *const FrameObservation, allocator: std.mem.Allocator, path: []const u8) !void {
+    pub fn writePng(self: *const FrameObservation, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
         if (self.pixels.items.len == 0) return error.NoFrame;
         const temporary = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
         defer allocator.free(temporary);
-        defer std.fs.deleteFileAbsolute(temporary) catch {};
-        const file = try std.fs.createFileAbsolute(temporary, .{ .mode = 0o600 });
+        defer system_io.fs.deleteFileAbsolute(io, temporary) catch {};
+        const file = try system_io.fs.createFileAbsolute(io, temporary, .{ .mode = 0o600 });
         {
             defer file.close();
-            try @import("png.zig").write(allocator, file.deprecatedWriter(), self.width, self.height, self.pixels.items);
+            var output_writer = file.writerStreaming(&.{});
+            try @import("png.zig").write(allocator, &output_writer.interface, self.width, self.height, self.pixels.items);
         }
-        try std.fs.renameAbsolute(temporary, path);
+        try system_io.fs.renameAbsolute(io, temporary, path);
     }
 
-    pub fn write(self: *const FrameObservation, path: []const u8) !void {
+    pub fn writeRgba(self: *const FrameObservation, io: std.Io, path: []const u8) !void {
         if (self.pixels.items.len == 0) return error.NoFrame;
-        var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });
+        var file = try system_io.fs.createFileAbsolute(io, path, .{ .mode = 0o600 });
         defer file.close();
         try file.writeAll(self.pixels.items);
     }

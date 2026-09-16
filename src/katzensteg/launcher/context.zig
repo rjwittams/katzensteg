@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const ExpansionContext = struct {
     home: []const u8,
@@ -8,18 +9,18 @@ pub const ExpansionContext = struct {
     owns_repo: bool = false,
     owns_path: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) !ExpansionContext {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) !ExpansionContext {
+        const home = system_io.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
             else => return err,
         };
         errdefer allocator.free(home);
-        const path = std.process.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
+        const path = system_io.process.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
             else => return err,
         };
         errdefer allocator.free(path);
-        const repo = try resolveRepoRoot(allocator);
+        const repo = try resolveRepoRoot(io, allocator);
         return .{ .home = home, .repo = repo, .path = path, .owns_home = true, .owns_repo = true, .owns_path = true };
     }
 
@@ -30,14 +31,14 @@ pub const ExpansionContext = struct {
     }
 };
 
-pub fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+pub fn resolveProfileDirs(io: std.Io, allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
     var dirs = std.ArrayList([]const u8).empty;
     errdefer {
         for (dirs.items) |dir| allocator.free(dir);
         dirs.deinit(allocator);
     }
 
-    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |raw| {
+    if (system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |raw| {
         defer allocator.free(raw);
         var it = std.mem.splitScalar(u8, raw, ':');
         while (it.next()) |segment| {
@@ -51,7 +52,7 @@ pub fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u
         else => return err,
     }
 
-    const repo = try resolveRepoRoot(allocator);
+    const repo = try resolveRepoRoot(io, allocator);
     defer allocator.free(repo);
     try dirs.append(allocator, try std.fs.path.join(allocator, &.{ repo, "profiles" }));
 
@@ -62,14 +63,14 @@ pub fn resolveProfileDirs(allocator: std.mem.Allocator) !std.ArrayList([]const u
 }
 
 fn userConfigProfilesDir(allocator: std.mem.Allocator) !?[]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+    if (system_io.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
         defer allocator.free(xdg);
         if (xdg.len > 0) return try std.fs.path.join(allocator, &.{ xdg, "katzensteg", "profiles" });
     } else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+    if (system_io.process.getEnvVarOwned(allocator, "HOME")) |home| {
         defer allocator.free(home);
         if (home.len > 0) return try std.fs.path.join(allocator, &.{ home, ".config", "katzensteg", "profiles" });
     } else |err| switch (err) {
@@ -79,18 +80,18 @@ fn userConfigProfilesDir(allocator: std.mem.Allocator) !?[]const u8 {
     return null;
 }
 
-pub fn resolveRepoRoot(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "KATZENSTEG_REPO")) |repo| return repo else |err| switch (err) {
+pub fn resolveRepoRoot(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+    if (system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_REPO")) |repo| return repo else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
 
-    if (try cwdLooksLikeRepo()) return std.fs.cwd().realpathAlloc(allocator, ".");
-    return repoRootFromExecutable(allocator) catch std.fs.cwd().realpathAlloc(allocator, ".");
+    if (try cwdLooksLikeRepo(io)) return system_io.fs.cwd(io).realpathAlloc(allocator, ".");
+    return repoRootFromExecutable(io, allocator) catch system_io.fs.cwd(io).realpathAlloc(allocator, ".");
 }
 
-fn cwdLooksLikeRepo() !bool {
-    var dir = std.fs.cwd().openDir("profiles", .{}) catch |err| switch (err) {
+fn cwdLooksLikeRepo(io: std.Io) !bool {
+    var dir = system_io.fs.cwd(io).openDir("profiles", .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => return err,
     };
@@ -98,8 +99,8 @@ fn cwdLooksLikeRepo() !bool {
     return true;
 }
 
-fn repoRootFromExecutable(allocator: std.mem.Allocator) ![]const u8 {
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
+fn repoRootFromExecutable(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+    const exe_path = try system_io.fs.selfExePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     return repoRootFromExecutablePath(allocator, exe_path);
 }

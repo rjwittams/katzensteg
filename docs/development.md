@@ -2,13 +2,16 @@
 
 ## Toolchain
 
-Use Zig 0.15.2.
+Use Zig 0.16.0.
 
 ```sh
 zig version
 ```
 
-There is no `build.zig.zon` yet. Install system dependencies through the host OS package manager.
+`build.zig.zon` pins the libxev fork at an immutable commit. Its
+`darwin-tty-readiness` branch carries the kqueue terminal-readiness patch on top
+of upstream Zig 0.16 support. Install system dependencies through the host OS
+package manager.
 
 Common dependencies:
 
@@ -54,6 +57,25 @@ zig build test
 python3 -m unittest discover -s scripts/katzensteg -p 'test_*.py'
 scripts/katzensteg/bootstrap_external_projects.py --doctor-only --root ~/dev
 ```
+
+## Runtime I/O
+
+Standalone programs use the I/O capability supplied by `std.process.Init`.
+The injected runtime and its logger each own a static `std.Io.Threaded` backend
+initialized with `init_single_threaded`. These backends do not install SIGIO or
+SIGPIPE handlers, allocate a worker pool, or support asynchronous tasks. The
+runtime still uses its existing OS threads; the desktop WM still uses libxev.
+
+`src/platform/` keeps file and directory operations attached to an explicit I/O
+capability. Raw descriptor operations preserve `WouldBlock` so the existing
+transport queues retain control of backpressure. Mutexes and conditions use
+pthread primitives, including timed condition waits. Owners destroy these
+objects after their users have stopped.
+
+`test_injected_io.py` loads the core library into an ordinary C process and
+checks that startup, threaded logging, and shutdown preserve the application's
+SIGIO and SIGPIPE handlers. `test_embed_render_batches.py` covers SDL2 and SDL3
+with both synchronous composition and queued replay.
 
 ## Logs
 

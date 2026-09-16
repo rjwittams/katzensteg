@@ -84,7 +84,7 @@ const GL_NO_ERROR: c_uint = 0;
 
 const SurfaceTraceView = extern struct {
     flags: u32,
-    format: ?*anyopaque,
+    format: u32,
     w: i32,
     h: i32,
     pitch: i32,

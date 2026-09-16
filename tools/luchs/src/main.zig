@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const builtin = @import("builtin");
 const sdl = @import("katzensteg_sdl");
 
@@ -119,13 +120,13 @@ fn helperPathFromExePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]
     return std.fs.path.join(allocator, &.{ dir, "luchs-webview-capture" });
 }
 
-fn nativeWebviewHelperPath(allocator: std.mem.Allocator) ![]u8 {
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
+fn nativeWebviewHelperPath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const exe_path = try system_io.fs.selfExePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     return helperPathFromExePath(allocator, exe_path);
 }
 
-fn readLineAlloc(allocator: std.mem.Allocator, file: std.fs.File, max_len: usize) ![]u8 {
+fn readLineAlloc(allocator: std.mem.Allocator, file: system_io.fs.File, max_len: usize) ![]u8 {
     var line = std.ArrayList(u8).empty;
     errdefer line.deinit(allocator);
     var byte: [1]u8 = undefined;
@@ -138,7 +139,7 @@ fn readLineAlloc(allocator: std.mem.Allocator, file: std.fs.File, max_len: usize
     return error.RawFrameHeaderTooLong;
 }
 
-fn readExactFile(file: std.fs.File, buf: []u8) !void {
+fn readExactFile(file: system_io.fs.File, buf: []u8) !void {
     var offset: usize = 0;
     while (offset < buf.len) {
         const n = try file.read(buf[offset..]);
@@ -147,7 +148,7 @@ fn readExactFile(file: std.fs.File, buf: []u8) !void {
     }
 }
 
-fn readRawFrameFromFile(allocator: std.mem.Allocator, file: std.fs.File) !RawFrame {
+fn readRawFrameFromFile(allocator: std.mem.Allocator, file: system_io.fs.File) !RawFrame {
     const line = try readLineAlloc(allocator, file, 4096);
     defer allocator.free(line);
     const header = try parseRawFrameHeader(line);
@@ -179,13 +180,13 @@ fn writeWebInputEventJson(writer: anytype, event: WebInputEvent) !void {
 
 const NativeWebviewStream = struct {
     allocator: std.mem.Allocator,
-    child: std.process.Child,
-    stdin_file: std.fs.File,
-    stdout_file: std.fs.File,
+    child: system_io.process.Child,
+    stdin_file: system_io.fs.File,
+    stdout_file: system_io.fs.File,
     waited: bool = false,
 
-    fn init(allocator: std.mem.Allocator, html_path: []const u8, frame_limit: u32, width: u32, height: u32) !NativeWebviewStream {
-        const helper_path = try nativeWebviewHelperPath(allocator);
+    fn init(io: std.Io, allocator: std.mem.Allocator, html_path: []const u8, frame_limit: u32, width: u32, height: u32) !NativeWebviewStream {
+        const helper_path = try nativeWebviewHelperPath(io, allocator);
         defer allocator.free(helper_path);
 
         var width_buf: [16]u8 = undefined;
@@ -198,7 +199,7 @@ const NativeWebviewStream = struct {
         const fps_arg = try std.fmt.bufPrint(&fps_buf, "{d}", .{native_webview_fps});
 
         var argv = [_][]const u8{ helper_path, html_path, width_arg, height_arg, frames_arg, fps_arg };
-        var child = std.process.Child.init(&argv, allocator);
+        var child = system_io.process.Child.init(io, &argv, allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Inherit;
@@ -243,18 +244,20 @@ const NativeWebviewStream = struct {
     }
 
     fn sendInput(self: *NativeWebviewStream, event: WebInputEvent) void {
-        writeWebInputEventJson(self.stdin_file.deprecatedWriter(), event) catch {};
+        var output_writer = self.stdin_file.writerStreaming(&.{});
+        writeWebInputEventJson(&output_writer.interface, event) catch {};
     }
 
     fn sendReload(self: *NativeWebviewStream) void {
-        writeJsonLine(self.stdin_file.deprecatedWriter(), .{ .type = "reload" }) catch {};
+        var output_writer = self.stdin_file.writerStreaming(&.{});
+        writeJsonLine(&output_writer.interface, .{ .type = "reload" }) catch {};
     }
 };
 
 /// Modification time of the page, or null when it cannot be read (mid-write).
-fn pageMtime(path: []const u8) ?i128 {
-    const stat = std.fs.cwd().statFile(path) catch return null;
-    return stat.mtime;
+fn pageMtime(io: std.Io, path: []const u8) ?i128 {
+    const stat = system_io.fs.cwd(io).statFile(path) catch return null;
+    return stat.mtime.nanoseconds;
 }
 
 fn sdlTextInputSlice(text: *const [32]u8) []const u8 {
@@ -414,22 +417,23 @@ test "native webview stream uses bounded frame cadence" {
 
 test "writeWebInputEventJson writes mouse input jsonl" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeWebInputEventJson(fbs.writer(), .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
-    try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&buf);
+    try writeWebInputEventJson(&fbs, .{ .mouse_down = .{ .x = 12, .y = 34, .button = 1 } });
+    try std.testing.expectEqualStrings("{\"type\":\"mouse_down\",\"x\":12,\"y\":34,\"button\":1}\n", fbs.buffered());
 }
 
 test "writeWebInputEventJson escapes text input jsonl" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeWebInputEventJson(fbs.writer(), .{ .text = "a\"b" });
-    try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":\"a\\\"b\"}\n", fbs.getWritten());
+    var fbs = std.Io.Writer.fixed(&buf);
+    try writeWebInputEventJson(&fbs, .{ .text = "a\"b" });
+    try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":\"a\\\"b\"}\n", fbs.buffered());
 }
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
+    const io = process_init.io;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const args = try std.process.argsAlloc(arena.allocator());
+    const args = try process_init.minimal.args.toSlice(arena.allocator());
     const options = try parseArgs(args);
     try ensureRendererBackendAvailable(options.renderer_backend);
     const frame_limit = effectiveFrameLimit(options);
@@ -437,7 +441,7 @@ pub fn main() !void {
     const frame_allocator = std.heap.page_allocator;
     var native_stream: ?NativeWebviewStream = switch (options.renderer_backend) {
         .test_pattern => null,
-        .native_webview => try NativeWebviewStream.init(frame_allocator, options.html_path, frame_limit, options.width, options.height),
+        .native_webview => try NativeWebviewStream.init(io, frame_allocator, options.html_path, frame_limit, options.width, options.height),
     };
     defer if (native_stream) |*stream| stream.deinit();
 
@@ -492,7 +496,7 @@ pub fn main() !void {
     const last_presented = if (dedupe) try arena.allocator().alloc(u8, pixels.len) else pixels;
     var have_presented = false;
     var last_present_ms: i64 = 0;
-    var last_mtime: ?i128 = if (options.watch) pageMtime(options.html_path) else null;
+    var last_mtime: ?i128 = if (options.watch) pageMtime(io, options.html_path) else null;
     var last_watch_ms: i64 = 0;
     var frame: usize = 0;
     var quit = false;
@@ -503,10 +507,10 @@ pub fn main() !void {
             if (native_stream) |*stream| forwardSdlEventToWebview(stream, &event);
         }
         if (options.watch) {
-            const now = std.time.milliTimestamp();
+            const now = system_io.time.milliTimestamp();
             if (now - last_watch_ms >= 250) {
                 last_watch_ms = now;
-                if (pageMtime(options.html_path)) |mtime| {
+                if (pageMtime(io, options.html_path)) |mtime| {
                     if (last_mtime != null and mtime != last_mtime.?) {
                         if (native_stream) |*stream| stream.sendReload();
                         std.debug.print("luchs: page changed, reloading\n", .{});
@@ -534,7 +538,7 @@ pub fn main() !void {
             @as(usize, window_width) * 4,
         };
         if (dedupe) {
-            const now = std.time.milliTimestamp();
+            const now = system_io.time.milliTimestamp();
             const same = have_presented and present_pixels.len == last_presented.len and std.mem.eql(u8, present_pixels, last_presented);
             if (same and now - last_present_ms < 1000) continue;
             if (present_pixels.len == last_presented.len) @memcpy(last_presented, present_pixels);

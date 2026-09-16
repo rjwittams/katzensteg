@@ -1,5 +1,6 @@
 // SDL3 frontend plumbing currently reuses SDL2 input/event projection.
 const std = @import("std");
+const system_io = @import("platform");
 const input = @import("input.zig");
 const runtime_mod = @import("runtime.zig");
 const sdl = @import("katzensteg_sdl");
@@ -70,7 +71,7 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
         }
     }
     var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
-    parser.copyKeyboardState(&terminal_state, std.time.nanoTimestamp());
+    parser.copyKeyboardState(&terminal_state, system_io.time.nanoTimestamp());
     for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
     if (numkeys) |out| out.* = @intCast(rt.keyboard_state.len);
     return @ptrCast(&rt.keyboard_state[0]);
@@ -276,10 +277,10 @@ test "SDL input pop does not hold input mutex while queueing cursor position" {
 
     rt.queue_mutex.lock();
     const pop_thread = try std.Thread.spawn(.{}, popInputEventProbe, .{PopProbe{ .rt = &rt, .done = &pop_done }});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    system_io.time.sleep(20 * std.time.ns_per_ms);
 
     const read_thread = try std.Thread.spawn(.{}, readMouseStateProbe, .{MouseStateProbe{ .rt = &rt, .done = &read_done }});
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    system_io.time.sleep(10 * std.time.ns_per_ms);
     const input_read_completed_while_queue_blocked = read_done.load(.acquire);
 
     rt.queue_mutex.unlock();

@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const board_w: i32 = 10;
 pub const board_h: i32 = 20;
@@ -32,7 +33,7 @@ pub const InputState = struct {
 };
 
 pub const SharedInput = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: system_io.Mutex = .{},
     state: InputState = .{},
     stop: bool = false,
 };

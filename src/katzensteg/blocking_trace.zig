@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 
 pub const default_threshold_ns: i128 = 5 * std.time.ns_per_ms;
 
@@ -27,7 +28,7 @@ pub fn shouldLog(enabled: bool, duration_ns: i128, threshold_ns: i128) bool {
 }
 
 pub fn start(settings: Settings) ?i128 {
-    return if (settings.enabled) std.time.nanoTimestamp() else null;
+    return if (settings.enabled) system_io.time.nanoTimestamp() else null;
 }
 
 pub fn elapsedMaybe(start_ns: ?i128) ?i128 {
@@ -35,7 +36,7 @@ pub fn elapsedMaybe(start_ns: ?i128) ?i128 {
 }
 
 pub fn elapsedSince(start_ns: i128) i128 {
-    const elapsed = std.time.nanoTimestamp() - start_ns;
+    const elapsed = system_io.time.nanoTimestamp() - start_ns;
     return if (elapsed < 0) 0 else elapsed;
 }
 

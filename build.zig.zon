@@ -1,10 +1,11 @@
 .{
     .name = .katzensteg,
     .version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .libxev = .{
-            .url = "git+https://github.com/rjwittams/libxev.git#c42f332ac90f43b1f51ff5c5a8fa92cfc5c9e74f",
-            .hash = "libxev-0.0.0-86vtcxtAEwD5GPOPfluoppIVLre_F5_mMajQRK6AWUkS",
+            .url = "https://github.com/rjwittams/libxev/archive/6871dcb89dbf59a391d38dd6e827f14290fbc990.tar.gz",
+            .hash = "libxev-0.0.0-86vtc2wbFABEWQR4CfGZ2ec9lJqzvG1IwIFes2tKhOxz",
         },
     },
     .paths = .{""},

@@ -310,10 +310,10 @@ pub fn writeCell(writer: anytype, row: usize, col: usize) !void {
 }
 
 test "placeholder cells encode explicit source indices including clipped origins" {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(std.testing.allocator);
-    try writeCell(bytes.writer(std.testing.allocator), 2, 3);
-    try std.testing.expectEqualStrings("\u{10eeee}\u{30e}\u{310}", bytes.items);
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    try writeCell(&bytes.writer, 2, 3);
+    try std.testing.expectEqualStrings("\u{10eeee}\u{30e}\u{310}", bytes.written());
     try std.testing.expectEqual(@as(usize, 297), diacritics.len);
-    try std.testing.expectError(error.PlaceholderIndexOutOfRange, writeCell(bytes.writer(std.testing.allocator), 297, 0));
+    try std.testing.expectError(error.PlaceholderIndexOutOfRange, writeCell(&bytes.writer, 297, 0));
 }

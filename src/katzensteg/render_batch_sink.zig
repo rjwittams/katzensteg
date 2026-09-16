@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const kitty_protocol = @import("termscene").kitty.protocol;
 const blocking_trace = @import("blocking_trace.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
@@ -28,7 +29,7 @@ pub const RenderBatchSink = struct {
     };
 
     const FileUploadState = struct {
-        file: std.fs.File,
+        file: system_io.fs.File,
         path: []u8,
         high_water: u64,
         next_offset: u64,
@@ -47,6 +48,7 @@ pub const RenderBatchSink = struct {
         file_offset_ring: FileUploadState,
     };
 
+    io: std.Io,
     allocator: std.mem.Allocator,
     window_id: []const u8,
     seq: u64 = 0,
@@ -55,7 +57,7 @@ pub const RenderBatchSink = struct {
     uploads: std.ArrayList([]u8) = .empty,
     placements: std.ArrayList([]u8) = .empty,
     after: std.ArrayList([]u8) = .empty,
-    frame_json: std.ArrayList(u8) = .empty,
+    frame_json: std.Io.Writer.Allocating,
     trace_placements: std.ArrayList(PlacementTrace) = .empty,
     trace_deletes: std.ArrayList(PlacementTrace) = .empty,
     trace_after_deletes: std.ArrayList(PlacementTrace) = .empty,
@@ -77,10 +79,12 @@ pub const RenderBatchSink = struct {
     placement_trace_enabled: bool = false,
     blocking_trace_settings: blocking_trace.Settings = .{},
 
-    pub fn init(allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, window_id: []const u8) RenderBatchSink {
         return .{
+            .io = io,
             .allocator = allocator,
             .window_id = window_id,
+            .frame_json = .init(allocator),
         };
     }
 
@@ -94,7 +98,7 @@ pub const RenderBatchSink = struct {
         self.uploads.deinit(self.allocator);
         self.placements.deinit(self.allocator);
         self.after.deinit(self.allocator);
-        self.frame_json.deinit(self.allocator);
+        self.frame_json.deinit();
         self.placeholder_frame.deinit(self.allocator);
         self.placeholder_scaled.deinit(self.allocator);
         self.trace_placements.deinit(self.allocator);
@@ -217,10 +221,10 @@ pub const RenderBatchSink = struct {
     pub fn refreshPlaceholder(self: *RenderBatchSink) !void {
         const target = self.placeholder orelse return;
         if (!self.placeholder_uploaded) return;
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeVirtualPlace(out.writer(self.allocator), target.image_id, placeholder_placement_id, target.cols, target.rows);
-        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeVirtualPlace(&out.writer, target.image_id, placeholder_placement_id, target.cols, target.rows);
+        try self.placements.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn restorePlaceholder(self: *RenderBatchSink) !void {
@@ -247,15 +251,16 @@ pub const RenderBatchSink = struct {
     }
 
     pub fn uploadRgba(self: *RenderBatchSink, image_id: u32, rgba: []const u8, w: i32, h: i32) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
+        const io = self.io;
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
         const upload_start_ns = self.traceBlockingStart();
         switch (self.upload) {
-            .direct_apc => try kitty_protocol.writeTransmitRgba(out.writer(self.allocator), image_id, rgba, w, h),
+            .direct_apc => try kitty_protocol.writeTransmitRgba(&out.writer, image_id, rgba, w, h),
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
-                var file = try std.fs.createFileAbsolute(state.paths[index], .{ .read = true, .truncate = false });
+                var file = try system_io.fs.createFileAbsolute(io, state.paths[index], .{ .read = true, .truncate = false });
                 defer file.close();
                 const write_start_ns = self.traceBlockingStart();
                 try file.pwriteAll(rgba, 0);
@@ -268,7 +273,7 @@ pub const RenderBatchSink = struct {
                 const sync_start_ns = self.traceBlockingStart();
                 try file.sync();
                 self.traceBlockingWriteSince("upload_rgba_file_whole_sync", sync_start_ns, rgba.len);
-                try kitty_protocol.writeTransmitRgbaFileWhole(out.writer(self.allocator), image_id, state.paths[index], w, h);
+                try kitty_protocol.writeTransmitRgbaFileWhole(&out.writer, image_id, state.paths[index], w, h);
             },
             .file_offset_ring => |*state| {
                 const region = try reserveFileRegion(state, rgba.len);
@@ -278,20 +283,20 @@ pub const RenderBatchSink = struct {
                 const sync_start_ns = self.traceBlockingStart();
                 try state.file.sync();
                 self.traceBlockingWriteSince("upload_rgba_file_offset_sync", sync_start_ns, rgba.len);
-                try kitty_protocol.writeTransmitRgbaFileRegion(out.writer(self.allocator), image_id, state.path, region.offset, rgba.len, w, h);
+                try kitty_protocol.writeTransmitRgbaFileRegion(&out.writer, image_id, state.path, region.offset, rgba.len, w, h);
             },
         }
-        try self.uploads.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try self.uploads.append(self.allocator, try out.toOwnedSlice());
         self.traceBlockingWriteSince("upload_rgba_total", upload_start_ns, rgba.len);
     }
 
     pub fn place(self: *RenderBatchSink, row: i32, col: i32, placement: kitty_protocol.Placement) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
         var adjusted = placement;
         adjusted.z += self.z_base;
-        try kitty_protocol.writePlace(out.writer(self.allocator), row, col, adjusted);
-        try self.placements.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        try kitty_protocol.writePlace(&out.writer, row, col, adjusted);
+        try self.placements.append(self.allocator, try out.toOwnedSlice());
         if (self.placement_trace_enabled) {
             try self.trace_placements.append(self.allocator, .{
                 .image_id = adjusted.image_id,
@@ -326,10 +331,10 @@ pub const RenderBatchSink = struct {
     }
 
     fn deletePlacementInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), target: kitty_protocol.ExactPlacement) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeDeleteExactPlacement(out.writer(self.allocator), target);
-        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeDeleteExactPlacement(&out.writer, target);
+        try group.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn deleteImageData(self: *RenderBatchSink, image_id: u32) !void {
@@ -341,10 +346,10 @@ pub const RenderBatchSink = struct {
     }
 
     fn deleteImageDataInto(self: *RenderBatchSink, group: *std.ArrayList([]u8), image_id: u32) !void {
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-        try kitty_protocol.writeDeleteImageWithQuiet(out.writer(self.allocator), .suppress_fail, .free_data, image_id);
-        try group.append(self.allocator, try out.toOwnedSlice(self.allocator));
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer out.deinit();
+        try kitty_protocol.writeDeleteImageWithQuiet(&out.writer, .suppress_fail, .free_data, image_id);
+        try group.append(self.allocator, try out.toOwnedSlice());
     }
 
     pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {
@@ -354,7 +359,7 @@ pub const RenderBatchSink = struct {
         // Runtime supplies an unbuffered pipe writer. Encode in memory so JSON
         // escaping does not turn each character into a separate pipe write.
         defer self.frame_json.clearRetainingCapacity();
-        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, self.frame_json.writer(self.allocator), .{
+        try render_batch_protocol.writeFrameBatchJsonl(self.allocator, &self.frame_json.writer, .{
             .window_id = self.window_id,
             .seq = self.seq,
             .presentation_generation = self.presentation_generation,
@@ -363,7 +368,7 @@ pub const RenderBatchSink = struct {
             .placements = self.placements.items,
             .after = self.after.items,
         });
-        try writer.writeAll(self.frame_json.items);
+        try writer.writeAll(self.frame_json.written());
         self.traceBlockingWriteSince("flush_frame_jsonl", start_ns, pending_bytes);
         self.clearRetainingCapacity();
     }
@@ -461,50 +466,52 @@ pub const RenderBatchSink = struct {
     }
 
     fn initUploadState(self: *RenderBatchSink, policy: render_batch_protocol.UploadPolicy) !UploadState {
+        const io = self.io;
         return switch (policy.profile) {
             .direct_apc => .direct_apc,
             .file_whole => blk: {
                 const path = policy.path orelse return error.MissingUploadFilePath;
-                break :blk .{ .file_whole = try initRotatingFileUploadState(self.allocator, path) };
+                break :blk .{ .file_whole = try initRotatingFileUploadState(io, self.allocator, path) };
             },
             .file_offset_ring => blk: {
                 const path = policy.path orelse return error.MissingUploadFilePath;
-                break :blk .{ .file_offset_ring = try initSingleFileUploadState(self.allocator, path, policy.high_water) };
+                break :blk .{ .file_offset_ring = try initSingleFileUploadState(io, self.allocator, path, policy.high_water) };
             },
         };
     }
 
     fn deinitUploadState(self: *RenderBatchSink) void {
+        const io = self.io;
         switch (self.upload) {
             .direct_apc => {},
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
-                    upload_path.deleteBasePath(path.*);
+                    upload_path.deleteBasePath(io, path.*);
                     self.allocator.free(path.*);
                 }
             },
             .file_offset_ring => |*state| {
                 state.file.close();
-                upload_path.deleteBasePath(state.path);
+                upload_path.deleteBasePath(io, state.path);
                 self.allocator.free(state.path);
             },
         }
         self.upload = .direct_apc;
     }
 
-    fn initRotatingFileUploadState(allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
+    fn initRotatingFileUploadState(io: std.Io, allocator: std.mem.Allocator, base_path: []const u8) !RotatingFileUploadState {
         var paths: [rotating_file_count][]u8 = undefined;
         var initialized: usize = 0;
         errdefer {
             for (paths[0..initialized]) |path| {
-                std.fs.deleteFileAbsolute(path) catch {};
+                system_io.fs.deleteFileAbsolute(io, path) catch {};
                 allocator.free(path);
             }
         }
         for (&paths, 0..) |*path, index| {
             path.* = try upload_path.makeRotatingFilePath(allocator, base_path, index);
             initialized += 1;
-            upload_path.deleteBasePath(path.*);
+            upload_path.deleteBasePath(io, path.*);
         }
         return .{
             .paths = paths,
@@ -513,10 +520,10 @@ pub const RenderBatchSink = struct {
         };
     }
 
-    fn initSingleFileUploadState(allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
+    fn initSingleFileUploadState(io: std.Io, allocator: std.mem.Allocator, path: []const u8, high_water: u64) !FileUploadState {
         const duped_path = try allocator.dupe(u8, path);
         errdefer allocator.free(duped_path);
-        const upload_file = try std.fs.createFileAbsolute(duped_path, .{ .read = true, .truncate = false });
+        const upload_file = try system_io.fs.createFileAbsolute(io, duped_path, .{ .read = true, .truncate = false });
         return .{
             .file = upload_file,
             .path = duped_path,
@@ -562,9 +569,10 @@ fn divRound(numerator: i32, denominator: i32) i32 {
 }
 
 test "batch sink groups upload place and delete bytes" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try sink.uploadRgba(100000, &[_]u8{ 255, 0, 0, 255 }, 1, 1);
@@ -580,15 +588,16 @@ test "batch sink groups upload place and delete bytes" {
         .z = 100,
     });
     try sink.deletePlacement(.{ .image_id = 100000, .placement_id = 200000 });
-    try sink.flushFrame(out.writer(std.testing.allocator));
+    try sink.flushFrame(&out.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"uploads\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"placements\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"deletes\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"uploads\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"placements\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"deletes\":[") != null);
 }
 
 test "batch sink reports pending frame byte count" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), sink.pendingFrameBytes());
@@ -597,9 +606,10 @@ test "batch sink reports pending frame byte count" {
 }
 
 test "batch sink placement trace records and clears frame operations" {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.testing.allocator);
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.enablePlacementTrace();
 
@@ -624,7 +634,7 @@ test "batch sink placement trace records and clears frame operations" {
     try std.testing.expectEqual(@as(u32, 200001), sink.trace_deletes.items[0].placement_id);
     try std.testing.expectEqual(@as(u32, 200002), sink.trace_after_deletes.items[0].placement_id);
 
-    try sink.flushFrame(out.writer(std.testing.allocator));
+    try sink.flushFrame(&out.writer);
 
     try std.testing.expectEqual(@as(usize, 0), sink.trace_placements.items.len);
     try std.testing.expectEqual(@as(usize, 0), sink.trace_deletes.items.len);
@@ -632,7 +642,8 @@ test "batch sink placement trace records and clears frame operations" {
 }
 
 test "batch sink viewport updates geometry without changing attach state" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     try std.testing.expect(!sink.isAttached());
@@ -649,7 +660,8 @@ test "batch sink viewport updates geometry without changing attach state" {
 }
 
 test "batch sink derives presentation tty pixels from host terminal geometry" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attach(.{ .row = 3, .col = 5, .rows = 20, .cols = 40 });
@@ -666,7 +678,8 @@ test "batch sink derives presentation tty pixels from host terminal geometry" {
 }
 
 test "batch sink applies presentation z base to placements" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attachWithPresentation(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 }, .fit, 2000);
@@ -686,7 +699,8 @@ test "batch sink applies presentation z base to placements" {
 }
 
 test "batch sink detach suppresses attachment without clearing pending deletes" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
 
     sink.attach(.{ .row = 1, .col = 1, .rows = 24, .cols = 80 });
@@ -699,7 +713,8 @@ test "batch sink detach suppresses attachment without clearing pending deletes" 
 }
 
 test "batch sink file whole upload writes image bytes to path and emits file APC" {
-    var tmp = std.testing.tmpDir(.{});
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
     defer tmp.cleanup();
 
     const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -709,7 +724,7 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
     const uploaded_path = try std.fmt.allocPrint(std.testing.allocator, "{s}.0", .{path});
     defer std.testing.allocator.free(uploaded_path);
 
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.setUploadPolicy(.{ .profile = .file_whole, .path = path, .high_water = 4096 });
 
@@ -717,31 +732,40 @@ test "batch sink file whole upload writes image bytes to path and emits file APC
 
     try std.testing.expectEqual(@as(usize, 1), sink.uploads.items.len);
     try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "t=f") != null);
-    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, uploaded_path, 16);
+    const bytes = try system_io.fs.cwd(io).readFileAlloc(std.testing.allocator, uploaded_path, 16);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, bytes);
 }
 
 test "batch sink writes a complete JSON frame at once and handles partial writes" {
+    const io = std.testing.io;
     const Output = struct {
         bytes: std.ArrayList(u8) = .empty,
         calls: usize = 0,
         max_write: usize = std.math.maxInt(usize),
 
-        fn write(self: *@This(), bytes: []const u8) error{OutOfMemory}!usize {
-            self.calls += 1;
-            const count = @min(self.max_write, bytes.len);
-            try self.bytes.appendSlice(std.testing.allocator, bytes[0..count]);
-            return count;
+        output: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+        fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("output", interface);
+            for (data, 0..) |bytes, i| {
+                if (i == data.len - 1 and splat == 0) break;
+                if (bytes.len == 0) continue;
+                self.calls += 1;
+                const count = @min(self.max_write, bytes.len);
+                self.bytes.appendSlice(std.testing.allocator, bytes[0..count]) catch return error.WriteFailed;
+                return count;
+            }
+            return 0;
         }
 
-        fn writer(self: *@This()) std.io.GenericWriter(*@This(), error{OutOfMemory}, write) {
-            return .{ .context = self };
+        fn writer(self: *@This()) *std.Io.Writer {
+            return &self.output;
         }
     };
     var output: Output = .{};
     defer output.bytes.deinit(std.testing.allocator);
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.deleteImageData(42);
     try sink.flushFrame(output.writer());
@@ -766,7 +790,8 @@ test "batch sink writes a complete JSON frame at once and handles partial writes
 }
 
 test "placeholder frames keep one id with only upload and virtual placement" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 777, .cols = 60, .rows = 20 };
     sink.attach(sink.placeholder.?.localRect());
@@ -794,7 +819,8 @@ test "placeholder frames keep one id with only upload and virtual placement" {
 }
 
 test "placeholder restore owns pixels and retransmits after a terminal clear" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 77, .cols = 3, .rows = 2 };
     var rgba = [_]u8{ 1, 2, 3, 255 };
@@ -815,7 +841,8 @@ test "placeholder restore owns pixels and retransmits after a terminal clear" {
 }
 
 test "placeholder upload bounds leave native framebuffer available for observation and resize" {
-    var sink = RenderBatchSink.init(std.testing.allocator, "main");
+    const io = std.testing.io;
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
     defer sink.deinit();
     sink.placeholder = .{ .image_id = 77, .cols = 2, .rows = 1, .target_px = .{ .w = 2, .h = 1 } };
     const rgba = [_]u8{255} ** (4 * 2 * 4);

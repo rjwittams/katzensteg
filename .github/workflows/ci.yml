@@ -53,7 +53,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Cache Zig build artifacts
         uses: actions/cache@v4
@@ -76,6 +76,8 @@ jobs:
           python3 scripts/katzensteg/test_image_fastpath_portable.py
           python3 scripts/katzensteg/test_katzensteg_banner.py
           python3 scripts/katzensteg/test_launcher_target.py
+          python3 scripts/katzensteg/test_injected_io.py
+          python3 scripts/katzensteg/test_embed_render_batches.py
           python3 scripts/katzensteg/test_headless_wm.py
           python3 scripts/katzensteg/test_wm_placeholder_host.py
           python3 scripts/katzensteg/test_linux_preload_exports.py

@@ -2,6 +2,7 @@
 .zig-global-cache/
 .zig-global-cache-system/
 zig-out/
+/zig-pkg/
 .codex-tmp/
 /.codex
 /.codex/

@@ -1,17 +1,18 @@
 const std = @import("std");
+const system_io = @import("platform");
 const ClientChannel = @import("client.zig").ClientChannel;
 const control = @import("producer_control.zig");
 
 // Process and transport ownership shared by the desktop and external frontends.
 // External producers have no child: closing one only closes its connection.
 pub const Producer = struct {
-    child: ?std.process.Child = null,
+    child: ?system_io.process.Child = null,
     channel: ClientChannel = .{ .stdio = .{} },
 
-    pub fn spawn(allocator: std.mem.Allocator, executable: []const u8, profile: []const u8, args: []const []const u8) !Producer {
+    pub fn spawn(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, profile: []const u8, args: []const []const u8) !Producer {
         const argv = try buildArgv(allocator, executable, profile, args);
         defer allocator.free(argv);
-        var child = std.process.Child.init(argv, allocator);
+        var child = system_io.process.Child.init(io, argv, allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
@@ -32,14 +33,15 @@ pub const Producer = struct {
         self.channel.closeControl();
     }
 
-    pub fn pollExit(self: *Producer) !?std.process.Child.Term {
+    pub fn pollExit(self: *Producer) !?system_io.process.Child.Term {
         const child = if (self.child) |*child| child else return null;
         if (child.term) |term| return try term;
         try child.waitForSpawn();
-        const result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+        const result = try system_io.posix.waitpid(child.id, std.posix.W.NOHANG);
         if (result.pid == 0) return null;
         const term = termFromStatus(result.status);
         child.term = term;
+        child.child.?.id = null;
         return term;
     }
 
@@ -62,23 +64,24 @@ pub fn buildArgv(allocator: std.mem.Allocator, executable: []const u8, profile: 
 }
 
 pub fn nonblocking(fd: std.posix.fd_t) !void {
-    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    const flags = try system_io.posix.fcntl(fd, std.posix.F.GETFL, 0);
     var typed: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
     typed.NONBLOCK = true;
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
+    _ = try system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed)));
 }
 
-pub fn termFromStatus(status: u32) std.process.Child.Term {
+pub fn termFromStatus(status: u32) system_io.process.Child.Term {
     return if (std.posix.W.IFEXITED(status))
         .{ .Exited = std.posix.W.EXITSTATUS(status) }
     else if (std.posix.W.IFSIGNALED(status))
-        .{ .Signal = std.posix.W.TERMSIG(status) }
+        .{ .Signal = @intFromEnum(std.posix.W.TERMSIG(status)) }
     else if (std.posix.W.IFSTOPPED(status))
-        .{ .Stopped = std.posix.W.STOPSIG(status) }
+        .{ .Stopped = @intFromEnum(std.posix.W.STOPSIG(status)) }
     else
         .{ .Unknown = status };
 }
 
 test "failed executable does not become a producer session" {
-    try std.testing.expectError(error.FileNotFound, Producer.spawn(std.testing.allocator, "/nonexistent/katzensteg", "sonic", &.{}));
+    const io = std.testing.io;
+    try std.testing.expectError(error.FileNotFound, Producer.spawn(io, std.testing.allocator, "/nonexistent/katzensteg", "sonic", &.{}));
 }

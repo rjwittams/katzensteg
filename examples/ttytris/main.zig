@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_io = @import("platform");
 const termscene = @import("termscene");
 const core = @import("core.zig");
 const renderer_mod = @import("renderer.zig");
@@ -7,8 +8,8 @@ fn kittyDeleteAll(writer: anytype) !void {
     try writer.writeAll("\x1b_Gq=2,a=d,d=A;\x1b\\");
 }
 
-fn inputThread(shared: *core.SharedInput) void {
-    var stdin = std.fs.File.stdin().deprecatedReader();
+fn inputThread(io: std.Io, shared: *core.SharedInput) void {
+    var stdin = system_io.fs.File.stdin(io);
     var buf: [16]u8 = undefined;
     while (true) {
         shared.mutex.lock();
@@ -18,13 +19,13 @@ fn inputThread(shared: *core.SharedInput) void {
 
         const count = stdin.read(&buf) catch |err| {
             if (err == error.WouldBlock) {
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                system_io.time.sleep(5 * std.time.ns_per_ms);
                 continue;
             }
             break;
         };
         if (count == 0) {
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            system_io.time.sleep(5 * std.time.ns_per_ms);
             continue;
         }
 
@@ -57,17 +58,19 @@ fn inputThread(shared: *core.SharedInput) void {
     }
 }
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(process_init: std.process.Init) !void {
+    const io = process_init.io;
+    var gpa_state = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(gpa_state.deinit() == .ok);
     const allocator = gpa_state.allocator();
 
-    const stdout_file = std.fs.File.stdout();
-    var writer = stdout_file.deprecatedWriter();
-    const stdin_fd = std.fs.File.stdin().handle;
+    const stdout_file = system_io.fs.File.stdout(io);
+    var writer_state = stdout_file.writerStreaming(&.{});
+    const writer = &writer_state.interface;
+    const stdin_fd = system_io.fs.File.stdin(io).handle;
 
-    const original_termios = try std.posix.tcgetattr(stdin_fd);
-    defer std.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
+    const original_termios = try system_io.posix.tcgetattr(stdin_fd);
+    defer system_io.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
     var raw = original_termios;
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
@@ -75,9 +78,9 @@ pub fn main() !void {
     raw.iflag.IXON = false;
     raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
     raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(stdin_fd, .FLUSH, raw);
+    try system_io.posix.tcsetattr(stdin_fd, .FLUSH, raw);
 
-    if (!try termscene.kitty.detectGraphicsSupport(allocator, writer)) {
+    if (!try termscene.kitty.detectGraphicsSupport(io, allocator, writer)) {
         std.debug.print("ttytris: kitty graphics protocol not detected in this terminal session. Try `zig build termscene-demo` to verify graphics support and scene rendering in this terminal.\n", .{});
         return;
     }
@@ -92,7 +95,8 @@ pub fn main() !void {
     defer renderer.deinit();
 
     var shared = core.SharedInput{};
-    var thread = try std.Thread.spawn(.{}, inputThread, .{&shared});
+    defer shared.mutex.deinit();
+    var thread = try std.Thread.spawn(.{}, inputThread, .{io, &shared});
     defer {
         shared.mutex.lock();
         shared.stop = true;
@@ -100,8 +104,8 @@ pub fn main() !void {
         thread.join();
     }
 
-    var game = core.Game.init(@intCast(std.time.nanoTimestamp()));
-    var timer = try std.time.Timer.start();
+    var game = core.Game.init(@intCast(system_io.time.nanoTimestamp()));
+    var timer = try system_io.time.Timer.start();
     var elapsed_t: f32 = 0;
 
     while (true) {
@@ -118,6 +122,6 @@ pub fn main() !void {
         game.update(dt, input);
         try renderer.render(writer, &game, elapsed_t);
 
-        std.Thread.sleep(@as(u64, @intFromFloat((1.0 / core.fps) * @as(f32, @floatFromInt(std.time.ns_per_s)))));
+        system_io.time.sleep(@as(u64, @intFromFloat((1.0 / core.fps) * @as(f32, @floatFromInt(std.time.ns_per_s)))));
     }
 }
