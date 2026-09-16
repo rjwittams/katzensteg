@@ -164,8 +164,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
     // A local file, or an http(s) page. The default website data store is
     // persistent for this binary (under ~/Library/WebKit), so a login made in
     // one run is still there in the next.
-    private let fileURL: URL
-    private var isFile: Bool { fileURL.isFileURL }
+    private let pageURL: URL
     private let width: Int
     private let height: Int
     private let frameCount: Int
@@ -183,8 +182,8 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
     private var capturing = false
     private var emittedFrames = 0
 
-    init(fileURL: URL, width: Int, height: Int, frameCount: Int, fps: Int) {
-        self.fileURL = fileURL
+    init(pageURL: URL, width: Int, height: Int, frameCount: Int, fps: Int) {
+        self.pageURL = pageURL
         self.width = width
         self.height = height
         self.frameCount = frameCount
@@ -204,7 +203,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
         configuration.userContentController.add(self, name: "luchsConsole")
         configuration.userContentController.addUserScript(
             WKUserScript(source: caretScriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
-        debugLog("luchs-webview-capture \(width)x\(height) page \(fileURL.absoluteString)")
+        debugLog("luchs-webview-capture \(width)x\(height) page \(pageURL.absoluteString)")
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height), configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
@@ -240,15 +239,15 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
         self.window = captureWindow
 
         startInputReader()
-        if isFile {
-            view.loadFileURL(fileURL, allowingReadAccessTo: fileURL.deletingLastPathComponent())
+        if pageURL.isFileURL {
+            view.loadFileURL(pageURL, allowingReadAccessTo: pageURL.deletingLastPathComponent())
         } else {
-            view.load(URLRequest(url: fileURL))
+            view.load(URLRequest(url: pageURL))
         }
         if frameCount > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                 if self?.loaded == false {
-                    fail("timed out loading \(self?.fileURL.absoluteString ?? "html")")
+                    fail("timed out loading \(self?.pageURL.absoluteString ?? "html")")
                 }
             }
         }
@@ -274,7 +273,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
         guard !capturing else { return }
         capturing = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.capture(webView)
+            self?.capture()
         }
     }
 
@@ -345,8 +344,8 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
         if type == "reload" {
             // The page file changed (luchs --watch). A plain load of the same
             // file URL can be served from WebKit's cache, so bypass it.
-            if isFile, let html = try? String(contentsOf: fileURL, encoding: .utf8) {
-                mainView.loadHTMLString(html, baseURL: fileURL)
+            if pageURL.isFileURL, let html = try? String(contentsOf: pageURL, encoding: .utf8) {
+                mainView.loadHTMLString(html, baseURL: pageURL)
             } else {
                 mainView.reloadFromOrigin()
             }
@@ -515,7 +514,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
     // Straight to the active view's responder methods rather than through
     // the window: with a popup open, the window would hand keys to its
     // first responder, the main view, not the popup.
-    private func route(_ event: NSEvent, to view: WKWebView, _ deliver: (NSEvent) -> Void) {
+    private func route(_ event: NSEvent, _ deliver: (NSEvent) -> Void) {
         if traceInput { debugLog("input \(event.type.rawValue) at \(event.locationInWindow) characters \(event.type == .keyDown || event.type == .keyUp ? event.characters ?? "" : "")") }
         deliver(event)
     }
@@ -541,7 +540,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
                 : buttonsDown.contains(3) ? .rightMouseDragged
                 : buttonsDown.isEmpty ? .mouseMoved : .otherMouseDragged
             guard let event = NSEvent.mouseEvent(with: kind, location: windowPoint(x, y), modifierFlags: modifierFlags, timestamp: now, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else { return }
-            route(event, to: view) { event in
+            route(event) { event in
                 switch kind {
                 case .leftMouseDragged: view.mouseDragged(with: event)
                 case .rightMouseDragged: view.rightMouseDragged(with: event)
@@ -568,7 +567,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
             default: down ? .otherMouseDown : .otherMouseUp
             }
             guard let event = NSEvent.mouseEvent(with: kind, location: windowPoint(x, y), modifierFlags: modifierFlags, timestamp: now, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: count, pressure: down ? 1 : 0) else { return }
-            route(event, to: view) { event in
+            route(event) { event in
                 switch kind {
                 case .leftMouseDown: view.mouseDown(with: event)
                 case .leftMouseUp: view.mouseUp(with: event)
@@ -589,7 +588,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
             let primaryHeight = NSScreen.screens.first?.frame.height ?? CGFloat(height)
             quartz.location = CGPoint(x: window.frame.minX + x, y: primaryHeight - (window.frame.minY + CGFloat(height) - y))
             guard let event = NSEvent(cgEvent: quartz) else { return }
-            route(event, to: view) { event in view.scrollWheel(with: event) }
+            route(event) { event in view.scrollWheel(with: event) }
         case "key_down", "key_up", "text":
             deliverKey(message, type: type, to: view, now: now)
         default:
@@ -633,7 +632,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
     private func sendKey(_ kind: NSEvent.EventType, characters: String, ignoringModifiers: String, keyCode: UInt16, flags: NSEvent.ModifierFlags, isRepeat: Bool, to view: WKWebView, now: TimeInterval) {
         guard let window else { return }
         guard let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: flags, timestamp: now, windowNumber: window.windowNumber, context: nil, characters: characters, charactersIgnoringModifiers: ignoringModifiers, isARepeat: isRepeat, keyCode: keyCode) else { return }
-        route(event, to: view) { event in
+        route(event) { event in
             if kind == .keyDown { view.keyDown(with: event) } else { view.keyUp(with: event) }
         }
     }
@@ -694,11 +693,13 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
             1073741882: 122, 1073741883: 120, 1073741884: 99, 1073741885: 118, 1073741886: 96, 1073741887: 97,
             1073741888: 98, 1073741889: 100, 1073741890: 101, 1073741891: 109, 1073741892: 103, 1073741893: 111,
         ]
-        return table[keycode] ?? 0
+        // No entry: a code no shortcut is bound to. 0 would be kVK_ANSI_A, and an
+        // unknown key could then fire an A-keyed shortcut such as select all.
+        return table[keycode] ?? 0xFFFF
     }
 
-    private func capture(_ webView: WKWebView) {
-        let webView = activeView ?? webView
+    private func capture() {
+        guard let webView = activeView else { return }
         let tickMilliseconds = Int(Double(emittedFrames) * frameInterval * 1000.0)
         let script = """
         (() => {
@@ -774,8 +775,7 @@ private final class CaptureController: NSObject, WKNavigationDelegate, WKUIDeleg
             exit(0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + frameInterval) { [weak self] in
-            guard let self, let webView = self.webView else { return }
-            self.capture(webView)
+            self?.capture()
         }
     }
 }
@@ -809,7 +809,7 @@ private enum LuchsWebviewCapture {
             }
         }
 
-        let controller = CaptureController(fileURL: url, width: width, height: height, frameCount: frameCount, fps: fps)
+        let controller = CaptureController(pageURL: url, width: width, height: height, frameCount: frameCount, fps: fps)
         controller.run()
     }
 }
