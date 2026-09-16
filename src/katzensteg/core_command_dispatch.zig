@@ -78,7 +78,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             var rect = c.rect;
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onUpdateTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onUpdateTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.pixels) |buf| @ptrCast(buf.ptr) else null, c.pitch);
             }
         },
@@ -86,7 +86,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             var rect = c.rect;
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onUpdateYuvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onUpdateYuvTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uplane) |buf| @ptrCast(buf.ptr) else null, c.upitch, if (c.vplane) |buf| @ptrCast(buf.ptr) else null, c.vpitch);
             }
         },
@@ -94,7 +94,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             var rect = c.rect;
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onUpdateNvTexture(&rt.logger, &rt.backend.?, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onUpdateNvTextureBatch(&rt.logger, c.texture, if (rect) |*r| r else null, if (c.yplane) |buf| @ptrCast(buf.ptr) else null, c.ypitch, if (c.uvplane) |buf| @ptrCast(buf.ptr) else null, c.uvpitch);
             }
         },
@@ -105,21 +105,21 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         .unlock_texture => |c| {
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onUnlockTexture(&rt.logger, &rt.backend.?, c.texture);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onUnlockTextureBatch(&rt.logger, c.texture);
             }
         },
         .set_texture_color_mod => |c| {
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onSetTextureColorMod(&rt.logger, &rt.backend.?, c.texture, c.r, c.g, c.b);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onSetTextureColorModBatch(c.texture, c.r, c.g, c.b);
             }
         },
         .set_texture_alpha_mod => |c| {
             if (rt.active and rt.backend != null) {
                 rt.frame_builder.onSetTextureAlphaMod(&rt.logger, &rt.backend.?, c.texture, c.a);
-            } else if (rt.active and rt.batch_sink != null) {
+            } else if (rt.active and (rt.batch_sink != null or rt.publisher != null)) {
                 rt.frame_builder.onSetTextureAlphaModBatch(c.texture, c.a);
             }
         },
@@ -152,6 +152,10 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
             rt.frame_builder.onRenderSetClipRect(c.renderer, if (rect) |*r| r else null);
         },
         .render_present => |c| {
+            if (rt.publisher != null) {
+                rt.renderPublishedPresent(c.renderer);
+                return;
+            }
             if (rt.batch_sink != null) {
                 rt.renderBatchPresent(c.renderer);
                 return;

@@ -86,6 +86,20 @@ jobs:
           python3 scripts/katzensteg/test_verify_review_posted.py
           python3 scripts/katzensteg/test_vulkan_linux_wiring.py
 
+      - name: Prepare optional Jackstay dependency
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.0
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          python3 scripts/katzensteg/prepare_jackstay.py --prefix /tmp/ks-jackstay
+
+      - name: Build and test Jackstay connectors
+        run: |
+          zig build -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
+          zig build test -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
+          python3 scripts/katzensteg/test_jackstay.py
+          python3 scripts/katzensteg/test_injected_io.py
+
   claude-plugin:
     name: Claude plugin unit tests
     runs-on: ubuntu-latest

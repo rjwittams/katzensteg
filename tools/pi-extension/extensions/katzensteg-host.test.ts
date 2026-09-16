@@ -168,6 +168,17 @@ test(
 			);
 			assert.equal((await observation)?.width, 1);
 			assert.equal(frameCount, 1);
+			socket.write('{"type":"presentation_status","input_supported":false}\n');
+			while (!statuses.includes("observation only")) {
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			await assert.rejects(
+				producer.game.act([{ type: "key", key: "escape" }]),
+				/Observation-only/,
+			);
+			producer.sendInput({ type: "input", marker: "unsupported" });
+			// Shutdown must be the next message: neither agent nor human input was sent.
+
 			producer.stop("test");
 			assert.equal((await next()).type, "shutdown");
 			assert.equal(producer.ready, false);

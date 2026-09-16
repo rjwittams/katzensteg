@@ -1,4 +1,5 @@
 const std = @import("std");
+const jackstay = @import("jackstay");
 const system_io = @import("platform");
 const builtin = @import("builtin");
 const termscene = @import("termscene");
@@ -102,6 +103,7 @@ const PayloadBufferPool = @import("replay_payloads.zig").Payloads;
 
 fn presentationStatusEqual(a: render_batch_protocol.PresentationStatusView, b: render_batch_protocol.PresentationStatusView) bool {
     return std.mem.eql(u8, a.window_id, b.window_id) and
+        a.input_supported == b.input_supported and
         a.ready_to_show == b.ready_to_show and
         optionalEqual(render_batch_protocol.SourcePixels, a.source_px, b.source_px) and
         optionalEqual(render_batch_protocol.PresentationRectCells, a.effective_rect_cells, b.effective_rect_cells);
@@ -143,6 +145,10 @@ pub const Runtime = struct {
     blocking_trace_settings: blocking_trace.Settings = .{},
     image_gc: bool = false,
     input_enabled: bool = false,
+    input_supported: bool = true,
+    host_closed: bool = false,
+    publisher: ?*jackstay.Publisher = null,
+    publication_sequence: u64 = 0,
     input_claimed: bool = false,
     input_claim_focus: bool = false,
     dump_composites: bool = false,
@@ -190,10 +196,22 @@ pub const Runtime = struct {
     file_transport_max_bytes: u64 = config_mod.default_file_transport_max_bytes,
 
     fn init() Runtime {
+        return initWithInputSupport(true);
+    }
+
+    pub fn initMediaSource() Runtime {
+        return initWithInputSupport(false);
+    }
+
+    fn initWithInputSupport(input_supported: bool) Runtime {
         const io = preload_io.io();
         const allocator = std.heap.c_allocator;
         const logger = Logger.init(allocator);
-        const config = config_mod.loadRuntimeConfig(io, allocator);
+        var config = config_mod.loadRuntimeConfig(io, allocator);
+        if (!input_supported) {
+            config.input_enabled = false;
+            config.intercept_mode = .sync_compose;
+        }
         const bg_only = std.c.getenv("KATZENSTEG_BG_ONLY") != null;
         const stats = config.stats;
         const debug_protocol_replies = config.debug_protocol_replies;
@@ -205,6 +223,7 @@ pub const Runtime = struct {
         const debug_composite = config.debug_composite;
         const trace_blocking = blocking_trace.settingsFromEnv();
         var runtime = Runtime{
+            .input_supported = input_supported,
             .io = io,
             .observation_enabled = std.c.getenv("KATZENSTEG_OBSERVE") != null,
             .allocator = allocator,
@@ -273,6 +292,21 @@ pub const Runtime = struct {
                 }
                 log.info("whiskers push registered producer={s} display={s}", .{ client.producer_id, client.display_name });
             }
+        }
+        if (std.c.getenv("KATZENSTEG_PUBLISH")) |path| {
+            if (jackstay.enabled) {
+                runtime.publisher = jackstay.Publisher.create(io, allocator, std.mem.span(path), .{}) catch |err| {
+                    log.err("Jackstay publisher init failed: {any}", .{err});
+                    return runtime;
+                };
+                runtime.active = true;
+                runtime.input_enabled = false;
+                runtime.input_claimed = false;
+                runtime.input_supported = false;
+                runtime.output_profile_name = "jackstay";
+                log.info("Jackstay publication ready: {s}", .{std.mem.span(path)});
+            } else log.err("Jackstay support is disabled", .{});
+            return runtime;
         }
         const presentation_options = presentationOptionsFromConfig(config);
         if (presentation_options.batch_enabled) {
@@ -438,6 +472,14 @@ pub const Runtime = struct {
         self.queue_cond.signal();
         self.queue_mutex.unlock();
         if (self.worker_thread) |thread| thread.join();
+        if (jackstay.enabled) if (self.publisher) |publisher| {
+            publisher.close() catch |err| {
+                // The stopped owner must remain allocated if remote leases have
+                // not retired. No thread can execute unloaded KS code here.
+                log.err("Jackstay cleanup incomplete, retaining storage owner: {any}", .{err});
+            };
+            self.publisher = null;
+        };
         if (self.whiskers_client) |*client| client.deinit();
         for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);
         self.queue.deinit(self.allocator);
@@ -631,6 +673,10 @@ pub const Runtime = struct {
         return routeTerminalRendering(self.window_policy);
     }
 
+    pub fn captureEnabled(self: *const Runtime) bool {
+        return self.publisher != null or self.terminalRenderingEnabled();
+    }
+
     pub fn realRenderEnabled(self: *const Runtime) bool {
         return routeRealRendering(self.window_policy);
     }
@@ -684,6 +730,7 @@ pub const Runtime = struct {
     }
 
     pub fn shouldCaptureExternalFrame(self: *Runtime) bool {
+        if (self.active and self.publisher != null) return self.shouldPresent();
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
             self.lockPresentation("should_capture_external_frame");
             defer self.presentation_mutex.unlock();
@@ -706,6 +753,13 @@ pub const Runtime = struct {
     }
 
     pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+        if (jackstay.enabled) if (self.publisher != null) {
+            self.lockPresentation("publish_external_frame");
+            defer self.presentation_mutex.unlock();
+            const frame = self.frame_builder.externalContentFrame(&self.logger, width, height, format, pixels, self.cursor_state.snapshot()) orelse return;
+            self.publishContent(frame.width, frame.height, frame.rgba);
+            return;
+        };
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
             self.lockPresentation("present_external_framebuffer");
             defer self.presentation_mutex.unlock();
@@ -713,9 +767,10 @@ pub const Runtime = struct {
             const start_ns = system_io.time.nanoTimestamp();
             self.queuePendingBatchPresentationReset();
             self.placeholder_scene.valid = false;
-            self.observation.pixels.clearRetainingCapacity(); // Positioned external capture has no observation yet.
             var output_writer = self.batch_writer.?.writerStreaming(&.{});
-            self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, &output_writer.interface);
+            if (self.frame_builder.renderExternalFramebufferBatch(&self.logger, &self.batch_sink.?, width, height, format, pixels, &output_writer.interface)) |frame| {
+                if (self.batch_sink.?.placeholder == null and self.observation_enabled) self.observation.retain(self.allocator, frame.width, frame.height, frame.rgba) catch {};
+            }
             var virtual_tty = self.batchVirtualTty();
             const layout = self.frame_builder.presentationLayoutForExternalFramebuffer(&virtual_tty);
             self.updateBatchInputTargetFromLayout(&self.batch_sink.?, layout);
@@ -786,7 +841,7 @@ pub const Runtime = struct {
             switch (job) {
                 .framebuffer => |fb| self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {},
                 .scene => {
-                    if (self.frame_builder.buildObservationFrame(&self.logger, renderer, self.cursor_state.snapshot())) |fb| {
+                    if (self.frame_builder.buildContentFrame(&self.logger, renderer, self.cursor_state.snapshot())) |fb| {
                         self.observation.retain(self.allocator, fb.width, fb.height, fb.rgba) catch {};
                     } else |_| self.observation.pixels.clearRetainingCapacity();
                 },
@@ -801,6 +856,38 @@ pub const Runtime = struct {
         const duration = system_io.time.nanoTimestamp() - start_ns;
         self.traceBlockingSpan("batch_present", "render_batch_present_locked", duration);
         self.notePresentDuration(duration);
+    }
+
+    pub fn renderPublishedPresent(self: *Runtime, renderer: core.CoreHandle) void {
+        if (jackstay.enabled) {
+            if (!self.active or self.publisher == null) return;
+            self.lockPresentation("publish_renderer");
+            defer self.presentation_mutex.unlock();
+            defer self.frame_builder.finishContentFrame(renderer);
+            if (!self.shouldPresent()) return;
+            var frame = self.frame_builder.buildContentFrame(&self.logger, renderer, self.cursor_state.snapshot()) catch |err| {
+                log.warn("Jackstay composition failed: {any}", .{err});
+                return;
+            };
+            defer frame.deinit(self.allocator);
+            self.publishContent(frame.width, frame.height, frame.rgba);
+        }
+    }
+
+    fn publishContent(self: *Runtime, width: i32, height: i32, pixels: []const u8) void {
+        if (jackstay.enabled) {
+            self.publication_sequence +%= 1;
+            _ = self.publisher.?.publish(.{
+                .width = @intCast(width),
+                .height = @intCast(height),
+                .stride = @as(u32, @intCast(width)) * 4,
+                .format = .rgba8,
+                .pixels = pixels,
+                .sequence = self.publication_sequence,
+                .clock = .unix_time,
+                .timestamp_ns = @intCast(@max(0, system_io.time.nanoTimestamp())),
+            }) catch |err| log.warn("Jackstay publication failed: {any}", .{err});
+        }
     }
 
     fn buildPlaceholderJob(self: *Runtime, renderer: core.CoreHandle) !PresentJob {
@@ -820,7 +907,9 @@ pub const Runtime = struct {
         self.writeBatchPresentationStatusView(status);
     }
 
-    fn writeBatchPresentationStatusView(self: *Runtime, status: render_batch_protocol.PresentationStatusView) void {
+    fn writeBatchPresentationStatusView(self: *Runtime, value: render_batch_protocol.PresentationStatusView) void {
+        var status = value;
+        status.input_supported = self.input_supported;
         if (self.last_batch_presentation_status) |previous| {
             if (presentationStatusEqual(previous, status)) return;
         }
@@ -891,7 +980,10 @@ pub const Runtime = struct {
                     return;
                 },
             };
-            if (n == 0) return;
+            if (n == 0) {
+                self.host_closed = true;
+                return;
+            }
             for (buf[0..n]) |byte| {
                 if (byte == '\n') {
                     self.processBatchControlLine(self.batch_control_line.items);
@@ -1107,6 +1199,7 @@ pub const Runtime = struct {
                 self.detachBatchWindow(sink, "main");
             },
             .shutdown => {
+                self.host_closed = true;
                 self.detachBatchWindow(sink, "main");
             },
         }
@@ -2584,7 +2677,6 @@ test "placeholder presentation uses target pixels without changing source coordi
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "s=2,v=2,i=777") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\"source_px\":{\"w\":4,\"h\":4}") != null);
 }
-
 
 test "synchronous external capture receives attach without an SDL renderer or input polling" {
     const io = std.testing.io;

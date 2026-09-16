@@ -43,6 +43,7 @@ pub const Detached = struct {
 pub const PresentationStatus = struct {
     window_id: []const u8,
     ready_to_show: bool = false,
+    input_supported: bool = true,
     source_px: ?SourcePixels = null,
     effective_rect_cells: ?PresentationRectCells = null,
 
@@ -116,6 +117,7 @@ pub fn parsePeerMessage(allocator: std.mem.Allocator, line: []const u8) !PeerMes
         return .{ .presentation_status = .{
             .window_id = window_id,
             .ready_to_show = if (root.get("ready_to_show")) |value| jsonBool(value) else false,
+            .input_supported = if (root.get("input_supported")) |value| jsonBool(value) else true,
             .source_px = if (root.get("source_px")) |value| try parseSourcePixels(value) else null,
             .effective_rect_cells = if (root.get("effective_rect_cells")) |value| try parseRectCells(value) else null,
         } };
@@ -236,6 +238,20 @@ test "attach protocol parses presentation status from producer" {
     const status = message.presentation_status;
     try std.testing.expectEqualStrings("main", status.window_id);
     try std.testing.expect(status.ready_to_show);
+    try std.testing.expect(status.input_supported);
     try std.testing.expectEqual(SourcePixels{ .w = 320, .h = 240 }, status.source_px.?);
     try std.testing.expectEqual(PresentationRectCells{ .row = 4, .col = 2, .rows = 18, .cols = 64 }, status.effective_rect_cells.?);
+}
+
+test "observation-only capability survives the producer protocol" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try render_batch_protocol.writePresentationStatusJsonl(&out.writer, .{
+        .window_id = "main",
+        .ready_to_show = true,
+        .input_supported = false,
+    });
+    var message = try parsePeerMessage(std.testing.allocator, out.written());
+    defer message.deinit(std.testing.allocator);
+    try std.testing.expect(!message.presentation_status.input_supported);
 }

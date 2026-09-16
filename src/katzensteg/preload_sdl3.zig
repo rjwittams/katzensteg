@@ -709,7 +709,7 @@ pub export fn ks_SDL_RenderClear(renderer: ?*sdl.SDL_Renderer) callconv(.c) sdl.
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderClear(renderer) else true;
     if (rc) {
         traceLimited(rt, &trace_render_clear, "SDL_RenderClear renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderClear(rt, renderer),
                 .queued_replay => sink.dispatchCommand(rt, .{ .render_clear = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
@@ -736,7 +736,7 @@ pub export fn ks_SDL_RenderTexture(renderer: ?*sdl.SDL_Renderer, texture: ?*sdl.
         traceLimited(rt, &trace_render_copy, "SDL_RenderTexture renderer={x} texture={x} src={s} dst={s}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, if (srcrect == null) "null" else "set", if (dstrect == null) "null" else "set" });
         const src_rect = if (srcrect) |r| sdl.SDL_Rect{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .w = @intFromFloat(r.w), .h = @intFromFloat(r.h) } else null;
         const dst_rect = if (dstrect) |r| sdl.SDL_Rect{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .w = @intFromFloat(r.w), .h = @intFromFloat(r.h) } else null;
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderCopy(rt, renderer, texture, if (src_rect) |*r| r else null, if (dst_rect) |*r| r else null),
                 .queued_replay => sink.dispatchCommand(rt, .{ .render_copy = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .texture = sdl_adapter.handleFromPtr(texture), .src = sdl_adapter.rectFromSdl(if (src_rect) |*r| r else null), .dst = sdl_adapter.rectFromSdl(if (dst_rect) |*r| r else null) } }),
@@ -754,7 +754,7 @@ pub export fn ks_SDL_RenderTextureRotated(renderer: ?*sdl.SDL_Renderer, texture:
         const src_rect = if (srcrect) |r| sdl.SDL_Rect{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .w = @intFromFloat(r.w), .h = @intFromFloat(r.h) } else null;
         const dst_rect = if (dstrect) |r| sdl.SDL_Rect{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .w = @intFromFloat(r.w), .h = @intFromFloat(r.h) } else null;
         const center_i = if (center) |p| sdl.SDL_Point{ .x = @intFromFloat(p.x), .y = @intFromFloat(p.y) } else null;
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderCopyEx(rt, renderer, texture, if (src_rect) |*r| r else null, if (dst_rect) |*r| r else null, angle, if (center_i) |*p| p else null, flip),
                 .queued_replay => sink.dispatchCommand(rt, .{ .render_copy_ex = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .texture = sdl_adapter.handleFromPtr(texture), .src = sdl_adapter.rectFromSdl(if (src_rect) |*r| r else null), .dst = sdl_adapter.rectFromSdl(if (dst_rect) |*r| r else null), .angle = angle, .center = sdl_adapter.pointFromSdl(if (center_i) |*p| p else null), .flip = flip } }),
@@ -769,7 +769,7 @@ pub export fn ks_SDL_RenderGeometryRaw(renderer: ?*sdl.SDL_Renderer, texture: ?*
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderGeometryRaw(renderer, texture, xy, xy_stride, color, color_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices) else true;
     if (rc) {
         traceLimited(rt, &trace_render_geometry_raw, "SDL_RenderGeometryRaw renderer={x} texture={x} vertices={d} indices={d} size_indices={d}", .{ if (renderer) |p| @intFromPtr(p) else 0, if (texture) |p| @intFromPtr(p) else 0, num_vertices, num_indices, size_indices });
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderGeometryRaw(rt, renderer, texture, xy, xy_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices),
                 .queued_replay => sink.enqueueRenderGeometryRaw(rt, renderer, texture, xy, xy_stride, uv, uv_stride, num_vertices, indices, num_indices, size_indices),
@@ -784,7 +784,7 @@ pub export fn ks_SDL_RenderFillRect(renderer: ?*sdl.SDL_Renderer, rect: ?*const 
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderFillRect(renderer, rect) else true;
     if (rc) {
         const rect_i = if (rect) |r| sdl.SDL_Rect{ .x = @intFromFloat(r.x), .y = @intFromFloat(r.y), .w = @intFromFloat(r.w), .h = @intFromFloat(r.h) } else null;
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             switch (rt.intercept_mode) {
                 .sync_compose => sink.onRenderFillRect(rt, renderer, if (rect_i) |*r| r else null),
                 .queued_replay => sink.dispatchCommand(rt, .{ .render_fill_rect = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .rect = sdl_adapter.rectFromSdl(if (rect_i) |*r| r else null) } }),
@@ -798,7 +798,7 @@ pub export fn ks_SDL_RenderPoint(renderer: ?*sdl.SDL_Renderer, x: f32, y: f32) c
     const rt = runtime.get();
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderPoint(renderer, x, y) else true;
     if (rc) {
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             const x_i: c_int = @intFromFloat(x);
             const y_i: c_int = @intFromFloat(y);
             switch (rt.intercept_mode) {
@@ -814,7 +814,7 @@ pub export fn ks_SDL_RenderLine(renderer: ?*sdl.SDL_Renderer, x1: f32, y1: f32, 
     const rt = runtime.get();
     const rc = if (rt.realRenderEnabled()) real_sdl.SDL_RenderLine(renderer, x1, y1, x2, y2) else true;
     if (rc) {
-        if (rt.terminalRenderingEnabled()) {
+        if (rt.captureEnabled()) {
             const x1_i: c_int = @intFromFloat(x1);
             const y1_i: c_int = @intFromFloat(y1);
             const x2_i: c_int = @intFromFloat(x2);
@@ -855,7 +855,7 @@ pub export fn ks_SDL_SetRenderClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*con
 pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) sdl.SDL_bool {
     const rt = runtime.get();
     traceLimited(rt, &trace_render_present, "SDL_RenderPresent renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
-    if (rt.terminalRenderingEnabled()) {
+    if (rt.captureEnabled()) {
         switch (rt.intercept_mode) {
             .sync_compose => sink.onRenderPresent(rt, renderer),
             .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),

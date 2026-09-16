@@ -5,22 +5,33 @@ pub const Destination = union(enum) {
     standalone,
     stdio,
     jsonl: []const u8,
+    jackstay: []const u8,
 
     pub fn resolve(allocator: std.mem.Allocator, explicit_stdio: bool, target: ?[]const u8, home: ?[]const u8) !Destination {
         if (explicit_stdio) return .stdio;
         const value = target orelse return .standalone;
-        if (!std.mem.startsWith(u8, value, "jsonl:")) return error.UnsupportedTarget;
-        const address = value[6..];
+        const publication = std.mem.startsWith(u8, value, "jackstay:");
+        if (!publication and !std.mem.startsWith(u8, value, "jsonl:")) return error.UnsupportedTarget;
+        if (publication) try @import("jackstay").checkAvailable();
+        const address = value[if (publication) @as(usize, 9) else 6..];
         if (address.len == 0 or std.mem.indexOfScalar(u8, address, 0) != null) return error.InvalidTargetAddress;
         const path = if (std.mem.startsWith(u8, address, "~/"))
             try std.fs.path.join(allocator, &.{ home orelse return error.MissingHome, address[2..] })
         else
             try allocator.dupe(u8, address);
+        if (publication) {
+            if (!std.fs.path.isAbsolute(path)) {
+                allocator.free(path);
+                return error.AbsoluteEndpointRequired;
+            }
+            return .{ .jackstay = path };
+        }
         return .{ .jsonl = path };
     }
 
     pub fn deinit(self: Destination, allocator: std.mem.Allocator) void {
         if (self == .jsonl) allocator.free(self.jsonl);
+        if (self == .jackstay) allocator.free(self.jackstay);
     }
 };
 
@@ -94,7 +105,11 @@ test "destination selection preserves standalone and explicit stdio precedence" 
     const remote = try Destination.resolve(a, false, "jsonl:~/wm.sock", "/home/test");
     defer remote.deinit(a);
     try std.testing.expectEqualStrings("/home/test/wm.sock", remote.jsonl);
-    try std.testing.expectError(error.UnsupportedTarget, Destination.resolve(a, false, "jackstay:/tmp/s", null));
+    if (@import("jackstay").enabled) {
+        const publication = try Destination.resolve(a, false, "jackstay:/tmp/s", null);
+        defer publication.deinit(a);
+        try std.testing.expectEqualStrings("/tmp/s", publication.jackstay);
+    } else try std.testing.expectError(error.JackstayUnavailable, Destination.resolve(a, false, "jackstay:/tmp/s", null));
     try std.testing.expectError(error.UnsupportedTarget, Destination.resolve(a, false, "", null));
     try std.testing.expectError(error.InvalidTargetAddress, Destination.resolve(a, false, "jsonl:", null));
 }

@@ -28,7 +28,7 @@ test('parseCellAspect reads the cell size from health', () => {
 test('parseSessions keeps well-formed sessions only', () => {
   const text = JSON.stringify([
     { id: 1, title: 'mi2', image_id: 100000, state: 'ready', source_px: { w: 640, h: 480 }, grid: { cols: 40, rows: 15 } },
-    { id: 2, image_id: 100001, state: 'closing', source_px: null, grid: null },
+    { id: 2, input_supported: false, image_id: 100001, state: 'closing', source_px: null, grid: null },
     { id: 3, image_id: 1, state: 'weird' },
     { id: true, image_id: 1, state: 'ready' },
     'nope',
@@ -40,6 +40,8 @@ test('parseSessions keeps well-formed sessions only', () => {
   assert.deepEqual(s[0]!.grid, { cols: 40, rows: 15 })
   assert.equal(s[1]!.title, '2')
   assert.equal(s[1]!.state, 'closing')
+  assert.equal(s[0]!.input_supported, true)
+  assert.equal(s[1]!.input_supported, false)
   assert.equal(s[1]!.source_px, null)
   assert.deepEqual(parseSessions('garbage'), [])
 })

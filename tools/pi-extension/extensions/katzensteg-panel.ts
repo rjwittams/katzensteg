@@ -972,6 +972,7 @@ class LayoutOnlyProducer implements ProducerConnection {
 }
 
 export class KatzenstegProducer implements ProducerConnection {
+	private inputSupported = true;
 	get ready(): boolean {
 		return (
 			!!this.control &&
@@ -981,8 +982,11 @@ export class KatzenstegProducer implements ProducerConnection {
 		);
 	}
 	readonly game = new GameInteraction({
+		inputSupported: () => this.inputSupported,
 		observe: (signal) => this.observe(signal),
 		input: (message) => {
+			if (!this.inputSupported)
+				throw new Error("Observation-only source: input is unsupported");
 			if (!this.ready) throw new Error("Game panel is not attached");
 			this.sendInput(message);
 		},
@@ -1225,7 +1229,7 @@ export class KatzenstegProducer implements ProducerConnection {
 		// Only the live producer needs to forward input to the actual katzensteg
 		// child; layout-only is a debug stand-in. Drop silently when the child
 		// is gone (panel closing) — no need to spam logs in that case.
-		if (!this.ready) return;
+		if (!this.ready || !this.inputSupported) return;
 		if (!this.attached) return;
 		this.writeControl(`${JSON.stringify(message)}\n`);
 	}
@@ -1308,6 +1312,11 @@ export class KatzenstegProducer implements ProducerConnection {
 			lines++;
 			try {
 				const reply = JSON.parse(line);
+				if (reply?.type === "presentation_status") {
+					this.inputSupported = reply.input_supported !== false;
+					if (!this.inputSupported) this.callbacks.onStatus("observation only");
+					continue;
+				}
 				if (reply?.type === "observation") {
 					this.pendingObservations.get(reply.request_id)?.finish(reply);
 					continue;

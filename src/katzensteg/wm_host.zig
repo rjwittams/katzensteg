@@ -245,6 +245,7 @@ pub const StatusBandOptions = struct {
 };
 
 pub const WmPresentationStatus = struct {
+    input_supported: bool = true,
     seen: bool = false,
     ready_to_show: bool = false,
     source_px: ?render_batch_protocol.SourcePixels = null,
@@ -1642,6 +1643,7 @@ pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
 
     if (options.presentation_status.seen) {
         const status = options.presentation_status;
+        if (!status.input_supported) try writeStatusPart(writer, &remaining, " observation-only");
         const ready = try std.fmt.bufPrint(&scratch, " ready={}", .{status.ready_to_show});
         try writeStatusPart(writer, &remaining, ready);
         if (status.source_px) |source| {
@@ -1803,6 +1805,7 @@ fn presentationStatusFromPeer(status: attach_protocol.PresentationStatus) WmPres
     return .{
         .seen = true,
         .ready_to_show = status.ready_to_show,
+        .input_supported = status.input_supported,
         .source_px = status.source_px,
         .effective_rect_cells = status.effective_rect_cells,
     };
@@ -1992,7 +1995,7 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
 }
 
 fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
-    if (!sessionIsVisible(session)) return;
+    if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
     const content = session.focusedContent();
     const content_rect = content.toPresentationRectCells();
@@ -2017,7 +2020,7 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
 }
 
 fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, events: *ProtocolEventLog, logger: *Logger) !void {
-    if (!sessionIsVisible(session)) return;
+    if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
     var local_bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer local_bytes.deinit();

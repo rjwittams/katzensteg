@@ -284,7 +284,7 @@ async function pickPanel($: $, wanted: unknown): Promise<Session | string> {
 }
 
 const describe = (s: Session) =>
-  `${s.id}: ${s.title} · ${s.state}${s.source_px ? ` · ${s.source_px.w}x${s.source_px.h} px` : ''}${s.grid ? ` · grid ${s.grid.cols}x${s.grid.rows}` : ''}`
+  `${s.id}: ${s.title}${s.input_supported ? '' : ' · observation only'} · ${s.state}${s.source_px ? ` · ${s.source_px.w}x${s.source_px.h} px` : ''}${s.grid ? ` · grid ${s.grid.cols}x${s.grid.rows}` : ''}`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -353,7 +353,7 @@ export const register: Register = on => {
     }
     if (verb === 'list') {
       await refresh($)
-      const rows = sessions.map(s => `${s.id.padEnd(4)} ${s.state.padEnd(8)} image ${s.image_id} ${s.source_px ? `${s.source_px.w}x${s.source_px.h}` : ''} ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'no grid'} ${hidden.has(s.id) ? '(hidden)' : ''} ${s.title}`)
+      const rows = sessions.map(s => `${s.id.padEnd(4)} ${s.state.padEnd(8)} image ${s.image_id} ${s.source_px ? `${s.source_px.w}x${s.source_px.h}` : ''} ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'no grid'} ${hidden.has(s.id) ? '(hidden)' : ''} ${s.title}${s.input_supported ? '' : ' (observation only)'}`)
       return { text: rows.join('\n') || 'katzensteg: no sessions' }
     }
     return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | list | host | stop' }
