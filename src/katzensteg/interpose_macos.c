@@ -68,6 +68,7 @@ extern int ks_SDL_WaitEvent(union SDL_Event *);
 extern int ks_SDL_WaitEventTimeout(union SDL_Event *, int);
 extern int ks_SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern const unsigned char *ks_SDL_GetKeyboardState(int *);
+extern int ks_SDL_GetModState(void);
 extern unsigned int ks_SDL_GetMouseState(int *, int *);
 extern unsigned int ks_SDL_GetRelativeMouseState(int *, int *);
 extern int ks_SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
@@ -134,6 +135,7 @@ extern int SDL_WaitEventTimeout(union SDL_Event *, int);
 extern int SDL_PeepEvents(union SDL_Event *, int, int, unsigned int, unsigned int);
 extern void SDL_PumpEvents(void);
 extern const unsigned char *SDL_GetKeyboardState(int *);
+extern int SDL_GetModState(void);
 extern unsigned int SDL_GetMouseState(int *, int *);
 extern unsigned int SDL_GetRelativeMouseState(int *, int *);
 extern int SDL_UpperBlit(struct SDL_Surface *, const struct SDL_Rect *, struct SDL_Surface *, struct SDL_Rect *);
@@ -198,6 +200,7 @@ DYLD_INTERPOSE(ks_SDL_WaitEvent, SDL_WaitEvent)
 DYLD_INTERPOSE(ks_SDL_WaitEventTimeout, SDL_WaitEventTimeout)
 DYLD_INTERPOSE(ks_SDL_PeepEvents, SDL_PeepEvents)
 DYLD_INTERPOSE(ks_SDL_GetKeyboardState, SDL_GetKeyboardState)
+DYLD_INTERPOSE(ks_SDL_GetModState, SDL_GetModState)
 DYLD_INTERPOSE(ks_SDL_GetMouseState, SDL_GetMouseState)
 DYLD_INTERPOSE(ks_SDL_GetRelativeMouseState, SDL_GetRelativeMouseState)
 DYLD_INTERPOSE(ks_SDL_UpperBlit, SDL_UpperBlit)

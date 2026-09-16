@@ -98,6 +98,17 @@ jobs:
           zig build -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
           zig build test -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
           python3 scripts/katzensteg/test_jackstay.py
+          git clone --no-checkout https://github.com/flotilla-org/jackstay.git /tmp/ks-jackstay-reference
+          git -C /tmp/ks-jackstay-reference checkout --detach "$(python3 -c 'import json; print(json.load(open("profiles/jackstay-dependency.json"))["revision"])')"
+          # ABI 0.7 viewer fixture leaves SDL union fields uninitialized on GCC.
+          git -C /tmp/ks-jackstay-reference apply "$GITHUB_WORKSPACE/scripts/katzensteg/fixtures/jackstay-viewer-self-test.patch"
+          cmake -S /tmp/ks-jackstay-reference/tools/capture-viewer-sdl -B /tmp/ks-reference-viewer \
+            -DJACKSTAY_LIB=/tmp/ks-jackstay/lib/libjackstay.so \
+            -DJACKSTAY_INCLUDE_DIR=/tmp/ks-jackstay/include
+          cmake --build /tmp/ks-reference-viewer --target capture-viewer-sdl
+          KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
+            JACKSTAY_REFERENCE_VIEWER=/tmp/ks-reference-viewer/capture-viewer-sdl \
+            python3 scripts/katzensteg/test_jackstay_input.py
           python3 scripts/katzensteg/test_injected_io.py
 
   claude-plugin:

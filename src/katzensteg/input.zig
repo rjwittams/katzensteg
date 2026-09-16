@@ -28,6 +28,7 @@ pub const KeyEvent = struct {
     keycode: i32,
     scancode: i32,
     mods: u16 = 0,
+    repeat: bool = false,
 };
 
 pub const TextEvent = struct {
@@ -48,14 +49,20 @@ pub const TextEvent = struct {
 pub const MouseMotionEvent = struct {
     x: i32,
     y: i32,
+    precise_x: ?f32 = null,
+    precise_y: ?f32 = null,
     xrel: i32,
     yrel: i32,
+    precise_xrel: ?f32 = null,
+    precise_yrel: ?f32 = null,
     buttons: u32 = 0,
 };
 
 pub const MouseButtonEvent = struct {
     x: i32,
     y: i32,
+    precise_x: ?f32 = null,
+    precise_y: ?f32 = null,
     button: u8,
     pressed: bool,
     clicks: u8 = 1,
@@ -65,21 +72,31 @@ pub const MouseButtonEvent = struct {
 pub const MouseWheelEvent = struct {
     x: i32,
     y: i32,
+    precise_x: ?f32 = null,
+    precise_y: ?f32 = null,
     mouse_x: i32,
     mouse_y: i32,
+    precise_mouse_x: ?f32 = null,
+    precise_mouse_y: ?f32 = null,
 };
 
 pub const MouseState = struct {
     x: i32,
     y: i32,
+    precise_x: ?f32 = null,
+    precise_y: ?f32 = null,
     xrel: i32 = 0,
     yrel: i32 = 0,
+    precise_xrel: ?f32 = null,
+    precise_yrel: ?f32 = null,
     buttons: u32,
 };
 
 pub const RelativeMouseBaseline = struct {
     x: i32 = 0,
     y: i32 = 0,
+    precise_x: f32 = 0,
+    precise_y: f32 = 0,
 
     pub fn snap(self: *RelativeMouseBaseline, current: MouseState) MouseState {
         const relative = MouseState{
@@ -87,10 +104,14 @@ pub const RelativeMouseBaseline = struct {
             .y = current.y,
             .xrel = current.x - self.x,
             .yrel = current.y - self.y,
+            .precise_xrel = if (current.precise_x) |x| x - self.precise_x else null,
+            .precise_yrel = if (current.precise_y) |y| y - self.precise_y else null,
             .buttons = current.buttons,
         };
         self.x = current.x;
         self.y = current.y;
+        self.precise_x = current.precise_x orelse @floatFromInt(current.x);
+        self.precise_y = current.precise_y orelse @floatFromInt(current.y);
         return relative;
     }
 };
@@ -120,18 +141,44 @@ pub const InputEvent = union(enum) {
     key_down: KeyEvent,
     key_up: KeyEvent,
     text: TextEvent,
+    // Borrowed until the source receives delivery completion. The adapter
+    // chooses its text chunk size; the model has no SDL text-buffer limit.
+    text_commit: []const u8,
     mouse_motion: MouseMotionEvent,
     mouse_button: MouseButtonEvent,
     mouse_wheel: MouseWheelEvent,
 };
 
-pub const TerminalInputParser = struct {
+pub const TerminalInputParser = InputModel;
+
+pub const InputModel = struct {
+    const QueuedEvent = struct {
+        event: InputEvent,
+        controller: u64 = 0,
+        ticket: u64 = 0,
+        acknowledged: bool = false,
+    };
+    pub const DeliveryKind = enum { keyboard, pointer, text, scroll, cleanup };
+    const Delivery = struct { ticket: u64, remaining: usize = 0, kind: DeliveryKind };
+    pub const Press = struct { controller: u64, identity: u64, binding: KeyEvent };
+    remote_presses: [256]?Press = @splat(null),
+    remote_controller: u64 = 0,
+    remote_buttons: u32 = 0,
+    native_keys: [sdl_num_scancodes]u8 = @splat(0),
+    native_buttons: u32 = 0,
+    native_mouse_x: ?f32 = null,
+    native_mouse_y: ?f32 = null,
+    delivery: ?Delivery = null,
+    next_ticket: u64 = 1,
+
     allocator: std.mem.Allocator,
-    queue: std.ArrayList(InputEvent),
+    queue: std.ArrayList(QueuedEvent),
     pending: std.ArrayList(u8),
     target: Target = .{},
     last_mouse_x: i32 = 0,
     last_mouse_y: i32 = 0,
+    precise_mouse_x: ?f32 = null,
+    precise_mouse_y: ?f32 = null,
     mouse_buttons: u32 = 0,
     mouse_activity: bool = false,
     // Set after an ESC/CSI sequence is consumed without producing a valid
@@ -182,7 +229,9 @@ pub const TerminalInputParser = struct {
         return .{
             .x = self.last_mouse_x,
             .y = self.last_mouse_y,
-            .buttons = self.mouse_buttons,
+            .precise_x = self.precise_mouse_x,
+            .precise_y = self.precise_mouse_y,
+            .buttons = self.mouse_buttons | self.remote_buttons | self.native_buttons,
         };
     }
 
@@ -196,19 +245,167 @@ pub const TerminalInputParser = struct {
         self.expireKeyboardState(now_ns);
         const n = @min(out.len, self.keyboard_state.len);
         @memcpy(out[0..n], self.keyboard_state[0..n]);
+        for (self.remote_presses) |entry| if (entry) |press| {
+            const scan = press.binding.scancode;
+            if (scan > 0 and scan < n) out[@intCast(scan)] = 1;
+        };
     }
 
-    pub fn pop(self: *TerminalInputParser) ?InputEvent {
-        if (self.queue.items.len == 0) return null;
-        return self.queue.orderedRemove(0);
+    fn append(self: *InputModel, event: InputEvent) !void {
+        try self.queue.append(self.allocator, .{ .event = event });
     }
 
-    pub fn popSdlRange(self: *TerminalInputParser, min_type: u32, max_type: u32) ?InputEvent {
-        for (self.queue.items, 0..) |event, idx| {
-            const event_type = inputEventSdlType(event);
-            if (event_type >= min_type and event_type <= max_type) return self.queue.orderedRemove(idx);
+    pub fn pop(self: *InputModel) ?InputEvent {
+        return self.popForAdapter(std.math.maxInt(usize), 0, std.math.maxInt(u32));
+    }
+
+    pub fn popSdlRange(self: *InputModel, min_type: u32, max_type: u32) ?InputEvent {
+        return self.popForAdapter(std.math.maxInt(usize), min_type, max_type);
+    }
+
+    // Called by an adapter that immediately projects the returned event. Text
+    // remains borrowed until the source next pumps its completed work.
+    pub fn popForAdapter(self: *InputModel, max_text_bytes: usize, min_type: u32, max_type: u32) ?InputEvent {
+        for (self.queue.items, 0..) |queued, idx| {
+            const event_type = inputEventSdlType(queued.event);
+            if (event_type < min_type or event_type > max_type) continue;
+            if (queued.event == .text_commit and queued.event.text_commit.len > max_text_bytes) {
+                const text = queued.event.text_commit;
+                var n = max_text_bytes;
+                while (n > 0 and (text[n] & 0xc0) == 0x80) : (n -= 1) {}
+                if (n == 0) return null;
+                self.queue.items[idx].event.text_commit = text[n..];
+                return .{ .text_commit = text[0..n] };
+            }
+            _ = self.queue.orderedRemove(idx);
+            if (self.delivery) |*delivery| {
+                if (queued.ticket == delivery.ticket and !queued.acknowledged and delivery.remaining > 0) delivery.remaining -= 1;
+            }
+            return queued.event;
         }
         return null;
+    }
+
+    pub fn beginDelivery(self: *InputModel, kind: DeliveryKind, count: usize) !void {
+        if (self.delivery != null) return error.DeliveryInProgress;
+        // Leave bounded room for releasing all held keys/buttons during cleanup.
+        if (kind != .cleanup and self.queue.items.len + count > 768) return error.Capacity;
+        try self.queue.ensureUnusedCapacity(self.allocator, count);
+        if (self.next_ticket == std.math.maxInt(u64)) return error.Capacity;
+        self.delivery = .{ .ticket = self.next_ticket, .kind = kind };
+        self.next_ticket += 1;
+    }
+
+    pub fn appendRemote(self: *InputModel, controller: u64, event: InputEvent) void {
+        const delivery = &self.delivery.?;
+        self.queue.appendAssumeCapacity(.{ .event = event, .controller = controller, .ticket = delivery.ticket });
+        delivery.remaining += 1;
+    }
+
+    pub fn deliveryFinished(self: *const InputModel) bool {
+        return if (self.delivery) |delivery| delivery.remaining == 0 else false;
+    }
+
+    pub fn finishDelivery(self: *InputModel) void {
+        std.debug.assert(self.deliveryFinished());
+        self.delivery = null;
+    }
+
+    // Observing a projected state settles only the transitions that it exposes.
+    // Scroll/text cannot be acknowledged by querying buttons or keys.
+    pub fn observeState(self: *InputModel, kind: DeliveryKind) void {
+        if (self.delivery) |*delivery| {
+            for (self.queue.items) |*queued| {
+                const observed = switch (queued.event) {
+                    .key_down, .key_up => kind == .keyboard,
+                    .mouse_motion, .mouse_button => kind == .pointer,
+                    else => false,
+                };
+                if (observed and queued.ticket == delivery.ticket and !queued.acknowledged) {
+                    queued.acknowledged = true;
+                    delivery.remaining -= 1;
+                }
+            }
+        }
+    }
+
+    pub fn observeButtons(self: *InputModel) void {
+        if (self.delivery) |*delivery| {
+            for (self.queue.items) |*queued| {
+                if (queued.event == .mouse_button and queued.ticket == delivery.ticket and !queued.acknowledged) {
+                    queued.acknowledged = true;
+                    delivery.remaining -= 1;
+                }
+            }
+        }
+    }
+
+    pub fn observeModifiers(self: *InputModel) void {
+        if (self.delivery) |*delivery| {
+            for (self.queue.items) |*queued| {
+                const scan = switch (queued.event) {
+                    .key_down, .key_up => |key| key.scancode,
+                    else => continue,
+                };
+                if (scan >= 224 and scan <= 231 and queued.ticket == delivery.ticket and !queued.acknowledged) {
+                    queued.acknowledged = true;
+                    delivery.remaining -= 1;
+                }
+            }
+        }
+    }
+
+    pub fn discardControllerEvents(self: *InputModel, controller: u64, pointer_only: bool) void {
+        var index: usize = 0;
+        while (index < self.queue.items.len) {
+            const queued = self.queue.items[index];
+            const pointer = switch (queued.event) {
+                .mouse_motion, .mouse_button, .mouse_wheel => true,
+                else => false,
+            };
+            if (queued.controller == controller and (!pointer_only or pointer)) {
+                _ = self.queue.orderedRemove(index);
+            } else index += 1;
+        }
+    }
+
+    pub fn pressSlot(self: *InputModel, controller: u64, identity: u64) ?*?Press {
+        for (&self.remote_presses) |*slot| if (slot.*) |press| {
+            if (press.controller == controller and press.identity == identity) return slot;
+        };
+        return null;
+    }
+
+    pub fn vacantPress(self: *InputModel) ?*?Press {
+        for (&self.remote_presses) |*slot| if (slot.* == null) return slot;
+        return null;
+    }
+
+    pub fn remoteScanHeld(self: *const InputModel, scan: i32) bool {
+        for (self.remote_presses) |slot| if (slot) |press| {
+            if (press.binding.scancode == scan) return true;
+        };
+        return false;
+    }
+
+    pub fn heldModifiers(self: *const InputModel) u16 {
+        var result: u16 = 0;
+        const scans = [_]i32{ 225, 229, 224, 228, 226, 230, 227, 231 };
+        const bits = [_]u16{ 1, 2, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800 };
+        for (scans, bits) |scan, bit| {
+            if (self.remoteScanHeld(scan) or self.keyboard_state[@intCast(scan)] != 0) result |= bit;
+        }
+        return result;
+    }
+
+    pub fn keyHeldElsewhere(self: *const InputModel, scan: i32, controller: u64, identity: u64) bool {
+        if (scan <= 0 or scan >= sdl_num_scancodes) return false;
+        const index: usize = @intCast(scan);
+        if (self.native_keys[index] != 0 or self.keyboard_state[index] != 0) return true;
+        for (self.remote_presses) |slot| if (slot) |press| {
+            if (press.binding.scancode == scan and (press.controller != controller or press.identity != identity)) return true;
+        };
+        return false;
     }
 
     pub fn flushStandaloneEscape(self: *TerminalInputParser) !void {
@@ -437,7 +634,7 @@ pub const TerminalInputParser = struct {
                 // when a producer needs pixel or page support we add the translation
                 // here rather than letting wrong deltas through silently.
                 if (event.delta_mode != .line) return;
-                try self.queue.append(self.allocator, .{ .mouse_wheel = .{
+                try self.append(.{ .mouse_wheel = .{
                     .x = roundWheelDelta(event.delta_x),
                     .y = -roundWheelDelta(event.delta_y),
                     .mouse_x = x,
@@ -448,7 +645,7 @@ pub const TerminalInputParser = struct {
                 const xrel = x - self.last_mouse_x;
                 const yrel = y - self.last_mouse_y;
                 self.mouse_buttons = event.buttons;
-                try self.queue.append(self.allocator, .{ .mouse_motion = .{
+                try self.append(.{ .mouse_motion = .{
                     .x = x,
                     .y = y,
                     .xrel = xrel,
@@ -465,7 +662,7 @@ pub const TerminalInputParser = struct {
                 if (event.button < 0 or event.button > 255) return;
                 const sdl_button = sdlButtonFromPointerIndex(@intCast(event.button));
                 self.mouse_buttons = event.buttons;
-                try self.queue.append(self.allocator, .{ .mouse_button = .{
+                try self.append(.{ .mouse_button = .{
                     .x = x,
                     .y = y,
                     .button = sdl_button,
@@ -476,6 +673,8 @@ pub const TerminalInputParser = struct {
         }
         self.last_mouse_x = x;
         self.last_mouse_y = y;
+        self.precise_mouse_x = null;
+        self.precise_mouse_y = null;
         self.mouse_activity = true;
     }
 
@@ -492,14 +691,14 @@ pub const TerminalInputParser = struct {
         const yrel = y - self.last_mouse_y;
 
         if ((b & 64) != 0 or b == 4 or b == 5) {
-            try self.queue.append(self.allocator, .{ .mouse_wheel = .{
+            try self.append(.{ .mouse_wheel = .{
                 .x = 0,
                 .y = if ((b & 1) == 0) 1 else -1,
                 .mouse_x = x,
                 .mouse_y = y,
             } });
         } else if ((b & 32) != 0) {
-            try self.queue.append(self.allocator, .{ .mouse_motion = .{
+            try self.append(.{ .mouse_motion = .{
                 .x = x,
                 .y = y,
                 .xrel = xrel,
@@ -515,7 +714,7 @@ pub const TerminalInputParser = struct {
             } else {
                 self.mouse_buttons &= ~sdlButtonMask(button);
             }
-            try self.queue.append(self.allocator, .{ .mouse_button = .{
+            try self.append(.{ .mouse_button = .{
                 .x = x,
                 .y = y,
                 .button = button,
@@ -525,6 +724,8 @@ pub const TerminalInputParser = struct {
         }
         self.last_mouse_x = x;
         self.last_mouse_y = y;
+        self.precise_mouse_x = null;
+        self.precise_mouse_y = null;
         self.mouse_activity = true;
     }
 
@@ -568,22 +769,22 @@ pub const TerminalInputParser = struct {
             const index: usize = @intCast(key.scancode);
             self.keyboard_state[index] = if (event.action == .down) 1 else 0;
             self.keyboard_deadline_ns[index] = if (event.action == .down) std.math.maxInt(i128) else 0;
-            try self.queue.append(self.allocator, if (event.action == .down) .{ .key_down = key } else .{ .key_up = key });
-            if (event.action == .down and text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.queue.append(self.allocator, .{ .text = TextEvent.init(text) });
+            try self.append(if (event.action == .down) .{ .key_down = key } else .{ .key_up = key });
+            if (event.action == .down and text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.append(.{ .text = TextEvent.init(text) });
         }
     }
 
     fn emitTextAndKey(self: *TerminalInputParser, bytes: []const u8, key: KeyEvent) !void {
         self.holdKeyForPolling(key);
-        try self.queue.append(self.allocator, .{ .key_down = key });
-        try self.queue.append(self.allocator, .{ .text = TextEvent.init(bytes) });
-        try self.queue.append(self.allocator, .{ .key_up = key });
+        try self.append(.{ .key_down = key });
+        try self.append(.{ .text = TextEvent.init(bytes) });
+        try self.append(.{ .key_up = key });
     }
 
     fn emitKey(self: *TerminalInputParser, key: KeyEvent) !void {
         self.holdKeyForPolling(key);
-        try self.queue.append(self.allocator, .{ .key_down = key });
-        try self.queue.append(self.allocator, .{ .key_up = key });
+        try self.append(.{ .key_down = key });
+        try self.append(.{ .key_up = key });
     }
 
     fn holdKeyForPolling(self: *TerminalInputParser, key: KeyEvent) void {
@@ -727,7 +928,7 @@ fn inputEventSdlType(event: InputEvent) u32 {
     return switch (event) {
         .key_down => sdl_event_key_down,
         .key_up => sdl_event_key_up,
-        .text => sdl_event_text_input,
+        .text, .text_commit => sdl_event_text_input,
         .mouse_motion => sdl_event_mouse_motion,
         .mouse_button => |button| if (button.pressed) sdl_event_mouse_button_down else sdl_event_mouse_button_up,
         .mouse_wheel => sdl_event_mouse_wheel,

@@ -61,6 +61,7 @@ KS_DECLARE_REPLACEMENT(SDL_WaitEvent);
 KS_DECLARE_REPLACEMENT(SDL_WaitEventTimeout);
 KS_DECLARE_REPLACEMENT(SDL_PeepEvents);
 KS_DECLARE_REPLACEMENT(SDL_GetKeyboardState);
+KS_DECLARE_REPLACEMENT(SDL_GetModState);
 KS_DECLARE_REPLACEMENT(SDL_GetMouseState);
 KS_DECLARE_REPLACEMENT(SDL_GetRelativeMouseState);
 KS_DECLARE_REPLACEMENT(SDL_UpperBlit);
@@ -136,6 +137,7 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_REPLACE(SDL_WaitEventTimeout),
     KS_REPLACE(SDL_PeepEvents),
     KS_REPLACE(SDL_GetKeyboardState),
+    KS_REPLACE(SDL_GetModState),
     KS_CAPTURE(SDL_GetMouseFocus),
     KS_REPLACE(SDL_GetMouseState),
     KS_REPLACE(SDL_GetRelativeMouseState),

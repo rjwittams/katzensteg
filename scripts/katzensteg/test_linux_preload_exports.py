@@ -57,6 +57,7 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "SDL_WaitEventTimeout",
     "SDL_PeepEvents",
     "SDL_GetKeyboardState",
+    "SDL_GetModState",
     "SDL_GetMouseState",
     "SDL_GetRelativeMouseState",
     "SDL_UpperBlit",

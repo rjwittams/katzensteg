@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(probe);
         b.step("jackstay-probe", "Build the Jackstay cross-process fixture").dependOn(&b.addInstallArtifact(probe, .{}).step);
     }
+    if (enable_jackstay) addUnitTest(b, test_step, "katzensteg-jackstay-input-test", "src/katzensteg/jackstay_input_executor_test.zig", target, optimize, use_llvm, .{ .link_libc = true });
     addUnitTest(b, test_step, "platform-test", "src/platform/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
 
     // On macOS, Zig emits debug-map binaries (no inline __DWARF); a UUID-matched
