@@ -287,6 +287,9 @@ pub const Executor = struct {
             var work = item;
             try work.complete(.uncertain);
         }
+        // Stopping the servers invalidates queued input. ABI 0.7 serializes
+        // the remaining cleanup behind the in-flight work settled above, so
+        // there is at most one cleanup item here. Failure retains the target.
         if (try self.target.next()) |item| {
             var work = item;
             try work.complete(.uncertain);

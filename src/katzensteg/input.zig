@@ -240,6 +240,8 @@ pub const InputModel = struct {
                 _ = self.queue.orderedRemove(i);
             } else i += 1;
         }
+        // Both scopes discard local pointer holds. Pointer-only cleanup keeps
+        // keyboard state, but a drag from the old geometry must not survive.
         self.mouse_buttons = 0;
         if (!pointer_only) {
             self.pending.clearRetainingCapacity();
