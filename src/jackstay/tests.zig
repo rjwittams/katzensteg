@@ -34,7 +34,18 @@ test "cancellation interrupts a frame wait and producer drains after setup joins
     try connection.attach();
     const Worker = struct {
         fn run(conn: *js.media.Connection) void {
-            std.testing.expectError(error.Cancelled, conn.next(std.math.maxInt(u64))) catch @panic("wait cancellation failed");
+            while (true) {
+                // cancel interrupts both setup and acquisition. Either the
+                // server's close notification or the cancellation can win.
+                if (conn.next(std.math.maxInt(u64)) catch |err| switch (err) {
+                    error.Cancelled, error.Closed => return,
+                    else => @panic("wait cancellation failed"),
+                }) |acquired| {
+                    var frame = acquired;
+                    frame.release();
+                    @panic("unexpected frame without publication");
+                }
+            }
         }
     };
     const worker = try std.Thread.spawn(.{}, Worker.run, .{&connection});

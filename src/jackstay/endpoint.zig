@@ -13,7 +13,7 @@ pub fn sameUser(fd: i32) !void {
     } else {
         var credentials: extern struct { pid: c_int, uid: c_uint, gid: c_uint } = undefined;
         var len: std.c.socklen_t = @sizeOf(@TypeOf(credentials));
-        if (std.c.getsockopt(fd, std.posix.SOL.SOCKET, 17, @ptrCast(&credentials), &len) != 0 or len != @sizeOf(@TypeOf(credentials))) return error.PeerIdentityUnavailable;
+        if (std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.os.linux.SO.PEERCRED, @ptrCast(&credentials), &len) != 0 or len != @sizeOf(@TypeOf(credentials))) return error.PeerIdentityUnavailable;
         uid = credentials.uid;
     }
     if (uid != std.c.geteuid()) return error.PeerNotAuthorized;

@@ -53,7 +53,7 @@ pub const Frame = struct {
         if (bytes == null or desc.sync_kind != c.FT_FRAME_SYNC_CPU_COPY_COMPLETE) return error.UnsupportedFrame;
         const row = try std.math.mul(usize, desc.width, 4);
         const size = try std.math.mul(usize, desc.stride, desc.height);
-        if (desc.width == 0 or desc.height == 0 or desc.stride < row or size > len or bytes == null) return error.InvalidFrame;
+        if (desc.width == 0 or desc.height == 0 or desc.stride < row or size > len) return error.InvalidFrame;
         return .{ .width = desc.width, .height = desc.height, .stride = desc.stride, .format = format, .pixels = bytes[0..size], .timestamp_ns = desc.timestamp_ns, .sequence = desc.sequence };
     }
 };
@@ -88,7 +88,9 @@ pub const Connection = struct {
         try check(c.ft_acquisition_cpu_attach(self.handle, holding, &self.consumer));
     }
 
-    // May overlap setup and acquisition waits. Destruction follows worker join.
+    // May overlap setup and acquisition waits. Closing setup can wake a frame
+    // wait as Closed before the cancellation wake arrives. Both end acquisition.
+    // Destruction follows worker join.
     pub fn cancel(self: *Connection) void {
         self.cancelled.store(true, .release);
         c.ft_acquisition_cpu_connection_cancel(self.handle);

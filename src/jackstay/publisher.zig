@@ -76,6 +76,7 @@ pub const Publisher = struct {
             self.stopped.store(true, .release);
             thread.join();
             self.thread = null;
+            // A later close retry skips this already-completed listener teardown.
             self.listener.deinit();
         }
         const started = os.time.nanoTimestamp();
