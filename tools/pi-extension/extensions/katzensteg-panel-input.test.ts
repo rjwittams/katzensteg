@@ -108,7 +108,8 @@ test("focus acquisition and keyboard input take control", () => {
 		assert.equal(f.cancellations(), 1);
 		f.panel.handleInput("a");
 		assert.equal(f.cancellations(), 2);
-		assert.equal(f.sent.length, 1);
+		assert.equal(f.sent.length, 2);
+		assert.match(JSON.stringify(f.sent[0]), /001b\[O/);
 	} finally {
 		f.panel.dispose();
 	}

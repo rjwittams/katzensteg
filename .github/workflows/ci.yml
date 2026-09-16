@@ -105,9 +105,10 @@ jobs:
           cmake -S /tmp/ks-jackstay-reference/tools/capture-viewer-sdl -B /tmp/ks-reference-viewer \
             -DJACKSTAY_LIB=/tmp/ks-jackstay/lib/libjackstay.so \
             -DJACKSTAY_INCLUDE_DIR=/tmp/ks-jackstay/include
-          cmake --build /tmp/ks-reference-viewer --target capture-viewer-sdl
+          cmake --build /tmp/ks-reference-viewer --target capture-viewer-sdl capture-input-source
           KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
             JACKSTAY_REFERENCE_VIEWER=/tmp/ks-reference-viewer/capture-viewer-sdl \
+            JACKSTAY_REFERENCE_SOURCE=/tmp/ks-reference-viewer/capture-input-source \
             python3 scripts/katzensteg/test_jackstay_input.py
           python3 scripts/katzensteg/test_injected_io.py
 

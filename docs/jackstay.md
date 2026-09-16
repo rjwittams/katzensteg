@@ -5,7 +5,8 @@ source through its existing terminal and hosted-panel paths. The connectors are
 optional, support macOS/Linux, and carry CPU RGBA/BGRA video. A publisher does
 not need a terminal or a consumer. SDL2 and SDL3 publishers can also accept
 cooperative keyboard and mouse input through an explicitly enabled endpoint.
-The KS source presenter remains observation-only.
+The KS source presenter forwards input when an input endpoint is explicitly
+associated with the source. Without that association it remains observation-only.
 
 ## Build
 
@@ -59,8 +60,8 @@ A pi or Claude workspace already supplying `KATZENSTEG_TARGET` can use that same
 `katzensteg jackstay-source /tmp/ks-sonic.sock` command. Use the enabled checkout's
 launcher explicitly if a different build is on PATH. The source uses the existing
 positioned/placeholder producer protocol and observation requests. Hosts label it
-as observation-only and suppress or reject game input; moving and resizing its
-panel still work.
+as observation-only unless an input endpoint is supplied; moving and resizing
+its panel still work in either case.
 
 This source accepts a generic Jackstay CPU setup socket. Porthole's session
 selection and authorization preface is not implemented here. The existing
@@ -99,7 +100,7 @@ work. The consumer checks setup disconnect at acquisition boundaries, including
 the one-second frame-wait timeout.
 
 Registration, graph management, source activation, remote credentials, audio,
-source-presenter input forwarding and GPU transport are outside this implementation. Direct
+GPU transport are outside this implementation. Direct
 endpoints work without a registry.
 
 ## Cooperative input to an app
@@ -123,7 +124,7 @@ Both endpoint paths must be unused. Input uses the same mode-0600, same-effectiv
 checks as media. The host explicitly associates the two paths; opening the media
 socket alone grants no input connection. One remote controller is admitted at a
 time. This endpoint is available on the SDL2/SDL3 publisher path; the KS
-`jackstay-source` presenter does not yet forward terminal, WM, pi or Claude input.
+`jackstay-source` presenter can forward terminal or hosted input as described below.
 
 `src/jackstay/input.zig` owns target, server, client and execution-work handles.
 Jackstay owns framing, ordering, epochs and the cleanup barrier. The executor
@@ -160,12 +161,60 @@ cleanup failure leaves the target draining or quarantined (`RecoveryRequired`).
 KS logs the failure and retains the stopped owner until process exit. It does not
 report clean release after a timeout or automatically replay an uncertain action.
 
+## Input from a KS presenter
+
+Close any controlling SDL viewer first: the source admits one controller. Then
+start the KS presenter with the associated input endpoint:
+
+```sh
+./zig-out/bin/katzensteg jackstay-source /tmp/ks-mi2-media.sock \
+  --input-socket /tmp/ks-mi2-input.sock
+```
+
+This command uses the normal destination selection. It runs in the current
+terminal, or in a WM/pi/Claude host supplying `KATZENSTEG_TARGET`. Media and input
+remain separate paths in this first interface; a registry can supply their
+association later. No input path is inferred from a media path or inherited from
+the publisher's `KATZENSTEG_INPUT_SOCKET` variable.
+
+The presenter performs admission on a worker and advertises input support after
+it connects. Video and host control continue during the handshake. Input polling
+runs independently of frame acquisition. Input disconnect disables forwarding
+while leaving video running. Closing the presenter requests cleanup and polls
+for confirmation for up to two seconds; expiration logs an unconfirmed outcome.
+Destroying the local connection is never treated as proof of remote cleanup.
+
+Terminal and current hosted key inputs are logical keys, with separate UTF-8 text
+events. KS does not infer physical DOM positions from terminal characters.
+Structured repeated key-downs become explicit repeats with the same press
+identity. Logical shortcuts preserve their modifiers; unsupported target mappings
+are logged with their execution sequence, without substitution or replay.
+Pointer positions pass through the existing presentation mapping, then scale from
+source pixels into the target's logical input extent. Fractional line scroll is
+preserved.
+
+The presenter limits outstanding operations to 32 and waits for execution results
+before sending more. Its local queue holds at most 8,192 events. Overflow drops
+pending work and requests cleanup; partial or uncertain execution closes input.
+A viewport change releases held pointer buttons and discards only pointer events
+captured under an older mapping. Target geometry resets preserve confirmed key
+holds and use the new geometry revision for subsequent pointer events.
+
+Focus loss is carried by the existing terminal-byte input message (`ESC [ O`).
+The direct terminal requests focus reports, and the desktop WM and pi panel send
+this sequence when input focus leaves. It clears pending work and requests a
+Jackstay reset; new input is discarded until the reset is confirmed. Hosts that
+do not report focus loss, including the current Claude surface integration, still
+need that notification to get this barrier. Detach, shutdown and transport loss
+also trigger cleanup. Viewport changes alone do not count as focus loss.
+
 ## Verification
 
 ```sh
 python3 scripts/katzensteg/test_jackstay.py
 KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
 JACKSTAY_REFERENCE_VIEWER=/path/to/capture-viewer-sdl \
+JACKSTAY_REFERENCE_SOURCE=/path/to/capture-input-source \
   python3 scripts/katzensteg/test_jackstay_input.py
 zig build                      # default, Vulkan enabled; Jackstay disabled
 zig build test
@@ -192,11 +241,12 @@ Porthole session or interactive pi/Claude rendering.
 Robert also confirmed a live publication working with two KS viewers and with
 the SDL reference viewer using its new `--cpu-socket` option.
 
-Publisher input verified on 2026-09-16 on macOS arm64 and Linux x86_64: default
-Vulkan-enabled builds passed with Jackstay enabled and disabled, as did 1,509
-enabled Zig tests, 1,444 disabled Zig tests, all seven input process tests, and
+Publisher and presenter input verified on 2026-09-16 on macOS arm64 and Linux x86_64: default
+Vulkan-enabled builds passed with Jackstay enabled and disabled, as did 1,580
+enabled Zig tests, 1,448 disabled Zig tests, all ten input process tests, and
 the existing media, injected-runtime, launcher and hosted-rendering regressions.
-Linux also passed preload export and Vulkan wiring checks.
+Linux also passed preload export and Vulkan wiring checks. All 66 pi extension
+tests passed.
 
 Input tests use a C ABI controller and the independently built Jackstay SDL viewer
 against real SDL2/SDL3 fixture processes with the dummy video driver. They cover
@@ -212,3 +262,9 @@ synthetic keyboard fields uninitialized under GCC. CI applies
 to clear those events explicitly before building the pinned viewer. The patch
 changes only its self-test, not the viewer's input adapter or Jackstay protocol;
 remove it when the dependency includes the upstream fix.
+
+Presenter acceptance also pairs KS with Jackstay's independent interactive source,
+including long Unicode input, logical-key repeat, held-state cleanup on graceful
+close, and abrupt producer exit. KS-to-KS tests cover both SDL versions, positioned
+and placeholder hosts, and input with video paused. A pseudo-terminal test covers
+direct terminal input and focus loss without using the user's terminal.

@@ -462,6 +462,7 @@ const WmProducerSession = struct {
     upload: render_batch_protocol.UploadPolicy,
     presentation_status: WmPresentationStatus = .{},
     initial_presentation_resolved: bool = false,
+    input_was_focused: bool = false,
     // Only launchers started by this host are waited for/reaped.
     producer: Producer = .{},
     stdout_buffer: std.ArrayList(u8) = .empty,
@@ -791,6 +792,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var wm_events = try WmEventLoop.init();
     defer wm_events.deinit();
     while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
+        syncInputFocus(sessions[0..initialized], if (prompt_active) null else focused_index);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
         for (sessions[0..initialized]) |*session| {
@@ -926,6 +928,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             wm_events.tty_ready = false;
             const input = readInputForSessionsLocked(&tty_lock, &tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
             if (input.focus_changed) {
+                syncInputFocus(sessions[0..initialized], focused_index);
                 try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -2016,6 +2019,16 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
     } else {
         logger.writeFmtScoped(.warn, .wm, "viewport control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
         closeSessionControl(session);
+    }
+}
+
+fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
+    for (sessions, 0..) |*session, i| {
+        const active = focused != null and focused.? == i;
+        if (session.input_was_focused and !active and session.producer.channel.controlFile() != null) {
+            _ = tryWriteInputControl(session.producer.channel.writer(), "\x1b[O");
+        }
+        session.input_was_focused = active;
     }
 }
 

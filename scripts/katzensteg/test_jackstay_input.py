@@ -5,6 +5,11 @@ prepared dependency. JACKSTAY_REFERENCE_VIEWER optionally enables the real SDL
 viewer pairing as well; its source is from the pinned Jackstay revision.
 """
 import ctypes as C
+import fcntl
+import pty
+import struct
+import termios
+import threading
 import json
 import os
 from pathlib import Path
@@ -130,6 +135,56 @@ class App:
             pass
         self.process.stdin.close(); self.stdout.close(); self.stderr.close()
 
+class Presenter:
+    """A JSONL host with file-backed output, so video cannot block input tests."""
+    def __init__(self, folder, media, input_path, placeholder=False):
+        self.stdout = open(folder / "presenter.jsonl", "w+")
+        self.stderr = open(folder / "presenter.err", "w+")
+        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", str(media), "--input-socket", str(input_path)], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)), start_new_session=True)
+        attach = dict(type="attach", window_id="main", aspect="fit", id_ranges=dict(image=[[10000,19999]], placement=[[20000,29999]]), rect_cells=dict(row=1, col=1, rows=10, cols=20), upload=dict(profile="file_whole", path=str(folder / "upload"), high_water=16*1024*1024))
+        if placeholder:
+            for key in ("rect_cells", "aspect", "id_ranges"):
+                del attach[key]
+            attach["placeholder"] = dict(image_id=777, cols=20, rows=10)
+        self.send(attach)
+    def send(self, event):
+        self.process.stdin.write((json.dumps(event) + "\n").encode())
+        self.process.stdin.flush()
+    def input(self, **event):
+        self.send(dict(type="input", window_id="main", **event))
+    def wait_ready(self):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            events = [json.loads(line) for line in Path(self.stdout.name).read_text().splitlines() if line.endswith("}")]
+            if any(e.get("type") == "presentation_status" and e.get("input_supported", True) for e in events):
+                return
+            assert self.process.poll() is None, Path(self.stderr.name).read_text()
+            time.sleep(.01)
+        raise AssertionError("presenter did not advertise input")
+    def finish(self):
+        self.send(dict(type="shutdown"))
+        self.process.wait(timeout=6)
+        assert self.process.returncode == 0, Path(self.stderr.name).read_text()
+    def kill(self):
+        # The embed launcher gives its producer a separate process group. Kill
+        # that child, not just the launcher, to exercise real controller loss.
+        if self.process.poll() is None:
+            rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+            for row in rows.splitlines():
+                pid, parent = map(int, row.split())
+                if parent == self.process.pid:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill(); self.process.wait()
+    def cleanup(self):
+        self.kill()
+        self.process.stdin.close(); self.stdout.close(); self.stderr.close()
+
 class PublisherInput(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -179,6 +234,109 @@ class PublisherInput(unittest.TestCase):
         client = Client(self.lib, app.input)
         self.addCleanup(client.destroy)
         return client
+    def test_direct_terminal_presenter_forwards_input_and_focus_loss(self):
+        app = self.app(2)
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 800, 480))
+        def controlling_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        viewer = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "jackstay-source", str(app.media), "--input-socket", str(app.input)], stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)))
+        os.close(slave)
+        output = bytearray()
+        def drain():
+            while True:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    return
+                if not data:
+                    return
+                output.extend(data)
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        try:
+            deadline = time.monotonic() + 8
+            while b"\x1b[?1004h" not in output:
+                assert viewer.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+            os.write(master, "é".encode())
+            app.wait(lambda es: any(e["event"] == "text" and bytes.fromhex(e["hex"]) == "é".encode() for e in es))
+            os.write(master, b"\x1b[<0;40;12M")
+            app.wait(lambda es: any(e["event"] == "button" and e["down"] for e in es))
+            os.write(master, b"\x1b[O")
+            app.wait(lambda es: any(e["event"] == "button" and not e["down"] for e in es))
+        finally:
+            if viewer.poll() is None:
+                os.killpg(viewer.pid, signal.SIGKILL)
+            viewer.wait()
+            os.close(master)
+            reader.join(timeout=2)
+
+    def test_presenter_controls_sdl_publisher_in_both_hosted_modes(self):
+        for version in (2, 3):
+            for placeholder in (False, True):
+                with self.subTest(sdl=version, placeholder=placeholder):
+                    app = self.app(version)
+                    viewer = Presenter(Path(app.stdout.name).parent, app.media, app.input, placeholder)
+                    self.addCleanup(viewer.cleanup)
+                    viewer.wait_ready()
+                    app.command("v")
+                    app.wait(lambda es: any(e["event"] == "video" and e["value"] == 0 for e in es))
+                    viewer.input(event="key", key="c", ctrl=True)
+                    app.wait(lambda es: any(e["event"] == "key" and e["key"] == ord("c") and e["mods"] & 0x40 for e in es))
+                    text = "hé🙂 日本語 " * 60
+                    viewer.input(event="terminal_bytes", bytes=text)
+                    app.wait(lambda es: b"".join(bytes.fromhex(e["hex"]) for e in es if e["event"] == "text") == text.encode())
+                    viewer.input(event="source_pointer", x=320, y=240, width=640, height=480, kind="pointerdown", button=0, buttons=1)
+                    app.wait(lambda es: any(e["event"] == "button" and e["down"] for e in es))
+                    viewer.input(event="key", key="enter", action="down")
+                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 40 and e["down"] for e in es))
+                    viewer.input(event="terminal_bytes", bytes="\x1b[O")
+                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 40 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
+                    viewer.finish()
+
+    @unittest.skipUnless(os.environ.get("JACKSTAY_REFERENCE_SOURCE"), "set JACKSTAY_REFERENCE_SOURCE to the independent input source")
+    def test_presenter_to_independent_reference_source(self):
+        for abrupt in (False, True):
+            with self.subTest(abrupt=abrupt), tempfile.TemporaryDirectory(prefix="ks-source-", dir="/tmp") as directory:
+                folder = Path(directory)
+                media, control = folder / "media", folder / "input"
+                with (folder / "source.log").open("w+") as report:
+                    source = subprocess.Popen([os.environ["JACKSTAY_REFERENCE_SOURCE"], str(media), str(control), "--report-state"], stdout=report, stderr=subprocess.PIPE)
+                    viewer = None
+                    try:
+                        deadline = time.monotonic() + 8
+                        while not (media.exists() and control.exists()):
+                            assert source.poll() is None and time.monotonic() < deadline
+                            time.sleep(.01)
+                        viewer = Presenter(folder, media, control)
+                        viewer.wait_ready()
+                        viewer.input(event="key", key="enter", action="down")
+                        viewer.input(event="key", key="enter", action="down")
+                        text = "hé🙂" + "x" * 1024
+                        viewer.input(event="terminal_bytes", bytes=text)
+                        # Reference source has no logical mapping for printable
+                        # chars: text still arrives, with no guessed physical keys.
+                        viewer.input(event="pointer", kind="pointerdown", col=10, row=5, button=0, buttons=1)
+                        deadline = time.monotonic() + 10
+                        while "downs=1 repeats=1 releases=0 text_bytes=1031 held=1 buttons=1" not in (folder / "source.log").read_text():
+                            assert source.poll() is None and time.monotonic() < deadline, (folder / "source.log").read_text()[-1000:]
+                            time.sleep(.01)
+                        if abrupt:
+                            viewer.kill()
+                        else:
+                            viewer.finish()
+                        _, err = source.communicate(timeout=6)
+                        assert source.returncode == 0, err.decode()
+                        assert "held=0 buttons=0" in (folder / "source.log").read_text().splitlines()[-1]
+                    finally:
+                        if viewer is not None:
+                            viewer.cleanup()
+                        if source.poll() is None:
+                            source.kill()
+                        source.communicate()
+
     def test_events_long_text_and_cleanup_without_video_progress(self):
         for version in (2, 3):
             with self.subTest(sdl=version):

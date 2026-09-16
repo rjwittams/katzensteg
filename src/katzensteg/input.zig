@@ -22,6 +22,12 @@ pub const Target = struct {
     h: i32 = 480,
     layout: presentation_layout.PresentationLayout = .{},
     source_px: ?render_batch_protocol.SourcePixels = null,
+
+    pub fn sameMapping(a: Target, b: Target) bool {
+        if (a.cols != b.cols or a.rows != b.rows or a.w != b.w or a.h != b.h or a.layout.len != b.layout.len) return false;
+        for (a.layout.regions[0..a.layout.len], b.layout.regions[0..b.layout.len]) |x, y| if (!std.meta.eql(x, y)) return false;
+        return true;
+    }
 };
 
 pub const KeyEvent = struct {
@@ -157,6 +163,7 @@ pub const InputModel = struct {
         controller: u64 = 0,
         ticket: u64 = 0,
         acknowledged: bool = false,
+        mapping_generation: u64 = 0,
     };
     pub const DeliveryKind = enum { keyboard, pointer, text, scroll, cleanup };
     const Delivery = struct { ticket: u64, remaining: usize = 0, kind: DeliveryKind };
@@ -170,6 +177,9 @@ pub const InputModel = struct {
     native_mouse_y: ?f32 = null,
     delivery: ?Delivery = null,
     next_ticket: u64 = 1,
+    focus_generation: u64 = 0,
+    mapping_generation: u64 = 0,
+    queue_limit: ?usize = null,
 
     allocator: std.mem.Allocator,
     queue: std.ArrayList(QueuedEvent),
@@ -204,6 +214,7 @@ pub const InputModel = struct {
     }
 
     pub fn setTarget(self: *TerminalInputParser, target: Target) void {
+        if (!Target.sameMapping(self.target, target)) self.mapping_generation +%= 1;
         self.target = .{
             .cols = @max(1, target.cols),
             .rows = @max(1, target.rows),
@@ -214,11 +225,56 @@ pub const InputModel = struct {
         };
     }
 
+    /// Drop stale local work at a controller barrier. Remote executor tickets
+    /// belong to a different owner and are never consumed here.
+    pub fn discardLocalInput(self: *InputModel, pointer_only: bool) void {
+        var i: usize = 0;
+        while (i < self.queue.items.len) {
+            const queued = self.queue.items[i];
+            const pointer = switch (queued.event) {
+                .mouse_motion, .mouse_button, .mouse_wheel => true,
+                else => false,
+            };
+            if (queued.controller == 0 and (!pointer_only or pointer)) {
+                _ = self.queue.orderedRemove(i);
+            } else i += 1;
+        }
+        self.mouse_buttons = 0;
+        if (!pointer_only) {
+            self.pending.clearRetainingCapacity();
+            self.keyboard_state = @splat(0);
+            self.keyboard_deadline_ns = @splat(0);
+        }
+    }
+
+    pub fn discardStalePointerInput(self: *InputModel) void {
+        var i: usize = 0;
+        while (i < self.queue.items.len) {
+            const queued = self.queue.items[i];
+            const pointer = switch (queued.event) {
+                .mouse_motion, .mouse_button, .mouse_wheel => true,
+                else => false,
+            };
+            if (queued.controller == 0 and pointer and queued.mapping_generation != self.mapping_generation) {
+                _ = self.queue.orderedRemove(i);
+            } else i += 1;
+        }
+    }
+
     pub fn feed(self: *TerminalInputParser, bytes: []const u8) !void {
-        if (bytes.len == 0) return;
-        if (self.pending.items.len + bytes.len > max_pending_bytes) self.pending.clearRetainingCapacity();
-        try self.pending.appendSlice(self.allocator, bytes);
-        try self.parsePending();
+        var rest = bytes;
+        while (rest.len > 0) {
+            // Keep a split UTF-8/escape prefix even when the next read is large.
+            // Only an overlong incomplete sequence is abandoned.
+            if (self.pending.items.len == max_pending_bytes) self.pending.clearRetainingCapacity();
+            const count = @min(rest.len, max_pending_bytes - self.pending.items.len);
+            try self.pending.appendSlice(self.allocator, rest[0..count]);
+            rest = rest[count..];
+            self.parsePending() catch |err| {
+                self.pending.clearRetainingCapacity();
+                return err;
+            };
+        }
     }
 
     pub fn pendingCount(self: *const TerminalInputParser) usize {
@@ -252,7 +308,12 @@ pub const InputModel = struct {
     }
 
     fn append(self: *InputModel, event: InputEvent) !void {
-        try self.queue.append(self.allocator, .{ .event = event });
+        if (self.queue_limit) |limit| if (self.queue.items.len >= limit) {
+            self.discardLocalInput(false);
+            self.focus_generation +%= 1;
+            return error.Capacity;
+        };
+        try self.queue.append(self.allocator, .{ .event = event, .mapping_generation = self.mapping_generation });
     }
 
     pub fn pop(self: *InputModel) ?InputEvent {
@@ -465,10 +526,22 @@ pub const InputModel = struct {
             try self.emitKey(.{ .keycode = 0x08, .scancode = 42 });
             return 1;
         }
+        if (first >= 0x80) {
+            const len = std.unicode.utf8ByteSequenceLength(first) catch return 1;
+            if (bytes.len < len) return 0;
+            const code = std.unicode.utf8Decode(bytes[0..len]) catch return len;
+            try self.emitTextAndKey(bytes[0..len], .{ .keycode = code, .scancode = 0 });
+            return len;
+        }
         if (first >= 0x20) {
             const key = asciiKey(first);
             try self.emitTextAndKey(bytes[0..1], key);
             return 1;
+        }
+        if (first >= 1 and first <= 26) {
+            var key = asciiKey('a' + first - 1);
+            key.mods = 0x40;
+            try self.emitKey(key);
         }
         return 1;
     }
@@ -485,6 +558,11 @@ pub const InputModel = struct {
         if (bytes.len <= start) return null;
 
         switch (bytes[start]) {
+            'O' => {
+                self.focus_generation +%= 1;
+                return start + 1;
+            },
+            'I' => return start + 1,
             'A' => {
                 try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82 });
                 return start + 1;
@@ -637,6 +715,8 @@ pub const InputModel = struct {
                 try self.append(.{ .mouse_wheel = .{
                     .x = roundWheelDelta(event.delta_x),
                     .y = -roundWheelDelta(event.delta_y),
+                    .precise_x = if (event.delta_x != @trunc(event.delta_x)) @floatCast(std.math.clamp(event.delta_x, -1000, 1000)) else null,
+                    .precise_y = if (event.delta_y != @trunc(event.delta_y)) @floatCast(-std.math.clamp(event.delta_y, -1000, 1000)) else null,
                     .mouse_x = x,
                     .mouse_y = y,
                 } });
@@ -1483,4 +1563,13 @@ test "structured keys share tap events and polling state and support held keys" 
     try std.testing.expectEqual(@as(u8, 0), state[82]);
     try std.testing.expectError(error.InvalidKey, parser.injectKey(.{ .key = "not-a-key" }));
     try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+}
+
+test "terminal UTF8 prefix survives a large following read" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    try model.feed("\xc3");
+    try model.feed("\xa9" ++ "x" ** 300);
+    try std.testing.expectEqual(@as(i32, 0xe9), model.pop().?.key_down.keycode);
+    try std.testing.expectEqualStrings("é", model.pop().?.text.bytes());
 }

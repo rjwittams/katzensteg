@@ -204,6 +204,31 @@ pub const Runtime = struct {
         return initWithInputSupport(false);
     }
 
+    pub fn enableSourceInput(self: *Runtime) !void {
+        if (self.input_parser == null) self.input_parser = input_mod.InputModel.init(self.allocator);
+        if (self.tty) |*tty| {
+            try tty.enableInputCapture();
+            var writer = tty.file.writerStreaming(&.{});
+            try writer.interface.writeAll("\x1b[?1004h");
+        }
+        self.input_parser.?.queue_limit = 8192;
+        self.input_supported = true;
+        self.input_enabled = true;
+        self.updateInputTarget();
+        self.refreshSourceInputStatus();
+    }
+
+    pub fn disableSourceInput(self: *Runtime) void {
+        self.input_supported = false;
+        self.input_enabled = false;
+        if (self.tty) |*tty| tty.disableInputCapture() catch {};
+        self.refreshSourceInputStatus();
+    }
+
+    fn refreshSourceInputStatus(self: *Runtime) void {
+        if (self.last_batch_presentation_status) |status| self.writeBatchPresentationStatusView(status);
+    }
+
     fn initWithInputSupport(input_supported: bool) Runtime {
         const io = preload_io.io();
         const allocator = std.heap.c_allocator;
@@ -550,7 +575,7 @@ pub const Runtime = struct {
         }
         // Batch mode enables the parser so hosts can forward terminal_bytes.
         // Consumers that never send input control messages observe no events.
-        self.input_enabled = true;
+        self.input_enabled = self.input_supported;
         self.input_parser = input_mod.TerminalInputParser.init(self.allocator);
     }
 
@@ -1235,6 +1260,9 @@ pub const Runtime = struct {
                 if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             },
             .detach => {
+                if (self.input_parser) |*model| {
+                    model.focus_generation +%= 1;
+                }
                 self.placeholder_scene.valid = false;
                 self.detachBatchWindow(sink, "main");
             },
