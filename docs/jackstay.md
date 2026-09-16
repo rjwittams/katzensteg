@@ -12,7 +12,7 @@ associated with the source. Without that association it remains observation-only
 
 The dependency revision and C ABI are pinned in
 [`profiles/jackstay-dependency.json`](../profiles/jackstay-dependency.json).
-Prepare the ABI 0.7 headers and shared library, then enable the connectors:
+Prepare the ABI 0.8 headers and shared library, then enable the connectors:
 
 ```sh
 python3 scripts/katzensteg/prepare_jackstay.py --prefix /tmp/ks-jackstay
@@ -146,7 +146,7 @@ State-acknowledged events remain available to mixed event/state readers until th
 768-event retention limit needs space. At that point, KS retires only copies
 already delivered through state APIs; unobserved events remain queued. If those
 unobserved events exhaust capacity, the executor ends the input connection and
-continues pumping cleanup. ABI 0.7 has no executor-side overflow notification, so
+continues pumping cleanup. ABI 0.8 has no executor-side overflow notification, so
 KS logs the capacity failure and uses server teardown on its transport thread.
 The peer sees a disconnect, which does not confirm cleanup. The listener remains
 available, and Jackstay admits a new controller only after cleanup finishes.
@@ -227,7 +227,6 @@ also trigger cleanup. Viewport changes alone do not count as focus loss.
 python3 scripts/katzensteg/test_jackstay.py
 KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
 JACKSTAY_REFERENCE_VIEWER=/path/to/capture-viewer-sdl \
-JACKSTAY_REFERENCE_SOURCE=/path/to/capture-input-source \
   python3 scripts/katzensteg/test_jackstay_input.py
 zig build                      # default, Vulkan enabled; Jackstay disabled
 zig build test
@@ -269,14 +268,13 @@ publisher exit, and input while video is paused. Model tests also cover allocati
 failure during cleanup and preservation of local/native holds. Live game and
 hardware-input trials remain manual.
 
-The ABI 0.7 reference viewer's self-test uses C union initializers that leave some
-synthetic keyboard fields uninitialized under GCC. CI applies
-[`jackstay-viewer-self-test.patch`](../scripts/katzensteg/fixtures/jackstay-viewer-self-test.patch)
-to clear those events explicitly before building the pinned viewer. The patch
-changes only its self-test, not the viewer's input adapter or Jackstay protocol;
-remove it when the dependency includes the upstream fix.
+The pinned ABI 0.8 dependency includes explicit initialization of the reference
+viewer's synthetic SDL events, so CI builds that viewer without a local patch.
+Its input transport also stops client heartbeats during graceful close, allowing
+the final cleanup acknowledgement to be read after the server closes its socket.
 
-Presenter acceptance also pairs KS with Jackstay's independent interactive source,
+Presenter acceptance also pairs KS with a C source fixture retained from Jackstay's
+two-socket reference example and compiled against the pinned library,
 including long Unicode input, logical-key repeat, held-state cleanup on graceful
 close, and abrupt producer exit. KS-to-KS tests cover both SDL versions, positioned
 and placeholder hosts, and input with video paused. A pseudo-terminal test covers
