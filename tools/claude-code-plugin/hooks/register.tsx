@@ -438,8 +438,10 @@ export const register: Register = on => {
     if (!host) return { text: `katzensteg: no host (${hostError ?? 'not connected'}); /katzensteg host retries` }
     if (verb === 'open') {
       const [profile, ...args] = rest
-      if (place === 'pane') { paneOpen = false }
       if (!profile) return { text: 'katzensteg open <profile> [args...]' }
+      // A pane the person closed comes back with the next panel; the refresh
+      // below reopens it, so the reset belongs on the path that reaches it.
+      if (place === 'pane') { paneOpen = false }
       const r = await api($, '/sessions', { profile, args }).catch(err => ({ ok: false, status: 0, text: String(err) }))
       if (!r.ok) return { text: `katzensteg open failed: ${r.text}` }
       const id = String((JSON.parse(r.text) as { id?: unknown }).id ?? '?')
