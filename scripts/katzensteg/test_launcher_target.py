@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,6 +30,51 @@ print('stdout:' + sys.stdin.readline().strip(), flush=True)
 print('stderr:application', file=sys.stderr, flush=True)
 sys.exit(7)
 '''
+
+
+class LauncherRepoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="ks-repo-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.executable_repo = self.root / "executable-checkout"
+        self.cwd_repo = self.root / "cwd-checkout"
+        for repo in (self.executable_repo, self.cwd_repo):
+            (repo / "profiles").mkdir(parents=True)
+            (repo / "profiles/test.json").write_text(json.dumps({"profiles": {
+                "repo-test": {"target": sys.executable,
+                              "args": [repo.name, "{repo}"],
+                              "env": {"KS_TEST_LIBRARY": "{repo}/zig-out/lib/test"}}
+            }}))
+        self.launcher = self.executable_repo / "zig-out/bin/katzensteg"
+        self.launcher.parent.mkdir(parents=True)
+        shutil.copy2(LAUNCHER, self.launcher)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith("KATZENSTEG_")}
+        self.env["XDG_CONFIG_HOME"] = str(self.root / "config")
+
+    def assert_repo(self, expected):
+        result = subprocess.run([str(self.launcher), "--dry-run", "repo-test"],
+                                cwd=self.cwd_repo, env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"commandline={sys.executable} {expected.name} {expected}\n",
+                      result.stderr)
+        self.assertIn(f"KS_TEST_LIBRARY={expected}/zig-out/lib/test", result.stderr)
+
+    def test_executable_checkout_wins_over_another_checkout_cwd(self):
+        self.assert_repo(self.executable_repo)
+
+    def test_explicit_repo_override_wins_over_executable_checkout(self):
+        self.env["KATZENSTEG_REPO"] = str(self.cwd_repo)
+        self.assert_repo(self.cwd_repo)
+
+    def test_installed_binary_falls_back_to_checkout_cwd(self):
+        installed = self.root / "installed/bin/katzensteg"
+        installed.parent.mkdir(parents=True)
+        shutil.copy2(self.launcher, installed)
+        self.launcher = installed
+        self.assert_repo(self.cwd_repo)
 
 
 class LauncherTargetTests(unittest.TestCase):

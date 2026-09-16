@@ -62,6 +62,13 @@ KATZENSTEG_REPO=/path/to/katzensteg ./zig-out/bin/katzensteg probe.input
 
 `KATZENSTEG_PROFILE_DIR` may be used for local/private profile sets without committing machine-specific paths to the repository.
 
+`KATZENSTEG_REPO` explicitly selects the repository for default profile lookup and
+`{repo}` expansion. Otherwise, a launcher in `<repo>/zig-out/bin` prefers its own
+repository when that directory contains `profiles/`, even when run from another
+checkout. If the executable's inferred repository has no `profiles/`, the launcher
+falls back to the current directory when it contains `profiles/`. If neither does,
+it uses the executable's inferred repository.
+
 ## Real App Profiles
 
 Real app profiles often assume:

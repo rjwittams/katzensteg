@@ -86,12 +86,25 @@ pub fn resolveRepoRoot(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
         else => return err,
     }
 
-    if (try cwdLooksLikeRepo(io)) return system_io.fs.cwd(io).realpathAlloc(allocator, ".");
-    return repoRootFromExecutable(io, allocator) catch system_io.fs.cwd(io).realpathAlloc(allocator, ".");
+    const executable_repo = repoRootFromExecutable(io, allocator) catch
+        return system_io.fs.cwd(io).realpathAlloc(allocator, ".");
+    errdefer allocator.free(executable_repo);
+
+    // Keep profiles and {repo} library paths with the executable's checkout,
+    // even when launched from a different worktree.
+    if (try looksLikeRepo(io, allocator, executable_repo)) return executable_repo;
+    if (try looksLikeRepo(io, allocator, ".")) {
+        const cwd = try system_io.fs.cwd(io).realpathAlloc(allocator, ".");
+        allocator.free(executable_repo);
+        return cwd;
+    }
+    return executable_repo;
 }
 
-fn cwdLooksLikeRepo(io: std.Io) !bool {
-    var dir = system_io.fs.cwd(io).openDir("profiles", .{}) catch |err| switch (err) {
+fn looksLikeRepo(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !bool {
+    const profiles_path = try std.fs.path.join(allocator, &.{ path, "profiles" });
+    defer allocator.free(profiles_path);
+    var dir = system_io.fs.cwd(io).openDir(profiles_path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => return err,
     };
