@@ -187,12 +187,41 @@ test "presenter does not replay partial execution and source overflow requests c
     try std.testing.expectEqual(@as(usize, 0), f.model.pendingCount());
     try f.finish();
     var overflow = try Fixture.init();
+    try overflow.model.injectKey(.{ .key = "enter", .action = .down });
+    work = try overflow.next();
+    try work.complete(.executed);
+    try overflow.settle();
+    try overflow.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointerdown, .button = 0, .buttons = 1 });
+    work = try overflow.next();
+    try work.complete(.executed);
+    try overflow.settle();
     overflow.model.queue_limit = 2;
     try std.testing.expectError(error.Capacity, overflow.model.feed("a"));
     work = try overflow.next();
     try std.testing.expectEqual(js.input.Scope.all, (try work.cleanup()).?.scope);
     try work.complete(.executed);
-    try overflow.settle();
+    try std.testing.expect(overflow.controller.closing);
+    for (0..2000) |_| {
+        try overflow.controller.pump(&overflow.model);
+        if (overflow.controller.closed) break;
+        os.time.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(overflow.controller.closed and overflow.controller.clean);
+    overflow.model.queue_limit = 8192;
+    try overflow.model.feed("x");
+    try overflow.controller.pump(&overflow.model);
+    try std.testing.expectEqual(@as(usize, 0), overflow.model.pendingCount());
+    var fds: [2]i32 = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
+    var fresh_server = try overflow.target.serve(&fds[0]);
+    var fresh = try js.input.Client.connect(&fds[1], .cooperative);
+    try std.testing.expect((try fresh.describe()).controller != overflow.controller.admission.controller);
+    fresh.deinit();
+    fresh_server.deinit();
+    while (try overflow.target.next()) |value| {
+        var cleanup = value;
+        try cleanup.complete(.executed);
+    }
     try overflow.finish();
 }
 
@@ -223,4 +252,54 @@ test "presenter settles or cleans up a key release racing geometry without repla
     try f.settle();
     for (f.controller.presses) |held| try std.testing.expect(held == null);
     try f.finish();
+}
+
+test "presenter rejected button releases request cleanup including viewport releases" {
+    for ([_]bool{ false, true }) |viewport| {
+        var f = try Fixture.init();
+        try f.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointerdown, .button = 0, .buttons = 1 });
+        var work = try f.next();
+        try work.complete(.executed);
+        try f.settle();
+        if (viewport) {
+            var target = f.model.target;
+            target.cols += 1;
+            f.model.setTarget(target);
+        } else {
+            try f.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointerup, .button = 0, .buttons = 0 });
+        }
+        work = try f.next();
+        try std.testing.expectEqual(js.input.Action.up, (try work.event()).button.action);
+        try work.complete(.rejected);
+        work = try f.next();
+        try std.testing.expectEqual(js.input.Scope.all, (try work.cleanup()).?.scope);
+        try work.complete(.executed);
+        try f.settle();
+        try f.finish();
+    }
+}
+
+test "presenter waits for button outcomes before a subsequent click and suppresses rejected downs" {
+    for ([_]js.input.Outcome{ .executed, .rejected }) |outcome| {
+        var f = try Fixture.init();
+        defer f.finish() catch unreachable;
+        for (0..2) |_| {
+            try f.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointerdown, .button = 0, .buttons = 1 });
+            try f.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointerup, .button = 0, .buttons = 0 });
+        }
+        for (0..2) |_| {
+            var work = try f.next();
+            try std.testing.expectEqual(js.input.Action.down, (try work.event()).button.action);
+            try std.testing.expectEqual(@as(usize, 1), f.controller.outstanding.items.len);
+            try work.complete(outcome);
+            if (outcome == .executed) {
+                work = try f.next();
+                try std.testing.expectEqual(js.input.Action.up, (try work.event()).button.action);
+                try std.testing.expectEqual(@as(u8, 1), f.controller.buttons);
+                try work.complete(.executed);
+            }
+        }
+        try f.settle();
+        try std.testing.expectEqual(@as(u8, 0), f.controller.buttons);
+    }
 }

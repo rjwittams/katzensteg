@@ -11,6 +11,7 @@ pub const Executor = struct {
     target: wire.Target,
     listener: ?js.endpoint.Listener = null,
     stopped: std.atomic.Value(bool) = .init(false),
+    disconnect_requested: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     servers: [8]?wire.Server = @splat(null),
     pending: ?wire.Work = null,
@@ -43,6 +44,16 @@ pub const Executor = struct {
 
     fn serve(self: *Executor) void {
         while (!self.stopped.load(.acquire)) {
+            if (self.disconnect_requested.load(.acquire)) {
+                // ABI 0.7 has no target-side overflow command. Disconnect on the
+                // transport thread: dropping servers ends assignment and asks
+                // Jackstay for cleanup, without claiming execution was uncertain.
+                for (&self.servers) |*slot| {
+                    if (slot.*) |*server| server.deinit();
+                    slot.* = null;
+                }
+                self.disconnect_requested.store(false, .release);
+            }
             for (&self.servers) |*slot| if (slot.*) |*server| {
                 if (server.finished() catch true) {
                     server.deinit();
@@ -78,6 +89,8 @@ pub const Executor = struct {
     /// bind resolves a down into the current app binding. Repeat/up use that
     /// stored binding even when layout, modifiers, or key meaning have changed.
     pub fn pump(self: *Executor, model: *input.InputModel, bind: anytype) !void {
+        // Do not dispatch more work while the network owner ends assignment.
+        if (self.disconnect_requested.load(.acquire)) return;
         if (self.pending) |item| {
             if (!model.deliveryFinished()) return;
             model.finishDelivery();
@@ -93,7 +106,13 @@ pub const Executor = struct {
                     error.Unsupported => .unsupported,
                     else => .rejected,
                 };
+                const exhausted = outcome == .rejected and (err == error.Capacity or err == error.OutOfMemory);
+                if (exhausted) {
+                    std.log.warn("Jackstay executor input capacity exhausted; disconnecting controller", .{});
+                    self.disconnect_requested.store(true, .release);
+                }
                 try work.complete(outcome);
+                if (exhausted) return;
                 continue;
             };
             if (model.deliveryFinished()) {

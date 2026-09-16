@@ -13,6 +13,8 @@ pub const Controller = struct {
     closing: bool = false,
     clean: bool = false,
     focus_generation: u64 = 0,
+    overflow_generation: u64 = 0,
+    pointer_generation: u64 = 0,
     mapping_generation: ?u64 = null,
     next_press: u64 = 1,
     presses: [256]?Press = @splat(null),
@@ -20,7 +22,7 @@ pub const Controller = struct {
     pointer: wire.Position = .{ .x = 0, .y = 0, .revision = 1 },
     outstanding: std.ArrayList(Pending) = .empty,
     const Press = struct { code: i32, id: u64, confirmed: bool = false, releasing: bool = false };
-    const Pending = struct { sequence: u64, press: ?u64 = null, action: wire.Action = .down };
+    const Pending = struct { sequence: u64, press: ?u64 = null, button: ?wire.Button = null, pointer_generation: u64 = 0, action: wire.Action = .down };
     const allocator = std.heap.c_allocator;
 
     pub fn init(client: wire.Client) !Controller {
@@ -59,6 +61,7 @@ pub const Controller = struct {
                 self.admission.geometry = result.geometry;
                 self.resetting = false;
                 self.buttons = 0;
+                self.pointer_generation +%= 1;
                 self.pointer.revision = result.geometry.revision;
                 model.discardLocalInput(!all);
                 if (all) {
@@ -91,6 +94,14 @@ pub const Controller = struct {
                     break;
                 };
             };
+            if (item.button) |button| {
+                if (item.pointer_generation == self.pointer_generation) {
+                    const mask = buttonMask(button);
+                    if (executed) {
+                        if (item.action == .down) self.buttons |= mask else self.buttons &= ~mask;
+                    } else if (item.action == .up) release_failed = self.buttons & mask != 0;
+                }
+            }
             _ = self.outstanding.swapRemove(i);
             return release_failed;
         };
@@ -105,6 +116,7 @@ pub const Controller = struct {
         model.discardLocalInput(false);
         self.presses = @splat(null);
         self.buttons = 0;
+        self.pointer_generation +%= 1;
         if (!self.resetting and !self.closed) {
             self.client.reset() catch |err| switch (err) {
                 error.Closed => {
@@ -122,6 +134,13 @@ pub const Controller = struct {
             model.discardLocalInput(false);
             return;
         }
+        if (model.overflow_generation != self.overflow_generation) {
+            self.overflow_generation = model.overflow_generation;
+            model.discardLocalInput(false);
+            std.log.warn("Jackstay presenter input capacity exhausted; ending controller", .{});
+            self.close();
+            return;
+        }
         if (model.focus_generation != self.focus_generation) {
             self.focus_generation = model.focus_generation;
             try self.reset(model);
@@ -134,21 +153,30 @@ pub const Controller = struct {
             if (previous != model.mapping_generation) {
                 // A viewer mapping change releases pointer contributions only.
                 // This is an ordinary release, not application drag cancellation.
+                // Settle prior button transitions before releasing, and reserve
+                // room for all five possible releases within the transport bound.
+                if (self.pendingButtons() != 0 or self.outstanding.items.len > 27) return;
                 for (0..5) |i| if (self.buttons & (@as(u8, 1) << @intCast(i)) != 0) {
-                    try self.send(.{ .button = .{ .button = @enumFromInt(i + 1), .action = .up, .position = self.pointer } });
+                    try self.sendButton(@enumFromInt(i + 1), .up);
                 };
-                self.buttons = 0;
                 model.discardStalePointerInput();
             }
         }
         self.mapping_generation = model.mapping_generation;
         // Bound work in the transport by actual results, without waiting here.
         while (self.outstanding.items.len < 32) {
-            const event = model.pop() orelse break;
+            const next = model.peek() orelse break;
+            // Serialize transitions for a button until its execution result is
+            // known. A later down must not hide a failed release of the same hold.
+            if (next == .mouse_button and self.pendingButtons() != 0) break;
+            const event = model.pop().?;
             self.forward(event, model.target) catch |err| {
                 std.log.warn("Jackstay input mapping/send failed: {any}", .{err});
-                if (err != error.Unsupported) try self.reset(model);
-                if (self.resetting) break;
+                if (err == error.Capacity or err == error.OutOfMemory) {
+                    model.discardLocalInput(false);
+                    self.close();
+                } else if (err != error.Unsupported) try self.reset(model);
+                if (self.resetting or self.closing) break;
             };
         }
     }
@@ -206,11 +234,10 @@ pub const Controller = struct {
                     5 => .forward,
                     else => return error.Unsupported,
                 };
-                const mask = @as(u8, 1) << @as(u3, @intCast(@intFromEnum(number) - 1));
+                const mask = buttonMask(number);
                 if (!button.pressed and self.buttons & mask == 0) return;
                 self.pointer = self.position(button.x, button.y, target);
-                try self.send(.{ .button = .{ .button = number, .action = if (button.pressed) .down else .up, .position = self.pointer } });
-                if (button.pressed) self.buttons |= mask else self.buttons &= ~mask;
+                try self.sendButton(number, if (button.pressed) .down else .up);
             },
             .mouse_wheel => |wheel| {
                 if (!caps.scroll) return error.Unsupported;
@@ -218,6 +245,25 @@ pub const Controller = struct {
                 try self.send(.{ .scroll = .{ .x = wheel.precise_x orelse @as(f32, @floatFromInt(wheel.x)), .y = -(wheel.precise_y orelse @as(f32, @floatFromInt(wheel.y))), .unit = .line, .position = self.pointer } });
             },
         }
+    }
+    fn buttonMask(button: wire.Button) u8 {
+        return @as(u8, 1) << @as(u3, @intCast(@intFromEnum(button) - 1));
+    }
+    fn pendingButtons(self: *const Controller) u8 {
+        var mask: u8 = 0;
+        for (self.outstanding.items) |item| {
+            if (item.button) |button| if (item.pointer_generation == self.pointer_generation) {
+                mask |= buttonMask(button);
+            };
+        }
+        return mask;
+    }
+    fn sendButton(self: *Controller, button: wire.Button, action: wire.Action) !void {
+        try self.send(.{ .button = .{ .button = button, .action = action, .position = self.pointer } });
+        const pending = &self.outstanding.items[self.outstanding.items.len - 1];
+        pending.button = button;
+        pending.action = action;
+        pending.pointer_generation = self.pointer_generation;
     }
     fn position(self: *const Controller, x: i32, y: i32, target: input.Target) wire.Position {
         const g = self.admission.geometry;

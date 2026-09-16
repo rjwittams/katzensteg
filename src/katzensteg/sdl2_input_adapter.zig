@@ -51,6 +51,11 @@ pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *sdl.SDL_Event) void {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
         if (rt.input_parser) |*model| {
+            switch (event.type) {
+                sdl.SDL_MOUSEMOTION => model.noteNativePointer(@floatFromInt(event.motion.x), @floatFromInt(event.motion.y)),
+                sdl.SDL_MOUSEBUTTONDOWN, sdl.SDL_MOUSEBUTTONUP => model.noteNativePointer(@floatFromInt(event.button.x), @floatFromInt(event.button.y)),
+                else => {},
+            }
             if (event.type == sdl.SDL_MOUSEMOTION) event.motion.state |= model.remote_buttons;
             if (event.type == sdl.SDL_KEYDOWN or event.type == sdl.SDL_KEYUP) event.key.keysym.mod |= model.heldModifiers();
         }
@@ -306,10 +311,7 @@ pub fn refreshInput(rt: *runtime_mod.Runtime) void {
             const buttons = real_sdl.SDL_GetMouseState(&native_x, &native_y);
             const x: f32 = @floatFromInt(native_x);
             const y: f32 = @floatFromInt(native_y);
-            if (model.native_mouse_x == null or model.native_mouse_x.? != x or model.native_mouse_y.? != y or buttons != model.native_buttons) rt.mouse_ownership.claimRealWindow();
-            model.native_mouse_x = x;
-            model.native_mouse_y = y;
-            model.native_buttons = buttons;
+            if (model.updateNativeMouse(x, y, buttons)) rt.mouse_ownership.claimRealWindow();
             executor.pump(model, @import("sdl_input_binding.zig").bind) catch |err| {
                 std.log.err("Jackstay input execution failed: {any}", .{err});
             };
@@ -336,4 +338,26 @@ pub fn mergedModifiers(rt: *runtime_mod.Runtime, native: u16) u16 {
     const model = &(rt.input_parser orelse return native);
     model.observeModifiers();
     return native | model.heldModifiers();
+}
+
+test "native motion updates canonical remote-release position" {
+    if (!@import("jackstay").enabled) return;
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+    var executor = try @import("jackstay_input_executor.zig").Executor.init(std.testing.allocator);
+    defer executor.target.deinit() catch unreachable;
+    rt.input_executor = &executor;
+    defer rt.input_executor = null;
+    rt.input_parser = input.InputModel.init(rt.allocator);
+    rt.input_parser.?.last_mouse_x = 10;
+    rt.input_parser.?.last_mouse_y = 10;
+    rt.input_parser.?.remote_buttons = 1;
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.motion.type = sdl.SDL_MOUSEMOTION;
+    event.motion.x = 100;
+    event.motion.y = 120;
+    noteRealEvent(&rt, &event);
+    try std.testing.expectEqual(@as(i32, 100), rt.input_parser.?.mouseState().x);
+    try std.testing.expectEqual(@as(i32, 120), rt.input_parser.?.mouseState().y);
+    try std.testing.expectEqual(@as(u32, 1), rt.input_parser.?.mouseState().buttons);
 }

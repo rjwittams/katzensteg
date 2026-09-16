@@ -234,6 +234,33 @@ class PublisherInput(unittest.TestCase):
         client = Client(self.lib, app.input)
         self.addCleanup(client.destroy)
         return client
+    def test_state_only_polling_does_not_exhaust_event_retention(self):
+        for version in (2, 3):
+            with self.subTest(sdl=version):
+                app = self.app(version)
+                client = self.client(app)
+                app.command("s")
+                app.wait(lambda es: any(e["event"] == "state" for e in es))
+                client.result(client.key("ShiftLeft", 1, press=9000))
+                # Cross the retained-event capacity with keys and buttons, while
+                # keeping an unrelated modifier held throughout.
+                for index in range(205):
+                    client.result(client.key("KeyA", 1, press=index + 1))
+                    client.result(client.key("KeyA", 2, press=index + 1))
+                    client.result(client.send(Event(kind=4, action=1, button=1, geometry_revision=1, x=10, y=10)))
+                    client.result(client.send(Event(kind=4, action=2, button=1, geometry_revision=1, x=10, y=10)))
+                client.result(client.key("ShiftLeft", 2, press=9000))
+                def released(es):
+                    states = [e for e in es if e["event"] == "state"]
+                    return states and states[-1]["a"] == 0 and states[-1]["shift"] == 0 and states[-1]["buttons"] == 0
+                app.wait(released)
+                client.close()
+                # Cleanup must leave the target available to a fresh controller.
+                fresh = self.client(app)
+                fresh.result(fresh.key("KeyA", 1))
+                fresh.result(fresh.key("KeyA", 2))
+                fresh.close()
+
     def test_direct_terminal_presenter_forwards_input_and_focus_loss(self):
         app = self.app(2)
         master, slave = pty.openpty()

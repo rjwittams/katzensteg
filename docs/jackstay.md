@@ -142,6 +142,15 @@ change releases pointer holds and preserves keyboard holds; stale pointer
 geometry is rejected. Completed but unread controller events are discarded at
 cleanup, so old presses cannot reappear after reset.
 
+State-acknowledged events remain available to mixed event/state readers until the
+768-event retention limit needs space. At that point, KS retires only copies
+already delivered through state APIs; unobserved events remain queued. If those
+unobserved events exhaust capacity, the executor ends the input connection and
+continues pumping cleanup. ABI 0.7 has no executor-side overflow notification, so
+KS logs the capacity failure and uses server teardown on its transport thread.
+The peer sees a disconnect, which does not confirm cleanup. The listener remains
+available, and Jackstay admits a new controller only after cleanup finishes.
+
 Physical keys use DOM codes, logical keys use the current SDL keyboard layout,
 and text commits are separate UTF-8 payloads. A key-down stores its resolved SDL
 binding; repeats and releases reuse it. The source owns repeat timing. SDL2 text
@@ -149,7 +158,8 @@ is split at UTF-8 boundaries into its fixed-size event buffers; SDL3 retains the
 whole commit. Line scroll keeps fractional deltas. Pixel/page scroll, unmappable
 keys and embedded NUL text return clean unsupported results. Pointer coordinates
 are logical window coordinates: SDL2 rounds down to integers, while SDL3 retains
-fractional positions.
+fractional positions. Native pointer activity also updates the canonical position,
+so a later remote release or cleanup uses the current location.
 
 Local input stays enabled, and cleanup preserves native/local holds visible to
 the model. The target advertises neither independent contributions nor interaction
@@ -195,7 +205,10 @@ preserved.
 
 The presenter limits outstanding operations to 32 and waits for execution results
 before sending more. Its local queue holds at most 8,192 events. Overflow drops
-pending work and requests cleanup; partial or uncertain execution closes input.
+pending work and ends the controller session with cleanup; partial or uncertain
+execution also closes input. Focus loss uses a reset and retains assignment.
+Button holds remain tracked until release execution succeeds. A rejected release
+requests recovery cleanup; subsequent button transitions wait for pending results.
 A viewport change releases held pointer buttons and discards only pointer events
 captured under an older mapping. Target geometry resets preserve confirmed key
 holds and use the new geometry revision for subsequent pointer events.
@@ -268,3 +281,10 @@ including long Unicode input, logical-key repeat, held-state cleanup on graceful
 close, and abrupt producer exit. KS-to-KS tests cover both SDL versions, positioned
 and placeholder hosts, and input with video paused. A pseudo-terminal test covers
 direct terminal input and focus loss without using the user's terminal.
+
+Review follow-up verified on 2026-09-16 on macOS arm64 and Linux x86_64: full
+Vulkan-enabled builds and tests passed with Jackstay enabled (1,599 Zig tests)
+and disabled (1,459), along with all 11 input and 11 media process tests. New
+coverage crosses the retained-event limit with state-only SDL2/SDL3 readers,
+checks native-motion release coordinates, rejects presenter button releases,
+and verifies cleanup and fresh admission after executor/presenter overflow.

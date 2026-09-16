@@ -5,18 +5,17 @@ const input = @import("input.zig");
 const executor_mod = if (js.enabled) @import("jackstay_input_executor.zig") else struct {};
 
 const Fixture = if (js.enabled) struct {
-    executor: executor_mod.Executor,
-    server: js.input.Server,
+    executor: *executor_mod.Executor,
     client: js.input.Client,
     model: input.InputModel,
 
     fn init() !@This() {
-        var executor = try executor_mod.Executor.init(std.testing.allocator);
-        var fds: [2]i32 = undefined;
-        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
-        const server = try executor.target.serve(&fds[0]);
-        const client = try js.input.Client.connect(&fds[1], .cooperative);
-        return .{ .executor = executor, .server = server, .client = client, .model = input.InputModel.init(std.testing.allocator) };
+        const path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/ks-executor-{d}-{d}.sock", .{ std.c.getpid(), os.time.nanoTimestamp() });
+        defer std.testing.allocator.free(path);
+        const executor = try executor_mod.Executor.create(std.testing.io, std.testing.allocator, path);
+        var fd = try js.endpoint.connect(path);
+        const client = try js.input.Client.connect(&fd, .cooperative);
+        return .{ .executor = executor, .client = client, .model = input.InputModel.init(std.testing.allocator) };
     }
     fn bind(key: js.input.Key) !input.KeyEvent {
         if (!std.mem.eql(u8, key.name, "KeyA")) return error.Unsupported;
@@ -60,8 +59,7 @@ const Fixture = if (js.enabled) struct {
         }
         try std.testing.expect(confirmed);
         self.client.deinit();
-        self.server.deinit();
-        try self.executor.target.deinit();
+        try self.executor.close();
         self.model.deinit();
     }
 } else struct {};
@@ -221,10 +219,84 @@ test "cooperative cleanup allocation failure quarantines the executor instead of
     }
     try std.testing.expect(f.model.remoteScanHeld(4));
     f.client.deinit();
-    f.server.deinit();
+    f.executor.stopTransport();
     try std.testing.expectError(error.RecoveryRequired, f.executor.target.deinit());
     // Only this test owns a synthetic executor with no application side effects.
     f.model.deinit();
     try f.executor.target.resolveFailedCleanup();
     try f.executor.target.deinit();
+    std.testing.allocator.destroy(f.executor);
+}
+
+test "executor native motion controls ordinary release and cleanup coordinates" {
+    if (!js.enabled) return;
+    for ([_]bool{ false, true }) |reset| {
+        var f = try Fixture.init();
+        _ = f.model.updateNativeMouse(0, 0, 0);
+        _ = try f.client.send(.{ .button = .{ .button = .primary, .action = .down, .position = .{ .x = 10, .y = 10, .revision = 1 } } });
+        try f.queued();
+        _ = f.model.pop();
+        _ = try f.status();
+        try std.testing.expect(f.model.updateNativeMouse(100.5, 120.25, 0));
+        if (reset) {
+            try f.client.reset();
+        } else {
+            _ = try f.client.send(.{ .button = .{ .button = .primary, .action = .up, .position = .{ .x = 10, .y = 10, .revision = 1 } } });
+        }
+        try f.queued();
+        const up = f.model.pop().?.mouse_button;
+        try std.testing.expect(!up.pressed);
+        try std.testing.expectEqual(@as(i32, 100), up.x);
+        try std.testing.expectEqual(@as(i32, 120), up.y);
+        try std.testing.expectEqual(@as(?f32, 100.5), up.precise_x);
+        try std.testing.expectEqual(@as(?f32, 120.25), up.precise_y);
+        _ = try f.status();
+        try std.testing.expectEqual(@as(i32, 100), f.model.mouseState().x);
+        try f.finish();
+    }
+}
+
+test "executor capacity on key or button release ends assignment and admits after cleanup" {
+    if (!js.enabled) return;
+    for ([_]bool{ false, true }) |release_button| {
+        var f = try Fixture.init();
+        const previous = (try f.client.describe()).controller;
+        try f.sendKey(.down, 1);
+        try f.queued();
+        _ = f.model.pop();
+        _ = try f.status();
+        _ = try f.client.send(.{ .button = .{ .button = .primary, .action = .down, .position = .{ .x = 10, .y = 10, .revision = 1 } } });
+        try f.queued();
+        _ = f.model.pop();
+        _ = try f.status();
+        // Unobserved local events cannot be evicted to make room for remote work.
+        for (0..768) |_| try f.model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointermove });
+        if (release_button) {
+            _ = try f.client.send(.{ .button = .{ .button = .primary, .action = .up, .position = .{ .x = 10, .y = 10, .revision = 1 } } });
+        } else try f.sendKey(.up, 1);
+        var cleaned = false;
+        for (0..2000) |_| {
+            try f.pump();
+            f.model.observeState(.keyboard);
+            f.model.observeState(.pointer);
+            if (!f.model.remoteScanHeld(4) and f.model.remote_buttons == 0 and f.executor.pending == null) {
+                cleaned = true;
+                break;
+            }
+            os.time.sleep(std.time.ns_per_ms);
+        }
+        try std.testing.expect(cleaned);
+        // Existing unobserved local transitions survived controller cleanup.
+        for (0..768) |_| try std.testing.expect(f.model.pop().? == .mouse_motion);
+        while (f.model.pop()) |_| {}
+        f.client.deinit();
+        var fd = try js.endpoint.connect(f.executor.listener.?.path);
+        f.client = try js.input.Client.connect(&fd, .cooperative);
+        try std.testing.expect((try f.client.describe()).controller != previous);
+        try f.sendKey(.down, 2);
+        try f.queued();
+        try std.testing.expect(f.model.pop().? == .key_down);
+        try std.testing.expectEqual(js.input.Outcome.executed, (try f.status()).completed.outcome);
+        try f.finish();
+    }
 }

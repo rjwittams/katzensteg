@@ -178,6 +178,7 @@ pub const InputModel = struct {
     delivery: ?Delivery = null,
     next_ticket: u64 = 1,
     focus_generation: u64 = 0,
+    overflow_generation: u64 = 0,
     mapping_generation: u64 = 0,
     queue_limit: ?usize = null,
 
@@ -281,6 +282,23 @@ pub const InputModel = struct {
         return self.queue.items.len;
     }
 
+    pub fn noteNativePointer(self: *InputModel, x: f32, y: f32) void {
+        self.last_mouse_x = @intFromFloat(x);
+        self.last_mouse_y = @intFromFloat(y);
+        self.precise_mouse_x = x;
+        self.precise_mouse_y = y;
+    }
+
+    pub fn updateNativeMouse(self: *InputModel, x: f32, y: f32, buttons: u32) bool {
+        const changed = self.native_mouse_x == null or self.native_mouse_x.? != x or
+            self.native_mouse_y.? != y or buttons != self.native_buttons;
+        self.native_mouse_x = x;
+        self.native_mouse_y = y;
+        self.native_buttons = buttons;
+        if (changed) self.noteNativePointer(x, y);
+        return changed;
+    }
+
     pub fn mouseState(self: *const TerminalInputParser) MouseState {
         return .{
             .x = self.last_mouse_x,
@@ -310,10 +328,14 @@ pub const InputModel = struct {
     fn append(self: *InputModel, event: InputEvent) !void {
         if (self.queue_limit) |limit| if (self.queue.items.len >= limit) {
             self.discardLocalInput(false);
-            self.focus_generation +%= 1;
+            self.overflow_generation +%= 1;
             return error.Capacity;
         };
         try self.queue.append(self.allocator, .{ .event = event, .mapping_generation = self.mapping_generation });
+    }
+
+    pub fn peek(self: *const InputModel) ?InputEvent {
+        return if (self.queue.items.len > 0) self.queue.items[0].event else null;
     }
 
     pub fn pop(self: *InputModel) ?InputEvent {
@@ -350,7 +372,19 @@ pub const InputModel = struct {
     pub fn beginDelivery(self: *InputModel, kind: DeliveryKind, count: usize) !void {
         if (self.delivery != null) return error.DeliveryInProgress;
         // Leave bounded room for releasing all held keys/buttons during cleanup.
-        if (kind != .cleanup and self.queue.items.len + count > 768) return error.Capacity;
+        if (kind != .cleanup and self.queue.items.len + count > 768) {
+            // State polling already delivered these transitions. Retain them for
+            // mixed event/state readers until capacity is needed, then retire
+            // only those acknowledged copies; never discard unobserved input.
+            var retained: usize = 0;
+            for (self.queue.items) |queued| {
+                if (queued.acknowledged) continue;
+                self.queue.items[retained] = queued;
+                retained += 1;
+            }
+            self.queue.items.len = retained;
+            if (retained + count > 768) return error.Capacity;
+        }
         try self.queue.ensureUnusedCapacity(self.allocator, count);
         if (self.next_ticket == std.math.maxInt(u64)) return error.Capacity;
         self.delivery = .{ .ticket = self.next_ticket, .kind = kind };
@@ -1572,4 +1606,40 @@ test "terminal UTF8 prefix survives a large following read" {
     try model.feed("\xa9" ++ "x" ** 300);
     try std.testing.expectEqual(@as(i32, 0xe9), model.pop().?.key_down.keycode);
     try std.testing.expectEqualStrings("é", model.pop().?.text.bytes());
+}
+
+test "native snapshots change canonical position only on native activity" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    try std.testing.expect(model.updateNativeMouse(0, 0, 0));
+    try model.injectSourcePointer(.{ .x = 10, .y = 10, .width = 640, .height = 480, .kind = .pointermove });
+    const remote = model.mouseState();
+    try std.testing.expect(!model.updateNativeMouse(0, 0, 0));
+    try std.testing.expectEqual(remote.x, model.mouseState().x);
+    try std.testing.expect(model.updateNativeMouse(100.5, 120.25, 0));
+    try std.testing.expectEqual(@as(i32, 100), model.mouseState().x);
+    try std.testing.expectEqual(@as(?f32, 100.5), model.mouseState().precise_x);
+}
+
+test "remote delivery retires only acknowledged state copies when capacity is needed" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    // Unobserved local transitions must remain in their original order.
+    try model.injectSourcePointer(.{ .x = 1, .y = 1, .width = 640, .height = 480, .kind = .pointerdown, .button = 0, .buttons = 1 });
+    for (0..767) |_| {
+        try model.beginDelivery(.keyboard, 1);
+        model.appendRemote(1, .{ .key_up = .{ .scancode = 4, .keycode = 'a' } });
+        model.observeState(.keyboard);
+        try std.testing.expect(model.deliveryFinished());
+        model.finishDelivery();
+    }
+    try std.testing.expectEqual(@as(usize, 768), model.pendingCount());
+    try model.beginDelivery(.keyboard, 1);
+    model.appendRemote(1, .{ .key_up = .{ .scancode = 225, .keycode = 0 } });
+    try std.testing.expectEqual(@as(usize, 2), model.pendingCount());
+    try std.testing.expect(model.pop().? == .mouse_button);
+    try std.testing.expect(!model.deliveryFinished());
+    try std.testing.expectEqual(@as(i32, 225), model.pop().?.key_up.scancode);
+    try std.testing.expect(model.deliveryFinished());
+    model.finishDelivery();
 }
