@@ -1364,6 +1364,7 @@ pub const Runtime = struct {
             .layout = layout,
             .source_px = if (self.last_batch_presentation_status) |status| status.source_px else null,
             .cell_px = if (sink.terminalGeometry()) |geometry| (if (geometry.pixels) |px| cellPixels(geometry.cells.cols, geometry.cells.rows, px.w, px.h) else null) else null,
+            .pixel_origin = mousePixelOrigin(),
         });
     }
 
@@ -2382,7 +2383,12 @@ fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_
         .h = h,
         .layout = layout,
         .cell_px = cellPixels(tty.cols, tty.rows, tty.pixel_width, tty.pixel_height),
+        .pixel_origin = mousePixelOrigin(),
     };
+}
+
+fn mousePixelOrigin() i32 {
+    return ts_kitty.capabilities.mousePixelOrigin(ts_kitty.capabilities.detectTerminalIdentity());
 }
 
 fn cellPixels(cols: i32, rows: i32, pixel_w: i32, pixel_h: i32) ?input_mod.CellPixels {

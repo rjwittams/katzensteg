@@ -7,6 +7,8 @@ pub const TerminalSize = struct {
     pixel_height: i32 = 0,
     /// Units of the terminal's SGR mouse reports, as confirmed by DECRQM.
     mouse_units: terminal_keys.MouseUnits = .cell,
+    /// Coordinate of the first pixel in pixel reports (terminal quirk).
+    pixel_origin: i32 = 1,
 
     pub fn cellPixelWidth(self: TerminalSize) i32 {
         return if (self.cols > 0 and self.pixel_width > 0) @divTrunc(self.pixel_width, self.cols) else 0;

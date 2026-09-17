@@ -36,10 +36,14 @@ pub const Target = struct {
     layout: presentation_layout.PresentationLayout = .{},
     source_px: ?render_batch_protocol.SourcePixels = null,
     cell_px: ?CellPixels = null,
+    /// Coordinate of the first pixel in pixel reports: 1 for xterm's
+    /// convention, 0 for kitty and Ghostty. The host sets it from the
+    /// terminal identity.
+    pixel_origin: i32 = 1,
 
     pub fn sameMapping(a: Target, b: Target) bool {
         if (a.cols != b.cols or a.rows != b.rows or a.w != b.w or a.h != b.h or a.layout.len != b.layout.len) return false;
-        if (!std.meta.eql(a.cell_px, b.cell_px)) return false;
+        if (!std.meta.eql(a.cell_px, b.cell_px) or a.pixel_origin != b.pixel_origin) return false;
         for (a.layout.regions[0..a.layout.len], b.layout.regions[0..b.layout.len]) |x, y| if (!std.meta.eql(x, y)) return false;
         return true;
     }
@@ -254,6 +258,7 @@ pub const InputModel = struct {
             .layout = target.layout,
             .source_px = target.source_px,
             .cell_px = target.cell_px,
+            .pixel_origin = target.pixel_origin,
         };
     }
 
@@ -924,10 +929,8 @@ pub const InputModel = struct {
             .pixel => {
                 const cell = self.target.cell_px orelse return null;
                 if (cell.w <= 0 or cell.h <= 0) return null;
-                // Pixel reports count from 1 like cell reports; terminals
-                // differ by at most one pixel here.
-                const col = @as(f32, @floatFromInt(@max(x, 1) - 1)) / cell.w + 1;
-                const row = @as(f32, @floatFromInt(@max(y, 1) - 1)) / cell.h + 1;
+                const col = @as(f32, @floatFromInt(@max(x - self.target.pixel_origin, 0))) / cell.w + 1;
+                const row = @as(f32, @floatFromInt(@max(y - self.target.pixel_origin, 0))) / cell.h + 1;
                 const point = self.mapFractionalCellToSdl(col, row) orelse return null;
                 return .{ .x = @intFromFloat(@floor(point.x)), .y = @intFromFloat(@floor(point.y)), .precise_x = point.x, .precise_y = point.y };
             },
@@ -2118,4 +2121,19 @@ test "terminal input parser maps pixel reports without a layout" {
     const clamped = parser.pop().?.mouse_motion;
     try std.testing.expectEqual(@as(i32, 799), clamped.x);
     try std.testing.expectEqual(@as(i32, 399), clamped.y);
+}
+
+test "terminal input parser honours a zero-based pixel origin" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400, .cell_px = .{ .w = 10, .h = 20 }, .pixel_origin = 0 });
+    try parser.feed("\x1b[?1016;1$y\x1b[<35;250;300M");
+    const motion = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 200), motion.x);
+    try std.testing.expectEqual(@as(i32, 120), motion.y);
+    try parser.feed("\x1b[<35;0;0M");
+    try std.testing.expectEqual(@as(i32, 0), parser.pop().?.mouse_motion.x);
+    const before = parser.mapping_generation;
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400, .cell_px = .{ .w = 10, .h = 20 }, .pixel_origin = 1 });
+    try std.testing.expect(parser.mapping_generation != before);
 }

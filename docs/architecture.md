@@ -166,6 +166,9 @@ teardown restore cell reports. A pixel report becomes a fractional cell through
 the terminal cell size the input target carries (`cell_px`, from the tty or the
 host's terminal geometry), so the same presentation layout places cell and
 pixel reports and the sub-cell position survives into the precise mouse fields.
+Terminals disagree on the first pixel's coordinate (xterm counts from 1 like
+cells, kitty and Ghostty from 0); `termscene`'s capabilities module owns that
+quirk and hosts pass it to the target as `pixel_origin`.
 The WM host converts pixel reports to cells for its own hit testing and drags,
 forwards them unchanged (grid-local pixels for placeholder sessions), and
 replays the DECRQM reply to each producer once.

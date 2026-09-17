@@ -743,7 +743,13 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         peer_queue.enableBlockingTrace(trace_blocking, &logger);
     }
 
-    var terminal = TerminalSize{ .rows = tty.rows, .cols = tty.cols, .pixel_width = tty.pixel_width, .pixel_height = tty.pixel_height };
+    var terminal = TerminalSize{
+        .rows = tty.rows,
+        .cols = tty.cols,
+        .pixel_width = tty.pixel_width,
+        .pixel_height = tty.pixel_height,
+        .pixel_origin = ts_kitty.capabilities.mousePixelOrigin(ts_kitty.capabilities.detectTerminalIdentity()),
+    };
     const session_capacity = @max(specs.len, default_wm_session_capacity);
     var sessions = try allocator.alloc(WmProducerSession, session_capacity);
     defer allocator.free(sessions);
@@ -2496,8 +2502,8 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize, terminal: TerminalSize) ?Par
     const cell_h = terminal.cellPixelHeight();
     if (terminal.mouse_units == .pixel and cell_w > 0 and cell_h > 0) {
         parsed.units = .pixel;
-        parsed.col = @divTrunc(@max(col, 1) - 1, cell_w) + 1;
-        parsed.row = @divTrunc(@max(row, 1) - 1, cell_h) + 1;
+        parsed.col = @divTrunc(@max(col - terminal.pixel_origin, 0), cell_w) + 1;
+        parsed.row = @divTrunc(@max(row - terminal.pixel_origin, 0), cell_h) + 1;
     }
     return parsed;
 }
@@ -4251,6 +4257,13 @@ test "WM converts pixel mouse reports to cells for itself and forwards grid-loca
     const cells = parseSgrMouseAt("\x1b[<0;105;150M", 0, .{ .rows = 40, .cols = 100 }).?;
     try std.testing.expectEqual(@as(i32, 105), cells.col);
     try std.testing.expectEqual(terminal_keys.MouseUnits.cell, cells.units);
+    // kitty and Ghostty count pixels from 0: pixel 100,140 is the first of cell 11,8.
+    var zero_based = terminal;
+    zero_based.pixel_origin = 0;
+    const zero = parseSgrMouseAt("\x1b[<0;100;140M", 0, zero_based).?;
+    try std.testing.expectEqual(@as(i32, 11), zero.col);
+    try std.testing.expectEqual(@as(i32, 8), zero.row);
+    try std.testing.expectEqual(@as(i32, 10), parseSgrMouseAt("\x1b[<0;100;140M", 0, terminal).?.col);
     var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer bytes.deinit();
     try translatePlaceholderInput(&bytes.writer, "\x1b[<0;105;150M\x1b[<35;95;150M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 }, terminal);
