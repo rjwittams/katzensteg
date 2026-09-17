@@ -6,6 +6,7 @@ const Producer = @import("wm/producer.zig").Producer;
 const Listener = @import("wm/listener.zig").Listener;
 const ClientChannel = @import("wm/client.zig").ClientChannel;
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const terminal_keys = @import("terminal_keys.zig");
 const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
 const blocking_trace = @import("blocking_trace.zig");
@@ -201,7 +202,7 @@ pub const WmMouseInputState = struct {
     drag: ?WmMouseDrag = null,
 
     pub fn readMouseInput(self: *WmMouseInputState, bytes: []u8, outer: Rect, content: Rect, terminal: TerminalSize) InputRead {
-        const mouse = parseSgrMouseAt(bytes, 0) orelse return .{ .action = .none };
+        const mouse = parseSgrMouseAt(bytes, 0, terminal) orelse return .{ .action = .none };
         const cell = Cell{ .row = mouse.row, .col = mouse.col };
         if (!mouse.pressed) {
             const had_drag = self.drag != null;
@@ -454,6 +455,12 @@ pub fn runSessionSpecsWithOptions(io: std.Io, allocator: std.mem.Allocator, prod
 
 const WmProducerSession = struct {
     placeholder_image_id: ?u32 = null,
+    /// Whether the producer has been told the terminal's kitty keyboard
+    /// flags, so its parser reads forwarded reports as real presses.
+    keyboard_flags_sent: bool = false,
+    /// Whether the producer has been told that forwarded mouse reports are
+    /// in pixels.
+    mouse_units_sent: bool = false,
     last_placeholder: ?render_batch_protocol.PlaceholderPresentation = null,
     profile_name: []const u8,
     session_id: u64 = 0,
@@ -736,7 +743,13 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         peer_queue.enableBlockingTrace(trace_blocking, &logger);
     }
 
-    const terminal = TerminalSize{ .rows = tty.rows, .cols = tty.cols, .pixel_width = tty.pixel_width, .pixel_height = tty.pixel_height };
+    var terminal = TerminalSize{
+        .rows = tty.rows,
+        .cols = tty.cols,
+        .pixel_width = tty.pixel_width,
+        .pixel_height = tty.pixel_height,
+        .pixel_origin = ts_kitty.capabilities.mousePixelOrigin(ts_kitty.capabilities.detectTerminalIdentity()),
+    };
     const session_capacity = @max(specs.len, default_wm_session_capacity);
     var sessions = try allocator.alloc(WmProducerSession, session_capacity);
     defer allocator.free(sessions);
@@ -784,7 +797,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     const keep_alive_when_empty = listener != null or specs.len == 0;
     var shutdown_deadline_ms: ?i64 = null;
     var accept_retry_ms: i64 = 0;
-    var input_buf: [256]u8 = undefined;
+    var input_buf: [wm_input_buffer_len]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
@@ -927,6 +940,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         if (!shutdown_sent and wm_events.tty_ready) {
             wm_events.tty_ready = false;
             const input = readInputForSessionsLocked(&tty_lock, &tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
+            terminal.mouse_units = tty.mouse_units;
             if (input.focus_changed) {
                 syncInputFocus(sessions[0..initialized], focused_index);
                 try event_log.record(.focus_changed, sessions[focused_index].profile_name);
@@ -966,7 +980,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 },
                 .forward => {
                     if (initialized == 0) continue;
-                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, &event_log, &logger);
+                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, tty.keyboard_protocol_flags, &event_log, &logger);
                 },
                 .quit => {
                     shutdown_sent = true;
@@ -1054,6 +1068,8 @@ fn recordLaunchFailure(events: *ProtocolEventLog, logger: *Logger, profile: []co
     logger.writeFmtScoped(.warn, .wm, "{s}", .{detail});
     try events.record(.parse_error, detail);
 }
+
+const wm_input_buffer_len = 256;
 
 fn availableSessionSlot(sessions: []const WmProducerSession, capacity: usize) ?usize {
     for (sessions, 0..) |session, i| if (session.retired) return i;
@@ -1856,12 +1872,15 @@ fn placeholderTarget(session: *const WmProducerSession, terminal: TerminalSize) 
     } else null };
 }
 
-fn translatePlaceholderInput(writer: anytype, bytes: []const u8, grid: Rect) !void {
+fn translatePlaceholderInput(writer: anytype, bytes: []const u8, grid: Rect, terminal: TerminalSize) !void {
     var i: usize = 0;
     while (i < bytes.len) {
-        if (parseSgrMouseAt(bytes, i)) |event| {
+        if (parseSgrMouseAt(bytes, i, terminal)) |event| {
             if (rectContainsCell(grid, event.row, event.col)) {
-                try writer.print("\x1b[<{d};{d};{d}{c}", .{ event.button, event.col - grid.col + 1, event.row - grid.row + 1, @as(u8, if (event.pressed) 'M' else 'm') });
+                // Grid-local coordinates in the report's own units.
+                const local_x = if (event.units == .pixel) event.x - terminal.columnPixelOffset(grid.col) else event.col - grid.col + 1;
+                const local_y = if (event.units == .pixel) event.y - terminal.rowPixelOffset(grid.row) else event.row - grid.row + 1;
+                try writer.print("\x1b[<{d};{d};{d}{c}", .{ event.button, local_x, local_y, @as(u8, if (event.pressed) 'M' else 'm') });
             }
             i += event.len;
         } else {
@@ -2032,13 +2051,36 @@ fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
     }
 }
 
-fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, events: *ProtocolEventLog, logger: *Logger) !void {
+fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
+    if (keyboard_flags != 0 and !session.keyboard_flags_sent) {
+        // The terminal answered the WM's query, not the producer's. Replay
+        // the reply once so the producer decodes forwarded key reports with
+        // the same event semantics.
+        var reply: [16]u8 = undefined;
+        const text = std.fmt.bufPrint(&reply, "\x1b[?{d}u", .{keyboard_flags}) catch unreachable;
+        if (!tryWriteInputControl(session.producer.channel.writer(), text)) {
+            logger.writeFmtScoped(.warn, .wm, "input control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
+            closeSessionControl(session);
+            return;
+        }
+        session.keyboard_flags_sent = true;
+    }
+    if (terminal.mouse_units == .pixel and !session.mouse_units_sent) {
+        // Likewise for the DECRQM reply that switched this terminal to
+        // pixel mouse reports; the viewport already carries the pixel size.
+        if (!tryWriteInputControl(session.producer.channel.writer(), "\x1b[?1016;1$y")) {
+            logger.writeFmtScoped(.warn, .wm, "input control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
+            closeSessionControl(session);
+            return;
+        }
+        session.mouse_units_sent = true;
+    }
     var local_bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer local_bytes.deinit();
     const forwarded = if (session.placeholder_image_id != null) blk: {
-        try translatePlaceholderInput(&local_bytes.writer, bytes, placeholderGridRect(session, terminal));
+        try translatePlaceholderInput(&local_bytes.writer, bytes, placeholderGridRect(session, terminal), terminal);
         break :blk local_bytes.written();
     } else bytes;
     if (forwarded.len == 0) return;
@@ -2200,6 +2242,8 @@ fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect,
 fn readInputForSessionsLocked(tty_lock: *system_io.Mutex, tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     const n = system_io.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
     if (n == 0) return .{ .action = .none };
+    if (keyboardFlagsReply(buf[0..n])) |flags| tty.keyboard_protocol_flags = flags;
+    if (mouseUnitsReply(buf[0..n])) |units| tty.mouse_units = units;
     tty_lock.lock();
     defer tty_lock.unlock();
     return readInputForSessionsBytes(buf[0..n], mouse, sessions, z_order, focused_index, terminal);
@@ -2220,7 +2264,7 @@ fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: [
     if (action != .none) return .{ .action = action };
     var changed_focus = false;
     if (mouse.drag == null) {
-        if (parseSgrMouseAt(bytes, 0)) |event| {
+        if (parseSgrMouseAt(bytes, 0, terminal)) |event| {
             if (event.pressed and (event.button & 3) == 0) {
                 const cell = Cell{ .row = event.row, .col = event.col };
                 if (hitSessionIndex(sessions, z_order, cell)) |hit_index| {
@@ -2245,13 +2289,17 @@ fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal:
     const content = contentRectForOuter(outer);
     const mouse_input = mouse.readMouseInput(bytes, outer, content, terminal);
     if (mouse_input.action != .none) return mouse_input;
-    const filtered = filterForwardedInputBytes(bytes, content);
+    const filtered = filterForwardedInputBytes(bytes, content, terminal);
     if (filtered.len > 0) return .{ .action = .forward, .bytes = filtered };
     return .{ .action = .none };
 }
 
 fn inputActionFromBytes(bytes: []const u8) InputAction {
-    for (bytes) |byte| {
+    // One character per input byte at most, so a chunk from the tty read
+    // buffer always fits and no hotkey is lost to truncation.
+    var scratch: [wm_input_buffer_len]u8 = undefined;
+    const keys = hotkeyChars(bytes, &scratch);
+    for (keys) |byte| {
         switch (byte) {
             'q', 'Q' => return .quit,
             'n' => return .start_launch,
@@ -2259,7 +2307,7 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
             else => {},
         }
     }
-    for (bytes) |byte| {
+    for (keys) |byte| {
         switch (byte) {
             'h' => return .{ .window = .move_left },
             'j' => return .{ .window = .move_down },
@@ -2275,6 +2323,67 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
         }
     }
     return .none;
+}
+
+/// The characters typed in a chunk of terminal input: plain bytes, plus the
+/// key of each kitty `CSI u` press report. Other control sequences (mouse,
+/// arrows, protocol replies) contribute nothing, so their letters are never
+/// mistaken for hotkeys.
+fn hotkeyChars(bytes: []const u8, out: []u8) []const u8 {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len and count < out.len) {
+        const byte = bytes[i];
+        if (byte != 0x1b and byte != 0x9b) {
+            out[count] = byte;
+            count += 1;
+            i += 1;
+            continue;
+        }
+        var start = i + 1;
+        if (byte == 0x1b) {
+            if (start >= bytes.len or bytes[start] != '[') {
+                i += 1;
+                continue;
+            }
+            start += 1;
+        }
+        var final = start;
+        while (final < bytes.len and !(bytes[final] >= 0x40 and bytes[final] <= 0x7e)) final += 1;
+        if (final >= bytes.len) break;
+        if (bytes[final] == 'u') {
+            if (terminal_keys.decodeCsi(bytes[start..final], 'u', true)) |report| switch (report) {
+                .key => |decoded| if (decoded.key.action != .up and !decoded.key.modifiers.suppressText()) {
+                    if (decoded.key.codepoint()) |cp| {
+                        if (cp < 0x80) {
+                            out[count] = @intCast(cp);
+                            count += 1;
+                        }
+                    } else if (std.mem.eql(u8, decoded.key.name.slice(), "Tab")) {
+                        out[count] = '\t';
+                        count += 1;
+                    }
+                },
+                .protocol_flags, .mouse_units => {},
+            };
+        }
+        i = final + 1;
+    }
+    return out[0..count];
+}
+
+/// The kitty keyboard flags in a `CSI ? flags u` reply, if the chunk holds one.
+fn keyboardFlagsReply(bytes: []const u8) ?u32 {
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, index, "\x1b[?")) |start| {
+        var final = start + 3;
+        while (final < bytes.len and (std.ascii.isDigit(bytes[final]) or bytes[final] == ';')) final += 1;
+        if (final < bytes.len and bytes[final] == 'u') {
+            if (terminal_keys.decodeCsi(bytes[start + 2 .. final], 'u', true)) |report| if (report == .protocol_flags) return report.protocol_flags;
+        }
+        index = start + 1;
+    }
+    return null;
 }
 
 fn readLaunchPromptInput(tty: *DirectTty, buf: []u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
@@ -2324,11 +2433,11 @@ fn recordLaunchPrompt(events: *ProtocolEventLog, prompt: []const u8) !void {
     try events.record(.launch_prompt, detail);
 }
 
-fn filterForwardedInputBytes(bytes: []u8, content: Rect) []const u8 {
+fn filterForwardedInputBytes(bytes: []u8, content: Rect, terminal: TerminalSize) []const u8 {
     var read_index: usize = 0;
     var write_index: usize = 0;
     while (read_index < bytes.len) {
-        if (parseSgrMouseAt(bytes, read_index)) |mouse| {
+        if (parseSgrMouseAt(bytes, read_index, terminal)) |mouse| {
             if (rectContainsCell(content, mouse.row, mouse.col)) {
                 std.mem.copyForwards(u8, bytes[write_index .. write_index + mouse.len], bytes[read_index .. read_index + mouse.len]);
                 write_index += mouse.len;
@@ -2364,14 +2473,19 @@ fn mouseHitTest(outer: Rect, cell: Cell) WmMouseHit {
 }
 
 const ParsedSgrMouse = struct {
+    /// Cell position, derived from pixels when the terminal reports those.
     row: i32,
     col: i32,
+    /// The report's own coordinates and their units.
+    x: i32,
+    y: i32,
+    units: terminal_keys.MouseUnits,
     len: usize,
     button: i32,
     pressed: bool,
 };
 
-fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
+fn parseSgrMouseAt(bytes: []const u8, start: usize, terminal: TerminalSize) ?ParsedSgrMouse {
     if (start + 3 > bytes.len) return null;
     if (!std.mem.eql(u8, bytes[start .. start + 3], "\x1b[<")) return null;
     var end: ?usize = null;
@@ -2387,7 +2501,30 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize) ?ParsedSgrMouse {
     const button = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     const col = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     const row = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
-    return .{ .row = row, .col = col, .len = final - start + 1, .button = button, .pressed = bytes[final] == 'M' };
+    var parsed = ParsedSgrMouse{ .row = row, .col = col, .x = col, .y = row, .units = .cell, .len = final - start + 1, .button = button, .pressed = bytes[final] == 'M' };
+    if (terminal.mouse_units == .pixel and terminal.pixelGridKnown()) {
+        // Scale by the whole grid rather than a truncated cell size, so a
+        // pixel width that is not a multiple of the column count cannot
+        // drift the far columns.
+        parsed.units = .pixel;
+        parsed.col = @intCast(@divTrunc(@as(i64, @max(col - terminal.pixel_origin, 0)) * terminal.cols, terminal.pixel_width) + 1);
+        parsed.row = @intCast(@divTrunc(@as(i64, @max(row - terminal.pixel_origin, 0)) * terminal.rows, terminal.pixel_height) + 1);
+    }
+    return parsed;
+}
+
+/// The mouse units in a DECRPM reply for mode 1016, if the chunk holds one.
+fn mouseUnitsReply(bytes: []const u8) ?terminal_keys.MouseUnits {
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, index, "\x1b[?")) |start| {
+        var final = start + 3;
+        while (final < bytes.len and (std.ascii.isDigit(bytes[final]) or bytes[final] == ';' or bytes[final] == '$')) final += 1;
+        if (final < bytes.len and bytes[final] == 'y') {
+            if (terminal_keys.decodeCsi(bytes[start + 2 .. final], 'y', true)) |report| if (report == .mouse_units) return report.mouse_units;
+        }
+        index = start + 1;
+    }
+    return null;
 }
 
 fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
@@ -3485,25 +3622,27 @@ test "wm input control writes terminal bytes" {
 
 test "wm forwards mouse input only inside content rect" {
     const content = Rect{ .row = 4, .col = 2, .rows = 16, .cols = 78 };
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
 
     var inside = [_]u8{ 0x1b, '[', '<', '3', '5', ';', '2', ';', '4', 'M' };
-    try std.testing.expectEqualStrings("\x1b[<35;2;4M", filterForwardedInputBytes(&inside, content));
+    try std.testing.expectEqualStrings("\x1b[<35;2;4M", filterForwardedInputBytes(&inside, content, terminal));
 
     var outside_col = [_]u8{ 0x1b, '[', '<', '3', '5', ';', '1', ';', '4', 'M' };
-    try std.testing.expectEqualStrings("", filterForwardedInputBytes(&outside_col, content));
+    try std.testing.expectEqualStrings("", filterForwardedInputBytes(&outside_col, content, terminal));
 
     var outside_row = [_]u8{ 0x1b, '[', '<', '3', '5', ';', '2', ';', '3', 'M' };
-    try std.testing.expectEqualStrings("", filterForwardedInputBytes(&outside_row, content));
+    try std.testing.expectEqualStrings("", filterForwardedInputBytes(&outside_row, content, terminal));
 
     var key = [_]u8{'a'};
-    try std.testing.expectEqualStrings("a", filterForwardedInputBytes(&key, content));
+    try std.testing.expectEqualStrings("a", filterForwardedInputBytes(&key, content, terminal));
 }
 
 test "wm mouse filter preserves non-mouse bytes in coalesced terminal reads" {
     const content = Rect{ .row = 4, .col = 2, .rows = 16, .cols = 78 };
+    const terminal = TerminalSize{ .rows = 24, .cols = 80 };
 
     var mixed = [_]u8{ 0x1b, '[', '<', '3', '5', ';', '1', ';', '4', 'M', 'a', 0x1b, '[', '<', '3', '5', ';', '2', ';', '4', 'M' };
-    try std.testing.expectEqualStrings("a\x1b[<35;2;4M", filterForwardedInputBytes(&mixed, content));
+    try std.testing.expectEqualStrings("a\x1b[<35;2;4M", filterForwardedInputBytes(&mixed, content, terminal));
 }
 
 const BrokenControlWriter = struct {
@@ -3536,6 +3675,23 @@ test "wm input parser prioritizes quit in coalesced input" {
     try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\t"));
     try std.testing.expectEqual(InputAction{ .layout = .tile }, inputActionFromBytes("t"));
     try std.testing.expectEqual(InputAction{ .layout = .cascade }, inputActionFromBytes("c"));
+}
+
+test "wm input parser reads kitty key reports and ignores other control sequences" {
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113u"));
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113;1;113u"));
+    try std.testing.expectEqual(InputAction{ .window = .move_left }, inputActionFromBytes("\x1b[104u"));
+    try std.testing.expectEqual(InputAction{ .window = .resize_narrower }, inputActionFromBytes("\x1b[104:72;2u"));
+    try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\x1b[9u"));
+    // Releases, shortcuts, replies and non-key sequences are not hotkeys.
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;1:3u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;5u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[?31u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[1;2H"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[<35;5;6M"));
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[<35;5;6Mq"));
+    try std.testing.expectEqual(@as(?u32, 31), keyboardFlagsReply("\x1b[<0;1;1M\x1b[?31u"));
+    try std.testing.expectEqual(@as(?u32, null), keyboardFlagsReply("\x1b[?1006h"));
 }
 
 test "wm launch prompt edits profile names" {
@@ -4091,8 +4247,45 @@ test "WM fits a placeholder grid and keeps image identity when moving" {
 test "WM translates placeholder mouse coordinates and excludes letterboxing" {
     var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer bytes.deinit();
-    try translatePlaceholderInput(&bytes.writer, "a\x1b[<0;11;8M\x1b[<0;11;8m\x1b[<35;9;8M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 });
+    try translatePlaceholderInput(&bytes.writer, "a\x1b[<0;11;8M\x1b[<0;11;8m\x1b[<35;9;8M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 }, .{ .rows = 24, .cols = 80 });
     try std.testing.expectEqualStrings("a\x1b[<0;1;1M\x1b[<0;1;1m", bytes.written());
+}
+
+test "WM converts pixel mouse reports to cells for itself and forwards grid-local pixels" {
+    const terminal = TerminalSize{ .rows = 40, .cols = 100, .pixel_width = 1000, .pixel_height = 800, .mouse_units = .pixel };
+    // Pixel 105,150 lies in cell 11,8 (10x20 pixel cells).
+    const parsed = parseSgrMouseAt("\x1b[<0;105;150M", 0, terminal).?;
+    try std.testing.expectEqual(@as(i32, 11), parsed.col);
+    try std.testing.expectEqual(@as(i32, 8), parsed.row);
+    try std.testing.expectEqual(@as(i32, 105), parsed.x);
+    try std.testing.expectEqual(terminal_keys.MouseUnits.pixel, parsed.units);
+    const cells = parseSgrMouseAt("\x1b[<0;105;150M", 0, .{ .rows = 40, .cols = 100 }).?;
+    try std.testing.expectEqual(@as(i32, 105), cells.col);
+    try std.testing.expectEqual(terminal_keys.MouseUnits.cell, cells.units);
+    // kitty and Ghostty count pixels from 0: pixel 100,140 is the first of cell 11,8.
+    var zero_based = terminal;
+    zero_based.pixel_origin = 0;
+    const zero = parseSgrMouseAt("\x1b[<0;100;140M", 0, zero_based).?;
+    try std.testing.expectEqual(@as(i32, 11), zero.col);
+    try std.testing.expectEqual(@as(i32, 8), zero.row);
+    try std.testing.expectEqual(@as(i32, 10), parseSgrMouseAt("\x1b[<0;100;140M", 0, terminal).?.col);
+    // A pixel width that is not a multiple of the columns still maps the last
+    // pixel to the last column, and placeholder offsets scale exactly.
+    const uneven = TerminalSize{ .rows = 40, .cols = 100, .pixel_width = 1005, .pixel_height = 815, .mouse_units = .pixel, .pixel_origin = 0 };
+    try std.testing.expectEqual(@as(i32, 100), parseSgrMouseAt("\x1b[<0;1004;814M", 0, uneven).?.col);
+    try std.testing.expectEqual(@as(i32, 40), parseSgrMouseAt("\x1b[<0;1004;814M", 0, uneven).?.row);
+    try std.testing.expectEqual(@as(i32, 1005), uneven.columnPixelOffset(101));
+    try std.testing.expectEqual(@as(i32, 502), uneven.columnPixelOffset(51));
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    try translatePlaceholderInput(&bytes.writer, "\x1b[<0;105;150M\x1b[<35;95;150M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 }, terminal);
+    try std.testing.expectEqualStrings("\x1b[<0;5;10M", bytes.written());
+    var forwarded = "\x1b[<0;105;150M\x1b[<0;5;150M".*;
+    try std.testing.expectEqualStrings("\x1b[<0;105;150M", filterForwardedInputBytes(&forwarded, .{ .row = 4, .col = 2, .rows = 16, .cols = 78 }, terminal));
+    try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, .pixel), mouseUnitsReply("\x1b[?31u\x1b[?1016;1$y"));
+    try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, .cell), mouseUnitsReply("\x1b[?1016;2$y"));
+    try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, null), mouseUnitsReply("\x1b[?1006;1$y"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[?1016;1$y"));
 }
 
 test "WM clipped placeholder text retains its source row and column indices" {

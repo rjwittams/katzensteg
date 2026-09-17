@@ -1,5 +1,6 @@
-//! Source-presenter adapter. Terminal-derived keys are logical, never guessed
-//! physical positions. Admission and execution completion remain separate.
+//! Source-presenter adapter. Keys leave the model in the native vocabulary and
+//! go on the wire unchanged, with the press identity the model assigned.
+//! Admission and execution completion remain separate.
 const std = @import("std");
 const os = @import("platform");
 const wire = @import("jackstay").input;
@@ -16,12 +17,11 @@ pub const Controller = struct {
     overflow_generation: u64 = 0,
     pointer_generation: u64 = 0,
     mapping_generation: ?u64 = null,
-    next_press: u64 = 1,
     presses: [256]?Press = @splat(null),
     buttons: u8 = 0,
     pointer: wire.Position = .{ .x = 0, .y = 0, .revision = 1 },
     outstanding: std.ArrayList(Pending) = .empty,
-    const Press = struct { code: i32, id: u64, confirmed: bool = false, releasing: bool = false };
+    const Press = struct { id: u64, confirmed: bool = false, releasing: bool = false };
     const Pending = struct { sequence: u64, press: ?u64 = null, button: ?wire.Button = null, pointer_generation: u64 = 0, action: wire.Action = .down };
     const allocator = std.heap.c_allocator;
 
@@ -184,11 +184,16 @@ pub const Controller = struct {
         const caps = self.admission.capabilities;
         switch (event) {
             .key_down, .key_up => |key| {
-                if (!caps.logical) return error.Unsupported;
-                var buf: [4]u8 = undefined;
-                const name = try logicalName(key.keycode, &buf);
+                const native = &key.native;
+                if (native.name.isEmpty() or native.press == 0) return error.Unsupported;
+                // A key that knows its position goes as a physical key when the
+                // target executes those; otherwise its meaning goes as a logical key.
+                const physical = !native.code.isEmpty() and caps.physical;
+                if (!physical and (native.kind == .physical or !caps.logical)) return error.Unsupported;
+                const kind: wire.KeyKind = if (physical) .physical else .logical;
+                const name = if (physical) native.code.slice() else native.name.slice();
                 var slot: ?*?Press = null;
-                for (&self.presses) |*entry| if (entry.* != null and entry.*.?.code == key.keycode and !entry.*.?.releasing) {
+                for (&self.presses) |*entry| if (entry.* != null and entry.*.?.id == native.press and !entry.*.?.releasing) {
                     slot = entry;
                     break;
                 };
@@ -201,13 +206,11 @@ pub const Controller = struct {
                         break;
                     };
                     if (slot == null) return error.Capacity;
-                    if (self.next_press == std.math.maxInt(u64)) return error.Capacity;
-                    slot.?.* = .{ .code = key.keycode, .id = self.next_press };
-                    self.next_press += 1;
+                    slot.?.* = .{ .id = native.press };
                 }
-                try self.send(.{ .key = .{ .kind = .logical, .name = name, .press = slot.?.*.?.id, .action = action, .modifiers = modifiers(key.mods) } });
+                try self.send(.{ .key = .{ .kind = kind, .name = name, .press = native.press, .action = action, .modifiers = @bitCast(native.modifiers) } });
                 const pending = &self.outstanding.items[self.outstanding.items.len - 1];
-                pending.press = slot.?.*.?.id;
+                pending.press = native.press;
                 pending.action = action;
                 if (!down) slot.?.*.?.releasing = true;
             },
@@ -270,34 +273,3 @@ pub const Controller = struct {
         return .{ .x = @as(f64, @floatFromInt(std.math.clamp(x, 0, target.w - 1))) * g.width / @as(f64, @floatFromInt(target.w)), .y = @as(f64, @floatFromInt(std.math.clamp(y, 0, target.h - 1))) * g.height / @as(f64, @floatFromInt(target.h)), .revision = g.revision };
     }
 };
-
-fn modifiers(mods: u16) wire.Modifiers {
-    return .{ .shift = mods & 0x3 != 0, .control = mods & 0xc0 != 0, .alt = mods & 0x300 != 0, .super = mods & 0xc00 != 0, .caps_lock = mods & 0x2000 != 0, .num_lock = mods & 0x1000 != 0 };
-}
-fn logicalName(code: i32, buf: *[4]u8) ![]const u8 {
-    return switch (code) {
-        13 => "Enter",
-        27 => "Escape",
-        8 => "Backspace",
-        9 => "Tab",
-        127 => "Delete",
-        (1 << 30) | 73 => "Insert",
-        (1 << 30) | 74 => "Home",
-        (1 << 30) | 77 => "End",
-        (1 << 30) | 75 => "PageUp",
-        (1 << 30) | 78 => "PageDown",
-        (1 << 30) | 79 => "ArrowRight",
-        (1 << 30) | 80 => "ArrowLeft",
-        (1 << 30) | 81 => "ArrowDown",
-        (1 << 30) | 82 => "ArrowUp",
-        else => blk: {
-            if (code >= (1 << 30) + 58 and code <= (1 << 30) + 69) {
-                const names = [_][]const u8{ "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12" };
-                break :blk names[@intCast(code - (1 << 30) - 58)];
-            }
-            if (code < 32 or code > 0x10ffff) return error.Unsupported;
-            const len = std.unicode.utf8Encode(@intCast(code), buf) catch return error.Unsupported;
-            break :blk buf[0..len];
-        },
-    };
-}

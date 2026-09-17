@@ -177,6 +177,10 @@ pub const Runtime = struct {
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
     sdl_window_ids: std.AutoHashMap(u32, core.CoreHandle),
     input_parser: ?input_mod.TerminalInputParser = null,
+    // Last terminal protocol replies written to the log, so each change is
+    // recorded once.
+    logged_keyboard_flags: u32 = 0,
+    logged_mouse_units: @import("terminal_keys.zig").MouseUnits = .cell,
     relative_mouse_baseline: input_mod.RelativeMouseBaseline = .{},
     mouse_ownership: input_mod.MouseOwnership = .{},
     input_window_w: i32 = 640,
@@ -692,6 +696,7 @@ pub const Runtime = struct {
                 self.input_mutex.unlock();
                 return;
             }
+            log.debug("terminal input bytes: {x}", .{buf[0..n]});
             self.lockInput("poll_terminal_input_feed");
             var parser = &(self.input_parser orelse {
                 self.input_mutex.unlock();
@@ -702,6 +707,14 @@ pub const Runtime = struct {
                 self.input_mutex.unlock();
                 return;
             };
+            if (parser.keyboard_protocol_flags != self.logged_keyboard_flags) {
+                self.logged_keyboard_flags = parser.keyboard_protocol_flags;
+                log.info("terminal keyboard protocol flags={d}", .{parser.keyboard_protocol_flags});
+            }
+            if (parser.mouse_units != self.logged_mouse_units) {
+                self.logged_mouse_units = parser.mouse_units;
+                log.info("terminal mouse units={s}", .{@tagName(parser.mouse_units)});
+            }
             if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             self.input_mutex.unlock();
             if (n < buf.len) return;
@@ -1363,6 +1376,8 @@ pub const Runtime = struct {
             .h = self.input_window_h,
             .layout = layout,
             .source_px = if (self.last_batch_presentation_status) |status| status.source_px else null,
+            .cell_px = if (sink.terminalGeometry()) |geometry| (if (geometry.pixels) |px| cellPixels(geometry.cells.cols, geometry.cells.rows, px.w, px.h) else null) else null,
+            .pixel_origin = mousePixelOrigin(),
         });
     }
 
@@ -2380,6 +2395,20 @@ fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_
         .w = w,
         .h = h,
         .layout = layout,
+        .cell_px = cellPixels(tty.cols, tty.rows, tty.pixel_width, tty.pixel_height),
+        .pixel_origin = mousePixelOrigin(),
+    };
+}
+
+fn mousePixelOrigin() i32 {
+    return ts_kitty.capabilities.mousePixelOrigin(ts_kitty.capabilities.detectTerminalIdentity());
+}
+
+fn cellPixels(cols: i32, rows: i32, pixel_w: i32, pixel_h: i32) ?input_mod.CellPixels {
+    if (cols <= 0 or rows <= 0 or pixel_w <= 0 or pixel_h <= 0) return null;
+    return .{
+        .w = @as(f32, @floatFromInt(pixel_w)) / @as(f32, @floatFromInt(cols)),
+        .h = @as(f32, @floatFromInt(pixel_h)) / @as(f32, @floatFromInt(rows)),
     };
 }
 
@@ -2766,4 +2795,12 @@ test "synchronous external capture receives attach without an SDL renderer or in
     try std.testing.expect(runtime.shouldCaptureExternalFrame());
     try peer.writeAll("{\"type\":\"detach\",\"window_id\":\"main\"}\n");
     try std.testing.expect(!runtime.shouldCaptureExternalFrame());
+}
+
+test "input target carries the terminal cell size when the tty reports pixels" {
+    try std.testing.expectEqual(@as(?input_mod.CellPixels, null), cellPixels(80, 24, 0, 0));
+    try std.testing.expectEqual(@as(?input_mod.CellPixels, null), cellPixels(0, 24, 800, 480));
+    const cell = cellPixels(80, 24, 800, 480).?;
+    try std.testing.expectEqual(@as(f32, 10), cell.w);
+    try std.testing.expectEqual(@as(f32, 20), cell.h);
 }
