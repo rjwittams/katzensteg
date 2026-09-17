@@ -509,7 +509,7 @@ const Host = struct {
             var bytes = std.Io.Writer.Allocating.init(allocator);
             var buttons = self.pointerButtons(session.id);
             // Validate the whole request before enqueuing any input.
-            for (parsed.value.events) |event| encodeInput(allocator, &bytes.writer, event, grid, &buttons) catch |err| {
+            for (parsed.value.events) |event| encodeInput(allocator, &bytes.writer, event, grid, session.source_px, &buttons) catch |err| {
                 // Allocating writers report allocation failure as WriteFailed.
                 // Keep resource failures on the HTTP 503 path.
                 return if (err == error.WriteFailed) error.OutOfMemory else err;
@@ -621,7 +621,11 @@ fn json(allocator: std.mem.Allocator, value: anytype) !http.Response {
     return .{ .body = try std.json.Stringify.valueAlloc(allocator, value, .{}) };
 }
 
-fn encodeInput(allocator: std.mem.Allocator, writer: anytype, value: std.json.Value, grid: Grid, buttons: *u32) !void {
+// A pointer event names a cell (x, y). It may also carry the point in
+// source pixels (px, py), which a client that knows the frame's size uses to
+// hit a target smaller than a cell; that goes to the producer as a
+// source_pointer, exact, and only while the producer's size is known.
+fn encodeInput(allocator: std.mem.Allocator, writer: anytype, value: std.json.Value, grid: Grid, source: ?protocol.SourcePixels, buttons: *u32) !void {
     if (value != .object) return error.InvalidInput;
     const kind = value.object.get("type") orelse return error.InvalidInput;
     if (kind != .string) return error.InvalidInput;
@@ -632,7 +636,7 @@ fn encodeInput(allocator: std.mem.Allocator, writer: anytype, value: std.json.Va
         const encoded = try std.json.Stringify.valueAlloc(allocator, .{ .type = "input", .window_id = "main", .event = "key", .key = key.key, .action = key.action, .ctrl = key.ctrl, .shift = key.shift, .alt = key.alt, .meta = key.meta }, .{});
         try writer.writeAll(encoded);
     } else if (std.mem.eql(u8, kind.string, "pointer")) {
-        const Pointer = struct { kind: enum { down, move, up }, x: i32, y: i32, button: ?enum { left, middle, right } = null };
+        const Pointer = struct { kind: enum { down, move, up }, x: i32, y: i32, px: ?i32 = null, py: ?i32 = null, button: ?enum { left, middle, right } = null };
         const parsed = try std.json.parseFromValue(Pointer, allocator, value, .{ .ignore_unknown_fields = true });
         const pointer = parsed.value;
         if (pointer.x < 0 or pointer.y < 0 or pointer.x >= grid.cols or pointer.y >= grid.rows) return error.PointerOutsideGrid;
@@ -647,12 +651,21 @@ fn encodeInput(allocator: std.mem.Allocator, writer: anytype, value: std.json.Va
             if (pointer.kind == .down) buttons.* |= mask;
             if (pointer.kind == .up) buttons.* &= ~mask;
         }
-        const encoded = try std.json.Stringify.valueAlloc(allocator, .{ .type = "input", .window_id = "main", .event = "pointer", .kind = switch (pointer.kind) {
+        const kind_name = switch (pointer.kind) {
             .down => "pointerdown",
             .move => "pointermove",
             .up => "pointerup",
-        }, .col = pointer.x + 1, .row = pointer.y + 1, .button = button, .buttons = buttons.* }, .{});
-        try writer.writeAll(encoded);
+        };
+        if (pointer.px != null and pointer.py != null and source != null) {
+            const px = pointer.px.?;
+            const py = pointer.py.?;
+            if (px < 0 or py < 0 or px >= source.?.w or py >= source.?.h) return error.PointerOutsideSource;
+            const encoded = try std.json.Stringify.valueAlloc(allocator, .{ .type = "input", .window_id = "main", .event = "source_pointer", .kind = kind_name, .x = px, .y = py, .width = source.?.w, .height = source.?.h, .button = button, .buttons = buttons.* }, .{});
+            try writer.writeAll(encoded);
+        } else {
+            const encoded = try std.json.Stringify.valueAlloc(allocator, .{ .type = "input", .window_id = "main", .event = "pointer", .kind = kind_name, .col = pointer.x + 1, .row = pointer.y + 1, .button = button, .buttons = buttons.* }, .{});
+            try writer.writeAll(encoded);
+        }
     } else return error.InvalidInput;
     try writer.writeAll("\n");
 }
@@ -832,4 +845,43 @@ test "busy output defers recovery without losing it when idle refresh is disable
     try std.testing.expect(!restoreDue(&session, 1100, 0, false));
     try std.testing.expect(!restoreDue(&session, 1600, 500, true));
     try std.testing.expect(restoreDue(&session, 1600, 500, false));
+}
+
+test "encodeInput sends a pointer with source pixels as an exact source_pointer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"pointer\",\"kind\":\"down\",\"x\":24,\"y\":10,\"px\":686,\"py\":528,\"button\":\"left\"}", .{});
+    defer parsed.deinit();
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    var buttons: u32 = 0;
+    try encodeInput(allocator, &bytes.writer, parsed.value, .{ .cols = 46, .rows = 16 }, .{ .w = 1288, .h = 800 }, &buttons);
+    try std.testing.expectEqualStrings("{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"source_pointer\",\"kind\":\"pointerdown\",\"x\":686,\"y\":528,\"width\":1288,\"height\":800,\"button\":0,\"buttons\":1}\n", bytes.written());
+    try std.testing.expectEqual(@as(u32, 1), buttons);
+}
+
+test "encodeInput falls back to the cell when the source size is unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"pointer\",\"kind\":\"move\",\"x\":24,\"y\":10,\"px\":686,\"py\":528}", .{});
+    defer parsed.deinit();
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    var buttons: u32 = 0;
+    try encodeInput(allocator, &bytes.writer, parsed.value, .{ .cols = 46, .rows = 16 }, null, &buttons);
+    try std.testing.expectEqualStrings("{\"type\":\"input\",\"window_id\":\"main\",\"event\":\"pointer\",\"kind\":\"pointermove\",\"col\":25,\"row\":11,\"button\":-1,\"buttons\":0}\n", bytes.written());
+}
+
+test "encodeInput rejects source pixels outside the frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"pointer\",\"kind\":\"move\",\"x\":0,\"y\":0,\"px\":1288,\"py\":0}", .{});
+    defer parsed.deinit();
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    var buttons: u32 = 0;
+    try std.testing.expectError(error.PointerOutsideSource, encodeInput(allocator, &bytes.writer, parsed.value, .{ .cols = 46, .rows = 16 }, .{ .w = 1288, .h = 800 }, &buttons));
 }
