@@ -158,3 +158,14 @@ Without the protocol every key is a whole tap, and a lone Escape or an Alt
 prefix is resolved by the tty read timeout. The WM host decodes its own hotkeys
 from either encoding, forwards reports unchanged, and replays the terminal's
 reply to each producer once so their parsers read the same semantics.
+
+Mouse reports use the same path. The direct tty asks for SGR-pixel reports
+(mode 1016) when it knows the terminal's pixel size and confirms the switch
+with DECRQM; the reply sets the model's units, and the launcher reset and tty
+teardown restore cell reports. A pixel report becomes a fractional cell through
+the terminal cell size the input target carries (`cell_px`, from the tty or the
+host's terminal geometry), so the same presentation layout places cell and
+pixel reports and the sub-cell position survives into the precise mouse fields.
+The WM host converts pixel reports to cells for its own hit testing and drags,
+forwards them unchanged (grid-local pixels for placeholder sessions), and
+replays the DECRQM reply to each producer once.

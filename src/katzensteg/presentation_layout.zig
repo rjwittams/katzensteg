@@ -7,6 +7,12 @@ pub const Point = struct {
     y: i32,
 };
 
+/// Sub-cell position from a pixel-resolution report.
+pub const PrecisePoint = struct {
+    x: f32,
+    y: f32,
+};
+
 pub const CellRect = struct {
     col: i32,
     row: i32,
@@ -47,6 +53,26 @@ pub const PresentationRegion = struct {
             .y = std.math.clamp(mapped_y, self.sdl_rect.y, self.sdl_rect.y + self.sdl_rect.h - 1),
         };
     }
+
+    /// Map a fractional cell position (1-based; cell c spans [c, c+1)) to
+    /// SDL coordinates, keeping the sub-cell precision of pixel reports.
+    pub fn mapFractionalCellToSdl(self: PresentationRegion, col: f32, row: f32) ?PrecisePoint {
+        if (self.kind != .sdl_window) return null;
+        if (self.tty_rect.w <= 0 or self.tty_rect.h <= 0 or self.sdl_rect.w <= 0 or self.sdl_rect.h <= 0) return null;
+        const col0: f32 = @floatFromInt(self.tty_rect.col);
+        const row0: f32 = @floatFromInt(self.tty_rect.row);
+        const cols: f32 = @floatFromInt(self.tty_rect.w);
+        const rows: f32 = @floatFromInt(self.tty_rect.h);
+        if (col < col0 or row < row0 or col >= col0 + cols or row >= row0 + rows) return null;
+        const x0: f32 = @floatFromInt(self.sdl_rect.x);
+        const y0: f32 = @floatFromInt(self.sdl_rect.y);
+        const w: f32 = @floatFromInt(self.sdl_rect.w);
+        const h: f32 = @floatFromInt(self.sdl_rect.h);
+        return .{
+            .x = std.math.clamp(x0 + (col - col0) * w / cols, x0, x0 + w - 1),
+            .y = std.math.clamp(y0 + (row - row0) * h / rows, y0, y0 + h - 1),
+        };
+    }
 };
 
 pub const PresentationLayout = struct {
@@ -73,6 +99,19 @@ pub const PresentationLayout = struct {
         var best_z: i32 = std.math.minInt(i32);
         for (self.regions[0..self.len]) |region| {
             const point = region.mapCellToSdl(cell_col, cell_row) orelse continue;
+            if (best_point == null or region.z >= best_z) {
+                best_point = point;
+                best_z = region.z;
+            }
+        }
+        return best_point;
+    }
+
+    pub fn mapFractionalCellToSdl(self: *const PresentationLayout, col: f32, row: f32) ?PrecisePoint {
+        var best_point: ?PrecisePoint = null;
+        var best_z: i32 = std.math.minInt(i32);
+        for (self.regions[0..self.len]) |region| {
+            const point = region.mapFractionalCellToSdl(col, row) orelse continue;
             if (best_point == null or region.z >= best_z) {
                 best_point = point;
                 best_z = region.z;
@@ -112,4 +151,28 @@ test "presentation layout maps through topmost SDL region" {
     });
 
     try std.testing.expectEqual(Point{ .x = 105, .y = 55 }, layout.mapCellToSdl(6, 6).?);
+}
+
+test "presentation region maps fractional cells with sub-cell precision" {
+    const region = PresentationRegion{
+        .kind = .sdl_window,
+        .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 },
+        .sdl_rect = .{ .x = 0, .y = 0, .w = 320, .h = 240 },
+        .z = 0,
+    };
+    const origin = region.mapFractionalCellToSdl(11, 6).?;
+    try std.testing.expectEqual(@as(f32, 0), origin.x);
+    try std.testing.expectEqual(@as(f32, 0), origin.y);
+    const half = region.mapFractionalCellToSdl(11.5, 6.5).?;
+    try std.testing.expectEqual(@as(f32, 2), half.x);
+    try std.testing.expectEqual(@as(f32, 4), half.y);
+    const edge = region.mapFractionalCellToSdl(90.999, 35.999).?;
+    try std.testing.expect(edge.x <= 319 and edge.x > 318);
+    try std.testing.expect(edge.y <= 239 and edge.y > 238);
+    try std.testing.expect(region.mapFractionalCellToSdl(10.999, 6) == null);
+    try std.testing.expect(region.mapFractionalCellToSdl(91, 6) == null);
+    var layout = PresentationLayout{};
+    layout.addRegion(region);
+    layout.addRegion(.{ .kind = .chrome, .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 }, .sdl_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .z = 5 });
+    try std.testing.expectEqual(@as(f32, 2), layout.mapFractionalCellToSdl(11.5, 6).?.x);
 }

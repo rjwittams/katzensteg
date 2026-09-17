@@ -20,6 +20,14 @@ pub const sdl_event_mouse_button_down = 0x401;
 pub const sdl_event_mouse_button_up = 0x402;
 pub const sdl_event_mouse_wheel = 0x403;
 
+/// Size of one terminal cell in pixels, from the tty or the host's terminal
+/// geometry. Pixel-resolution mouse reports map through it; without it
+/// they cannot be placed and are dropped.
+pub const CellPixels = struct {
+    w: f32,
+    h: f32,
+};
+
 pub const Target = struct {
     cols: i32 = 80,
     rows: i32 = 24,
@@ -27,9 +35,11 @@ pub const Target = struct {
     h: i32 = 480,
     layout: presentation_layout.PresentationLayout = .{},
     source_px: ?render_batch_protocol.SourcePixels = null,
+    cell_px: ?CellPixels = null,
 
     pub fn sameMapping(a: Target, b: Target) bool {
         if (a.cols != b.cols or a.rows != b.rows or a.w != b.w or a.h != b.h or a.layout.len != b.layout.len) return false;
+        if (!std.meta.eql(a.cell_px, b.cell_px)) return false;
         for (a.layout.regions[0..a.layout.len], b.layout.regions[0..b.layout.len]) |x, y| if (!std.meta.eql(x, y)) return false;
         return true;
     }
@@ -217,6 +227,9 @@ pub const InputModel = struct {
     /// query the tty sends after pushing them. Zero until then, and on
     /// terminals without the protocol.
     keyboard_protocol_flags: u32 = 0,
+    /// Units of SGR mouse reports, from the terminal's DECRQM reply to the
+    /// tty's request for pixels. Cells until the terminal confirms.
+    mouse_units: terminal_keys.MouseUnits = .cell,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{
@@ -240,6 +253,7 @@ pub const InputModel = struct {
             .h = @max(1, target.h),
             .layout = target.layout,
             .source_px = target.source_px,
+            .cell_px = target.cell_px,
         };
     }
 
@@ -638,6 +652,7 @@ pub const InputModel = struct {
         switch (report) {
             .key => |decoded| try self.pressKey(decoded.key, decoded.text()),
             .protocol_flags => |flags| self.keyboard_protocol_flags = flags,
+            .mouse_units => |units| self.mouse_units = units,
         }
     }
 
@@ -695,7 +710,7 @@ pub const InputModel = struct {
         const cell_x = decodeLegacyMouseByte(bytes[start + 2]) orelse return consumed;
         const cell_y = decodeLegacyMouseByte(bytes[start + 3]) orelse return consumed;
         const pressed = (b & 3) != 3;
-        try self.emitMouseCode(b, cell_x, cell_y, pressed);
+        try self.emitMouseCode(b, cell_x, cell_y, pressed, .cell);
         return consumed;
     }
 
@@ -706,7 +721,7 @@ pub const InputModel = struct {
         const b = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_x = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_y = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
-        try self.emitMouseCode(b, cell_x, cell_y, true);
+        try self.emitMouseCode(b, cell_x, cell_y, true, .cell);
         return final + 1;
     }
 
@@ -725,7 +740,7 @@ pub const InputModel = struct {
         const cell_x = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const cell_y = std.fmt.parseInt(i32, fields.next() orelse return final + 1, 10) catch return final + 1;
         const pressed = bytes[final] == 'M';
-        try self.emitMouseCode(b, cell_x, cell_y, pressed);
+        try self.emitMouseCode(b, cell_x, cell_y, pressed, self.mouse_units);
         return final + 1;
     }
 
@@ -743,7 +758,7 @@ pub const InputModel = struct {
         const cell_y = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
         if (fields.next() != null) return null;
         if (b == 4 or b == 5 or (b & 64) != 0) {
-            try self.emitMouseCode(b, cell_x, cell_y, true);
+            try self.emitMouseCode(b, cell_x, cell_y, true, self.mouse_units);
             return final + 1;
         }
         return null;
@@ -834,8 +849,8 @@ pub const InputModel = struct {
         self.mouse_activity = true;
     }
 
-    fn emitMouseCode(self: *TerminalInputParser, b: i32, cell_x: i32, cell_y: i32, pressed: bool) !void {
-        const point = self.mapCellToSdl(cell_x, cell_y) orelse {
+    fn emitMouseCode(self: *TerminalInputParser, b: i32, report_x: i32, report_y: i32, pressed: bool, units: terminal_keys.MouseUnits) !void {
+        const point = self.mapReportToSdl(report_x, report_y, units) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
             // button state and last mouse position unchanged until region
             // routing can synthesize enter/leave or chrome-owned events.
@@ -845,6 +860,8 @@ pub const InputModel = struct {
         const y = point.y;
         const xrel = x - self.last_mouse_x;
         const yrel = y - self.last_mouse_y;
+        const precise_xrel: ?f32 = if (point.precise_x) |px| px - (self.precise_mouse_x orelse @as(f32, @floatFromInt(self.last_mouse_x))) else null;
+        const precise_yrel: ?f32 = if (point.precise_y) |py| py - (self.precise_mouse_y orelse @as(f32, @floatFromInt(self.last_mouse_y))) else null;
 
         if ((b & 64) != 0 or b == 4 or b == 5) {
             try self.append(.{ .mouse_wheel = .{
@@ -852,13 +869,19 @@ pub const InputModel = struct {
                 .y = if ((b & 1) == 0) 1 else -1,
                 .mouse_x = x,
                 .mouse_y = y,
+                .precise_mouse_x = point.precise_x,
+                .precise_mouse_y = point.precise_y,
             } });
         } else if ((b & 32) != 0) {
             try self.append(.{ .mouse_motion = .{
                 .x = x,
                 .y = y,
+                .precise_x = point.precise_x,
+                .precise_y = point.precise_y,
                 .xrel = xrel,
                 .yrel = yrel,
+                .precise_xrel = precise_xrel,
+                .precise_yrel = precise_yrel,
                 .buttons = self.mouse_buttons,
             } });
         } else {
@@ -873,6 +896,8 @@ pub const InputModel = struct {
             try self.append(.{ .mouse_button = .{
                 .x = x,
                 .y = y,
+                .precise_x = point.precise_x,
+                .precise_y = point.precise_y,
                 .button = button,
                 .pressed = pressed,
                 .buttons = self.mouse_buttons,
@@ -880,9 +905,45 @@ pub const InputModel = struct {
         }
         self.last_mouse_x = x;
         self.last_mouse_y = y;
-        self.precise_mouse_x = null;
-        self.precise_mouse_y = null;
+        self.precise_mouse_x = point.precise_x;
+        self.precise_mouse_y = point.precise_y;
         self.mouse_activity = true;
+    }
+
+    const MappedReport = struct { x: i32, y: i32, precise_x: ?f32 = null, precise_y: ?f32 = null };
+
+    /// Place a mouse report in SDL coordinates. Cell reports map to a cell's
+    /// origin; pixel reports become fractional cells first, so the same
+    /// layout answers both and the sub-cell position survives.
+    fn mapReportToSdl(self: *const TerminalInputParser, x: i32, y: i32, units: terminal_keys.MouseUnits) ?MappedReport {
+        switch (units) {
+            .cell => {
+                const point = self.mapCellToSdl(x, y) orelse return null;
+                return .{ .x = point.x, .y = point.y };
+            },
+            .pixel => {
+                const cell = self.target.cell_px orelse return null;
+                if (cell.w <= 0 or cell.h <= 0) return null;
+                // Pixel reports count from 1 like cell reports; terminals
+                // differ by at most one pixel here.
+                const col = @as(f32, @floatFromInt(@max(x, 1) - 1)) / cell.w + 1;
+                const row = @as(f32, @floatFromInt(@max(y, 1) - 1)) / cell.h + 1;
+                const point = self.mapFractionalCellToSdl(col, row) orelse return null;
+                return .{ .x = @intFromFloat(@floor(point.x)), .y = @intFromFloat(@floor(point.y)), .precise_x = point.x, .precise_y = point.y };
+            },
+        }
+    }
+
+    fn mapFractionalCellToSdl(self: *const TerminalInputParser, col: f32, row: f32) ?presentation_layout.PrecisePoint {
+        if (self.target.layout.len > 0) return self.target.layout.mapFractionalCellToSdl(col, row);
+        const cols: f32 = @floatFromInt(self.target.cols);
+        const rows: f32 = @floatFromInt(self.target.rows);
+        const w: f32 = @floatFromInt(self.target.w);
+        const h: f32 = @floatFromInt(self.target.h);
+        return .{
+            .x = std.math.clamp((std.math.clamp(col, 1, cols + 1) - 1) * w / cols, 0, w - 1),
+            .y = std.math.clamp((std.math.clamp(row, 1, rows + 1) - 1) * h / rows, 0, h - 1),
+        };
     }
 
     pub fn injectKey(self: *TerminalInputParser, event: render_batch_protocol.KeyInput) !void {
@@ -1989,4 +2050,72 @@ test "terminal parser turns kitty reports into held presses with positions and t
     try std.testing.expectEqualStrings("Escape", parser.pop().?.key_down.native.name.slice());
     try std.testing.expectEqualStrings("Escape", parser.pop().?.key_up.native.name.slice());
     try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+}
+
+test "terminal input parser maps pixel mouse reports with sub-cell precision" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var layout = presentation_layout.PresentationLayout{};
+    layout.setSingleSdlRegion(.{
+        .kind = .sdl_window,
+        .tty_rect = .{ .col = 11, .row = 6, .w = 80, .h = 30 },
+        .sdl_rect = .{ .x = 0, .y = 0, .w = 320, .h = 240 },
+        .z = 0,
+    });
+    parser.setTarget(.{ .cols = 100, .rows = 40, .w = 320, .h = 240, .layout = layout, .cell_px = .{ .w = 10, .h = 20 } });
+    const generation = parser.mapping_generation;
+    // Cells until the terminal confirms pixels.
+    try parser.feed("\x1b[<35;11;6M");
+    try std.testing.expectEqual(InputEvent{ .mouse_motion = .{ .x = 0, .y = 0, .xrel = 0, .yrel = 0, .buttons = 0 } }, parser.pop().?);
+    try parser.feed("\x1b[?1016;1$y");
+    try std.testing.expectEqual(terminal_keys.MouseUnits.pixel, parser.mouse_units);
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+    // Pixel 101,101 is the first pixel of cell 11,6.
+    try parser.feed("\x1b[<35;101;101M");
+    const origin = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 0), origin.x);
+    try std.testing.expectEqual(@as(f32, 0), origin.precise_x.?);
+    try parser.feed("\x1b[<0;505;401M");
+    const press = parser.pop().?.mouse_button;
+    try std.testing.expectEqual(@as(i32, 161), press.x);
+    try std.testing.expectEqual(@as(i32, 120), press.y);
+    try std.testing.expect(@abs(press.precise_x.? - 161.6) < 0.01);
+    try std.testing.expectEqual(@as(f32, 120), press.precise_y.?);
+    try std.testing.expect(press.pressed);
+    try parser.feed("\x1b[<32;515;401M");
+    const drag = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 165), drag.x);
+    try std.testing.expectEqual(@as(i32, 4), drag.xrel);
+    try std.testing.expect(@abs(drag.precise_xrel.? - 4.0) < 0.01);
+    try std.testing.expectEqual(@as(u32, 1), drag.buttons);
+    const state = parser.mouseState();
+    try std.testing.expect(@abs(state.precise_x.? - 165.6) < 0.01);
+    // Outside the layout nothing targets SDL; legacy encodings stay cells.
+    try parser.feed("\x1b[<35;5;5M");
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+    try parser.feed("\x1b[<64;505;401M");
+    const wheel = parser.pop().?.mouse_wheel;
+    try std.testing.expectEqual(@as(i32, 161), wheel.mouse_x);
+    try std.testing.expect(wheel.precise_mouse_x != null);
+    // A changed cell size is a new mapping.
+    parser.setTarget(.{ .cols = 100, .rows = 40, .w = 320, .h = 240, .layout = layout, .cell_px = .{ .w = 8, .h = 16 } });
+    try std.testing.expect(parser.mapping_generation != generation);
+    // Without a cell size pixel reports cannot be placed.
+    parser.setTarget(.{ .cols = 100, .rows = 40, .w = 320, .h = 240, .layout = layout });
+    try parser.feed("\x1b[<35;505;401M");
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+}
+
+test "terminal input parser maps pixel reports without a layout" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400, .cell_px = .{ .w = 10, .h = 20 } });
+    try parser.feed("\x1b[?1016;1$y\x1b[<35;251;301M");
+    const motion = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 200), motion.x);
+    try std.testing.expectEqual(@as(i32, 120), motion.y);
+    try parser.feed("\x1b[<35;5000;5000M");
+    const clamped = parser.pop().?.mouse_motion;
+    try std.testing.expectEqual(@as(i32, 799), clamped.x);
+    try std.testing.expectEqual(@as(i32, 399), clamped.y);
 }

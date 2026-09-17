@@ -1363,6 +1363,7 @@ pub const Runtime = struct {
             .h = self.input_window_h,
             .layout = layout,
             .source_px = if (self.last_batch_presentation_status) |status| status.source_px else null,
+            .cell_px = if (sink.terminalGeometry()) |geometry| (if (geometry.pixels) |px| cellPixels(geometry.cells.cols, geometry.cells.rows, px.w, px.h) else null) else null,
         });
     }
 
@@ -2380,6 +2381,15 @@ fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_
         .w = w,
         .h = h,
         .layout = layout,
+        .cell_px = cellPixels(tty.cols, tty.rows, tty.pixel_width, tty.pixel_height),
+    };
+}
+
+fn cellPixels(cols: i32, rows: i32, pixel_w: i32, pixel_h: i32) ?input_mod.CellPixels {
+    if (cols <= 0 or rows <= 0 or pixel_w <= 0 or pixel_h <= 0) return null;
+    return .{
+        .w = @as(f32, @floatFromInt(pixel_w)) / @as(f32, @floatFromInt(cols)),
+        .h = @as(f32, @floatFromInt(pixel_h)) / @as(f32, @floatFromInt(rows)),
     };
 }
 
@@ -2766,4 +2776,12 @@ test "synchronous external capture receives attach without an SDL renderer or in
     try std.testing.expect(runtime.shouldCaptureExternalFrame());
     try peer.writeAll("{\"type\":\"detach\",\"window_id\":\"main\"}\n");
     try std.testing.expect(!runtime.shouldCaptureExternalFrame());
+}
+
+test "input target carries the terminal cell size when the tty reports pixels" {
+    try std.testing.expectEqual(@as(?input_mod.CellPixels, null), cellPixels(80, 24, 0, 0));
+    try std.testing.expectEqual(@as(?input_mod.CellPixels, null), cellPixels(0, 24, 800, 480));
+    const cell = cellPixels(80, 24, 800, 480).?;
+    try std.testing.expectEqual(@as(f32, 10), cell.w);
+    try std.testing.expectEqual(@as(f32, 20), cell.h);
 }

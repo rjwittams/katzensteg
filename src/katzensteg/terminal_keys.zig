@@ -9,6 +9,10 @@ const native_key = @import("native_key.zig");
 
 pub const max_text_bytes = 15;
 
+/// Coordinate units of SGR mouse reports: cells (mode 1006) or pixels
+/// (mode 1016). Both use the same `CSI <` encoding.
+pub const MouseUnits = enum { cell, pixel };
+
 pub const Decoded = struct {
     key: native_key.Key,
     text_buf: [max_text_bytes + 1]u8 = undefined,
@@ -23,6 +27,8 @@ pub const Report = union(enum) {
     key: Decoded,
     /// Reply to the kitty keyboard protocol query (`CSI ? flags u`).
     protocol_flags: u32,
+    /// Reply to the DECRQM query for SGR-pixel mouse reports (mode 1016).
+    mouse_units: MouseUnits,
 };
 
 /// Decode a CSI key report from its parameter bytes and final byte. When the
@@ -48,6 +54,15 @@ pub fn decodeCsi(params: []const u8, final: u8, reports_events: bool) ?Report {
             // The first parameter is 1 or absent for these keys.
             if (fields.number(0, 0)) |first| if (first != 1) return null;
             return finish(letterKey(final).?, &fields, reports_events);
+        },
+        'y' => {
+            // DECRPM `CSI ? mode ; value $ y`: 1 or 3 means the mode is set.
+            if (params.len < 4 or params[0] != '?' or params[params.len - 1] != '$') return null;
+            var parts = std.mem.splitScalar(u8, params[1 .. params.len - 1], ';');
+            const mode = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+            const value = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+            if (mode != 1016) return null;
+            return .{ .mouse_units = if (value == 1 or value == 3) .pixel else .cell };
         },
         else => return null,
     }
@@ -336,4 +351,14 @@ test "kitty text fields are bounded and hyper is dropped" {
     try std.testing.expectEqual(@as(usize, 12), long.text().len);
     const hyper = key("97;17", 'u', true);
     try std.testing.expectEqual(native_key.Modifiers{}, hyper.key.modifiers);
+}
+
+test "DECRPM replies report the mouse units and nothing else" {
+    try std.testing.expectEqual(Report{ .mouse_units = .pixel }, decodeCsi("?1016;1$", 'y', false).?);
+    try std.testing.expectEqual(Report{ .mouse_units = .pixel }, decodeCsi("?1016;3$", 'y', false).?);
+    try std.testing.expectEqual(Report{ .mouse_units = .cell }, decodeCsi("?1016;0$", 'y', false).?);
+    try std.testing.expectEqual(Report{ .mouse_units = .cell }, decodeCsi("?1016;2$", 'y', false).?);
+    try std.testing.expectEqual(@as(?Report, null), decodeCsi("?1006;1$", 'y', false));
+    try std.testing.expectEqual(@as(?Report, null), decodeCsi("1016;1$", 'y', false));
+    try std.testing.expectEqual(@as(?Report, null), decodeCsi("?1016;1", 'y', false));
 }

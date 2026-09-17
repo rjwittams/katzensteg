@@ -1,9 +1,20 @@
 const render_batch_protocol = @import("../render_batch_protocol.zig");
+const terminal_keys = @import("../terminal_keys.zig");
 pub const TerminalSize = struct {
     rows: i32,
     cols: i32,
     pixel_width: i32 = 0,
     pixel_height: i32 = 0,
+    /// Units of the terminal's SGR mouse reports, as confirmed by DECRQM.
+    mouse_units: terminal_keys.MouseUnits = .cell,
+
+    pub fn cellPixelWidth(self: TerminalSize) i32 {
+        return if (self.cols > 0 and self.pixel_width > 0) @divTrunc(self.pixel_width, self.cols) else 0;
+    }
+
+    pub fn cellPixelHeight(self: TerminalSize) i32 {
+        return if (self.rows > 0 and self.pixel_height > 0) @divTrunc(self.pixel_height, self.rows) else 0;
+    }
 };
 
 pub const AttachOptions = struct {
