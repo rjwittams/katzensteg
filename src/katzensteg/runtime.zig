@@ -177,6 +177,10 @@ pub const Runtime = struct {
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
     sdl_window_ids: std.AutoHashMap(u32, core.CoreHandle),
     input_parser: ?input_mod.TerminalInputParser = null,
+    // Last terminal protocol replies written to the log, so each change is
+    // recorded once.
+    logged_keyboard_flags: u32 = 0,
+    logged_mouse_units: @import("terminal_keys.zig").MouseUnits = .cell,
     relative_mouse_baseline: input_mod.RelativeMouseBaseline = .{},
     mouse_ownership: input_mod.MouseOwnership = .{},
     input_window_w: i32 = 640,
@@ -692,6 +696,7 @@ pub const Runtime = struct {
                 self.input_mutex.unlock();
                 return;
             }
+            log.debug("terminal input bytes: {x}", .{buf[0..n]});
             self.lockInput("poll_terminal_input_feed");
             var parser = &(self.input_parser orelse {
                 self.input_mutex.unlock();
@@ -702,6 +707,14 @@ pub const Runtime = struct {
                 self.input_mutex.unlock();
                 return;
             };
+            if (parser.keyboard_protocol_flags != self.logged_keyboard_flags) {
+                self.logged_keyboard_flags = parser.keyboard_protocol_flags;
+                log.info("terminal keyboard protocol flags={d}", .{parser.keyboard_protocol_flags});
+            }
+            if (parser.mouse_units != self.logged_mouse_units) {
+                self.logged_mouse_units = parser.mouse_units;
+                log.info("terminal mouse units={s}", .{@tagName(parser.mouse_units)});
+            }
             if (parser.takeMouseActivity()) self.mouse_ownership.claimTerminal();
             self.input_mutex.unlock();
             if (n < buf.len) return;
