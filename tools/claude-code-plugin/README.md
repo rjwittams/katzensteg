@@ -40,15 +40,27 @@ host; the host's per-terminal lock prevents a second host taking ownership.
 /katzensteg open mi2 [args...]   # open a panel
 /katzensteg close [id]           # close the last or the named panel
 /katzensteg size small|medium|large   # panel height preset (medium by default, remembered)
+/katzensteg place band|pane      # where panels live (pane by default, remembered)
+/katzensteg pane                 # reopen the pane after closing it with ctrl+x x
 /katzensteg list                 # sessions the host knows
 /katzensteg host                 # host status; reconnects or starts one
 /katzensteg stop                 # close every panel
 ```
 
+Panels live in one of two Claude Code sites. The pane, the default, is
+docked beside the transcript in fullscreen from 110 columns, where panels
+stack vertically and the pane scrolls; below that width, or on the main
+screen, the same pane is seated inline above the prompt with a frame. The
+band is the strip directly above the prompt, panels side by side. The pane
+opens when the first panel appears and closes when the last one goes;
+`ctrl+x tab` focuses it and `ctrl+x x` closes it, leaving the games running.
+A pane per group, drawn by the engine as tabs, is the natural next step.
+
 Click a panel to play; Escape returns the keyboard to the prompt. The border
 is the panel's own UI: × at the top-right closes it, dragging the title row
-reorders panels in the band, and dragging the right edge, bottom edge or the
-corner resizes it, keeping the source aspect. A dragged size replaces the
+reorders panels (sideways in the band, up and down in the docked pane), and
+dragging the right edge, bottom edge or the corner resizes it, keeping the
+source aspect. A dragged size replaces the
 preset for that panel until `/katzensteg size` is used again. The title shows
 how many input events the panel has captured. The plugin
 also exports `KATZENSTEG_TARGET=jsonl:<host socket>` and
@@ -86,15 +98,25 @@ Event long-polling and animation-frame edits remain future work.
 Registered at session start, served by `tool.call` hooks in the hooks module:
 
 - `mcp__katzensteg__open` `{profile, args?}`: open a panel; returns its id.
-- `mcp__katzensteg__show` `{html | path, title?}`: show an HTML page in a
-  panel through luchs (macOS). Writes `html` to a temp file, sizes the page to
-  the panel's pixel area (doubled for crisp text), and opens it with
+- `mcp__katzensteg__show` `{html | path | url, title?}`: show an HTML page in a
+  panel through luchs (macOS). Writes `html` to a temp file, sizes the page as a
+  16:10 page of the preset's height in pixels (doubled for crisp text, capped
+  by the measured site width), and opens it with
   `--watch`, so rewriting the file updates the picture; `observe` shows it.
+  `url` opens an http(s) page instead, loaded once. The viewer keeps its
+  cookies between runs, so a page behind a login, such as a private Claude
+  artifact, asks for it once; the login form can be driven through the panel
+  (click, type, Escape back to the prompt) or with `act`, and later pages on
+  that site open signed in. Sign-in popups open as a second view that the
+  panel shows and types into until the page closes it. The page's console
+  output, errors and navigations are in `/tmp/luchs-console-<pid>.log`,
+  newest file for the newest panel.
 - `mcp__katzensteg__panels`: id, title, state, source size, grid per panel.
 - `mcp__katzensteg__act` `{panel?, actions}`: up to 16 `move`, `click`, `key`,
-  `wait` actions. Coordinates are source pixels, converted to grid cells; a
-  click holds 60 ms; keys are taps; waits total at most 5 s. `panel` may be
-  omitted with one panel open.
+  `wait` actions. Coordinates are source pixels: the host gets the grid cell
+  and the exact pixel, and forwards the pixel to the producer, so a target
+  smaller than a cell can still be hit. A click holds 60 ms; keys are taps;
+  waits total at most 5 s. `panel` may be omitted with one panel open.
 - `mcp__katzensteg__observe` `{panel?, afterFrame?}`: the latest frame as a
   PNG path for the Read tool, with size and capture id.
 
@@ -158,6 +180,11 @@ requests retained frames after the clear. Its periodic idle refresh defaults
 to off; `--idle-refresh-ms 500` before `--wrap` enables it as a fallback.
 
 ## Findings that shaped this
+
+- A host outlives its terminal if the session is killed, and a later session
+  can get the same pty name; `--background` then reuses the dead host and
+  every producer fails with `WriteFailed` within seconds. Kill the host with
+  the session until the host checks its terminal (codex item 7).
 
 - Function hooks have no Node, no tty, no sockets. Escape hatches are
   `$.process.run` (one shot), `$.fs` (text, 4 MiB), `$.http.fetch` (text).

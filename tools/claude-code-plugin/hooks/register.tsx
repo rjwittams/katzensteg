@@ -1,5 +1,5 @@
 /* @jsx h */
-import type { EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 import { fitGrid, type Grid } from './placeholders.ts'
 import {
   isPanelEvent, newInputEvents, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
@@ -28,10 +28,21 @@ let cellAspect = 0.5
 let cellPx: { w: number; h: number } | undefined
 // The band as last rendered, for sizing a page viewer before it opens.
 let band = { columns: 100, rows: 16 }
+let siteMeasured = false
 let sessions: Session[] = []
 let listing = ''
 let polling = false
 let hidden = new Set<string>()
+// Which Claude Code site holds the panels: the band above the prompt, or a
+// pane (docked beside the transcript in fullscreen from 110 columns, else
+// seated inline). One pane, id PANE_ID, carries every panel; groups as
+// separate panes (the engine draws them as tabs) can follow.
+const PANE_ID = 'katzensteg'
+type Place = 'band' | 'pane'
+let place: Place = 'pane'
+let paneOpen = false
+let lastPlacement: string | undefined
+let drawnCount = -1
 // Panel height presets in rows; the band's own limit still applies.
 const SIZES = { small: 10, medium: 16, large: 40 } as const
 type SizeName = keyof typeof SIZES
@@ -48,6 +59,9 @@ let order: string[] = []
 const sizeOverride = new Map<string, { cols: number; rows: number }>()
 const resizing = new Set<string>()
 const lastWidths = new Map<string, number>()
+const lastHeights = new Map<string, number>()
+// Stacked (docked pane), panels reorder by vertical drag against heights.
+let lastStacked = false
 // Where each panel sits in the band body, as the last render laid it out:
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
 const placed = new Map<string, { col: number; row: number; cols: number; rows: number }>()
@@ -176,8 +190,9 @@ async function refresh($: $): Promise<boolean> {
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); placed.delete(id) }
+  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
   $.ui.invalidate('ui.render')
+  void ensureContainer($)
   return true
 }
 
@@ -193,8 +208,9 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); placed.delete(id) }
+          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
           $.ui.invalidate('ui.render')
+          void ensureContainer($)
         }
       } catch (err) {
         log($, `host lost: ${err}`)
@@ -215,6 +231,20 @@ function poll($: $): void {
 
 function visible(): Session[] {
   return sessions.filter(s => (s.state === 'starting' || s.state === 'ready') && !hidden.has(s.id))
+}
+
+// Open the pane while panels exist and the place is the pane; close it when
+// the last panel goes or the place moves to the band.
+async function ensureContainer($: $): Promise<void> {
+  const any = visible().length > 0
+  if (place === 'pane' && any && !paneOpen) {
+    paneOpen = true
+    await $.ui.open({ id: PANE_ID, title: 'katzensteg', rows: SIZES[size] + 3 }).catch(err => { paneOpen = false; log($, `pane did not open: ${err}`) })
+  } else if (paneOpen && (place !== 'pane' || !any)) {
+    paneOpen = false
+    await $.ui.close({ id: PANE_ID }).catch(() => undefined)
+  }
+  $.ui.invalidate('ui.render')
 }
 
 async function closeSession($: $, id: string): Promise<string> {
@@ -250,8 +280,8 @@ async function registerTools($: $): Promise<void> {
     },
     {
       name: 'show',
-      description: 'Show a visualization (chart, plot, graph, diagram, table, drawing, HTML page) in a Katzensteg panel above the prompt, rendered by a WebKit page viewer (macOS). Give html (a complete self-contained document) or path (an existing .html file). Returns the panel id and the file path: rewrite that file with the Write tool to update the picture, and use observe to see the result. Interactive pages get mouse, wheel and key events from the panel. The katzensteg-visualize skill has layout rules for the small panel.',
-      inputSchema: { type: 'object', properties: { html: { type: 'string' }, path: { type: 'string' }, title: { type: 'string' } } },
+      description: 'Show a visualization (chart, plot, graph, diagram, table, drawing, HTML page) in a Katzensteg panel above the prompt, rendered by a WebKit page viewer (macOS). Give html (a complete self-contained document), path (an existing .html file) or url (an http(s) page, e.g. a published Claude artifact; the viewer keeps cookies between runs so a login persists). Returns the panel id and the file path: rewrite that file with the Write tool to update the picture, and use observe to see the result. Interactive pages get mouse, wheel and key events from the panel. The katzensteg-visualize skill has layout rules for the small panel.',
+      inputSchema: { type: 'object', properties: { html: { type: 'string' }, path: { type: 'string' }, url: { type: 'string' }, title: { type: 'string' } } },
     },
     {
       name: 'panels',
@@ -295,13 +325,94 @@ async function pickPanel($: $, wanted: unknown): Promise<Session | string> {
 const describe = (s: Session) =>
   `${s.id}: ${s.title}${s.input_supported ? '' : ' · observation only'} · ${s.state}${s.source_px ? ` · ${s.source_px.w}x${s.source_px.h} px` : ''}${s.grid ? ` · grid ${s.grid.cols}x${s.grid.rows}` : ''}`
 
+// One tree for both sites. `columns` is the site's body width, `rowsBudget`
+// the rows a panel may take, `stacked` lays panels in a column (the dock)
+// rather than a wrapping row (the band, or a pane seated inline).
+async function panelsTree($: $, els: Elements['terminal'], columns: number, rowsBudget: number, stacked: boolean, tail: RenderChildren): Promise<RenderElement> {
+  const { Box, Client, Text } = els
+  const shown = ordered(order, visible())
+  order = shown.map(s => s.id)
+  if (drawnCount !== shown.length) { drawnCount = shown.length; log($, `drawing ${shown.length} panel(s) in ${stacked ? 'a docked pane' : 'a row'} at ${columns} columns, ${rowsBudget} rows`) }
+  // Side by side, panels share the width; stacked, each has the full width.
+  const share = stacked ? columns - 2 : Math.floor((columns - shown.length) / shown.length) - 2
+  const rowsMax = Math.min(SIZES[size], rowsBudget)
+  band = { columns, rows: rowsBudget }
+  siteMeasured = true
+  lastStacked = stacked
+  const panels = shown.map(s => {
+    const own = sizeOverride.get(s.id)
+    const grid = own
+      ? fitGrid(s.source_px, Math.min(own.cols, columns - 2), Math.min(own.rows, rowsBudget), cellAspect)
+      : fitGrid(s.source_px, share, rowsMax, cellAspect)
+    lastWidths.set(s.id, grid.cols + 2)
+    lastHeights.set(s.id, grid.rows + 2)
+    const sent = sentGrid.get(s.id)
+    // The host withholds graphics until it has a grid, so wait for the
+    // source size rather than commit a full-width grid it would refit.
+    if (s.source_px && !resizing.has(s.id) && (!sent || sent.cols !== grid.cols || sent.rows !== grid.rows)) {
+      sentGrid.set(s.id, grid)
+      $.clock.after(0, () => {
+        api($, `/sessions/${encodeURIComponent(s.id)}/grid`, grid)
+          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`) })
+          .catch(err => log($, `grid for ${s.id} failed: ${err}`))
+      })
+    }
+    // Repainting placeholder cells does not need another image upload.
+    // Live producers restore themselves on their next frame; the WM's idle
+    // refresh covers stationary producers after a terminal clear.
+    return { s, grid }
+  })
+  // Replicate the layout below so scroll events can be mapped to a panel:
+  // header on row 0, then panels left to right with a one-cell gap, wrapping
+  // when the site is too narrow; stacked, one per row block.
+  placed.clear()
+  {
+    let col = 0
+    let row = 1
+    let tallest = 0
+    for (const { s, grid } of panels) {
+      const w = grid.cols + 2
+      const h = grid.rows + 2
+      if (stacked) { placed.set(s.id, { col: 0, row, cols: w, rows: h }); row += h; continue }
+      if (col > 0 && col + w > columns) { col = 0; row += tallest; tallest = 0 }
+      placed.set(s.id, { col, row, cols: w, rows: h })
+      col += w + 1
+      tallest = Math.max(tallest, h)
+    }
+  }
+  return (
+    <Box flexDirection="column">
+      <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
+      <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
+        {panels.map(({ s, grid }) => (
+          <Client
+            key={`panel:${s.id}`}
+            module="./panel.tsx"
+            width={grid.cols + 2}
+            height={grid.rows + 2}
+            props={{ id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }}
+          />
+        ))}
+      </Box>
+      {tail}
+    </Box>
+  )
+}
+
+
+function panelsEmpty(els: Elements['terminal']): RenderElement {
+  const { Text } = els
+  return <Text dimColor>{'katzensteg · no panels · /katzensteg open <profile>'}</Text>
+}
+
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     await $.command.register({
       name: 'katzensteg',
       description: 'Game panels above the prompt via a headless katzensteg-wm: open, close, list, host',
-      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | list | host | stop',
+      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | pane | list | host | stop',
       immediate: true,
     }).catch(err => log($, `/katzensteg not registered: ${err}`))
     await registerTools($)
@@ -309,6 +420,8 @@ export const register: Register = on => {
     hostBin = (await $.env.get('KATZENSTEG_HOST_BIN')) ?? `${repo}/zig-out/bin/katzensteg-wm`
     const saved = await $.store.get('size').catch(() => undefined)
     if (saved === 'small' || saved === 'medium' || saved === 'large') size = saved
+    const savedPlace = await $.store.get('place').catch(() => undefined)
+    if (savedPlace === 'band' || savedPlace === 'pane') place = savedPlace
     // Connect off the session.start path so a slow host start never holds it;
     // the poll loop keeps retrying while no host answers.
     $.clock.after(0, () => { connect($).catch(err => log($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
@@ -335,6 +448,9 @@ export const register: Register = on => {
     if (verb === 'open') {
       const [profile, ...args] = rest
       if (!profile) return { text: 'katzensteg open <profile> [args...]' }
+      // A pane the person closed comes back with the next panel; the refresh
+      // below reopens it, so the reset belongs on the path that reaches it.
+      if (place === 'pane') { paneOpen = false }
       const r = await api($, '/sessions', { profile, args }).catch(err => ({ ok: false, status: 0, text: String(err) }))
       if (!r.ok) return { text: `katzensteg open failed: ${r.text}` }
       const id = String((JSON.parse(r.text) as { id?: unknown }).id ?? '?')
@@ -360,12 +476,27 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
       return { text: `katzensteg: panels ${size} (${SIZES[size]} rows at most)` }
     }
+    if (verb === 'place') {
+      const pick = rest[0]
+      if (pick !== 'band' && pick !== 'pane') return { text: `katzensteg place band|pane (now ${place})` }
+      place = pick
+      await $.store.set('place', place).catch(err => log($, `store write failed: ${err}`))
+      await ensureContainer($)
+      return { text: `katzensteg: panels in the ${place}${place === 'pane' ? ' (docked beside the transcript in fullscreen from 110 columns, else above the prompt; ctrl+x tab focuses it, ctrl+x x closes it)' : ''}` }
+    }
+    if (verb === 'pane') {
+      // Reopen the pane the person closed, keeping the panels that were in it.
+      paneOpen = false
+      place = 'pane'
+      await ensureContainer($)
+      return { text: visible().length > 0 ? 'katzensteg: pane reopened' : 'katzensteg: no panels to show; open one first' }
+    }
     if (verb === 'list') {
       await refresh($)
       const rows = sessions.map(s => `${s.id.padEnd(4)} ${s.state.padEnd(8)} image ${s.image_id} ${s.source_px ? `${s.source_px.w}x${s.source_px.h}` : ''} ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'no grid'} ${hidden.has(s.id) ? '(hidden)' : ''} ${s.title}${s.input_supported ? '' : ' (observation only)'}`)
       return { text: rows.join('\n') || 'katzensteg: no sessions' }
     }
-    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | list | host | stop' }
+    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | place band|pane | pane | list | host | stop' }
   })
 
   // A standing note in the system prompt while a host is connected, so the
@@ -394,8 +525,12 @@ export const register: Register = on => {
   on('tool.call', { tool: `${TOOL_PREFIX}show` }, async ($, e) => {
     if (!host) return toolText(`katzensteg: no host (${hostError ?? 'not connected'})`, true)
     let path = typeof e.path === 'string' ? e.path : ''
-    if (!path) {
-      if (typeof e.html !== 'string' || e.html === '') return toolText('show needs html or path', true)
+    const url = typeof e.url === 'string' ? e.url : ''
+    if (url) {
+      if (!/^https?:\/\/[^\s/]+/.test(url)) return toolText(`show needs an http(s) url, not ${url}`, true)
+      path = url
+    } else if (!path) {
+      if (typeof e.html !== 'string' || e.html === '') return toolText('show needs html, path or url', true)
       const dir = (await $.env.get('TMPDIR')) ?? '/tmp'
       shown += 1
       path = `${dir.replace(/\/+$/, '')}/katzensteg-show-${Date.now()}-${shown}.html`
@@ -407,19 +542,24 @@ export const register: Register = on => {
     } else if (!(await $.fs.exists(path))) return toolText(`no such file: ${path}`, true)
     // Render at the size the panel's cells cover, doubled for crisp text on
     // high-density displays, so labels stay legible after the terminal
-    // scales the image into the grid. The panel takes the preset's height and
-    // its share of the band's width.
-    const cols = Math.max(20, Math.min(band.columns - 2, 160))
-    const rows = Math.max(6, Math.min(SIZES[size], band.rows))
+    // scales the image into the grid. The page is the preset's rows tall and
+    // as wide as a 16:10 page needs at that height, capped by the site's
+    // width once a render has measured it. Before the first panel the site is
+    // unmeasured (`band` still holds its defaults), and the page viewer cannot
+    // resize after start, so the aspect rule alone decides then.
+    const rows = Math.max(6, siteMeasured ? Math.min(SIZES[size], band.rows) : SIZES[size])
+    const pageCols = Math.round((rows * 1.6) / cellAspect)
+    const cols = Math.max(20, Math.min(pageCols, siteMeasured ? band.columns - 2 : 160, 160))
     const px = cellPx ?? { w: 8, h: 16 }
     // cell_px is a ratio of the tty's pixel and cell counts, so it is usually
     // fractional; luchs takes whole pixels.
     const sizeArg = `--size=${Math.min(4096, Math.round(cols * px.w * 2))}x${Math.min(4096, Math.round(rows * px.h * 2))}`
-    const r = await api($, '/sessions', { profile: 'luchs', args: [sizeArg, '--watch', path] }).catch(err => ({ ok: false, status: 0, text: String(err) }))
+    const r = await api($, '/sessions', { profile: 'luchs', args: url ? [sizeArg, path] : [sizeArg, '--watch', path] }).catch(err => ({ ok: false, status: 0, text: String(err) }))
     if (!r.ok) return toolText(`show failed: ${r.text}`, true)
     const id = String((JSON.parse(r.text) as { id?: unknown }).id ?? '?')
     hidden.delete(id)
     await refresh($)
+    if (url) return toolText(`Showing ${path} as panel ${id}. The viewer keeps its own cookies between runs, so a page that needs a login shows it once; act can type into it. observe shows the rendered result.`)
     return toolText(`Showing ${path} as panel ${id}. Rewrite that file to update it (the viewer reloads on change); observe shows the rendered result.`)
   })
 
@@ -440,11 +580,19 @@ export const register: Register = on => {
     const px = panel.source_px
     const grid = sentGrid.get(panel.id) ?? panel.grid
     if (!px || !grid) return toolText(`panel ${panel.id} has no size yet`, true)
-    // Source pixels to grid cells, the coordinates the host takes.
-    const cell = (x: unknown, y: unknown) => ({
-      x: Math.min(grid.cols - 1, Math.max(0, Math.floor((Number(x) || 0) * grid.cols / px.w))),
-      y: Math.min(grid.rows - 1, Math.max(0, Math.floor((Number(y) || 0) * grid.rows / px.h))),
-    })
+    // The host takes grid cells; the source pixels go along so the producer
+    // gets the exact point rather than the cell's corner, which at panel
+    // cell sizes can miss a button or a text field.
+    const cell = (x: unknown, y: unknown) => {
+      const sx = Math.min(px.w - 1, Math.max(0, Math.round(Number(x) || 0)))
+      const sy = Math.min(px.h - 1, Math.max(0, Math.round(Number(y) || 0)))
+      return {
+        x: Math.min(grid.cols - 1, Math.max(0, Math.floor(sx * grid.cols / px.w))),
+        y: Math.min(grid.rows - 1, Math.max(0, Math.floor(sy * grid.rows / px.h))),
+        px: sx,
+        py: sy,
+      }
+    }
     let waited = 0
     let pending: Record<string, unknown>[] = []
     const flush = async () => {
@@ -497,11 +645,20 @@ export const register: Register = on => {
     return toolText(`Frame observation is not exposed by the host yet (${r.status}). Panel ${describe(panel)}.`, true)
   })
 
+  // The person closed the pane (ctrl+x x, Esc with closeOnEscape): panels keep
+  // running; /katzensteg pane or the next open brings it back.
+  on('ui.close', { id: PANE_ID }, async ($, e, next) => {
+    const r = await next(e)
+    paneOpen = false
+    return r
+  })
+
   // The wheel over a panel's picture goes to the game as a wheel event; over
-  // anything else the band scrolls as usual.
-  on('ui.scroll', { component: 'AbovePrompt' }, async ($, e, next) => {
+  // anything else the site scrolls as usual.
+  on('ui.scroll', async ($, e, next) => {
+    const ours = e.component === 'Pane' ? e.requestId === PANE_ID : place === 'band'
     const p = e.pointer
-    if (!p || e.origin.kind !== 'person' || !host) return next(e)
+    if (!ours || !p || e.origin.kind !== 'person' || !host) return next(e)
     const row = e.offset + p.row
     for (const [id, box] of placed) {
       const inside = p.column > box.col && p.column < box.col + box.cols - 1 && row > box.row && row < box.row + box.rows - 1
@@ -534,7 +691,8 @@ export const register: Register = on => {
         resizing.delete(id)
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'drag') {
-        const reordered = swapOnDrag(order, id, ev.dx, lastWidths)
+        // Side by side the gap is one column; stacked, the blocks touch.
+        const reordered = lastStacked ? swapOnDrag(order, id, ev.dy, lastHeights, 0) : swapOnDrag(order, id, ev.dx, lastWidths)
         if (reordered.some((v, i) => v !== order[i])) { order = reordered; $.ui.invalidate('ui.render') }
       }
     }
@@ -549,73 +707,26 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const shown = ordered(order, visible())
-    if (shown.length === 0 || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
-    order = shown.map(s => s.id)
-    const { Box, Client, Text } = await $.ui.resolve(e)
-    // Panels share the band's width side by side; each keeps its source aspect.
-    // A dragged size replaces the preset for that panel, within the band.
-    const share = Math.floor((e.props.bodyColumns - shown.length) / shown.length) - 2
-    // The tree is one header row plus each panel's border, so the grid gets
-    // the band's rows less three; the header never wraps.
-    const bandRows = Math.max(1, e.props.maxRows - 3)
-    const rowsMax = Math.min(SIZES[size], bandRows)
-    band = { columns: e.props.bodyColumns, rows: bandRows }
-    const panels = shown.map(s => {
-      const own = sizeOverride.get(s.id)
-      const grid = own
-        ? fitGrid(s.source_px, Math.min(own.cols, e.props.bodyColumns - 2), Math.min(own.rows, bandRows), cellAspect)
-        : fitGrid(s.source_px, share, rowsMax, cellAspect)
-      lastWidths.set(s.id, grid.cols + 2)
-      const sent = sentGrid.get(s.id)
-      // The host withholds graphics until it has a grid, so wait for the
-      // source size rather than commit a full-width grid it would refit.
-      if (s.source_px && !resizing.has(s.id) && (!sent || sent.cols !== grid.cols || sent.rows !== grid.rows)) {
-        sentGrid.set(s.id, grid)
-        $.clock.after(0, () => {
-          api($, `/sessions/${encodeURIComponent(s.id)}/grid`, grid)
-            .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`) })
-            .catch(err => log($, `grid for ${s.id} failed: ${err}`))
-        })
-      }
-      // Repainting placeholder cells does not need another image upload.
-      // Live producers restore themselves on their next frame; the WM's idle
-      // refresh covers stationary producers after a terminal clear.
-      return { s, grid }
-    })
-    // Replicate the wrapping row layout below so scroll events can be mapped
-    // to a panel: header on row 0, then panels left to right with a one-cell
-    // gap, wrapping to a new row when the band is too narrow.
-    placed.clear()
-    {
-      let col = 0
-      let row = 1
-      let tallest = 0
-      for (const { s, grid } of panels) {
-        const w = grid.cols + 2
-        const h = grid.rows + 2
-        if (col > 0 && col + w > e.props.bodyColumns) { col = 0; row += tallest; tallest = 0 }
-        placed.set(s.id, { col, row, cols: w, rows: h })
-        col += w + 1
-        tallest = Math.max(tallest, h)
-      }
-    }
-    return (
-      <Box flexDirection="column">
-        <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
-        <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          {panels.map(({ s, grid }) => (
-            <Client
-              key={`panel:${s.id}`}
-              module="./panel.tsx"
-              width={grid.cols + 2}
-              height={grid.rows + 2}
-              props={{ id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }}
-            />
-          ))}
-        </Box>
-        {await next(e)}
-      </Box>
-    )
+    if (place !== 'band' || visible().length === 0 || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
+    const els = await $.ui.resolve(e)
+    // One header row plus each panel's border: the grid gets the rows less three.
+    return panelsTree($, els, e.props.bodyColumns, Math.max(1, e.props.maxRows - 3), false, await next(e))
   })
+
+  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e, next) => {
+    if (e.surface !== 'terminal') return next(e)
+    if (visible().length === 0) return panelsEmpty(await $.ui.resolve(e))
+    const els = await $.ui.resolve(e)
+    // Docked, the pane is a column: stack panels and let its body scroll.
+    // Inline, it is a band with a frame: lay panels out as the band does.
+    const stacked = e.props.placement === 'dock'
+    const key = `${e.props.placement}:${e.props.bodyColumns}x${e.props.scroll.bodyRows}`
+    if (lastPlacement !== key) {
+      lastPlacement = key
+      log($, `pane ${e.props.placement}: ${e.props.bodyColumns} columns, ${e.props.scroll.bodyRows} body rows`)
+    }
+    const rowsBudget = stacked ? SIZES.large : Math.max(1, e.props.scroll.bodyRows - 1)
+    return panelsTree($, els, e.props.bodyColumns, rowsBudget, stacked, null)
+  })
+
 }

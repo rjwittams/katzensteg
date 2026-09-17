@@ -9,7 +9,10 @@ const Fixture = struct {
     controller: Controller,
     model: input.InputModel,
     fn init() !Fixture {
-        var target = try js.input.Target.init(.{ .capabilities = .{ .logical = true, .text = true, .pointer = true, .scroll = true }, .geometry = .{ .width = 1280, .height = 960 } });
+        return initWith(.{ .logical = true, .text = true, .pointer = true, .scroll = true });
+    }
+    fn initWith(capabilities: js.input.Capabilities) !Fixture {
+        var target = try js.input.Target.init(.{ .capabilities = capabilities, .geometry = .{ .width = 1280, .height = 960 } });
         var fds: [2]i32 = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
         const server = try target.serve(&fds[0]);
@@ -302,4 +305,39 @@ test "presenter waits for button outcomes before a subsequent click and suppress
         try f.settle();
         try std.testing.expectEqual(@as(u8, 0), f.controller.buttons);
     }
+}
+
+test "presenter sends positions as physical keys when the target executes them" {
+    var f = try Fixture.initWith(.{ .physical = true, .logical = true, .text = true, .pointer = true, .scroll = true });
+    try f.model.feed("\x1b[?31u\x1b[97::113;1;97u");
+    var down = try f.next();
+    const key = (try down.event()).key;
+    try std.testing.expectEqual(js.input.KeyKind.physical, key.kind);
+    try std.testing.expectEqualStrings("KeyQ", key.name);
+    try std.testing.expectEqual(js.input.Action.down, key.action);
+    try down.complete(.executed);
+    var text = try f.next();
+    try std.testing.expectEqualStrings("a", (try text.event()).text);
+    try text.complete(.executed);
+    try f.model.feed("\x1b[97::113;1:3u");
+    var up = try f.next();
+    try std.testing.expectEqual(js.input.Action.up, (try up.event()).key.action);
+    try std.testing.expectEqual(key.press, (try up.event()).key.press);
+    try up.complete(.executed);
+    try f.settle();
+    try f.finish();
+    // A logical-only target still receives the key's meaning.
+    var logical = try Fixture.init();
+    try logical.model.feed("\x1b[?31u\x1b[97::113;1;97u\x1b[97::113;1:3u");
+    var work = try logical.next();
+    try std.testing.expectEqual(js.input.KeyKind.logical, (try work.event()).key.kind);
+    try std.testing.expectEqualStrings("a", (try work.event()).key.name);
+    try work.complete(.executed);
+    work = try logical.next();
+    try work.complete(.executed);
+    work = try logical.next();
+    try std.testing.expectEqual(js.input.Action.up, (try work.event()).key.action);
+    try work.complete(.executed);
+    try logical.settle();
+    try logical.finish();
 }

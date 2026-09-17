@@ -2,6 +2,7 @@ const std = @import("std");
 const js = @import("jackstay");
 const os = @import("platform");
 const input = @import("input.zig");
+const native_key = @import("native_key.zig");
 const executor_mod = if (js.enabled) @import("jackstay_input_executor.zig") else struct {};
 
 const Fixture = if (js.enabled) struct {
@@ -27,9 +28,9 @@ const Fixture = if (js.enabled) struct {
         };
         return js.input.Client.connect(&fds[1], .cooperative);
     }
-    fn bind(key: js.input.Key) !input.KeyEvent {
-        if (!std.mem.eql(u8, key.name, "KeyA")) return error.Unsupported;
-        return .{ .scancode = 4, .keycode = 'a' };
+    fn bind(key: native_key.Key) !input.KeyEvent {
+        if (!std.mem.eql(u8, key.name.slice(), "KeyA")) return error.Unsupported;
+        return .{ .scancode = 4, .keycode = 'a', .native = key };
     }
     fn pump(self: *@This()) !void {
         try self.executor.pump(&self.model, bind);

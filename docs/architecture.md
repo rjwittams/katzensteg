@@ -139,5 +139,36 @@ An explicit discovery descriptor in `KATZENSTEG_WM_HOST` lets plugins attach to
 the wrapping host instead of starting a second host for the inner PTY.
 
 Structured keyboard requests join terminal bytes and pointer requests at the
-canonical input model. That model owns key events, held state and modifier
-translation; the HTTP adapter does not inject SDL events directly.
+canonical input model. Every source hands it a native key in the Jackstay
+vocabulary (`src/katzensteg/native_key.zig`): a DOM code or logical key name,
+an action, modifiers and, once inside the model, a press identity. The model
+binds the key once with static US-layout tables, keeps held presses so a repeat
+or release reuses its down binding, and projects the result into the SDL-shaped
+queue. SDL adapters refine bindings against the live keymap; presenters forward
+the native key without translating SDL numbers back into names. The HTTP
+adapter does not inject SDL events directly.
+
+Terminal keyboard reports are decoded by `src/katzensteg/terminal_keys.zig`,
+one decoder for the legacy xterm forms and the kitty keyboard protocol. The
+direct tty pushes the protocol flags (disambiguated escapes, event types,
+alternate keys, all keys as escape codes, associated text) after entering the
+alternate screen and queries them; the reply tells the model whether reports
+carry real press, repeat and release actions, base-layout positions and text.
+Without the protocol every key is a whole tap, and a lone Escape or an Alt
+prefix is resolved by the tty read timeout. The WM host decodes its own hotkeys
+from either encoding, forwards reports unchanged, and replays the terminal's
+reply to each producer once so their parsers read the same semantics.
+
+Mouse reports use the same path. The direct tty asks for SGR-pixel reports
+(mode 1016) when it knows the terminal's pixel size and confirms the switch
+with DECRQM; the reply sets the model's units, and the launcher reset and tty
+teardown restore cell reports. A pixel report becomes a fractional cell through
+the terminal cell size the input target carries (`cell_px`, from the tty or the
+host's terminal geometry), so the same presentation layout places cell and
+pixel reports and the sub-cell position survives into the precise mouse fields.
+Terminals disagree on the first pixel's coordinate (xterm counts from 1 like
+cells, kitty and Ghostty from 0); `termscene`'s capabilities module owns that
+quirk and hosts pass it to the target as `pixel_origin`.
+The WM host converts pixel reports to cells for its own hit testing and drags,
+forwards them unchanged (grid-local pixels for placeholder sessions), and
+replays the DECRQM reply to each producer once.

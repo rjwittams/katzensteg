@@ -54,7 +54,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
       // release, past the edges too.
       if (drag) {
         if (ev.type === 'move') {
-          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0 })
+          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0 })
           else {
             const c = drag.kind === 'resize-y' ? drag.cols0 : Math.max(4, drag.cols0 + ev.x - drag.x0)
             const r = drag.kind === 'resize-x' ? drag.rows0 : Math.max(2, drag.rows0 + ev.y - drag.y0)

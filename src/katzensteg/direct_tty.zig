@@ -1,4 +1,5 @@
 const std = @import("std");
+const terminal_keys = @import("terminal_keys.zig");
 const system_io = @import("platform");
 
 pub const DirectTty = struct {
@@ -10,6 +11,13 @@ pub const DirectTty = struct {
     cols: u16,
     pixel_width: u16,
     pixel_height: u16,
+    /// Kitty keyboard protocol flags the terminal confirmed in reply to the
+    /// query sent by `enableInputCapture`; zero on terminals without it.
+    /// The tty reader records the reply here so hosts can pass it on.
+    keyboard_protocol_flags: u32 = 0,
+    /// Units of SGR mouse reports the terminal confirmed by DECRQM after
+    /// `enableInputCapture` asked for pixels; cells until then.
+    mouse_units: terminal_keys.MouseUnits = .cell,
 
     pub fn init(io: std.Io) !DirectTty {
         const file = try system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
@@ -50,17 +58,28 @@ pub const DirectTty = struct {
 
     pub fn enableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        // Disable the legacy urxvt/SGR-pixel mouse-encoding modes (?1015, ?1016)
-        // before enabling SGR (?1006) and tracking modes (?1000/1002/1003).
-        // Terminals can have multiple encoders enabled simultaneously; resetting
-        // the alternates first avoids stray reports in non-SGR formats.
-        try writer.interface.writeAll("\x1b[?1015l\x1b[?1016l\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        // Disable the legacy urxvt mouse encoding (?1015) before enabling SGR
+        // (?1006) and tracking modes (?1000/1002/1003). Terminals can have
+        // multiple encoders enabled simultaneously; resetting the alternate
+        // first avoids stray reports in non-SGR formats.
+        try writer.interface.writeAll("\x1b[?1015l\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        // SGR-pixel reports (?1016) when the terminal told us its pixel size,
+        // so reports can be mapped back through the cell grid. DECRQM confirms
+        // whether the terminal switched; without the mode it keeps reporting
+        // cells and ignores both sequences.
+        if (self.pixel_width > 0 and self.pixel_height > 0) try writer.interface.writeAll(sgr_pixel_mouse_enable ++ sgr_pixel_mouse_query);
+        // Kitty keyboard protocol: disambiguate escapes, report event types,
+        // alternate keys, all keys as escape codes, and associated text. The
+        // flag stack is per screen, so this only affects the alternate screen
+        // entered above. The query's reply tells the parser which flags took
+        // effect; terminals without the protocol ignore both sequences.
+        try writer.interface.writeAll(kitty_keyboard_push ++ kitty_keyboard_query);
         try writer.interface.flush();
     }
 
     pub fn disableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        try writer.interface.writeAll("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
+        try writer.interface.writeAll(kitty_keyboard_pop ++ "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
         try writer.interface.flush();
     }
 
@@ -99,6 +118,13 @@ pub const DirectTty = struct {
         return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
     }
 };
+
+pub const kitty_keyboard_flags = 31;
+pub const kitty_keyboard_push = std.fmt.comptimePrint("\x1b[>{d}u", .{kitty_keyboard_flags});
+pub const kitty_keyboard_query = "\x1b[?u";
+pub const kitty_keyboard_pop = "\x1b[<u";
+pub const sgr_pixel_mouse_enable = "\x1b[?1016h";
+pub const sgr_pixel_mouse_query = "\x1b[?1016$p";
 
 fn kittyGraphicsClearSequence() []const u8 {
     // Delete all visible kitty graphics placements and request image data cleanup.

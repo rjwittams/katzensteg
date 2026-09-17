@@ -73,3 +73,20 @@ pub fn probe(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const
     applyKnownCompat(&caps);
     return caps;
 }
+
+/// The coordinate of the first pixel in SGR-pixel mouse reports (mode 1016).
+/// xterm, which defined the mode, counts pixels from 1 like cells; kitty and
+/// Ghostty round the pointer's 0-based position within the grid. All three
+/// report the exact grid size as the pty pixel size.
+pub fn mousePixelOrigin(identity: TerminalIdentity) i32 {
+    return switch (identity) {
+        .kitty, .ghostty => 0,
+        .unknown => 1,
+    };
+}
+
+test "pixel mouse origin follows the terminal's convention" {
+    try std.testing.expectEqual(@as(i32, 0), mousePixelOrigin(.kitty));
+    try std.testing.expectEqual(@as(i32, 0), mousePixelOrigin(.ghostty));
+    try std.testing.expectEqual(@as(i32, 1), mousePixelOrigin(.unknown));
+}

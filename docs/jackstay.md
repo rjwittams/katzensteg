@@ -217,7 +217,11 @@ Once bootstrap finishes, stalled media attachment remains cancellable. A forced
 exit relies on peer-disconnect cleanup and does not report confirmed release.
 
 Terminal and current hosted key inputs are logical keys, with separate UTF-8 text
-events. KS does not infer physical DOM positions from terminal characters.
+events. KS does not infer physical DOM positions from terminal characters. Keys
+reach the presenter as native keys carrying the input model's press identity and
+go on the wire unchanged; a source that reports physical positions (a kitty
+keyboard protocol terminal, for example) can send them once the target advertises
+physical support.
 Structured repeated key-downs become explicit repeats with the same press
 identity. Logical shortcuts preserve their modifiers; unsupported target mappings
 are logged with their execution sequence, without substitution or replay.

@@ -1,9 +1,30 @@
 const render_batch_protocol = @import("../render_batch_protocol.zig");
+const terminal_keys = @import("../terminal_keys.zig");
 pub const TerminalSize = struct {
     rows: i32,
     cols: i32,
     pixel_width: i32 = 0,
     pixel_height: i32 = 0,
+    /// Units of the terminal's SGR mouse reports, as confirmed by DECRQM.
+    mouse_units: terminal_keys.MouseUnits = .cell,
+    /// Coordinate of the first pixel in pixel reports (terminal quirk).
+    pixel_origin: i32 = 1,
+
+    pub fn pixelGridKnown(self: TerminalSize) bool {
+        return self.cols > 0 and self.rows > 0 and self.pixel_width > 0 and self.pixel_height > 0;
+    }
+
+    /// Pixel offset of the left edge of a 1-based column, scaled by the whole
+    /// grid so truncation cannot accumulate across columns.
+    pub fn columnPixelOffset(self: TerminalSize, col: i32) i32 {
+        if (self.cols <= 0) return 0;
+        return @intCast(@divTrunc(@as(i64, col - 1) * self.pixel_width, self.cols));
+    }
+
+    pub fn rowPixelOffset(self: TerminalSize, row: i32) i32 {
+        if (self.rows <= 0) return 0;
+        return @intCast(@divTrunc(@as(i64, row - 1) * self.pixel_height, self.rows));
+    }
 };
 
 pub const AttachOptions = struct {

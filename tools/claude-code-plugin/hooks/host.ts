@@ -124,7 +124,7 @@ export type InputEvent =
   | { n: number; type: 'close' }
   | { n: number; type: 'resize'; cols: number; rows: number; axis: 'resize-x' | 'resize-y' | 'resize-xy' }
   | { n: number; type: 'resizeend' }
-  | { n: number; type: 'drag'; dx: number }
+  | { n: number; type: 'drag'; dx: number; dy: number }
   | { n: number; type: 'dragend' }
 
 /** Events the plugin acts on itself; everything else goes to the host. */
