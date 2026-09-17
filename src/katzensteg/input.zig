@@ -557,6 +557,10 @@ pub const InputModel = struct {
             return;
         }
         if (self.pending.items.len == 2 and self.pending.items[0] == 0x1b and self.pending.items[1] == 'O') {
+            // An SS3 key split across reads with the idle timeout in between
+            // would be misread as Alt+O; that needs a link slower than the
+            // timeout, and terminals speaking the kitty protocol never send
+            // SS3 or a bare ESC prefix at all.
             try self.tapAltKey('O');
             self.pending.clearRetainingCapacity();
         }

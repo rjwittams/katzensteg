@@ -306,6 +306,19 @@ pub const Executor = struct {
     }
 };
 
+// The modifier casts below and in the presenter rely on both packed structs
+// having the same fields in the same order.
+comptime {
+    const native = @typeInfo(native_key.Modifiers).@"struct".fields;
+    const remote = @typeInfo(wire.Modifiers).@"struct".fields;
+    std.debug.assert(@bitSizeOf(native_key.Modifiers) == @bitSizeOf(wire.Modifiers));
+    std.debug.assert(native.len == remote.len);
+    for (native, remote) |a, b| {
+        std.debug.assert(std.mem.eql(u8, a.name, b.name));
+        std.debug.assert(a.type == b.type);
+    }
+}
+
 /// Wire keys already use the native vocabulary; only the container differs.
 fn nativeKey(key: wire.Key) !native_key.Key {
     var native = switch (key.kind) {

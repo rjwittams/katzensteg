@@ -10,12 +10,20 @@ pub const TerminalSize = struct {
     /// Coordinate of the first pixel in pixel reports (terminal quirk).
     pixel_origin: i32 = 1,
 
-    pub fn cellPixelWidth(self: TerminalSize) i32 {
-        return if (self.cols > 0 and self.pixel_width > 0) @divTrunc(self.pixel_width, self.cols) else 0;
+    pub fn pixelGridKnown(self: TerminalSize) bool {
+        return self.cols > 0 and self.rows > 0 and self.pixel_width > 0 and self.pixel_height > 0;
     }
 
-    pub fn cellPixelHeight(self: TerminalSize) i32 {
-        return if (self.rows > 0 and self.pixel_height > 0) @divTrunc(self.pixel_height, self.rows) else 0;
+    /// Pixel offset of the left edge of a 1-based column, scaled by the whole
+    /// grid so truncation cannot accumulate across columns.
+    pub fn columnPixelOffset(self: TerminalSize, col: i32) i32 {
+        if (self.cols <= 0) return 0;
+        return @intCast(@divTrunc(@as(i64, col - 1) * self.pixel_width, self.cols));
+    }
+
+    pub fn rowPixelOffset(self: TerminalSize, row: i32) i32 {
+        if (self.rows <= 0) return 0;
+        return @intCast(@divTrunc(@as(i64, row - 1) * self.pixel_height, self.rows));
     }
 };
 

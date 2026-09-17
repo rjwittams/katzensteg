@@ -797,7 +797,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     const keep_alive_when_empty = listener != null or specs.len == 0;
     var shutdown_deadline_ms: ?i64 = null;
     var accept_retry_ms: i64 = 0;
-    var input_buf: [256]u8 = undefined;
+    var input_buf: [wm_input_buffer_len]u8 = undefined;
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
@@ -1068,6 +1068,8 @@ fn recordLaunchFailure(events: *ProtocolEventLog, logger: *Logger, profile: []co
     logger.writeFmtScoped(.warn, .wm, "{s}", .{detail});
     try events.record(.parse_error, detail);
 }
+
+const wm_input_buffer_len = 256;
 
 fn availableSessionSlot(sessions: []const WmProducerSession, capacity: usize) ?usize {
     for (sessions, 0..) |session, i| if (session.retired) return i;
@@ -1876,8 +1878,8 @@ fn translatePlaceholderInput(writer: anytype, bytes: []const u8, grid: Rect, ter
         if (parseSgrMouseAt(bytes, i, terminal)) |event| {
             if (rectContainsCell(grid, event.row, event.col)) {
                 // Grid-local coordinates in the report's own units.
-                const local_x = if (event.units == .pixel) event.x - (grid.col - 1) * terminal.cellPixelWidth() else event.col - grid.col + 1;
-                const local_y = if (event.units == .pixel) event.y - (grid.row - 1) * terminal.cellPixelHeight() else event.row - grid.row + 1;
+                const local_x = if (event.units == .pixel) event.x - terminal.columnPixelOffset(grid.col) else event.col - grid.col + 1;
+                const local_y = if (event.units == .pixel) event.y - terminal.rowPixelOffset(grid.row) else event.row - grid.row + 1;
                 try writer.print("\x1b[<{d};{d};{d}{c}", .{ event.button, local_x, local_y, @as(u8, if (event.pressed) 'M' else 'm') });
             }
             i += event.len;
@@ -2293,7 +2295,9 @@ fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal:
 }
 
 fn inputActionFromBytes(bytes: []const u8) InputAction {
-    var scratch: [64]u8 = undefined;
+    // One character per input byte at most, so a chunk from the tty read
+    // buffer always fits and no hotkey is lost to truncation.
+    var scratch: [wm_input_buffer_len]u8 = undefined;
     const keys = hotkeyChars(bytes, &scratch);
     for (keys) |byte| {
         switch (byte) {
@@ -2498,12 +2502,13 @@ fn parseSgrMouseAt(bytes: []const u8, start: usize, terminal: TerminalSize) ?Par
     const col = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     const row = std.fmt.parseInt(i32, fields.next() orelse return null, 10) catch return null;
     var parsed = ParsedSgrMouse{ .row = row, .col = col, .x = col, .y = row, .units = .cell, .len = final - start + 1, .button = button, .pressed = bytes[final] == 'M' };
-    const cell_w = terminal.cellPixelWidth();
-    const cell_h = terminal.cellPixelHeight();
-    if (terminal.mouse_units == .pixel and cell_w > 0 and cell_h > 0) {
+    if (terminal.mouse_units == .pixel and terminal.pixelGridKnown()) {
+        // Scale by the whole grid rather than a truncated cell size, so a
+        // pixel width that is not a multiple of the column count cannot
+        // drift the far columns.
         parsed.units = .pixel;
-        parsed.col = @divTrunc(@max(col - terminal.pixel_origin, 0), cell_w) + 1;
-        parsed.row = @divTrunc(@max(row - terminal.pixel_origin, 0), cell_h) + 1;
+        parsed.col = @intCast(@divTrunc(@as(i64, @max(col - terminal.pixel_origin, 0)) * terminal.cols, terminal.pixel_width) + 1);
+        parsed.row = @intCast(@divTrunc(@as(i64, @max(row - terminal.pixel_origin, 0)) * terminal.rows, terminal.pixel_height) + 1);
     }
     return parsed;
 }
@@ -4264,6 +4269,13 @@ test "WM converts pixel mouse reports to cells for itself and forwards grid-loca
     try std.testing.expectEqual(@as(i32, 11), zero.col);
     try std.testing.expectEqual(@as(i32, 8), zero.row);
     try std.testing.expectEqual(@as(i32, 10), parseSgrMouseAt("\x1b[<0;100;140M", 0, terminal).?.col);
+    // A pixel width that is not a multiple of the columns still maps the last
+    // pixel to the last column, and placeholder offsets scale exactly.
+    const uneven = TerminalSize{ .rows = 40, .cols = 100, .pixel_width = 1005, .pixel_height = 815, .mouse_units = .pixel, .pixel_origin = 0 };
+    try std.testing.expectEqual(@as(i32, 100), parseSgrMouseAt("\x1b[<0;1004;814M", 0, uneven).?.col);
+    try std.testing.expectEqual(@as(i32, 40), parseSgrMouseAt("\x1b[<0;1004;814M", 0, uneven).?.row);
+    try std.testing.expectEqual(@as(i32, 1005), uneven.columnPixelOffset(101));
+    try std.testing.expectEqual(@as(i32, 502), uneven.columnPixelOffset(51));
     var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer bytes.deinit();
     try translatePlaceholderInput(&bytes.writer, "\x1b[<0;105;150M\x1b[<35;95;150M", .{ .row = 8, .col = 11, .rows = 10, .cols = 20 }, terminal);
