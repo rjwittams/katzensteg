@@ -10,6 +10,10 @@ pub const DirectTty = struct {
     cols: u16,
     pixel_width: u16,
     pixel_height: u16,
+    /// Kitty keyboard protocol flags the terminal confirmed in reply to the
+    /// query sent by `enableInputCapture`; zero on terminals without it.
+    /// The tty reader records the reply here so hosts can pass it on.
+    keyboard_protocol_flags: u32 = 0,
 
     pub fn init(io: std.Io) !DirectTty {
         const file = try system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
@@ -55,12 +59,18 @@ pub const DirectTty = struct {
         // Terminals can have multiple encoders enabled simultaneously; resetting
         // the alternates first avoids stray reports in non-SGR formats.
         try writer.interface.writeAll("\x1b[?1015l\x1b[?1016l\x1b[?1006h\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        // Kitty keyboard protocol: disambiguate escapes, report event types,
+        // alternate keys, all keys as escape codes, and associated text. The
+        // flag stack is per screen, so this only affects the alternate screen
+        // entered above. The query's reply tells the parser which flags took
+        // effect; terminals without the protocol ignore both sequences.
+        try writer.interface.writeAll(kitty_keyboard_push ++ kitty_keyboard_query);
         try writer.interface.flush();
     }
 
     pub fn disableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        try writer.interface.writeAll("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
+        try writer.interface.writeAll(kitty_keyboard_pop ++ "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
         try writer.interface.flush();
     }
 
@@ -99,6 +109,11 @@ pub const DirectTty = struct {
         return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
     }
 };
+
+pub const kitty_keyboard_flags = 31;
+pub const kitty_keyboard_push = std.fmt.comptimePrint("\x1b[>{d}u", .{kitty_keyboard_flags});
+pub const kitty_keyboard_query = "\x1b[?u";
+pub const kitty_keyboard_pop = "\x1b[<u";
 
 fn kittyGraphicsClearSequence() []const u8 {
     // Delete all visible kitty graphics placements and request image data cleanup.

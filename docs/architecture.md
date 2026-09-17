@@ -147,3 +147,14 @@ or release reuses its down binding, and projects the result into the SDL-shaped
 queue. SDL adapters refine bindings against the live keymap; presenters forward
 the native key without translating SDL numbers back into names. The HTTP
 adapter does not inject SDL events directly.
+
+Terminal keyboard reports are decoded by `src/katzensteg/terminal_keys.zig`,
+one decoder for the legacy xterm forms and the kitty keyboard protocol. The
+direct tty pushes the protocol flags (disambiguated escapes, event types,
+alternate keys, all keys as escape codes, associated text) after entering the
+alternate screen and queries them; the reply tells the model whether reports
+carry real press, repeat and release actions, base-layout positions and text.
+Without the protocol every key is a whole tap, and a lone Escape or an Alt
+prefix is resolved by the tty read timeout. The WM host decodes its own hotkeys
+from either encoding, forwards reports unchanged, and replays the terminal's
+reply to each producer once so their parsers read the same semantics.

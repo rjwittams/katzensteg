@@ -3,6 +3,7 @@ const system_io = @import("platform");
 const presentation_layout = @import("presentation_layout.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const native_key = @import("native_key.zig");
+const terminal_keys = @import("terminal_keys.zig");
 
 pub const NativeKey = native_key.Key;
 
@@ -212,6 +213,10 @@ pub const InputModel = struct {
     // that its repeats and release reuse, as the Jackstay contract requires.
     local_presses: [max_local_presses]?KeyEvent = @splat(null),
     next_press: u64 = 1,
+    /// Kitty keyboard protocol flags the terminal reported in reply to the
+    /// query the tty sends after pushing them. Zero until then, and on
+    /// terminals without the protocol.
+    keyboard_protocol_flags: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{
@@ -518,6 +523,10 @@ pub const InputModel = struct {
         return false;
     }
 
+    /// The tty reader calls this when no more bytes followed an escape within
+    /// the read timeout: a lone ESC is the Escape key, and ESC plus one byte
+    /// that started no sequence is that key with Alt. Terminals speaking the
+    /// kitty protocol never leave this ambiguity, since they encode both.
     pub fn flushStandaloneEscape(self: *TerminalInputParser) !void {
         if (self.pending.items.len == 1 and self.pending.items[0] == 0x1b) {
             try self.tapNamed("Escape");
@@ -526,7 +535,16 @@ pub const InputModel = struct {
             // bytes could arrive after this flush — let the next parseOne
             // pass try to consume them as an orphan-mouse-tail cleanup.
             self.expect_orphan_mouse_tail = true;
+            return;
         }
+        if (self.pending.items.len == 2 and self.pending.items[0] == 0x1b and self.pending.items[1] == 'O') {
+            try self.tapAltKey('O');
+            self.pending.clearRetainingCapacity();
+        }
+    }
+
+    pub fn keyboardReportsEvents(self: *const InputModel) bool {
+        return self.keyboard_protocol_flags & 2 != 0;
     }
 
     fn parsePending(self: *TerminalInputParser) !void {
@@ -546,6 +564,12 @@ pub const InputModel = struct {
                 return consumed;
             }
             if (isIncompleteEscape(bytes)) return 0;
+            if (bytes.len >= 2 and isAltPrefixedByte(bytes[1])) {
+                // ESC followed by a key in the same read is the legacy Alt
+                // encoding; a human Escape never arrives that close.
+                try self.tapAltKey(bytes[1]);
+                return 2;
+            }
             try self.tapNamed("Escape");
             self.expect_orphan_mouse_tail = true;
             return 1;
@@ -594,10 +618,47 @@ pub const InputModel = struct {
 
     fn parseEscape(self: *TerminalInputParser, bytes: []const u8) !?usize {
         if (bytes.len < 2) return null;
+        if (bytes[1] == 'O') {
+            // SS3 keys from application cursor mode. Anything else after
+            // ESC O is Alt+O followed by that byte.
+            if (bytes.len < 3) return null;
+            if (terminal_keys.decodeCsi("", bytes[2], self.keyboardReportsEvents())) |report| {
+                try self.applyKeyReport(report);
+                return 3;
+            }
+            return null;
+        }
         if (bytes[1] != '[') return null;
         if (bytes.len < 3) return null;
 
         return try self.parseCsi(bytes, 2);
+    }
+
+    fn applyKeyReport(self: *TerminalInputParser, report: terminal_keys.Report) !void {
+        switch (report) {
+            .key => |decoded| try self.pressKey(decoded.key, decoded.text()),
+            .protocol_flags => |flags| self.keyboard_protocol_flags = flags,
+        }
+    }
+
+    fn tapAltKey(self: *TerminalInputParser, byte: u8) !void {
+        if (byte >= 1 and byte <= 26) {
+            try self.tapCharacter('a' + byte - 1, "", .{ .alt = true, .control = true });
+        } else if (byte == '\r' or byte == '\n') {
+            try self.pressKey(altNamed("Enter"), "");
+        } else if (byte == '\t') {
+            try self.pressKey(altNamed("Tab"), "");
+        } else if (byte == 0x7f or byte == 0x08) {
+            try self.pressKey(altNamed("Backspace"), "");
+        } else {
+            try self.tapCharacter(byte, "", .{ .alt = true, .shift = std.ascii.isUpper(byte) });
+        }
+    }
+
+    fn altNamed(name: []const u8) native_key.Key {
+        var key = native_key.Key.logical(name) catch unreachable;
+        key.modifiers = .{ .alt = true };
+        return key;
     }
 
     fn parseCsi(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
@@ -609,30 +670,6 @@ pub const InputModel = struct {
                 return start + 1;
             },
             'I' => return start + 1,
-            'A' => {
-                try self.tapNamed("ArrowUp");
-                return start + 1;
-            },
-            'B' => {
-                try self.tapNamed("ArrowDown");
-                return start + 1;
-            },
-            'C' => {
-                try self.tapNamed("ArrowRight");
-                return start + 1;
-            },
-            'D' => {
-                try self.tapNamed("ArrowLeft");
-                return start + 1;
-            },
-            'H' => {
-                try self.tapNamed("Home");
-                return start + 1;
-            },
-            'F' => {
-                try self.tapNamed("End");
-                return start + 1;
-            },
             '<' => return try self.parseSgrMouse(bytes, start),
             'M' => return try self.parseLegacyMouse(bytes, start),
             else => {},
@@ -642,20 +679,13 @@ pub const InputModel = struct {
             if (try self.parseUrxvtMouse(bytes, start)) |consumed| return consumed;
         }
 
-        if (bytes[start] == '3' and bytes.len > start + 1 and bytes[start + 1] == '~') {
-            try self.tapNamed("Delete");
-            return start + 2;
+        const final = csiFinalIndex(bytes, start) orelse return null;
+        // Key reports in either the legacy or the kitty encoding; any other
+        // control sequence is consumed without leaking into text.
+        if (terminal_keys.decodeCsi(bytes[start..final], bytes[final], self.keyboardReportsEvents())) |report| {
+            try self.applyKeyReport(report);
         }
-        if (csiFinalIndex(bytes, start)) |final| {
-            // Hosts that already resolved a standalone Escape can send CSI u
-            // without depending on the direct tty's idle-read flush.
-            const sequence = bytes[start .. final + 1];
-            if (std.mem.eql(u8, sequence, "27u") or std.mem.eql(u8, sequence, "27;1u")) {
-                try self.tapNamed("Escape");
-            }
-            return final + 1;
-        }
-        return null;
+        return final + 1;
     }
 
     fn parseLegacyMouse(self: *TerminalInputParser, bytes: []const u8, start: usize) !?usize {
@@ -1017,8 +1047,10 @@ pub fn bindStatic(key: native_key.Key) !KeyEvent {
         },
         .logical => {
             event.keycode = try logicalKeycode(key.name.slice());
-            event.scancode = if (key.codepoint()) |cp|
-                (if (cp < 0x80) asciiUsage(@intCast(cp)) else 0)
+            event.scancode = if (!key.code.isEmpty())
+                native_key.domUsage(key.code.slice()) orelse 0
+            else if (key.codepoint()) |cp|
+                (if (cp < 0x80) native_key.usLayoutUsage(@intCast(cp)) else 0)
             else
                 native_key.domUsage(key.name.slice()) orelse 0;
         },
@@ -1111,9 +1143,16 @@ fn decodeLegacyMouseByte(byte: u8) ?i32 {
 
 fn isIncompleteEscape(bytes: []const u8) bool {
     if (bytes.len == 1) return true;
+    if (bytes[1] == 'O') return bytes.len == 2;
     if (bytes[1] != '[') return false;
     if (bytes.len == 2) return true;
     return isIncompleteCsi(bytes, 2);
+}
+
+/// Bytes the legacy Alt encoding prefixes with ESC. Another ESC starts its
+/// own sequence and C1/UTF-8 lead bytes are not Alt-prefixed.
+fn isAltPrefixedByte(byte: u8) bool {
+    return byte < 0x80 and byte != 0x1b;
 }
 
 fn isIncompleteCsi(bytes: []const u8, start: usize) bool {
@@ -1139,30 +1178,6 @@ fn orphanTailFinalIndex(bytes: []const u8) ?usize {
         if (!(std.ascii.isDigit(b) or b == ';')) return null;
     }
     return null;
-}
-
-/// US-layout position of a printable ASCII character, or 0 when SDL has no
-/// scancode for it (a shifted symbol, for example).
-fn asciiUsage(byte: u8) i32 {
-    if (byte >= 'a' and byte <= 'z') return 4 + @as(i32, byte - 'a');
-    if (byte >= 'A' and byte <= 'Z') return 4 + @as(i32, byte - 'A');
-    if (byte >= '1' and byte <= '9') return 30 + @as(i32, byte - '1');
-    return switch (byte) {
-        '0' => 39,
-        ' ' => 44,
-        '-' => 45,
-        '=' => 46,
-        '[' => 47,
-        ']' => 48,
-        '\\' => 49,
-        ';' => 51,
-        '\'' => 52,
-        '`' => 53,
-        ',' => 54,
-        '.' => 55,
-        '/' => 56,
-        else => 0,
-    };
 }
 
 fn inputEventSdlType(event: InputEvent) u32 {
@@ -1879,4 +1894,99 @@ test "static binding follows the Jackstay key vocabulary" {
     try std.testing.expectError(error.Unsupported, logicalKeycode("KeyA"));
     try std.testing.expectError(error.Unsupported, logicalKeycode("ShiftLeft"));
     try std.testing.expectEqual(@as(i32, 27), try logicalKeycode("Escape"));
+}
+
+test "terminal parser decodes legacy modified keys, SS3 and Alt prefixes" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.feed("\x1b[1;5A\x1b[15~\x1bOD\x1bx\x1b[24;2~");
+    const control_up = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("ArrowUp", control_up.native.name.slice());
+    try std.testing.expectEqual(@as(u16, 0x40), control_up.mods);
+    try std.testing.expectEqual(@as(i32, 82), control_up.scancode);
+    _ = parser.pop().?.key_up;
+    const f5 = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("F5", f5.native.name.slice());
+    try std.testing.expectEqual(sdlKeycodeFromScancode(62), f5.keycode);
+    _ = parser.pop().?.key_up;
+    const ss3_left = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("ArrowLeft", ss3_left.native.name.slice());
+    _ = parser.pop().?.key_up;
+    const alt_x = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("x", alt_x.native.name.slice());
+    try std.testing.expect(alt_x.native.modifiers.alt);
+    try std.testing.expectEqual(@as(u16, 0x100), alt_x.mods);
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).key_up, std.meta.activeTag(parser.pop().?));
+    const shift_f12 = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("F12", shift_f12.native.name.slice());
+    try std.testing.expectEqual(@as(u16, 1), shift_f12.mods);
+    _ = parser.pop().?.key_up;
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+}
+
+test "terminal parser flushes ESC O as Alt+O and waits for an SS3 final" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.feed("\x1bO");
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+    try parser.flushStandaloneEscape();
+    const alt_o = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("O", alt_o.native.name.slice());
+    try std.testing.expect(alt_o.native.modifiers.alt and alt_o.native.modifiers.shift);
+    _ = parser.pop().?.key_up;
+    try parser.feed("\x1bOx");
+    try std.testing.expectEqualStrings("O", parser.pop().?.key_down.native.name.slice());
+    _ = parser.pop().?.key_up;
+    try std.testing.expectEqualStrings("x", parser.pop().?.key_down.native.name.slice());
+}
+
+test "terminal parser turns kitty reports into held presses with positions and text" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    // Until the terminal confirms event reporting, a bare report is a tap.
+    try parser.feed("\x1b[97u");
+    try std.testing.expectEqual(@as(usize, 3), parser.pendingCount());
+    while (parser.pop()) |_| {}
+    try parser.feed("\x1b[?31u");
+    try std.testing.expectEqual(@as(u32, 31), parser.keyboard_protocol_flags);
+    try std.testing.expectEqual(@as(usize, 0), parser.pendingCount());
+    // AZERTY 'a' at the US Q position: held, shifted mid-press, released.
+    try parser.feed("\x1b[97::113;1;97u");
+    const down = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("a", down.native.name.slice());
+    try std.testing.expectEqualStrings("KeyQ", down.native.code.slice());
+    try std.testing.expectEqual(@as(i32, 20), down.scancode);
+    try std.testing.expectEqual(@as(i32, 'a'), down.keycode);
+    try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+    var state: [sdl_num_scancodes]u8 = undefined;
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp() + std.time.ns_per_s);
+    try std.testing.expectEqual(@as(u8, 1), state[20]);
+    try parser.feed("\x1b[97:65:113;2:2;65u");
+    const repeat = parser.pop().?.key_down;
+    try std.testing.expect(repeat.repeat);
+    try std.testing.expectEqual(down.native.press, repeat.native.press);
+    // The repeat keeps the binding and name its down established; the
+    // shifted character arrives as text.
+    try std.testing.expectEqualStrings("a", repeat.native.name.slice());
+    try std.testing.expect(repeat.native.modifiers.shift);
+    try std.testing.expectEqual(@as(u16, 1), repeat.mods);
+    try std.testing.expectEqualStrings("A", parser.pop().?.text.bytes());
+    try parser.feed("\x1b[97::113;1:3u");
+    const up = parser.pop().?.key_up;
+    try std.testing.expectEqual(down.native.press, up.native.press);
+    try std.testing.expectEqual(@as(i32, 20), up.scancode);
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp());
+    try std.testing.expectEqual(@as(u8, 0), state[20]);
+    // Modifier keys are physical positions with real transitions.
+    try parser.feed("\x1b[57441;2u\x1b[57441;1:3u");
+    const shift_down = parser.pop().?.key_down;
+    try std.testing.expectEqual(@as(i32, 225), shift_down.scancode);
+    try std.testing.expectEqual(sdlKeycodeFromScancode(225), shift_down.keycode);
+    try std.testing.expectEqual(@as(i32, 225), parser.pop().?.key_up.scancode);
+    // Escape is unambiguous and unknown functional keys are dropped.
+    try parser.feed("\x1b[27u\x1b[57428u\x1b[27;1:3u");
+    try std.testing.expectEqualStrings("Escape", parser.pop().?.key_down.native.name.slice());
+    try std.testing.expectEqualStrings("Escape", parser.pop().?.key_up.native.name.slice());
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
 }

@@ -5,7 +5,6 @@ const std = @import("std");
 const os = @import("platform");
 const wire = @import("jackstay").input;
 const input = @import("input.zig");
-const native_key = @import("native_key.zig");
 
 pub const Controller = struct {
     client: wire.Client,
@@ -187,11 +186,12 @@ pub const Controller = struct {
             .key_down, .key_up => |key| {
                 const native = &key.native;
                 if (native.name.isEmpty() or native.press == 0) return error.Unsupported;
-                const supported = switch (native.kind) {
-                    .physical => caps.physical,
-                    .logical => caps.logical,
-                };
-                if (!supported) return error.Unsupported;
+                // A key that knows its position goes as a physical key when the
+                // target executes those; otherwise its meaning goes as a logical key.
+                const physical = !native.code.isEmpty() and caps.physical;
+                if (!physical and (native.kind == .physical or !caps.logical)) return error.Unsupported;
+                const kind: wire.KeyKind = if (physical) .physical else .logical;
+                const name = if (physical) native.code.slice() else native.name.slice();
                 var slot: ?*?Press = null;
                 for (&self.presses) |*entry| if (entry.* != null and entry.*.?.id == native.press and !entry.*.?.releasing) {
                     slot = entry;
@@ -208,7 +208,7 @@ pub const Controller = struct {
                     if (slot == null) return error.Capacity;
                     slot.?.* = .{ .id = native.press };
                 }
-                try self.send(.{ .key = .{ .kind = wireKind(native.kind), .name = native.name.slice(), .press = native.press, .action = action, .modifiers = @bitCast(native.modifiers) } });
+                try self.send(.{ .key = .{ .kind = kind, .name = name, .press = native.press, .action = action, .modifiers = @bitCast(native.modifiers) } });
                 const pending = &self.outstanding.items[self.outstanding.items.len - 1];
                 pending.press = native.press;
                 pending.action = action;
@@ -273,10 +273,3 @@ pub const Controller = struct {
         return .{ .x = @as(f64, @floatFromInt(std.math.clamp(x, 0, target.w - 1))) * g.width / @as(f64, @floatFromInt(target.w)), .y = @as(f64, @floatFromInt(std.math.clamp(y, 0, target.h - 1))) * g.height / @as(f64, @floatFromInt(target.h)), .revision = g.revision };
     }
 };
-
-fn wireKind(kind: native_key.Kind) wire.KeyKind {
-    return switch (kind) {
-        .physical => .physical,
-        .logical => .logical,
-    };
-}

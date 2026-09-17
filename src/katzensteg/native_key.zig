@@ -60,6 +60,11 @@ pub const Name = struct {
 pub const Key = struct {
     kind: Kind = .logical,
     name: Name = .{},
+    /// DOM code of the key's position when the source reports it (a kitty
+    /// base-layout key, for example). A logical key may carry it alongside
+    /// its meaning; a physical key repeats its name here. Empty when the
+    /// source only knows the meaning.
+    code: Name = .{},
     /// Assigned by the input model when the key enters it. Zero until then.
     press: u64 = 0,
     action: Action = .tap,
@@ -90,7 +95,11 @@ pub const Key = struct {
         return std.unicode.utf8Decode(bytes) catch null;
     }
 
+    /// Whether two reports are the same key for press tracking. Positions win
+    /// when both are known: a release may arrive with different modifiers and
+    /// therefore a different logical name.
     pub fn sameKey(self: *const Key, other: *const Key) bool {
+        if (!self.code.isEmpty() and !other.code.isEmpty()) return self.code.eql(&other.code);
         return self.kind == other.kind and self.name.eql(&other.name);
     }
 };
@@ -118,6 +127,36 @@ pub fn domCode(usage: i32) ?[]const u8 {
     if (usage >= 104 and usage <= 115) return function_codes[@intCast(usage - 104 + 12)];
     for (named_usages) |entry| if (entry[1] == usage) return entry[0];
     return null;
+}
+
+/// US-layout position of a printable ASCII character, or 0 when SDL has no
+/// scancode for it (a shifted symbol, for example).
+pub fn usLayoutUsage(byte: u8) i32 {
+    if (byte >= 'a' and byte <= 'z') return 4 + @as(i32, byte - 'a');
+    if (byte >= 'A' and byte <= 'Z') return 4 + @as(i32, byte - 'A');
+    if (byte >= '1' and byte <= '9') return 30 + @as(i32, byte - '1');
+    return switch (byte) {
+        '0' => 39,
+        ' ' => 44,
+        '-' => 45,
+        '=' => 46,
+        '[' => 47,
+        ']' => 48,
+        '\\' => 49,
+        ';' => 51,
+        '\'' => 52,
+        '`' => 53,
+        ',' => 54,
+        '.' => 55,
+        '/' => 56,
+        else => 0,
+    };
+}
+
+/// DOM code of the US-layout key that produces a printable ASCII character.
+pub fn usLayoutCode(byte: u8) ?[]const u8 {
+    const usage = usLayoutUsage(byte);
+    return if (usage == 0) null else domCode(usage);
 }
 
 /// Whether a DOM name describes a key position rather than a key meaning.
@@ -189,6 +228,16 @@ test "keys carry one character or a DOM name and bound their length" {
     try std.testing.expect(!enter.sameKey(&e_acute));
     try std.testing.expect(enter.sameKey(&(try Key.logical("Enter"))));
     try std.testing.expect(!enter.sameKey(&(try Key.physical("Enter"))));
+    var lower = Key.character('a');
+    lower.code = try Name.init("KeyQ");
+    var upper = Key.character('A');
+    upper.code = try Name.init("KeyQ");
+    try std.testing.expect(lower.sameKey(&upper));
+    try std.testing.expect(lower.sameKey(&Key.character('a')));
+    try std.testing.expect(!lower.sameKey(&Key.character('b')));
+    try std.testing.expectEqualStrings("KeyQ", usLayoutCode('q').?);
+    try std.testing.expectEqualStrings("Semicolon", usLayoutCode(';').?);
+    try std.testing.expectEqual(@as(?[]const u8, null), usLayoutCode('!'));
     try std.testing.expectError(error.NameTooLong, Key.logical("x" ** (max_name_bytes + 1)));
     try std.testing.expect((Key{}).name.isEmpty());
     try std.testing.expect((Modifiers{ .control = true }).suppressText());

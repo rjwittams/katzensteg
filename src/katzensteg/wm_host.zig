@@ -6,6 +6,7 @@ const Producer = @import("wm/producer.zig").Producer;
 const Listener = @import("wm/listener.zig").Listener;
 const ClientChannel = @import("wm/client.zig").ClientChannel;
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const terminal_keys = @import("terminal_keys.zig");
 const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
 const blocking_trace = @import("blocking_trace.zig");
@@ -454,6 +455,9 @@ pub fn runSessionSpecsWithOptions(io: std.Io, allocator: std.mem.Allocator, prod
 
 const WmProducerSession = struct {
     placeholder_image_id: ?u32 = null,
+    /// Whether the producer has been told the terminal's kitty keyboard
+    /// flags, so its parser reads forwarded reports as real presses.
+    keyboard_flags_sent: bool = false,
     last_placeholder: ?render_batch_protocol.PlaceholderPresentation = null,
     profile_name: []const u8,
     session_id: u64 = 0,
@@ -966,7 +970,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 },
                 .forward => {
                     if (initialized == 0) continue;
-                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, &event_log, &logger);
+                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, tty.keyboard_protocol_flags, &event_log, &logger);
                 },
                 .quit => {
                     shutdown_sent = true;
@@ -2032,9 +2036,22 @@ fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
     }
 }
 
-fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, events: *ProtocolEventLog, logger: *Logger) !void {
+fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
+    if (keyboard_flags != 0 and !session.keyboard_flags_sent) {
+        // The terminal answered the WM's query, not the producer's. Replay
+        // the reply once so the producer decodes forwarded key reports with
+        // the same event semantics.
+        var reply: [16]u8 = undefined;
+        const text = std.fmt.bufPrint(&reply, "\x1b[?{d}u", .{keyboard_flags}) catch unreachable;
+        if (!tryWriteInputControl(session.producer.channel.writer(), text)) {
+            logger.writeFmtScoped(.warn, .wm, "input control write failed profile={s}; producer control pipe is closed", .{session.profile_name});
+            closeSessionControl(session);
+            return;
+        }
+        session.keyboard_flags_sent = true;
+    }
     var local_bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer local_bytes.deinit();
     const forwarded = if (session.placeholder_image_id != null) blk: {
@@ -2200,6 +2217,7 @@ fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect,
 fn readInputForSessionsLocked(tty_lock: *system_io.Mutex, tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     const n = system_io.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
     if (n == 0) return .{ .action = .none };
+    if (keyboardFlagsReply(buf[0..n])) |flags| tty.keyboard_protocol_flags = flags;
     tty_lock.lock();
     defer tty_lock.unlock();
     return readInputForSessionsBytes(buf[0..n], mouse, sessions, z_order, focused_index, terminal);
@@ -2251,7 +2269,9 @@ fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal:
 }
 
 fn inputActionFromBytes(bytes: []const u8) InputAction {
-    for (bytes) |byte| {
+    var scratch: [64]u8 = undefined;
+    const keys = hotkeyChars(bytes, &scratch);
+    for (keys) |byte| {
         switch (byte) {
             'q', 'Q' => return .quit,
             'n' => return .start_launch,
@@ -2259,7 +2279,7 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
             else => {},
         }
     }
-    for (bytes) |byte| {
+    for (keys) |byte| {
         switch (byte) {
             'h' => return .{ .window = .move_left },
             'j' => return .{ .window = .move_down },
@@ -2275,6 +2295,67 @@ fn inputActionFromBytes(bytes: []const u8) InputAction {
         }
     }
     return .none;
+}
+
+/// The characters typed in a chunk of terminal input: plain bytes, plus the
+/// key of each kitty `CSI u` press report. Other control sequences (mouse,
+/// arrows, protocol replies) contribute nothing, so their letters are never
+/// mistaken for hotkeys.
+fn hotkeyChars(bytes: []const u8, out: []u8) []const u8 {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len and count < out.len) {
+        const byte = bytes[i];
+        if (byte != 0x1b and byte != 0x9b) {
+            out[count] = byte;
+            count += 1;
+            i += 1;
+            continue;
+        }
+        var start = i + 1;
+        if (byte == 0x1b) {
+            if (start >= bytes.len or bytes[start] != '[') {
+                i += 1;
+                continue;
+            }
+            start += 1;
+        }
+        var final = start;
+        while (final < bytes.len and !(bytes[final] >= 0x40 and bytes[final] <= 0x7e)) final += 1;
+        if (final >= bytes.len) break;
+        if (bytes[final] == 'u') {
+            if (terminal_keys.decodeCsi(bytes[start..final], 'u', true)) |report| switch (report) {
+                .key => |decoded| if (decoded.key.action != .up and !decoded.key.modifiers.suppressText()) {
+                    if (decoded.key.codepoint()) |cp| {
+                        if (cp < 0x80) {
+                            out[count] = @intCast(cp);
+                            count += 1;
+                        }
+                    } else if (std.mem.eql(u8, decoded.key.name.slice(), "Tab")) {
+                        out[count] = '\t';
+                        count += 1;
+                    }
+                },
+                .protocol_flags => {},
+            };
+        }
+        i = final + 1;
+    }
+    return out[0..count];
+}
+
+/// The kitty keyboard flags in a `CSI ? flags u` reply, if the chunk holds one.
+fn keyboardFlagsReply(bytes: []const u8) ?u32 {
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, index, "\x1b[?")) |start| {
+        var final = start + 3;
+        while (final < bytes.len and (std.ascii.isDigit(bytes[final]) or bytes[final] == ';')) final += 1;
+        if (final < bytes.len and bytes[final] == 'u') {
+            if (terminal_keys.decodeCsi(bytes[start + 2 .. final], 'u', true)) |report| if (report == .protocol_flags) return report.protocol_flags;
+        }
+        index = start + 1;
+    }
+    return null;
 }
 
 fn readLaunchPromptInput(tty: *DirectTty, buf: []u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
@@ -3536,6 +3617,23 @@ test "wm input parser prioritizes quit in coalesced input" {
     try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\t"));
     try std.testing.expectEqual(InputAction{ .layout = .tile }, inputActionFromBytes("t"));
     try std.testing.expectEqual(InputAction{ .layout = .cascade }, inputActionFromBytes("c"));
+}
+
+test "wm input parser reads kitty key reports and ignores other control sequences" {
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113u"));
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113;1;113u"));
+    try std.testing.expectEqual(InputAction{ .window = .move_left }, inputActionFromBytes("\x1b[104u"));
+    try std.testing.expectEqual(InputAction{ .window = .resize_narrower }, inputActionFromBytes("\x1b[104:72;2u"));
+    try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\x1b[9u"));
+    // Releases, shortcuts, replies and non-key sequences are not hotkeys.
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;1:3u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;5u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[?31u"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[1;2H"));
+    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[<35;5;6M"));
+    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[<35;5;6Mq"));
+    try std.testing.expectEqual(@as(?u32, 31), keyboardFlagsReply("\x1b[<0;1;1M\x1b[?31u"));
+    try std.testing.expectEqual(@as(?u32, null), keyboardFlagsReply("\x1b[?1006h"));
 }
 
 test "wm launch prompt edits profile names" {
