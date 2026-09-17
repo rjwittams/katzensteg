@@ -329,13 +329,16 @@ class PublisherInput(unittest.TestCase):
         viewer.finish()
 
     def test_media_attach_failure_cleans_up_admitted_input(self):
-        endpoint, source, report = self.reference_source("--reject-media")
-        viewer = self.presenter(endpoint)
-        viewer.process.wait(timeout=8)
-        self.assertNotEqual(viewer.process.returncode, 0)
-        _, err = source.communicate(timeout=6)
-        self.assertEqual(source.returncode, 0, err.decode())
-        self.assertIn("cleanup=1 held=0 buttons=0", report.read_text())
+        for observe_only in (False, True):
+            with self.subTest(observe_only=observe_only):
+                options = ["--reject-media"] + (["--observe-only"] if observe_only else [])
+                endpoint, source, report = self.reference_source(*options)
+                viewer = self.presenter(endpoint)
+                viewer.process.wait(timeout=8)
+                self.assertNotEqual(viewer.process.returncode, 0)
+                _, err = source.communicate(timeout=6)
+                self.assertEqual(source.returncode, 0, err.decode())
+                self.assertIn(f"cleanup={0 if observe_only else 1} held=0 buttons=0", report.read_text())
 
     def test_host_exit_during_bootstrap_cleans_up_unadopted_input(self):
         endpoint, source, report = self.reference_source("--delay-bootstrap")

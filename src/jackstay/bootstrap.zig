@@ -19,6 +19,7 @@ pub const Connected = struct {
 pub fn connect(fd: *i32, request: Request) !Connected {
     try media.checkAbi();
     var handle: ?*c.ft_input_client = null;
+    // The C bootstrap contract writes input status on every successful return.
     var status: c.ft_status = undefined;
     try input.check(c.ft_source_bootstrap_connect(fd, @intFromEnum(request), if (request == .observe) 0 else c.FT_INPUT_MODE_COOPERATIVE, &handle, &status));
     var refusal: ?anyerror = null;

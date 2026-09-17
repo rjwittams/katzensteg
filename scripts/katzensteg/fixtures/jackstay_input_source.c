@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
         fflush(stdout);
       }
     }
-    if (!input_server && ft_cpu_setup_server_poll(media_server) != FT_STATUS_DRAINING) finished = 1;
+    if (!input_server && (!media_server || ft_cpu_setup_server_poll(media_server) != FT_STATUS_DRAINING)) finished = 1;
     fill_frame(pixels, sequence);
     /* Held keys tint the top strip; committed text fills a bottom progress bar;
      * the pointer is a white square, red while a button is held. */

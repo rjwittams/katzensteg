@@ -3,6 +3,7 @@ const os = @import("platform");
 const media = @import("media.zig");
 const endpoint = @import("endpoint.zig");
 const bootstrap = @import("bootstrap.zig");
+const log = std.log.scoped(.jackstay);
 
 pub const Publisher = struct {
     allocator: std.mem.Allocator,
@@ -24,11 +25,15 @@ pub const Publisher = struct {
         fn run(self: *Setup, publisher: *Publisher) void {
             defer self.done.store(true, .release);
             defer if (self.fd >= 0) os.posix.close(self.fd);
-            var input_server = bootstrap.accept(&self.fd, if (publisher.authority) |a| a.target else null) catch return;
+            var input_server = bootstrap.accept(&self.fd, if (publisher.authority) |a| a.target else null) catch |err| {
+                log.debug("source bootstrap failed: {any}", .{err});
+                return;
+            };
             if (input_server) |*server| {
                 // Input owns a separate lifetime, including when media setup
                 // fails. Executor teardown stops it and settles target cleanup.
-                publisher.authority.?.servers.adopt(server.*) catch {
+                publisher.authority.?.servers.adopt(server.*) catch |err| {
+                    log.warn("source input server adoption failed: {any}", .{err});
                     server.deinit();
                     return;
                 };

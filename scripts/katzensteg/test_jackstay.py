@@ -229,6 +229,8 @@ class CpuConnections(unittest.TestCase):
                 with listener.accept()[0]:
                     started = time.monotonic()
                     consumer.process.stdin.write(b'{"type":"shutdown"}\n')
+                    # launcher.zig: terminateEmbedChildAfterGrace sends TERM
+                    # after 1.5 s, then KILL after another 0.25 s. Allow scheduling slack.
                     consumer.process.wait(timeout=4)
                     self.assertLess(time.monotonic() - started, 4)
                     # Bootstrap currently has no cancellation handle. The launcher
