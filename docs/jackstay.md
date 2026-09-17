@@ -4,9 +4,9 @@ Katzensteg can publish an app's composed video to Jackstay, or present a Jacksta
 source through its existing terminal and hosted-panel paths. The connectors are
 optional, support macOS/Linux, and carry CPU RGBA/BGRA video. A publisher does
 not need a terminal or a consumer. SDL2 and SDL3 publishers can also accept
-cooperative keyboard and mouse input through an explicitly enabled endpoint.
-The KS source presenter forwards input when an input endpoint is explicitly
-associated with the source. Without that association it remains observation-only.
+cooperative keyboard and mouse input when the publisher explicitly enables it.
+One source endpoint negotiates media and optional input. The KS presenter requests
+input by default and remains observation-only when the source refuses it cleanly.
 
 ## Build
 
@@ -60,10 +60,12 @@ A pi or Claude workspace already supplying `KATZENSTEG_TARGET` can use that same
 `katzensteg jackstay-source /tmp/ks-sonic.sock` command. Use the enabled checkout's
 launcher explicitly if a different build is on PATH. The source uses the existing
 positioned/placeholder producer protocol and observation requests. Hosts label it
-as observation-only unless an input endpoint is supplied; moving and resizing
-its panel still work in either case.
+as observation-only unless input admission succeeds; moving and resizing its
+panel still work in either case.
 
-This source accepts a generic Jackstay CPU setup socket. Porthole's session
+This source accepts a Jackstay shared-bootstrap source socket, followed by generic
+CPU media setup. The earlier raw media/two-path interface is replaced; source and
+presenter must both speak bootstrap. Porthole's session
 selection and authorization preface is not implemented here. The existing
 `jackstay-viewer` profile remains available for its SDL viewer.
 
@@ -74,8 +76,10 @@ runs in the app process, after source composition and before terminal layout or
 Kitty encoding. It publishes source dimensions and Unix-time nanoseconds. Native
 app input stays enabled. Audio is not transported by these connectors.
 The consumer acquires on a worker, copies into a bounded latest-frame mailbox,
-then releases the lease before presentation. Setup and frame waits are cancellable
-independently of host control. Unexpected setup disconnect ends acquisition;
+then releases the lease before presentation. Bootstrap runs on a setup worker:
+its absolute timeout is five seconds, with up to five more seconds for input
+admission. It has no cancellation handle. CPU attachment and frame waits remain
+cancellable independently of host control. Unexpected setup disconnect ends acquisition;
 it never proves that a remote frame lease can be reclaimed.
 
 Local endpoints use mode 0600 and check the peer's effective UID. Both peers open
@@ -92,7 +96,8 @@ and consumer copies accept at most 64 MiB per frame; Jackstay's budget also has
 to fit resource multiplicity and metadata. These limits are currently code
 settings, not profile options. There are at most eight concurrent setup workers.
 
-Shutdown cancels and joins setup workers, then asks Jackstay to drain. If cleanup
+Publisher shutdown stops acceptance and joins the bounded setup workers, then
+asks Jackstay to drain. Input servers stop before their executor target is freed. If cleanup
 cannot complete within the bounded wait, the app logs the failure and retains
 the stopped owner until process exit. It does not forcibly reclaim leased
 storage. Retrying such retained owners during a long-lived app unload is future
@@ -105,26 +110,32 @@ endpoints work without a registry.
 
 ## Cooperative input to an app
 
-Enable an input endpoint alongside the app's media publication:
+Enable input on the app's publication:
 
 ```sh
-KATZENSTEG_TARGET=jackstay:/tmp/ks-mi2-media.sock \
-KATZENSTEG_INPUT_SOCKET=/tmp/ks-mi2-input.sock \
+KATZENSTEG_TARGET=jackstay:/tmp/ks-mi2.sock \
+KATZENSTEG_PUBLISH_INPUT=1 \
   ./zig-out/bin/katzensteg mi2
 ```
 
-The Jackstay SDL reference viewer can connect to both:
+The Jackstay SDL reference viewer uses that same endpoint:
 
 ```sh
-/path/to/capture-viewer-sdl \
-  --cpu-socket /tmp/ks-mi2-media.sock --input-socket /tmp/ks-mi2-input.sock
+/path/to/capture-viewer-sdl --source-socket /tmp/ks-mi2.sock
 ```
 
-Both endpoint paths must be unused. Input uses the same mode-0600, same-effective-UID
-checks as media. The host explicitly associates the two paths; opening the media
-socket alone grants no input connection. One remote controller is admitted at a
-time. This endpoint is available on the SDL2/SDL3 publisher path; the KS
-`jackstay-source` presenter can forward terminal or hosted input as described below.
+The endpoint must be unused. It uses mode 0600 and same-effective-UID checks.
+Media access alone does not authorize input: `KATZENSTEG_PUBLISH_INPUT=1` grants
+same-user peers permission to request the matching SDL2/SDL3 executor. Without
+that setting, the publisher offers observation only. One remote controller is
+admitted at a time; an additional viewer can still observe. This replaces the
+old `KATZENSTEG_INPUT_SOCKET` setting.
+
+Bootstrap preserves the original connection for media admission, so Jackstay
+sees the consumer's actual kernel PID. Jackstay transfers the separate input
+channel internally; KS does not implement framing or FD passing. Each publisher
+setup gets a bounded worker, so a stalled peer cannot block frame publication,
+maintenance or other viewers.
 
 `src/jackstay/input.zig` owns target, server, client and execution-work handles.
 Jackstay owns framing, ordering, epochs and the cleanup barrier. The executor
@@ -173,26 +184,37 @@ report clean release after a timeout or automatically replay an uncertain action
 
 ## Input from a KS presenter
 
-Close any controlling SDL viewer first: the source admits one controller. Then
-start the KS presenter with the associated input endpoint:
+Connect the KS presenter to the source:
 
 ```sh
-./zig-out/bin/katzensteg jackstay-source /tmp/ks-mi2-media.sock \
-  --input-socket /tmp/ks-mi2-input.sock
+./zig-out/bin/katzensteg jackstay-source /tmp/ks-mi2.sock
+./zig-out/bin/katzensteg jackstay-source /tmp/ks-mi2.sock --observe
+./zig-out/bin/katzensteg jackstay-source /tmp/ks-mi2.sock --require-input
 ```
 
-This command uses the normal destination selection. It runs in the current
-terminal, or in a WM/pi/Claude host supplying `KATZENSTEG_TARGET`. Media and input
-remain separate paths in this first interface; a registry can supply their
-association later. No input path is inferred from a media path or inherited from
-the publisher's `KATZENSTEG_INPUT_SOCKET` variable.
+The default requests optional cooperative input. A clean refusal, including a
+busy controller, preserves video and is logged with its reason. `--observe`
+never requests input. `--require-input` fails setup if input cannot be admitted.
+Protocol and transport failures fail setup in every mode. Close a controlling
+viewer before opening another presenter that requires control.
 
-The presenter performs admission on a worker and advertises input support after
-it connects. Video and host control continue during the handshake. Input polling
-runs independently of frame acquisition. Input disconnect disables forwarding
-while leaving video running. Closing the presenter requests cleanup and polls
-for confirmation for up to two seconds; expiration logs an unconfirmed outcome.
-Destroying the local connection is never treated as proof of remote cleanup.
+These commands use normal destination selection: the current terminal, or a
+WM/pi/Claude host supplying `KATZENSTEG_TARGET`. The old `--input-socket` argument
+is no longer accepted. No second path or registry lookup is needed.
+
+The presenter performs bootstrap and admission on a worker while the main loop
+serves host control. It advertises input only after admission. Media attachment
+follows bootstrap; frame acquisition and input execution then run independently.
+Input disconnect disables forwarding while leaving video running. If media
+attachment fails, or setup is abandoned, any admitted input owner is explicitly
+closed and polled before destruction.
+
+Closing the presenter requests cleanup and polls for confirmation for up to two
+seconds; expiration logs an unconfirmed outcome. Destruction never proves remote
+cleanup. A host shutdown during a stalled bootstrap may force process exit under
+the existing host/launcher grace deadline because bootstrap cannot be cancelled.
+Once bootstrap finishes, stalled media attachment remains cancellable. A forced
+exit relies on peer-disconnect cleanup and does not report confirmed release.
 
 Terminal and current hosted key inputs are logical keys, with separate UTF-8 text
 events. KS does not infer physical DOM positions from terminal characters. Keys
@@ -278,7 +300,7 @@ Its input transport also stops client heartbeats during graceful close, allowing
 the final cleanup acknowledgement to be read after the server closes its socket.
 
 Presenter acceptance also pairs KS with a C source fixture retained from Jackstay's
-two-socket reference example and compiled against the pinned library,
+shared-bootstrap reference example and compiled against the pinned library,
 including long Unicode input, logical-key repeat, held-state cleanup on graceful
 close, and abrupt producer exit. KS-to-KS tests cover both SDL versions, positioned
 and placeholder hosts, and input with video paused. A pseudo-terminal test covers
@@ -290,3 +312,14 @@ and disabled (1,459), along with all 11 input and 11 media process tests. New
 coverage crosses the retained-event limit with state-only SDL2/SDL3 readers,
 checks native-motion release coordinates, rejects presenter button releases,
 and verifies cleanup and fresh admission after executor/presenter overflow.
+
+Shared-bootstrap acceptance also covers observation without controller admission,
+optional/required refusal, busy targets, stalled peers, protocol failure, input
+disconnect with continuing video, and media-attach failure after input admission.
+The C fixture adds only fault-injection modes to the upstream reference source.
+
+Shared-bootstrap adoption verified on 2026-09-17 on macOS arm64 and Linux x86_64:
+full Vulkan-enabled builds passed with Jackstay enabled and disabled (1,606 and
+1,466 Zig tests). All 19 input cases, 13 media cases and the injected-runtime
+signal-handler check passed. This includes the independent SDL viewer, the C
+source, and KS at both ends; interactive game and workspace trials remain manual.

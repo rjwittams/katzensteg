@@ -10,11 +10,10 @@ const native_key = @import("native_key.zig");
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     target: wire.Target,
-    listener: ?js.endpoint.Listener = null,
     stopped: std.atomic.Value(bool) = .init(false),
     disconnect_requested: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
-    servers: [8]?wire.Server = @splat(null),
+    servers: wire.Servers = .{},
     pending: ?wire.Work = null,
     geometry: wire.Geometry = .{ .width = 640, .height = 480 },
 
@@ -32,49 +31,27 @@ pub const Executor = struct {
         };
     }
 
-    pub fn create(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !*Executor {
+    pub fn create(allocator: std.mem.Allocator) !*Executor {
         const self = try allocator.create(Executor);
         errdefer allocator.destroy(self);
         self.* = try init(allocator);
         errdefer self.target.deinit() catch {};
-        self.listener = try js.endpoint.Listener.init(io, allocator, path);
-        errdefer self.listener.?.deinit();
         self.thread = try std.Thread.spawn(.{}, serve, .{self});
         return self;
     }
 
     fn serve(self: *Executor) void {
         while (!self.stopped.load(.acquire)) {
-            if (self.disconnect_requested.load(.acquire)) {
-                // ABI 0.7 has no target-side overflow command. Disconnect on the
-                // transport thread: dropping servers ends assignment and asks
-                // Jackstay for cleanup, without claiming execution was uncertain.
-                for (&self.servers) |*slot| {
-                    if (slot.*) |*server| server.deinit();
-                    slot.* = null;
-                }
-                self.disconnect_requested.store(false, .release);
-            }
-            for (&self.servers) |*slot| if (slot.*) |*server| {
-                if (server.finished() catch true) {
-                    server.deinit();
-                    slot.* = null;
-                }
-            };
-            if (self.listener.?.accept() catch null) |accepted| {
-                var fd = accepted;
-                defer if (fd >= 0) os.posix.close(fd);
-                for (&self.servers) |*slot| if (slot.* == null) {
-                    slot.* = self.target.serve(&fd) catch null;
-                    break;
-                };
-            }
+            const disconnect = self.disconnect_requested.load(.acquire);
+            self.servers.maintain(disconnect);
+            if (disconnect) self.disconnect_requested.store(false, .release);
             os.time.sleep(5 * std.time.ns_per_ms);
         }
-        for (&self.servers) |*slot| {
-            if (slot.*) |*server| server.deinit();
-            slot.* = null;
-        }
+        self.servers.maintain(true);
+    }
+
+    pub fn authority(self: *Executor) js.bootstrap.Authority {
+        return .{ .target = &self.target, .servers = &self.servers };
     }
 
     pub fn setSize(self: *Executor, w: i32, h: i32) !void {
@@ -280,8 +257,6 @@ pub const Executor = struct {
             self.stopped.store(true, .release);
             thread.join();
             self.thread = null;
-            self.listener.?.deinit();
-            self.listener = null;
         }
     }
 
@@ -302,6 +277,7 @@ pub const Executor = struct {
             try work.complete(.uncertain);
         }
         try self.target.deinit();
+        self.servers.deinit();
         self.allocator.destroy(self);
     }
 };

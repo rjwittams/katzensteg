@@ -9,7 +9,13 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = log_mod.std
 
 const Shared = struct {
     allocator: std.mem.Allocator,
-    connection: js.media.Connection,
+    path: []const u8,
+    request: js.bootstrap.Request,
+    connection: ?js.media.Connection = null,
+    client: ?js.input.Client = null,
+    refusal: ?anyerror = null,
+    setup_done: std.atomic.Value(bool) = .init(false),
+    attached: bool = false, // worker-owned; distinguishes setup failure from source exit
     mutex: os.Mutex = .{},
     stopped: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
@@ -19,17 +25,32 @@ const Shared = struct {
 
     fn run(self: *Shared) void {
         self.receive() catch |err| {
-            if (err != error.Closed and err != error.Cancelled) self.failure = err;
+            if (err != error.Cancelled and !(err == error.Closed and self.attached)) self.failure = err;
         };
         self.done.store(true, .release);
     }
 
     fn receive(self: *Shared) !void {
-        try self.connection.attach();
+        // Bootstrap and admission are bounded but synchronous. The main loop
+        // remains responsive to host control throughout setup.
+        var fd = try js.endpoint.connect(self.path);
+        defer if (fd >= 0) os.posix.close(fd);
+        const connected = try js.bootstrap.connect(&fd, self.request);
+        self.client = connected.client;
+        self.refusal = connected.refusal;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.stopped.load(.acquire)) return;
+            self.connection = try js.media.Connection.init(&fd);
+        }
+        self.setup_done.store(true, .release);
+        try self.connection.?.attach();
+        self.attached = true;
         var copy: std.ArrayList(u8) = .empty;
         defer copy.deinit(self.allocator);
         while (!self.stopped.load(.acquire)) {
-            var frame = (self.connection.next(std.time.ns_per_s) catch |err| switch (err) {
+            var frame = (self.connection.?.next(std.time.ns_per_s) catch |err| switch (err) {
                 error.Timeout => continue,
                 else => return err,
             }) orelse continue;
@@ -54,47 +75,29 @@ const Shared = struct {
     }
 };
 
-// Only this worker performs the bounded synchronous input handshake. The main
-// loop can keep serving host control and video while admission is in progress.
-const InputConnection = struct {
-    path: []const u8,
-    done: std.atomic.Value(bool) = .init(false),
-    client: ?js.input.Client = null,
-    failure: ?anyerror = null,
-    fn run(self: *InputConnection) void {
-        self.connect() catch |err| {
-            self.failure = err;
-        };
-        self.done.store(true, .release);
-    }
-    fn connect(self: *InputConnection) !void {
-        var fd = try js.endpoint.connect(self.path);
-        defer if (fd >= 0) os.posix.close(fd);
-        self.client = try js.input.Client.connect(&fd, .cooperative);
-    }
-};
-
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.gpa);
     defer init.gpa.free(args);
-    if (args.len != 2 and !(args.len == 4 and std.mem.eql(u8, args[2], "--input-socket"))) return error.ExpectedSourceSocket;
-    var input_connection = InputConnection{ .path = if (args.len == 4) args[3] else "" };
-    const input_worker = if (args.len == 4) try std.Thread.spawn(.{}, InputConnection.run, .{&input_connection}) else null;
-    defer {
-        if (input_worker) |thread| thread.join();
-        if (input_connection.client) |*client| client.deinit();
-    }
-    var fd = try js.endpoint.connect(args[1]);
-    defer if (fd >= 0) os.posix.close(fd);
-    var shared = Shared{ .allocator = init.gpa, .connection = try js.media.Connection.init(&fd) };
+    if (args.len < 2 or args.len > 3) return error.ExpectedSourceSocket;
+    const request: js.bootstrap.Request = if (args.len == 2) .optional else if (std.mem.eql(u8, args[2], "--observe")) .observe else if (std.mem.eql(u8, args[2], "--require-input")) .required else return error.InvalidInputMode;
+    var shared = Shared{ .allocator = init.gpa, .path = args[1], .request = request };
     defer shared.mutex.deinit();
-    defer shared.connection.deinit();
     defer shared.pixels.deinit(init.gpa);
     const worker = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     defer {
         shared.stopped.store(true, .release);
-        shared.connection.cancel();
+        shared.mutex.lock();
+        if (shared.connection) |*connection| connection.cancel();
+        shared.mutex.unlock();
         worker.join();
+        if (shared.connection) |*connection| connection.deinit();
+        // Covers early host exit, failed media attachment, and failed controller
+        // adoption. No admitted client is silently destroyed during setup.
+        if (shared.client) |*client| {
+            const clean = client.closeAndWait(2 * std.time.ns_per_s) catch false;
+            if (!clean) std.log.warn("Jackstay setup input cleanup unconfirmed", .{});
+            client.deinit();
+        }
     }
     var source_runtime = runtime.Runtime.initMediaSource();
     const rt = &source_runtime;
@@ -102,12 +105,7 @@ pub fn main(init: std.process.Init) !void {
     if (!rt.active) return error.PresentationUnavailable;
     var controller: ?Controller = null;
     defer if (controller) |*control| {
-        control.close();
-        const deadline = os.time.nanoTimestamp() + 2 * std.time.ns_per_s;
-        while (!control.closed and os.time.nanoTimestamp() < deadline) {
-            control.poll(&rt.input_parser.?) catch break;
-            os.time.sleep(std.time.ns_per_ms);
-        }
+        if (!control.closed) control.clean = control.client.closeAndWait(2 * std.time.ns_per_s) catch false;
         if (!control.clean) std.log.warn("Jackstay input cleanup unconfirmed at presenter exit", .{});
         control.deinit();
     };
@@ -115,14 +113,16 @@ pub fn main(init: std.process.Init) !void {
     var displayed: std.ArrayList(u8) = .empty;
     defer displayed.deinit(init.gpa);
     while (!rt.host_closed) {
-        if (!input_adopted and input_worker != null and input_connection.done.load(.acquire)) {
+        if (!input_adopted and shared.setup_done.load(.acquire)) {
             input_adopted = true;
-            if (input_connection.client) |client| {
+            if (shared.client) |client| {
                 controller = try Controller.init(client);
-                input_connection.client = null;
+                shared.client = null;
                 try rt.enableSourceInput();
-                std.log.info("Jackstay source input connected: {s}", .{input_connection.path});
-            } else std.log.warn("Jackstay source input unavailable: {any}", .{input_connection.failure});
+                std.log.info("Jackstay source input connected: {s}", .{shared.path});
+            } else if (shared.refusal) |reason| {
+                std.log.info("Jackstay source is observation-only: {any}", .{reason});
+            }
         }
         rt.pollBatchControl();
         rt.pollTerminalInput();

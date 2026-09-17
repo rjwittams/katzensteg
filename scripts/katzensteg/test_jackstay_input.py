@@ -40,7 +40,9 @@ class Client:
         stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stream.connect(str(path))
         fd = C.c_int32(stream.detach())
-        status = library.ft_input_client_connect(C.byref(fd), 4, C.byref(self.handle))
+        input_status = C.c_int32()
+        status = library.ft_source_bootstrap_connect(C.byref(fd), 2, 4, C.byref(self.handle), C.byref(input_status))
+        # The input channel must survive independently of abandoned media setup.
         if fd.value >= 0:
             os.close(fd.value)
         assert status == 0, status
@@ -96,14 +98,13 @@ class Client:
         self.lib.ft_input_client_destroy(C.byref(self.handle))
 
 class App:
-    def __init__(self, folder, version):
-        self.media = folder / f"media{version}"
-        self.input = folder / f"input{version}"
+    def __init__(self, folder, version, allow_input=True):
+        self.source = folder / f"source{version}"
         self.stdout = open(folder / f"app{version}.jsonl", "w+")
         self.stderr = open(folder / f"app{version}.err", "w+")
-        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), f"test.input{version}"], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_PROFILE_DIR=f"{ROOT / 'profiles'}:{folder}", KATZENSTEG_REPO=str(ROOT), KATZENSTEG_TARGET=f"jackstay:{self.media}", KATZENSTEG_INPUT_SOCKET=str(self.input), SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide"), start_new_session=True)
+        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), f"test.input{version}"], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_PROFILE_DIR=f"{ROOT / 'profiles'}:{folder}", KATZENSTEG_REPO=str(ROOT), KATZENSTEG_TARGET=f"jackstay:{self.source}", KATZENSTEG_PUBLISH_INPUT="1" if allow_input else "0", SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide"), start_new_session=True)
         try:
-            self.wait(lambda events: any(e["event"] == "ready" for e in events) and self.input.exists())
+            self.wait(lambda events: any(e["event"] == "ready" for e in events) and self.source.exists())
         except Exception:
             self.cleanup()
             raise
@@ -137,10 +138,10 @@ class App:
 
 class Presenter:
     """A JSONL host with file-backed output, so video cannot block input tests."""
-    def __init__(self, folder, media, input_path, placeholder=False):
+    def __init__(self, folder, source, placeholder=False, mode=None):
         self.stdout = open(folder / "presenter.jsonl", "w+")
         self.stderr = open(folder / "presenter.err", "w+")
-        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", str(media), "--input-socket", str(input_path)], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)), start_new_session=True)
+        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", str(source)] + ([mode] if mode else []), stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)), start_new_session=True)
         attach = dict(type="attach", window_id="main", aspect="fit", id_ranges=dict(image=[[10000,19999]], placement=[[20000,29999]]), rect_cells=dict(row=1, col=1, rows=10, cols=20), upload=dict(profile="file_whole", path=str(folder / "upload"), high_water=16*1024*1024))
         if placeholder:
             for key in ("rect_cells", "aspect", "id_ranges"):
@@ -152,6 +153,20 @@ class Presenter:
         self.process.stdin.flush()
     def input(self, **event):
         self.send(dict(type="input", window_id="main", **event))
+    def events(self):
+        return [json.loads(line) for line in Path(self.stdout.name).read_text().splitlines() if line.endswith("}")]
+    def frame_count(self):
+        return sum(e.get("type") == "frame_batch" for e in self.events())
+    def wait_frames(self, supported, after=0):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            events = self.events()
+            states = [e for e in events if e.get("type") == "presentation_status"]
+            if states and states[-1].get("input_supported") == supported and self.frame_count() > after:
+                return
+            assert self.process.poll() is None, Path(self.stderr.name).read_text()
+            time.sleep(.01)
+        raise AssertionError(f"no new frames with input_supported={supported}")
     def wait_ready(self):
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -197,7 +212,7 @@ class PublisherInput(unittest.TestCase):
         suffix = "dylib" if sys.platform == "darwin" else "so"
         cls.lib = C.CDLL(str(prefix / "lib" / f"libjackstay.{suffix}"))
         for name, args in {
-            "ft_input_client_connect": [C.POINTER(C.c_int32), C.c_uint32, C.POINTER(C.c_void_p)],
+            "ft_source_bootstrap_connect": [C.POINTER(C.c_int32), C.c_uint32, C.c_uint32, C.POINTER(C.c_void_p), C.POINTER(C.c_int32)],
             "ft_input_client_describe": [C.c_void_p, C.POINTER(Config), C.POINTER(C.c_uint64), C.POINTER(C.c_uint64)],
             "ft_input_client_send": [C.c_void_p, C.POINTER(Event), C.POINTER(C.c_uint64)],
             "ft_input_client_poll": [C.c_void_p, C.POINTER(Status)],
@@ -226,19 +241,142 @@ class PublisherInput(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.temp.cleanup()
-    def app(self, version):
+    def app(self, version, allow_input=True):
         # Unique endpoints/logs for each test, sharing only compiled fixture profiles.
         directory = tempfile.TemporaryDirectory(prefix="ks-input-case-", dir="/tmp")
         self.addCleanup(directory.cleanup)
         folder = Path(directory.name)
         (folder / "profiles.json").write_text((self.folder / "profiles.json").read_text())
-        app = App(folder, version)
+        app = App(folder, version, allow_input)
         self.addCleanup(app.cleanup)
         return app
     def client(self, app):
-        client = Client(self.lib, app.input)
+        client = Client(self.lib, app.source)
         self.addCleanup(client.destroy)
         return client
+    def presenter(self, source, mode=None):
+        directory = tempfile.TemporaryDirectory(prefix="ks-presenter-", dir="/tmp")
+        self.addCleanup(directory.cleanup)
+        viewer = Presenter(Path(directory.name), source, mode=mode)
+        self.addCleanup(viewer.cleanup)
+        return viewer
+
+    def reference_source(self, *options):
+        directory = tempfile.TemporaryDirectory(prefix="ks-source-", dir="/tmp")
+        self.addCleanup(directory.cleanup)
+        folder = Path(directory.name)
+        report = (folder / "source.log").open("w+")
+        self.addCleanup(report.close)
+        source_path = folder / "source"
+        source = subprocess.Popen([str(self.input_source), str(source_path), "--report-state", *options], stdout=report, stderr=subprocess.PIPE)
+        def cleanup():
+            if source.poll() is None: source.kill()
+            source.communicate()
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 8
+        while not source_path.exists():
+            assert source.poll() is None and time.monotonic() < deadline
+            time.sleep(.01)
+        return source_path, source, folder / "source.log"
+
+    def test_observation_and_optional_refusal_do_not_claim_input(self):
+        for allowed, mode in ((True, "--observe"), (False, None), (False, "--observe")):
+            with self.subTest(allowed=allowed, mode=mode):
+                app = self.app(2, allow_input=allowed)
+                viewer = self.presenter(app.source, mode)
+                viewer.wait_frames(False)
+                viewer.finish()
+                self.assertFalse(any(e["event"] in ("key", "button") for e in app.events()))
+                if allowed:
+                    client = self.client(app)
+                    client.result(client.key("KeyA", 1))
+                    client.close()
+
+    def test_busy_optional_viewer_keeps_video_and_required_viewer_fails(self):
+        app = self.app(2)
+        owner = self.client(app)
+        owner.result(owner.key("ShiftLeft", 1))
+        observer = self.presenter(app.source)
+        observer.wait_frames(False)
+        required = self.presenter(app.source, "--require-input")
+        required.process.wait(timeout=8)
+        self.assertNotEqual(required.process.returncode, 0)
+        frames = observer.frame_count()
+        owner.result(owner.key("KeyA", 1, press=2))
+        owner.close()
+        observer.wait_frames(False, after=frames)
+        fresh = self.client(app)
+        fresh.result(fresh.key("KeyA", 1))
+        fresh.close()
+        observer.finish()
+
+    def test_required_input_refused_by_observation_only_publisher(self):
+        app = self.app(2, allow_input=False)
+        viewer = self.presenter(app.source, "--require-input")
+        viewer.process.wait(timeout=8)
+        self.assertNotEqual(viewer.process.returncode, 0)
+
+    def test_stalled_bootstrap_does_not_block_other_viewers(self):
+        app = self.app(2)
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(stalled.close)
+        stalled.connect(str(app.source))
+        started = time.monotonic()
+        viewer = self.presenter(app.source, "--observe")
+        viewer.wait_frames(False)
+        self.assertLess(time.monotonic() - started, 3, "waited for another peer's five-second bootstrap timeout")
+        stalled.close()
+        viewer.finish()
+
+    def test_media_attach_failure_cleans_up_admitted_input(self):
+        for observe_only in (False, True):
+            with self.subTest(observe_only=observe_only):
+                options = ["--reject-media"] + (["--observe-only"] if observe_only else [])
+                endpoint, source, report = self.reference_source(*options)
+                viewer = self.presenter(endpoint)
+                viewer.process.wait(timeout=8)
+                self.assertNotEqual(viewer.process.returncode, 0)
+                _, err = source.communicate(timeout=6)
+                self.assertEqual(source.returncode, 0, err.decode())
+                self.assertIn(f"cleanup={0 if observe_only else 1} held=0 buttons=0", report.read_text())
+
+    def test_host_exit_during_bootstrap_cleans_up_unadopted_input(self):
+        endpoint, source, report = self.reference_source("--delay-bootstrap")
+        viewer = self.presenter(endpoint)
+        deadline = time.monotonic() + 5
+        while "bootstrap_wait" not in report.read_text():
+            self.assertIsNone(source.poll())
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.005)
+        viewer.finish()
+        _, err = source.communicate(timeout=6)
+        self.assertEqual(source.returncode, 0, err.decode())
+        self.assertIn("cleanup=1 held=0 buttons=0", report.read_text())
+
+    def test_input_disconnect_keeps_media_running(self):
+        endpoint, source, report = self.reference_source("--drop-input")
+        viewer = self.presenter(endpoint)
+        viewer.wait_ready()
+        viewer.input(event="key", key="enter", action="down")
+        viewer.wait_frames(False, after=viewer.frame_count())
+        frames = viewer.frame_count()
+        viewer.wait_frames(False, after=frames + 2)
+        viewer.finish()
+        _, err = source.communicate(timeout=6)
+        self.assertEqual(source.returncode, 0, err.decode())
+        self.assertIn("cleanup=1 held=0 buttons=0", report.read_text())
+
+    def test_independent_source_observation_and_optional_refusal(self):
+        for options, mode in (((), "--observe"), (("--observe-only",), None)):
+            with self.subTest(options=options, mode=mode):
+                endpoint, source, report = self.reference_source(*options)
+                viewer = self.presenter(endpoint, mode)
+                viewer.wait_frames(False)
+                viewer.finish()
+                _, err = source.communicate(timeout=6)
+                self.assertEqual(source.returncode, 0, err.decode())
+                self.assertIn("cleanup=0 held=0 buttons=0", report.read_text())
+
     def test_state_only_polling_does_not_exhaust_event_retention(self):
         for version in (2, 3):
             with self.subTest(sdl=version):
@@ -273,7 +411,7 @@ class PublisherInput(unittest.TestCase):
         def controlling_terminal():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        viewer = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "jackstay-source", str(app.media), "--input-socket", str(app.input)], stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)))
+        viewer = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), "jackstay-source", str(app.source)], stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal, env=dict(os.environ, KATZENSTEG_REPO=str(ROOT)))
         os.close(slave)
         output = bytearray()
         def drain():
@@ -310,7 +448,7 @@ class PublisherInput(unittest.TestCase):
             for placeholder in (False, True):
                 with self.subTest(sdl=version, placeholder=placeholder):
                     app = self.app(version)
-                    viewer = Presenter(Path(app.stdout.name).parent, app.media, app.input, placeholder)
+                    viewer = Presenter(Path(app.stdout.name).parent, app.source, placeholder, mode="--require-input" if placeholder else None)
                     self.addCleanup(viewer.cleanup)
                     viewer.wait_ready()
                     app.command("v")
@@ -332,16 +470,16 @@ class PublisherInput(unittest.TestCase):
         for abrupt in (False, True):
             with self.subTest(abrupt=abrupt), tempfile.TemporaryDirectory(prefix="ks-source-", dir="/tmp") as directory:
                 folder = Path(directory)
-                media, control = folder / "media", folder / "input"
+                source_path = folder / "source"
                 with (folder / "source.log").open("w+") as report:
-                    source = subprocess.Popen([str(self.input_source), str(media), str(control), "--report-state"], stdout=report, stderr=subprocess.PIPE)
+                    source = subprocess.Popen([str(self.input_source), str(source_path), "--report-state"], stdout=report, stderr=subprocess.PIPE)
                     viewer = None
                     try:
                         deadline = time.monotonic() + 8
-                        while not (media.exists() and control.exists()):
+                        while not source_path.exists():
                             assert source.poll() is None and time.monotonic() < deadline
                             time.sleep(.01)
-                        viewer = Presenter(folder, media, control)
+                        viewer = Presenter(folder, source_path)
                         viewer.wait_ready()
                         viewer.input(event="key", key="enter", action="down")
                         viewer.input(event="key", key="enter", action="down")
@@ -499,7 +637,7 @@ class PublisherInput(unittest.TestCase):
             for abrupt in (False, True):
                 with self.subTest(sdl=version, abrupt=abrupt):
                     app = self.app(version)
-                    viewer = subprocess.Popen([os.environ["JACKSTAY_REFERENCE_VIEWER"], "--cpu-socket", str(app.media), "--input-socket", str(app.input), "--input-self-test", "--frames", "0" if abrupt else "60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, SDL_VIDEODRIVER="dummy"))
+                    viewer = subprocess.Popen([os.environ["JACKSTAY_REFERENCE_VIEWER"], "--source-socket", str(app.source), "--input-self-test", "--frames", "0" if abrupt else "60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, SDL_VIDEODRIVER="dummy"))
                     def stop_viewer(viewer=viewer):
                         if viewer.poll() is None: viewer.kill()
                         viewer.communicate(timeout=5)

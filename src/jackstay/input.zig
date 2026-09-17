@@ -2,8 +2,8 @@
 //! Work and all handles have one owner; destroy must not race other calls.
 const std = @import("std");
 const media = @import("media.zig");
-const c = @cImport({
-    @cInclude("jackstay_input.h");
+pub const c = @cImport({
+    @cInclude("jackstay_bootstrap.h");
 });
 
 pub const Mode = enum(u32) { physical = c.FT_INPUT_MODE_PHYSICAL, source_text = c.FT_INPUT_MODE_SOURCE_TEXT, cooperative = c.FT_INPUT_MODE_COOPERATIVE };
@@ -82,7 +82,7 @@ pub const Event = union(enum) {
     scroll: struct { x: f64, y: f64, unit: ScrollUnit, position: Position },
 };
 
-fn check(status: c.ft_status) !void {
+pub fn check(status: c.ft_status) !void {
     switch (status) {
         c.FT_STATUS_OK => {},
         c.FT_STATUS_CLOSED => return error.Closed,
@@ -292,6 +292,18 @@ pub const Client = struct {
     pub fn close(self: *Client) void {
         c.ft_input_client_close(self.handle);
     }
+    /// Close an unadopted setup owner too: destruction alone does not confirm
+    /// remote cleanup. The caller reports false/error before releasing it.
+    pub fn closeAndWait(self: *Client, timeout_ns: u64) !bool {
+        const os = @import("platform");
+        self.close();
+        const deadline = os.time.nanoTimestamp() + timeout_ns;
+        while (os.time.nanoTimestamp() < deadline) {
+            while (try self.poll()) |status| if (status == .closed) return status.closed.clean;
+            os.time.sleep(std.time.ns_per_ms);
+        }
+        return false;
+    }
     /// Joins transport only. This is not confirmed remote cleanup.
     pub fn deinit(self: *Client) void {
         c.ft_input_client_destroy(&self.handle);
@@ -307,3 +319,35 @@ fn setPosition(raw: *c.ft_input_event, pos: Position) void {
 fn enumFromInt(comptime E: type, value: anytype) !E {
     return std.enums.fromInt(E, value) orelse error.InvalidEnumTag;
 }
+
+/// Input transports outlive media setup/attachment. Setup workers transfer
+/// servers here; the executor's transport worker retires or disconnects them.
+/// Stop all setup workers before deinit; target cleanup remains the executor's.
+pub const Servers = struct {
+    mutex: @import("platform").Mutex = .{},
+    slots: [8]?Server = @splat(null),
+
+    pub fn adopt(self: *Servers, server: Server) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (&self.slots) |*slot| if (slot.* == null) {
+            slot.* = server;
+            return;
+        };
+        return error.Capacity;
+    }
+    pub fn maintain(self: *Servers, disconnect: bool) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (&self.slots) |*slot| if (slot.*) |*server| {
+            if (disconnect or (server.finished() catch true)) {
+                server.deinit();
+                slot.* = null;
+            }
+        };
+    }
+    pub fn deinit(self: *Servers) void {
+        self.maintain(true);
+        self.mutex.deinit();
+    }
+};
