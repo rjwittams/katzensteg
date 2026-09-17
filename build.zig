@@ -798,6 +798,8 @@ pub fn build(b: *std.Build) void {
     luchs_build_step.dependOn(&install_luchs.step);
     if (install_luchs_helper_step) |step| luchs_build_step.dependOn(step);
 
+    addUnitTest(b, test_step, "termscene-shared-memory-test", "src/termscene/kitty/shared_memory.zig", target, optimize, use_llvm, .{ .link_libc = true });
+    addUnitTest(b, test_step, "termscene-profile-test", "src/termscene/kitty_tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
     addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});
     addUnitTest(b, test_step, "katzensteg-log-test", "src/katzensteg/log.zig", target, optimize, use_llvm, .{});

@@ -14,6 +14,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest.mock import patch
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
@@ -204,6 +205,20 @@ class WrapTest(unittest.TestCase):
         self.assertNotIn(b'\x1b_G', self.output[boundary:])
         self.emit(b'\x07')
         self.until(lambda: b'a=d' in self.output[boundary:])
+
+    def test_shm_discards_during_long_string_do_not_exhaust_upload_pool(self):
+        with patch.dict(os.environ, KATZENSTEG_OUTPUT_PROFILE='shm'):
+            self.start()
+        self.emit(b'\x1b]hold-graphics')
+        boundary = len(self.output)
+        client = self.panel()
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            self.read(.02)
+        self.assertNotIn(b'\x1b_G', self.output[boundary:])
+        self.emit(b'\x07')
+        self.until(lambda: b't=s' in self.output[boundary:] and b'a=p,U=1' in self.output[boundary:])
+        self.api('/client/close', {}, client)
 
     def test_graphics_wait_for_string(self):
         self.check_graphics_boundary(b'\x1b]title', b'\x07')

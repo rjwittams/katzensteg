@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 
 pub const UploadMedium = enum {
     direct,
+    shm,
     file_whole,
     file_offset,
 };
@@ -57,6 +58,7 @@ pub const Backend = struct {
 
     const UploadState = union(UploadMedium) {
         direct,
+        shm: @import("shared_memory.zig").Pool,
         file_whole: RotatingFileUploadState,
         file_offset: FileUploadState,
     };
@@ -96,6 +98,7 @@ pub const Backend = struct {
         const io = self.file.io;
         switch (self.upload) {
             .direct => {},
+            .shm => |*pool| pool.deinit(),
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
                     system_io.fs.deleteFileAbsolute(io, path.*) catch {};
@@ -125,6 +128,11 @@ pub const Backend = struct {
         }
         switch (self.upload) {
             .direct => try protocol.writeTransmitRgbaWithQuiet(self.writer(), self.quiet, image_id, rgba, w, h),
+            .shm => |*pool| {
+                const object = try pool.create(rgba, 0);
+                // A failed write can be partial; keep its name until teardown.
+                try protocol.writeTransmitRgbaShm(self.writer(), self.quiet, image_id, object.name(), w, h);
+            },
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
@@ -273,6 +281,7 @@ pub const Backend = struct {
     fn initUploadState(io: std.Io, allocator: std.mem.Allocator, options: Options) !UploadState {
         switch (options.upload_medium) {
             .direct => return .direct,
+            .shm => return .{ .shm = .{ .allocator = allocator } },
             .file_whole, .file_offset => {
                 const path = options.upload_file_path orelse return error.MissingUploadFilePath;
                 return switch (options.upload_medium) {

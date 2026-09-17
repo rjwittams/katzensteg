@@ -153,6 +153,7 @@ fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.fs.File) !ren
             allocator.free(path);
             break :blk .{ .profile = .direct_apc };
         },
+        .shm => .{ .profile = .shm, .path = path },
         .file_whole => .{ .profile = .file_whole, .path = path },
         .file_offset_ring => .{ .profile = .file_offset_ring, .path = path },
     };
@@ -162,7 +163,7 @@ fn deinitUploadPolicy(io: std.Io, allocator: std.mem.Allocator, upload: *render_
     if (upload.path) |path| {
         switch (upload.profile) {
             .file_whole => upload_path_mod.deleteRotatingFileWholeArtifacts(io, allocator, path),
-            .file_offset_ring, .direct_apc => upload_path_mod.deleteBasePath(io, path),
+            .file_offset_ring, .direct_apc, .shm => upload_path_mod.deleteBasePath(io, path),
         }
         allocator.free(path);
     }

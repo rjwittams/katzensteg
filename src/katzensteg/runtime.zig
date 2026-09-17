@@ -395,12 +395,14 @@ pub const Runtime = struct {
         runtime.active = true;
         runtime.output_profile_name = switch (actual_upload_medium) {
             .direct => "direct_apc",
+            .shm => "shm",
             .file_whole => "file_whole",
             .file_offset => "file_offset_ring",
         };
         log.info("runtime initialized in direct tty mode", .{});
         switch (actual_upload_medium) {
             .direct => log.info("upload transport profile = direct_apc", .{}),
+            .shm => log.info("upload transport profile = shm", .{}),
             .file_whole => {
                 log.info("upload transport profile = file_whole path {s} (high-water {d} bytes)", .{ backend_options.upload_file_path.?, backend_options.upload_file_high_water });
             },
@@ -1229,6 +1231,7 @@ pub const Runtime = struct {
                     );
                 }
             },
+            .discard_batch => |seq| sink.discardBatch(seq),
             .observe => |request| {
                 const output = self.batch_writer orelse return;
                 var writer_state = output.writerStreaming(&.{});
@@ -2554,6 +2557,7 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
 
     const caps = try ts_kitty.capabilities.probe(allocator, tty, upload_path);
     runtime.terminal_identity = @tagName(caps.terminal);
+    log.info("shared memory probe={s}", .{@tagName(caps.shared_memory_rgba.probe)});
     log.info(
         "terminal={s} graphics={s} file_whole={s}/{s} file_offset={s}/{s}",
         .{
@@ -2575,6 +2579,11 @@ fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kit
             allocator.free(upload_path);
             log.info("file upload transport unavailable or avoided; falling back to inline APC", .{});
             break :blk .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
+        },
+        .shm => blk: {
+            system_io.fs.deleteFileAbsolute(io, upload_path) catch {};
+            allocator.free(upload_path);
+            break :blk .{ .upload_medium = .shm, .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
         },
         .file_whole => .{
             .upload_medium = .file_whole,
@@ -2598,6 +2607,7 @@ fn makeUploadPath(allocator: std.mem.Allocator) ![]u8 {
 fn mapOutputProfile(profile: ?config_mod.OutputProfile) ?ts_kitty.OutputProfile {
     return switch (profile orelse return null) {
         .direct_apc => .direct_apc,
+        .shm => .shm,
         .file_whole => .file_whole,
         .file_offset_ring => .file_offset_ring,
     };

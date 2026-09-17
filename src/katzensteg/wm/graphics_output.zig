@@ -47,7 +47,7 @@ fn sequenceLength(bytes: []const u8, image_id: u32) !usize {
     }
     if (!quiet or !own_id) return error.UnownedGraphics;
     if (std.mem.eql(u8, action, "t")) {
-        if (!std.mem.eql(u8, transmission, "f")) return error.FileUploadRequired;
+        if (!std.mem.eql(u8, transmission, "f") and !std.mem.eql(u8, transmission, "s")) return error.ExternalUploadRequired;
     } else if (std.mem.eql(u8, action, "p")) {
         if (!virtual) return error.VirtualPlacementRequired;
     } else if (std.mem.eql(u8, action, "d")) {
@@ -77,6 +77,18 @@ test "graphics-only output coalesces small frames and rejects text and inline pi
     });
     try std.testing.expectEqual(@as(usize, 1), writer.writes);
     try std.testing.expectError(error.NonGraphicsOutput, sequenceLength("\x1b[2J", 77));
-    try std.testing.expectError(error.FileUploadRequired, sequenceLength("\x1b_Ga=t,t=d,i=77,q=2;AAAA\x1b\\", 77));
+    try std.testing.expectError(error.ExternalUploadRequired, sequenceLength("\x1b_Ga=t,t=d,i=77,q=2;AAAA\x1b\\", 77));
     try std.testing.expectError(error.UnownedGraphics, sequenceLength("\x1b_Ga=d,d=I,i=78,q=2;\x1b\\", 77));
+}
+
+test "headless graphics accepts a bounded owned SHM upload and virtual placement" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try apply(std.testing.allocator, &output.writer, 77, .{
+        .deletes = &.{},
+        .uploads = &.{"\x1b_Ga=t,t=s,i=77,q=2,f=32,s=1,v=1;L2tzLXRlc3Q=\x1b\\"},
+        .placements = &.{"\x1b_Ga=p,U=1,i=77,c=2,r=2,q=2;\x1b\\"},
+        .after = &.{},
+    });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "t=s") != null);
 }

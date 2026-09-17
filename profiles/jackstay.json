@@ -5,8 +5,7 @@
       "runtime": {
         "composite_mode": "fullscreen",
         "intercept_mode": "sync_compose",
-        "input": false,
-        "output_profile": "file_whole"
+        "input": false
       },
       "stdout": "/tmp/katzensteg-jackstay-source.out",
       "stderr": "stdout"

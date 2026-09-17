@@ -16,6 +16,7 @@ pub const InterceptMode = enum {
 
 pub const OutputProfile = enum {
     direct_apc,
+    shm,
     file_whole,
     file_offset_ring,
 };
@@ -180,7 +181,7 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     applyJsonBool(parsed.value, "file_transport", &config.file_transport);
     applyJsonBool(parsed.value, "vulkan_capture", &config.vulkan_capture);
     if (parsed.value.object.get("output_profile")) |value| {
-        if (value == .string) config.output_profile = parseOutputProfile(value.string) orelse config.output_profile;
+        if (value == .string) config.output_profile = if (std.mem.eql(u8, value.string, "auto")) null else parseOutputProfile(value.string) orelse config.output_profile;
     }
     if (parsed.value.object.get("file_transport_max_bytes")) |value| {
         switch (value) {
@@ -289,7 +290,7 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
         return true;
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_OUTPUT_PROFILE")) {
-        config.output_profile = parseOutputProfile(value) orelse config.output_profile;
+        config.output_profile = if (std.mem.eql(u8, value, "auto")) null else parseOutputProfile(value) orelse config.output_profile;
         return true;
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_FILE_TRANSPORT")) {
@@ -325,6 +326,7 @@ pub fn parseInterceptMode(value: []const u8) ?InterceptMode {
 
 pub fn parseOutputProfile(value: []const u8) ?OutputProfile {
     if (std.mem.eql(u8, value, "direct_apc")) return .direct_apc;
+    if (std.mem.eql(u8, value, "shm")) return .shm;
     if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
     if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
     return null;
@@ -531,4 +533,12 @@ test "runtime config env values override extended fields" {
     try std.testing.expectEqual(GlCaptureMode.pbo, config.gl_capture);
     try std.testing.expect(config.vulkan_capture);
     try std.testing.expect(!applyRuntimeConfigEnvValue(&config, "KATZENSTEG_UNKNOWN", "1"));
+}
+
+test "output profile auto clears an explicit SHM override" {
+    var config: RuntimeConfig = .{};
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "shm"));
+    try std.testing.expectEqual(OutputProfile.shm, config.output_profile.?);
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "auto"));
+    try std.testing.expect(config.output_profile == null);
 }

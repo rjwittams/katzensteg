@@ -2137,6 +2137,7 @@ fn forcedWmOutputProfile(allocator: std.mem.Allocator) ?config_mod.OutputProfile
 fn mapKittyOutputProfile(profile: ts_kitty.profile.OutputProfile) config_mod.OutputProfile {
     return switch (profile) {
         .direct_apc => .direct_apc,
+        .shm => .shm,
         .file_whole => .file_whole,
         .file_offset_ring => .file_offset_ring,
     };
@@ -2147,6 +2148,7 @@ fn uploadPolicyForOutputProfile(path: []const u8, profile: config_mod.OutputProf
         // The WM multiplexes producer batches through a shared JSONL host.
         // Keep raw APC out of that path even when a probe or override requests it.
         .direct_apc => .{ .profile = .file_whole, .path = path },
+        .shm => .{ .profile = .shm, .path = path },
         .file_whole => .{ .profile = .file_whole, .path = path },
         .file_offset_ring => .{ .profile = .file_offset_ring, .path = path },
     };
@@ -2156,7 +2158,7 @@ fn deinitUploadPolicy(io: std.Io, allocator: std.mem.Allocator, upload: *render_
     if (upload.path) |path| {
         switch (upload.profile) {
             .file_whole => upload_path_mod.deleteRotatingFileWholeArtifacts(io, allocator, path),
-            .file_offset_ring, .direct_apc => upload_path_mod.deleteBasePath(io, path),
+            .file_offset_ring, .direct_apc, .shm => upload_path_mod.deleteBasePath(io, path),
         }
         allocator.free(path);
     }

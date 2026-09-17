@@ -373,3 +373,43 @@ button state per session. Out-of-grid coordinates return 400.
 
 Event long-polling and Kitty frame-edit uploads are deferred. The Claude Code
 plugin in `tools/claude-code-plugin/` uses the client-scoped interface above.
+
+### Terminal image transport
+
+Ordinary launches select their output transport automatically. On macOS, a
+successful Kitty SHM probe makes `shm` the first choice. Otherwise selection
+prefers supported file-offset uploads, whole-file uploads, then inline APC.
+Linux retains that file preference, with SHM available before the inline
+fallback. Terminal compatibility rules still apply, including avoiding file
+offsets on Ghostty. The historical `runtime.fullscreen_file` profile name is
+retained for compatibility; it no longer forces file transport.
+
+`KATZENSTEG_OUTPUT_PROFILE=auto|shm|file_whole|file_offset_ring|direct_apc`
+overrides a launch profile. A profile can also set `runtime.output_profile` to
+one of those values. An explicit transport bypasses the automatic choice;
+`auto` clears an inherited choice. `KATZENSTEG_FILE_TRANSPORT=0` retains its
+legacy direct-output behavior of forcing inline APC, including disabling SHM.
+
+The desktop WM probes and chooses on behalf of its producers. Its JSONL path
+still substitutes whole-file uploads for inline output. The headless WM and pi
+extension do not own terminal input, so they keep whole-file output by default.
+Set `KATZENSTEG_OUTPUT_PROFILE=shm` in the environment of the **host** to use SHM
+there. Restart an existing background headless host for the setting to take
+effect. These two hosts currently recognize only the SHM override; their other
+settings continue to select whole-file output. They do not consume terminal
+probe replies from Claude or pi. Hosted automatic negotiation remains follow-up
+work.
+
+For example, from the repository root:
+
+```sh
+./zig-out/bin/katzensteg mi2
+KATZENSTEG_OUTPUT_PROFILE=shm ./zig-out/bin/katzensteg-wm mi2
+KATZENSTEG_OUTPUT_PROFILE=shm ./zig-out/bin/katzensteg-wm --wrap -- claude
+KATZENSTEG_OUTPUT_PROFILE=shm pi -e ./tools/pi-extension/extensions/katzensteg-panel.ts
+```
+
+SHM requires the producer and terminal to share a POSIX shared-memory namespace.
+Each upload creates an immutable object and sends one APC containing its encoded
+name. Kitty maps and unlinks the object. There is no per-frame `fsync`, but pixels
+are still copied into SHM; this is not a GPU-only transport.

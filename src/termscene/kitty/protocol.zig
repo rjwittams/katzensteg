@@ -40,6 +40,17 @@ pub fn writeTransmitRgbaWithQuiet(out: anytype, quiet: Quiet, image_id: u32, rgb
     try chunkedApc(out, prefix, rgba);
 }
 
+/// The payload is only the POSIX SHM name. The terminal consumes and unlinks it.
+pub fn writeTransmitRgbaShm(out: anytype, quiet: Quiet, image_id: u32, name: []const u8, w: i32, h: i32) !void {
+    var buf: [160]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&buf, "q={d},a=t,t=s,f=32,s={d},v={d},i={d},S={d}", .{ @intFromEnum(quiet), w, h, image_id, @as(u64, @intCast(w)) * @as(u64, @intCast(h)) * 4 });
+    try writeEncodedPayloadApc(out, prefix, name);
+}
+
+pub fn writeQueryShmRgba(out: anytype, name: []const u8) !void {
+    try writeEncodedPayloadApc(out, "i=33,a=q,t=s,f=32,s=1,v=1,S=4", name);
+}
+
 /// Upload raw RGBA pixel data by asking the terminal to read the entire contents
 /// of a regular file.
 pub fn writeTransmitRgbaFileWhole(out: anytype, image_id: u32, path: []const u8, w: i32, h: i32) !void {
@@ -178,4 +189,11 @@ test "protocol writers support memory writers" {
     });
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[4;1H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "a=p") != null);
+}
+
+test "SHM upload is a single APC carrying only the encoded name" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try writeTransmitRgbaShm(&out.writer, .suppress_fail, 42, "/ks-test", 1920, 1080);
+    try std.testing.expectEqualStrings("\x1b_Gq=2,a=t,t=s,f=32,s=1920,v=1080,i=42,S=8294400;L2tzLXRlc3Q=\x1b\\", out.written());
 }

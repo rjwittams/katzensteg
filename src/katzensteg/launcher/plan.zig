@@ -141,7 +141,7 @@ pub fn defaultRuntimeConfig() RuntimeConfig {
         .window_policy = .terminal_only,
         .input_enabled = true,
         .input_claimed = true,
-        .output_profile = .file_whole,
+        .output_profile = null,
     };
 }
 
@@ -207,7 +207,7 @@ test "launch plan appends extra args after profile args" {
         .allocator = std.testing.allocator,
         .name = "demo",
         .target = "$HOME/bin/demo",
-        .args = &.{ "--profile-default" },
+        .args = &.{"--profile-default"},
     };
 
     const expansion = context.ExpansionContext{ .home = "/Users/test", .repo = "/repo" };
