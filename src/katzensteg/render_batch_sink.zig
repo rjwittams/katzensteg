@@ -907,7 +907,7 @@ test "SHM batches keep sent uploads alive and discard only unsent or host-reject
     // Submission to a host is not submission to the terminal.
     sink.discardBatch(1);
     try std.testing.expect(sent.consumed());
-    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.objects.items.len);
 
     try sink.uploadRgba(100000, &.{ 7, 8, 9, 255 }, 1, 1);
     const next = sink.shm_pool.objects.items[0];
@@ -917,7 +917,7 @@ test "SHM batches keep sent uploads alive and discard only unsent or host-reject
     try std.testing.expect(!next.consumed());
     next.unlink(); // Terminal opens/maps and unlinks the name.
     sink.shm_pool.reap();
-    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.objects.items.len);
 }
 
 test "changing upload policy does not unlink a previously submitted SHM object" {

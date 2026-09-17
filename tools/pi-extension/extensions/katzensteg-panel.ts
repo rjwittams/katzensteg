@@ -1177,6 +1177,8 @@ export class KatzenstegProducer implements ProducerConnection {
 			return;
 		}
 		if (!this.attached) {
+			const uploadProfile: UploadProfile =
+				process.env.KATZENSTEG_OUTPUT_PROFILE === "shm" ? "shm" : "file_whole";
 			debugLog(
 				`producer.live.attach ${formatRect(sync.rect)} clip=${formatRect(sync.clip)}`,
 			);
@@ -1193,8 +1195,8 @@ export class KatzenstegProducer implements ProducerConnection {
 					imageIds: this.imageIds,
 					placementIds: this.placementIds,
 					upload: {
-						profile: process.env.KATZENSTEG_OUTPUT_PROFILE === "shm" ? "shm" : "file_whole",
-						path: this.uploadPath,
+						profile: uploadProfile,
+						path: uploadProfile === "shm" ? undefined : this.uploadPath,
 						highWater: DEFAULT_UPLOAD_HIGH_WATER,
 					},
 				}),

@@ -62,12 +62,11 @@ pub const Pool = struct {
     objects: std.ArrayList(Object) = .empty,
     reserved_objects: usize = 0,
     reserved_bytes: usize = 0,
-    len: usize = 0,
     bytes: usize = 0,
 
     pub fn reap(self: *Pool) void {
         var i: usize = 0;
-        while (i < self.len) {
+        while (i < self.objects.items.len) {
             if (self.objects.items[i].consumed()) self.remove(i) else i += 1;
         }
     }
@@ -78,8 +77,8 @@ pub const Pool = struct {
         if (self.reserved_objects != 0) {
             if (bytes.len > self.reserved_bytes) return error.InvalidUploadReservation;
         } else {
-            if (self.len >= max_objects or (self.len != 0 and bytes.len > max_bytes -| self.bytes)) return error.UploadBackpressure;
-            try self.objects.ensureTotalCapacity(self.allocator, self.len + 1);
+            if (self.objects.items.len >= max_objects or (self.objects.items.len != 0 and bytes.len > max_bytes -| self.bytes)) return error.UploadBackpressure;
+            try self.objects.ensureTotalCapacity(self.allocator, self.objects.items.len + 1);
         }
         var object = try Object.create(bytes);
         object.batch = batch;
@@ -88,17 +87,16 @@ pub const Pool = struct {
             self.reserved_objects -= 1;
             self.reserved_bytes -= bytes.len;
         }
-        self.len += 1;
         self.bytes += bytes.len;
-        return &self.objects.items[self.len - 1];
+        return &self.objects.items[self.objects.items.len - 1];
     }
 
     /// Admit a whole composition before it mutates presentation state. A single
     /// oversized frame is allowed only with no outstanding uploads.
     pub fn reserveBatch(self: *Pool, count: usize, bytes: usize) !void {
         self.reap();
-        if (count != 0 and self.len != 0 and (count > max_objects -| self.len or bytes > max_bytes -| self.bytes)) return error.UploadBackpressure;
-        try self.objects.ensureTotalCapacity(self.allocator, self.len + count);
+        if (count != 0 and self.objects.items.len != 0 and (count > max_objects -| self.objects.items.len or bytes > max_bytes -| self.bytes)) return error.UploadBackpressure;
+        try self.objects.ensureTotalCapacity(self.allocator, self.objects.items.len + count);
         self.reserved_objects = count;
         self.reserved_bytes = bytes;
     }
@@ -111,7 +109,7 @@ pub const Pool = struct {
     /// Only for batches known never to have reached the terminal.
     pub fn discard(self: *Pool, batch: u64) void {
         var i: usize = 0;
-        while (i < self.len) {
+        while (i < self.objects.items.len) {
             if (self.objects.items[i].batch == batch) {
                 self.objects.items[i].unlink();
                 self.remove(i);
@@ -120,14 +118,13 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
-        for (self.objects.items[0..self.len]) |*object| object.unlink();
+        for (self.objects.items) |*object| object.unlink();
         self.objects.deinit(self.allocator);
         self.* = .{ .allocator = self.allocator };
     }
 
     fn remove(self: *Pool, i: usize) void {
         self.bytes -= self.objects.items[i].bytes;
-        self.len -= 1;
         _ = self.objects.swapRemove(i);
     }
 };
@@ -158,10 +155,10 @@ test "pool bounds outstanding uploads and reclaims only consumed or discarded ba
     try std.testing.expect(!first.consumed());
     first.unlink(); // Terminal consumption.
     pool.reap();
-    try std.testing.expectEqual(Pool.max_objects - 1, pool.len);
+    try std.testing.expectEqual(Pool.max_objects - 1, pool.objects.items.len);
     pool.discard(Pool.max_objects); // Host dropped this exact batch.
     try std.testing.expect(last.consumed());
-    try std.testing.expectEqual(Pool.max_objects - 2, pool.len);
+    try std.testing.expectEqual(Pool.max_objects - 2, pool.objects.items.len);
     _ = try pool.create(&.{1}, 100);
 }
 
@@ -170,7 +167,7 @@ test "whole-frame admission rejects pressure before allocation and permits one o
     defer pool.deinit();
     const old = (try pool.create(&.{ 1, 2, 3, 255 }, 1)).*;
     try std.testing.expectError(error.UploadBackpressure, pool.reserveBatch(Pool.max_objects + 1, 4 * (Pool.max_objects + 1)));
-    try std.testing.expectEqual(@as(usize, 1), pool.len);
+    try std.testing.expectEqual(@as(usize, 1), pool.objects.items.len);
     try std.testing.expect(!old.consumed());
     old.unlink();
     try pool.reserveBatch(Pool.max_objects + 1, 4 * (Pool.max_objects + 1));
@@ -178,6 +175,6 @@ test "whole-frame admission rejects pressure before allocation and permits one o
     pool.endReservation();
     try std.testing.expectError(error.UploadBackpressure, pool.create(&.{1}, 3));
     pool.discard(2);
-    try std.testing.expectEqual(@as(usize, 0), pool.len);
+    try std.testing.expectEqual(@as(usize, 0), pool.objects.items.len);
     _ = try pool.create(&.{1}, 3);
 }
