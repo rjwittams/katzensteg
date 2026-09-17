@@ -139,5 +139,11 @@ An explicit discovery descriptor in `KATZENSTEG_WM_HOST` lets plugins attach to
 the wrapping host instead of starting a second host for the inner PTY.
 
 Structured keyboard requests join terminal bytes and pointer requests at the
-canonical input model. That model owns key events, held state and modifier
-translation; the HTTP adapter does not inject SDL events directly.
+canonical input model. Every source hands it a native key in the Jackstay
+vocabulary (`src/katzensteg/native_key.zig`): a DOM code or logical key name,
+an action, modifiers and, once inside the model, a press identity. The model
+binds the key once with static US-layout tables, keeps held presses so a repeat
+or release reuses its down binding, and projects the result into the SDL-shaped
+queue. SDL adapters refine bindings against the live keymap; presenters forward
+the native key without translating SDL numbers back into names. The HTTP
+adapter does not inject SDL events directly.

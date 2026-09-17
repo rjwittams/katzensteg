@@ -2,8 +2,12 @@ const std = @import("std");
 const system_io = @import("platform");
 const presentation_layout = @import("presentation_layout.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
+const native_key = @import("native_key.zig");
+
+pub const NativeKey = native_key.Key;
 
 const max_pending_bytes = 256;
+const max_local_presses = 64;
 const keyboard_poll_hold_ns: i128 = 150 * std.time.ns_per_ms;
 
 pub const sdl_num_scancodes = 512;
@@ -30,11 +34,15 @@ pub const Target = struct {
     }
 };
 
+/// A key as the SDL adapters project it. `native` is the source-neutral key
+/// the binding was resolved from; presenters forward it without translating
+/// SDL numbers back into names.
 pub const KeyEvent = struct {
     keycode: i32,
     scancode: i32,
     mods: u16 = 0,
     repeat: bool = false,
+    native: native_key.Key = .{},
 };
 
 pub const TextEvent = struct {
@@ -200,6 +208,10 @@ pub const InputModel = struct {
     expect_orphan_mouse_tail: bool = false,
     keyboard_state: [sdl_num_scancodes]u8 = [_]u8{0} ** sdl_num_scancodes,
     keyboard_deadline_ns: [sdl_num_scancodes]i128 = [_]i128{0} ** sdl_num_scancodes,
+    // Local presses in flight. A down fixes the binding and press identity
+    // that its repeats and release reuse, as the Jackstay contract requires.
+    local_presses: [max_local_presses]?KeyEvent = @splat(null),
+    next_press: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator) TerminalInputParser {
         return .{
@@ -247,6 +259,7 @@ pub const InputModel = struct {
             self.pending.clearRetainingCapacity();
             self.keyboard_state = @splat(0);
             self.keyboard_deadline_ns = @splat(0);
+            self.local_presses = @splat(null);
         }
     }
 
@@ -507,7 +520,7 @@ pub const InputModel = struct {
 
     pub fn flushStandaloneEscape(self: *TerminalInputParser) !void {
         if (self.pending.items.len == 1 and self.pending.items[0] == 0x1b) {
-            try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+            try self.tapNamed("Escape");
             self.pending.clearRetainingCapacity();
             // If a partial mouse CSI was fragmented across reads, the tail
             // bytes could arrive after this flush — let the next parseOne
@@ -533,7 +546,7 @@ pub const InputModel = struct {
                 return consumed;
             }
             if (isIncompleteEscape(bytes)) return 0;
-            try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+            try self.tapNamed("Escape");
             self.expect_orphan_mouse_tail = true;
             return 1;
         }
@@ -551,33 +564,30 @@ pub const InputModel = struct {
             if (try self.parseOrphanMouseTail(bytes)) |consumed| return consumed;
         }
         if (first == '\r' or first == '\n') {
-            try self.emitKey(.{ .keycode = '\r', .scancode = 40 });
+            try self.tapNamed("Enter");
             return 1;
         }
         if (first == '\t') {
-            try self.emitKey(.{ .keycode = '\t', .scancode = 43 });
+            try self.tapNamed("Tab");
             return 1;
         }
         if (first == 0x7f or first == 0x08) {
-            try self.emitKey(.{ .keycode = 0x08, .scancode = 42 });
+            try self.tapNamed("Backspace");
             return 1;
         }
         if (first >= 0x80) {
             const len = std.unicode.utf8ByteSequenceLength(first) catch return 1;
             if (bytes.len < len) return 0;
             const code = std.unicode.utf8Decode(bytes[0..len]) catch return len;
-            try self.emitTextAndKey(bytes[0..len], .{ .keycode = code, .scancode = 0 });
+            try self.tapCharacter(code, bytes[0..len], .{});
             return len;
         }
         if (first >= 0x20) {
-            const key = asciiKey(first);
-            try self.emitTextAndKey(bytes[0..1], key);
+            try self.tapCharacter(first, bytes[0..1], .{ .shift = std.ascii.isUpper(first) });
             return 1;
         }
         if (first >= 1 and first <= 26) {
-            var key = asciiKey('a' + first - 1);
-            key.mods = 0x40;
-            try self.emitKey(key);
+            try self.tapCharacter('a' + first - 1, "", .{ .control = true });
         }
         return 1;
     }
@@ -600,27 +610,27 @@ pub const InputModel = struct {
             },
             'I' => return start + 1,
             'A' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82 });
+                try self.tapNamed("ArrowUp");
                 return start + 1;
             },
             'B' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(81), .scancode = 81 });
+                try self.tapNamed("ArrowDown");
                 return start + 1;
             },
             'C' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(79), .scancode = 79 });
+                try self.tapNamed("ArrowRight");
                 return start + 1;
             },
             'D' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(80), .scancode = 80 });
+                try self.tapNamed("ArrowLeft");
                 return start + 1;
             },
             'H' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(74), .scancode = 74 });
+                try self.tapNamed("Home");
                 return start + 1;
             },
             'F' => {
-                try self.emitKey(.{ .keycode = sdlKeycodeFromScancode(77), .scancode = 77 });
+                try self.tapNamed("End");
                 return start + 1;
             },
             '<' => return try self.parseSgrMouse(bytes, start),
@@ -633,7 +643,7 @@ pub const InputModel = struct {
         }
 
         if (bytes[start] == '3' and bytes.len > start + 1 and bytes[start + 1] == '~') {
-            try self.emitKey(.{ .keycode = 0x7f, .scancode = 76 });
+            try self.tapNamed("Delete");
             return start + 2;
         }
         if (csiFinalIndex(bytes, start)) |final| {
@@ -641,7 +651,7 @@ pub const InputModel = struct {
             // without depending on the direct tty's idle-read flush.
             const sequence = bytes[start .. final + 1];
             if (std.mem.eql(u8, sequence, "27u") or std.mem.eql(u8, sequence, "27;1u")) {
-                try self.emitKey(.{ .keycode = 0x1b, .scancode = 41 });
+                try self.tapNamed("Escape");
             }
             return final + 1;
         }
@@ -847,60 +857,103 @@ pub const InputModel = struct {
 
     pub fn injectKey(self: *TerminalInputParser, event: render_batch_protocol.KeyInput) !void {
         if (!event.valid()) return error.InvalidKey;
-        const key_input = @import("key_input.zig");
-        var text: []const u8 = "";
-        var shifted: [1]u8 = undefined;
-        var key: KeyEvent = undefined;
-        if (key_input.namedScancode(event.key)) |scan| {
-            const code: i32 = switch (scan) {
-                40 => 13,
-                41 => 27,
-                42 => 8,
-                43 => 9,
-                44 => 32,
-                76 => 127,
-                else => sdlKeycodeFromScancode(scan),
-            };
-            key = .{ .keycode = code, .scancode = scan };
-            if (scan == 44) text = " ";
-        } else {
-            text = event.key;
-            if (event.key.len == 1) {
-                var char = event.key[0];
-                if (event.shift and std.ascii.isLower(char)) char = std.ascii.toUpper(char);
-                shifted[0] = char;
-                text = &shifted;
-                key = asciiKey(char);
-            } else {
-                key = .{ .keycode = @intCast(try std.unicode.utf8Decode(event.key)), .scancode = 0 };
-            }
-        }
-        if (event.shift) key.mods |= 0x1;
-        if (event.ctrl) key.mods |= 0x40;
-        if (event.alt) key.mods |= 0x100;
-        if (event.meta) key.mods |= 0x400;
-        if (event.action == .tap) {
-            if (text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.emitTextAndKey(text, key) else try self.emitKey(key);
-        } else {
-            const index: usize = @intCast(key.scancode);
-            self.keyboard_state[index] = if (event.action == .down) 1 else 0;
-            self.keyboard_deadline_ns[index] = if (event.action == .down) std.math.maxInt(i128) else 0;
-            try self.append(if (event.action == .down) .{ .key_down = key } else .{ .key_up = key });
-            if (event.action == .down and text.len != 0 and !event.ctrl and !event.alt and !event.meta) try self.append(.{ .text = TextEvent.init(text) });
+        const converted = try event.toNative();
+        try self.pressKey(converted.key, converted.text());
+    }
+
+    /// Every local key source enters here: terminal bytes, structured host
+    /// keys and, later, kitty keyboard events. The key is bound once with the
+    /// static US-layout tables (no SDL calls: this runs on reader threads and
+    /// in presenter processes without SDL), receives a press identity, and is
+    /// projected into the SDL-shaped queue. `text` is the key's text commit,
+    /// which shortcut modifiers suppress.
+    pub fn pressKey(self: *InputModel, key: native_key.Key, text: []const u8) !void {
+        const commits_text = text.len != 0 and !key.modifiers.suppressText();
+        switch (key.action) {
+            .tap => {
+                var down = try bindStatic(key);
+                down.native.press = try self.mintPress();
+                down.native.action = .down;
+                self.holdKeyForPolling(down);
+                try self.append(.{ .key_down = down });
+                if (commits_text) try self.append(.{ .text = TextEvent.init(text) });
+                var up = down;
+                up.native.action = .up;
+                try self.append(.{ .key_up = up });
+            },
+            .down, .repeat => {
+                // A second down for a held key is a repeat with the same press.
+                const held = self.localPressSlot(&key);
+                const slot = held orelse try self.beginLocalPress(key);
+                var event = slot.*.?;
+                event.repeat = held != null;
+                event.native.action = if (held != null) .repeat else .down;
+                event.native.modifiers = key.modifiers;
+                event.mods = sdlModifiers(key.modifiers);
+                self.setHeld(event.scancode, true);
+                try self.append(.{ .key_down = event });
+                if (commits_text) try self.append(.{ .text = TextEvent.init(text) });
+            },
+            .up => {
+                var event: KeyEvent = undefined;
+                if (self.localPressSlot(&key)) |slot| {
+                    event = slot.*.?;
+                    slot.* = null;
+                } else {
+                    // A release whose down was discarded (focus loss, for
+                    // example) still clears the projected state.
+                    event = try bindStatic(key);
+                    event.native.press = try self.mintPress();
+                }
+                event.repeat = false;
+                event.native.action = .up;
+                event.native.modifiers = key.modifiers;
+                event.mods = sdlModifiers(key.modifiers);
+                self.setHeld(event.scancode, false);
+                try self.append(.{ .key_up = event });
+            },
         }
     }
 
-    fn emitTextAndKey(self: *TerminalInputParser, bytes: []const u8, key: KeyEvent) !void {
-        self.holdKeyForPolling(key);
-        try self.append(.{ .key_down = key });
-        try self.append(.{ .text = TextEvent.init(bytes) });
-        try self.append(.{ .key_up = key });
+    fn tapNamed(self: *TerminalInputParser, name: []const u8) !void {
+        try self.pressKey(native_key.Key.logical(name) catch unreachable, "");
     }
 
-    fn emitKey(self: *TerminalInputParser, key: KeyEvent) !void {
-        self.holdKeyForPolling(key);
-        try self.append(.{ .key_down = key });
-        try self.append(.{ .key_up = key });
+    fn tapCharacter(self: *TerminalInputParser, codepoint: u21, text: []const u8, modifiers: native_key.Modifiers) !void {
+        var key = native_key.Key.character(codepoint);
+        key.modifiers = modifiers;
+        try self.pressKey(key, text);
+    }
+
+    fn mintPress(self: *InputModel) !u64 {
+        if (self.next_press == std.math.maxInt(u64)) return error.Capacity;
+        defer self.next_press += 1;
+        return self.next_press;
+    }
+
+    fn localPressSlot(self: *InputModel, key: *const native_key.Key) ?*?KeyEvent {
+        for (&self.local_presses) |*slot| if (slot.*) |press| {
+            if (press.native.sameKey(key)) return slot;
+        };
+        return null;
+    }
+
+    fn beginLocalPress(self: *InputModel, key: native_key.Key) !*?KeyEvent {
+        for (&self.local_presses) |*slot| if (slot.* == null) {
+            var event = try bindStatic(key);
+            event.native.press = try self.mintPress();
+            event.native.action = .down;
+            slot.* = event;
+            return slot;
+        };
+        return error.Capacity;
+    }
+
+    fn setHeld(self: *InputModel, scancode: i32, held: bool) void {
+        if (scancode <= 0 or scancode >= sdl_num_scancodes) return;
+        const index: usize = @intCast(scancode);
+        self.keyboard_state[index] = @intFromBool(held);
+        self.keyboard_deadline_ns[index] = if (held) std.math.maxInt(i128) else 0;
     }
 
     fn holdKeyForPolling(self: *TerminalInputParser, key: KeyEvent) void {
@@ -936,6 +989,82 @@ pub const InputModel = struct {
 
 pub fn sdlKeycodeFromScancode(scancode: i32) i32 {
     return scancode | (1 << 30);
+}
+
+/// SDL modifier bits for native modifiers. Super and meta both project to the
+/// GUI key; SDL has one notion of that key.
+pub fn sdlModifiers(modifiers: native_key.Modifiers) u16 {
+    var result: u16 = 0;
+    if (modifiers.shift) result |= 0x0001;
+    if (modifiers.control) result |= 0x0040;
+    if (modifiers.alt) result |= 0x0100;
+    if (modifiers.super or modifiers.meta) result |= 0x0400;
+    if (modifiers.num_lock) result |= 0x1000;
+    if (modifiers.caps_lock) result |= 0x2000;
+    if (modifiers.alt_graph) result |= 0x4000;
+    return result;
+}
+
+/// Bind a native key with the static US-layout tables. This is the binding
+/// every source gets when no SDL keymap is available or safe to consult; the
+/// SDL adapters refine it through `sdl_input_binding.bind`.
+pub fn bindStatic(key: native_key.Key) !KeyEvent {
+    var event = KeyEvent{ .keycode = 0, .scancode = 0, .mods = sdlModifiers(key.modifiers), .native = key };
+    switch (key.kind) {
+        .physical => {
+            event.scancode = native_key.domUsage(key.name.slice()) orelse return error.Unsupported;
+            event.keycode = staticKeycodeForUsage(event.scancode);
+        },
+        .logical => {
+            event.keycode = try logicalKeycode(key.name.slice());
+            event.scancode = if (key.codepoint()) |cp|
+                (if (cp < 0x80) asciiUsage(@intCast(cp)) else 0)
+            else
+                native_key.domUsage(key.name.slice()) orelse 0;
+        },
+    }
+    return event;
+}
+
+/// SDL keycode of a logical key: one character, or a DOM key name that means
+/// the same at every layout. Positional DOM codes are physical only.
+pub fn logicalKeycode(name: []const u8) !i32 {
+    if ((std.unicode.utf8CountCodepoints(name) catch return error.Unsupported) == 1) {
+        const cp = std.unicode.utf8Decode(name) catch return error.Unsupported;
+        // SDL keycodes are unshifted: Shift+A is keycode 'a' with the modifier.
+        if (cp < 0x80 and std.ascii.isUpper(@intCast(cp))) return std.ascii.toLower(@intCast(cp));
+        return @intCast(cp);
+    }
+    const usage = native_key.domUsage(name) orelse return error.Unsupported;
+    if (native_key.isPositionalName(name)) return error.Unsupported;
+    return staticKeycodeForUsage(usage);
+}
+
+/// The keycode SDL gives a key position under the US layout.
+fn staticKeycodeForUsage(usage: i32) i32 {
+    if (usage >= 4 and usage <= 29) return 'a' + usage - 4;
+    if (usage >= 30 and usage <= 38) return '1' + usage - 30;
+    return switch (usage) {
+        39 => '0',
+        40 => 13,
+        41 => 27,
+        42 => 8,
+        43 => 9,
+        44 => 32,
+        45 => '-',
+        46 => '=',
+        47 => '[',
+        48 => ']',
+        49 => '\\',
+        51 => ';',
+        52 => '\'',
+        53 => '`',
+        54 => ',',
+        55 => '.',
+        56 => '/',
+        76 => 127,
+        else => sdlKeycodeFromScancode(usage),
+    };
 }
 
 fn sdlButtonMask(button: u8) u32 {
@@ -1012,31 +1141,27 @@ fn orphanTailFinalIndex(bytes: []const u8) ?usize {
     return null;
 }
 
-fn asciiKey(byte: u8) KeyEvent {
-    if (byte >= 'a' and byte <= 'z') {
-        return .{ .keycode = byte, .scancode = 4 + byte - 'a' };
-    }
-    if (byte >= 'A' and byte <= 'Z') {
-        return .{ .keycode = std.ascii.toLower(byte), .scancode = 4 + std.ascii.toLower(byte) - 'a', .mods = 0x0003 };
-    }
-    if (byte >= '1' and byte <= '9') {
-        return .{ .keycode = byte, .scancode = 30 + byte - '1' };
-    }
-    if (byte == '0') return .{ .keycode = byte, .scancode = 39 };
+/// US-layout position of a printable ASCII character, or 0 when SDL has no
+/// scancode for it (a shifted symbol, for example).
+fn asciiUsage(byte: u8) i32 {
+    if (byte >= 'a' and byte <= 'z') return 4 + @as(i32, byte - 'a');
+    if (byte >= 'A' and byte <= 'Z') return 4 + @as(i32, byte - 'A');
+    if (byte >= '1' and byte <= '9') return 30 + @as(i32, byte - '1');
     return switch (byte) {
-        ' ' => .{ .keycode = byte, .scancode = 44 },
-        '-' => .{ .keycode = byte, .scancode = 45 },
-        '=' => .{ .keycode = byte, .scancode = 46 },
-        '[' => .{ .keycode = byte, .scancode = 47 },
-        ']' => .{ .keycode = byte, .scancode = 48 },
-        '\\' => .{ .keycode = byte, .scancode = 49 },
-        ';' => .{ .keycode = byte, .scancode = 51 },
-        '\'' => .{ .keycode = byte, .scancode = 52 },
-        '`' => .{ .keycode = byte, .scancode = 53 },
-        ',' => .{ .keycode = byte, .scancode = 54 },
-        '.' => .{ .keycode = byte, .scancode = 55 },
-        '/' => .{ .keycode = byte, .scancode = 56 },
-        else => .{ .keycode = byte, .scancode = 0 },
+        '0' => 39,
+        ' ' => 44,
+        '-' => 45,
+        '=' => 46,
+        '[' => 47,
+        ']' => 48,
+        '\\' => 49,
+        ';' => 51,
+        '\'' => 52,
+        '`' => 53,
+        ',' => 54,
+        '.' => 55,
+        '/' => 56,
+        else => 0,
     };
 }
 
@@ -1051,6 +1176,17 @@ fn inputEventSdlType(event: InputEvent) u32 {
     };
 }
 
+fn expectKeyTransition(comptime tag: std.meta.Tag(InputEvent), keycode: i32, scancode: i32, mods: u16, event: InputEvent) !void {
+    try std.testing.expectEqual(tag, std.meta.activeTag(event));
+    const key = switch (event) {
+        .key_down, .key_up => |key| key,
+        else => unreachable,
+    };
+    try std.testing.expectEqual(keycode, key.keycode);
+    try std.testing.expectEqual(scancode, key.scancode);
+    try std.testing.expectEqual(mods, key.mods);
+}
+
 test "terminal input parser emits printable key text and key transitions" {
     var parser = TerminalInputParser.init(std.testing.allocator);
     defer parser.deinit();
@@ -1058,9 +1194,9 @@ test "terminal input parser emits printable key text and key transitions" {
     try parser.feed("a");
 
     try std.testing.expectEqual(@as(usize, 3), parser.pendingCount());
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_down, 'a', 4, 0, parser.pop().?);
     try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_up, 'a', 4, 0, parser.pop().?);
 }
 
 test "terminal input parser can pop events by SDL type range" {
@@ -1069,8 +1205,8 @@ test "terminal input parser can pop events by SDL type range" {
 
     try parser.feed("a");
 
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 'a', .scancode = 4, .mods = 0 } }, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
+    try expectKeyTransition(.key_down, 'a', 4, 0, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
+    try expectKeyTransition(.key_up, 'a', 4, 0, parser.popSdlRange(sdl_event_key_down, sdl_event_key_up).?);
     try std.testing.expectEqualStrings("a", parser.pop().?.text.bytes());
 }
 
@@ -1095,8 +1231,8 @@ test "terminal input parser emits arrow key transitions" {
     try parser.feed("\x1b[A");
 
     try std.testing.expectEqual(@as(usize, 2), parser.pendingCount());
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82, .mods = 0 } }, parser.pop().?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = sdlKeycodeFromScancode(82), .scancode = 82, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_down, sdlKeycodeFromScancode(82), 82, 0, parser.pop().?);
+    try expectKeyTransition(.key_up, sdlKeycodeFromScancode(82), 82, 0, parser.pop().?);
 }
 
 test "terminal input parser emits c1 delete key" {
@@ -1105,8 +1241,8 @@ test "terminal input parser emits c1 delete key" {
 
     try parser.feed("\x9b3~");
 
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x7f, .scancode = 76, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_down, 0x7f, 76, 0, parser.pop().?);
+    try expectKeyTransition(.key_up, 0x7f, 76, 0, parser.pop().?);
 }
 
 test "terminal input parser emits encoded escape without a tty flush" {
@@ -1114,8 +1250,8 @@ test "terminal input parser emits encoded escape without a tty flush" {
     defer parser.deinit();
 
     try parser.feed("\x1b[27u");
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_down, 0x1b, 41, 0, parser.pop().?);
+    try expectKeyTransition(.key_up, 0x1b, 41, 0, parser.pop().?);
     try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
 }
 
@@ -1129,8 +1265,8 @@ test "terminal input parser flushes standalone escape" {
     try parser.flushStandaloneEscape();
 
     try std.testing.expectEqual(@as(usize, 2), parser.pendingCount());
-    try std.testing.expectEqual(InputEvent{ .key_down = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
-    try std.testing.expectEqual(InputEvent{ .key_up = .{ .keycode = 0x1b, .scancode = 41, .mods = 0 } }, parser.pop().?);
+    try expectKeyTransition(.key_down, 0x1b, 41, 0, parser.pop().?);
+    try expectKeyTransition(.key_up, 0x1b, 41, 0, parser.pop().?);
 }
 
 test "terminal input parser emits SGR mouse motion in SDL coordinates" {
@@ -1583,7 +1719,7 @@ test "structured keys share tap events and polling state and support held keys" 
     var parser = TerminalInputParser.init(std.testing.allocator);
     defer parser.deinit();
     try parser.injectKey(.{ .key = "a", .shift = true });
-    try std.testing.expectEqual(@as(u16, 3), parser.pop().?.key_down.mods);
+    try std.testing.expectEqual(@as(u16, 1), parser.pop().?.key_down.mods);
     try std.testing.expectEqual(std.meta.Tag(InputEvent).text, std.meta.activeTag(parser.pop().?));
     try std.testing.expectEqual(std.meta.Tag(InputEvent).key_up, std.meta.activeTag(parser.pop().?));
     try parser.injectKey(.{ .key = "up", .action = .down, .ctrl = true });
@@ -1644,4 +1780,103 @@ test "remote delivery retires only acknowledged state copies when capacity is ne
     try std.testing.expectEqual(@as(i32, 225), model.pop().?.key_up.scancode);
     try std.testing.expect(model.deliveryFinished());
     model.finishDelivery();
+}
+
+test "terminal keys carry native names and a shared press identity per tap" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.feed("A\x1b[A\x01");
+    const shifted = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("A", shifted.native.name.slice());
+    try std.testing.expectEqual(native_key.Kind.logical, shifted.native.kind);
+    try std.testing.expect(shifted.native.modifiers.shift);
+    try std.testing.expectEqual(@as(i32, 'a'), shifted.keycode);
+    try std.testing.expectEqual(@as(i32, 4), shifted.scancode);
+    try std.testing.expectEqual(@as(u16, 1), shifted.mods);
+    try std.testing.expectEqualStrings("A", parser.pop().?.text.bytes());
+    const released = parser.pop().?.key_up;
+    try std.testing.expectEqual(shifted.native.press, released.native.press);
+    try std.testing.expectEqual(native_key.Action.up, released.native.action);
+    const arrow = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("ArrowUp", arrow.native.name.slice());
+    try std.testing.expect(arrow.native.press > shifted.native.press);
+    _ = parser.pop().?.key_up;
+    const control = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("a", control.native.name.slice());
+    try std.testing.expect(control.native.modifiers.control);
+    try std.testing.expectEqual(@as(u16, 0x40), control.mods);
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).key_up, std.meta.activeTag(parser.pop().?));
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+}
+
+test "native key presses keep the down binding and identity through repeat and release" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var key = try native_key.Key.logical("Enter");
+    key.action = .down;
+    try parser.pressKey(key, "");
+    const down = parser.pop().?.key_down;
+    try std.testing.expectEqual(@as(i32, 13), down.keycode);
+    try std.testing.expectEqual(@as(i32, 40), down.scancode);
+    try std.testing.expect(!down.repeat);
+    try std.testing.expect(down.native.press != 0);
+    var state: [sdl_num_scancodes]u8 = undefined;
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp() + 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(u8, 1), state[40]);
+    key.modifiers = .{ .control = true };
+    try parser.pressKey(key, "");
+    const repeated = parser.pop().?.key_down;
+    try std.testing.expect(repeated.repeat);
+    try std.testing.expectEqual(down.native.press, repeated.native.press);
+    try std.testing.expectEqual(native_key.Action.repeat, repeated.native.action);
+    try std.testing.expectEqual(@as(u16, 0x40), repeated.mods);
+    key.action = .up;
+    key.modifiers = .{};
+    try parser.pressKey(key, "");
+    const up = parser.pop().?.key_up;
+    try std.testing.expectEqual(down.native.press, up.native.press);
+    try std.testing.expectEqual(@as(i32, 40), up.scancode);
+    parser.copyKeyboardState(&state, system_io.time.nanoTimestamp());
+    try std.testing.expectEqual(@as(u8, 0), state[40]);
+    // The next down of the same key is a new press.
+    key.action = .down;
+    try parser.pressKey(key, "");
+    try std.testing.expect(parser.pop().?.key_down.native.press > up.native.press);
+}
+
+test "native key presses commit text unless a shortcut modifier is held" {
+    var parser = TerminalInputParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var key = native_key.Key.character('x');
+    key.action = .down;
+    try parser.pressKey(key, "x");
+    _ = parser.pop().?.key_down;
+    try std.testing.expectEqualStrings("x", parser.pop().?.text.bytes());
+    key.modifiers = .{ .alt = true };
+    try parser.pressKey(key, "x");
+    try std.testing.expect(parser.pop().?.key_down.repeat);
+    try std.testing.expectEqual(@as(?InputEvent, null), parser.pop());
+}
+
+test "static binding follows the Jackstay key vocabulary" {
+    const physical = try bindStatic(try native_key.Key.physical("KeyQ"));
+    try std.testing.expectEqual(@as(i32, 20), physical.scancode);
+    try std.testing.expectEqual(@as(i32, 'q'), physical.keycode);
+    const minus = try bindStatic(try native_key.Key.physical("Minus"));
+    try std.testing.expectEqual(@as(i32, '-'), minus.keycode);
+    const f5 = try bindStatic(try native_key.Key.logical("F5"));
+    try std.testing.expectEqual(@as(i32, 62), f5.scancode);
+    try std.testing.expectEqual(sdlKeycodeFromScancode(62), f5.keycode);
+    const symbol = try bindStatic(native_key.Key.character('!'));
+    try std.testing.expectEqual(@as(i32, '!'), symbol.keycode);
+    try std.testing.expectEqual(@as(i32, 0), symbol.scancode);
+    var shifted = native_key.Key.character('Q');
+    shifted.modifiers = .{ .shift = true, .caps_lock = true };
+    const bound = try bindStatic(shifted);
+    try std.testing.expectEqual(@as(i32, 'q'), bound.keycode);
+    try std.testing.expectEqual(@as(u16, 0x2001), bound.mods);
+    try std.testing.expectError(error.Unsupported, bindStatic(try native_key.Key.physical("Unknown")));
+    try std.testing.expectError(error.Unsupported, logicalKeycode("KeyA"));
+    try std.testing.expectError(error.Unsupported, logicalKeycode("ShiftLeft"));
+    try std.testing.expectEqual(@as(i32, 27), try logicalKeycode("Escape"));
 }

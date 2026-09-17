@@ -5,6 +5,7 @@ const os = @import("platform");
 const js = @import("jackstay");
 const wire = js.input;
 const input = @import("input.zig");
+const native_key = @import("native_key.zig");
 
 pub const Executor = struct {
     allocator: std.mem.Allocator,
@@ -135,11 +136,13 @@ pub const Executor = struct {
         const event = try work.event();
         switch (event) {
             .key => |key| {
+                const native = try nativeKey(key);
                 if (key.action == .down) {
                     if (model.pressSlot(controller, key.press) != null) return error.InvalidPress;
                     const slot = model.vacantPress() orelse return error.Capacity;
-                    var binding = try bind(key);
-                    binding.mods = modifiers(key.modifiers);
+                    var binding = try bind(native);
+                    binding.native = native;
+                    binding.mods = input.sdlModifiers(native.modifiers);
                     binding.repeat = false;
                     try model.beginDelivery(.keyboard, 1);
                     slot.* = .{ .controller = controller, .identity = key.press, .binding = binding };
@@ -147,7 +150,9 @@ pub const Executor = struct {
                 } else {
                     const slot = model.pressSlot(controller, key.press) orelse return error.InvalidPress;
                     var binding = slot.*.?.binding;
-                    binding.mods = modifiers(key.modifiers);
+                    binding.native.action = native.action;
+                    binding.native.modifiers = native.modifiers;
+                    binding.mods = input.sdlModifiers(native.modifiers);
                     binding.repeat = key.action == .repeat;
                     try model.beginDelivery(.keyboard, 1);
                     if (key.action == .up) {
@@ -231,6 +236,8 @@ pub const Executor = struct {
                 var binding = press.binding;
                 binding.mods = 0;
                 binding.repeat = false;
+                binding.native.action = .up;
+                binding.native.modifiers = .{};
                 if (!model.keyHeldElsewhere(binding.scancode, controller, press.identity)) model.appendRemote(controller, .{ .key_up = binding });
                 slot.* = null;
             };
@@ -299,16 +306,20 @@ pub const Executor = struct {
     }
 };
 
-pub fn modifiers(value: wire.Modifiers) u16 {
-    var result: u16 = 0;
-    if (value.shift) result |= 0x0001;
-    if (value.control) result |= 0x0040;
-    if (value.alt) result |= 0x0100;
-    if (value.super or value.meta) result |= 0x0400;
-    if (value.alt_graph) result |= 0x4000;
-    if (value.caps_lock) result |= 0x2000;
-    if (value.num_lock) result |= 0x1000;
-    return result;
+/// Wire keys already use the native vocabulary; only the container differs.
+fn nativeKey(key: wire.Key) !native_key.Key {
+    var native = switch (key.kind) {
+        .physical => native_key.Key.physical(key.name),
+        .logical => native_key.Key.logical(key.name),
+    } catch return error.Unsupported;
+    native.press = key.press;
+    native.action = switch (key.action) {
+        .down => .down,
+        .repeat => .repeat,
+        .up => .up,
+    };
+    native.modifiers = @bitCast(key.modifiers);
+    return native;
 }
 
 fn sdlButton(button: wire.Button) u8 {

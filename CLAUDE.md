@@ -105,6 +105,7 @@ Historical design notes, implementation plans, and agent-oriented handoffs were 
 ## Architecture boundaries
 
 - Treat input as a source/model/adapter pipeline. Platform input sources read raw input; the canonical Katzensteg input model owns event queue, current state, timestamps, routing state, and future Katzensteg-native bindings; SDL interpose functions only project that model into SDL APIs.
+- Keyboard sources emit native keys (`src/katzensteg/native_key.zig`, the Jackstay vocabulary: DOM names, action, modifiers, press identity). SDL scancodes and keycodes are resolved once, by the model's static binder or the SDL adapter's keymap binder, never by a source or a presenter.
 - Do not use graphics or presentation code as an input side channel. Frame/composite code may render cursor state it is handed, but must not sample terminal mouse position, SDL state, or mutate input state directly.
 - SDL event APIs (`SDL_PollEvent`, `SDL_PeepEvents`, `SDL_PumpEvents`) may refresh input ingestion, but should feed the same canonical input model. Avoid adding parallel event queues or per-API input semantics.
 - SDL state APIs (`SDL_GetMouseState`, `SDL_GetKeyboardState`, relative mouse state, etc.) should read from the same model as event APIs. If a program uses a new SDL input API, cover it as another adapter projection, not as a separate behavior path.
