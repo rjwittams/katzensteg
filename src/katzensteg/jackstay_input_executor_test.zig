@@ -10,12 +10,22 @@ const Fixture = if (js.enabled) struct {
     model: input.InputModel,
 
     fn init() !@This() {
-        const path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/ks-executor-{d}-{d}.sock", .{ std.c.getpid(), os.time.nanoTimestamp() });
-        defer std.testing.allocator.free(path);
-        const executor = try executor_mod.Executor.create(std.testing.io, std.testing.allocator, path);
-        var fd = try js.endpoint.connect(path);
-        const client = try js.input.Client.connect(&fd, .cooperative);
+        const executor = try executor_mod.Executor.create(std.testing.allocator);
+        const client = try connect(executor);
         return .{ .executor = executor, .client = client, .model = input.InputModel.init(std.testing.allocator) };
+    }
+    fn connect(executor: *executor_mod.Executor) !js.input.Client {
+        var fds: [2]i32 = undefined;
+        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+        defer for (fds) |fd| {
+            if (fd >= 0) os.posix.close(fd);
+        };
+        var server = try executor.target.serve(&fds[0]);
+        executor.servers.adopt(server) catch |err| {
+            server.deinit();
+            return err;
+        };
+        return js.input.Client.connect(&fds[1], .cooperative);
     }
     fn bind(key: js.input.Key) !input.KeyEvent {
         if (!std.mem.eql(u8, key.name, "KeyA")) return error.Unsupported;
@@ -290,8 +300,7 @@ test "executor capacity on key or button release ends assignment and admits afte
         for (0..768) |_| try std.testing.expect(f.model.pop().? == .mouse_motion);
         while (f.model.pop()) |_| {}
         f.client.deinit();
-        var fd = try js.endpoint.connect(f.executor.listener.?.path);
-        f.client = try js.input.Client.connect(&fd, .cooperative);
+        f.client = try Fixture.connect(f.executor);
         try std.testing.expect((try f.client.describe()).controller != previous);
         try f.sendKey(.down, 2);
         try f.queued();

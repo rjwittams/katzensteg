@@ -321,26 +321,31 @@ pub const Runtime = struct {
         }
         if (std.c.getenv("KATZENSTEG_PUBLISH")) |path| {
             if (jackstay.enabled) {
-                runtime.publisher = jackstay.Publisher.create(io, allocator, std.mem.span(path), .{}) catch |err| {
+                runtime.input_enabled = false;
+                runtime.input_claimed = false;
+                runtime.input_supported = false;
+                // Publication grants observation. Input is separately opted in
+                // by the source owner; the same-user listener authorizes peers.
+                const allow_input = if (std.c.getenv("KATZENSTEG_PUBLISH_INPUT")) |value| std.mem.eql(u8, std.mem.span(value), "1") else false;
+                if (input_supported and allow_input) {
+                    runtime.input_executor = @import("jackstay_input_executor.zig").Executor.create(allocator) catch |err| blk: {
+                        log.err("Jackstay input executor init failed: {any}", .{err});
+                        break :blk null;
+                    };
+                }
+                runtime.publisher = jackstay.Publisher.create(io, allocator, std.mem.span(path), .{}, if (runtime.input_executor) |executor| executor.authority() else null) catch |err| {
+                    if (runtime.input_executor) |executor| executor.close() catch {};
+                    runtime.input_executor = null;
                     log.err("Jackstay publisher init failed: {any}", .{err});
                     return runtime;
                 };
                 runtime.active = true;
-                runtime.input_enabled = false;
-                runtime.input_claimed = false;
-                runtime.input_supported = false;
-                if (if (input_supported) std.c.getenv("KATZENSTEG_INPUT_SOCKET") else null) |input_path| {
-                    runtime.input_executor = @import("jackstay_input_executor.zig").Executor.create(io, allocator, std.mem.span(input_path)) catch |err| blk: {
-                        log.err("Jackstay input listener init failed: {any}", .{err});
-                        break :blk null;
-                    };
-                    if (runtime.input_executor != null) {
-                        runtime.input_parser = input_mod.InputModel.init(allocator);
-                        runtime.input_enabled = true;
-                        runtime.mouse_ownership.claimRealWindow();
-                        runtime.input_supported = true;
-                        log.info("Jackstay input ready: {s}", .{std.mem.span(input_path)});
-                    }
+                if (runtime.input_executor != null) {
+                    runtime.input_parser = input_mod.InputModel.init(allocator);
+                    runtime.input_enabled = true;
+                    runtime.mouse_ownership.claimRealWindow();
+                    runtime.input_supported = true;
+                    log.info("Jackstay publication allows same-user input", .{});
                 }
                 runtime.output_profile_name = "jackstay";
                 log.info("Jackstay publication ready: {s}", .{std.mem.span(path)});
@@ -511,12 +516,6 @@ pub const Runtime = struct {
         self.queue_cond.signal();
         self.queue_mutex.unlock();
         if (self.worker_thread) |thread| thread.join();
-        if (jackstay.enabled) if (self.input_executor) |executor| {
-            executor.close() catch |err| {
-                log.err("Jackstay input cleanup unconfirmed, retaining stopped executor: {any}", .{err});
-            };
-            self.input_executor = null;
-        };
         if (jackstay.enabled) if (self.publisher) |publisher| {
             publisher.close() catch |err| {
                 // The stopped owner must remain allocated if remote leases have
@@ -524,6 +523,12 @@ pub const Runtime = struct {
                 log.err("Jackstay cleanup incomplete, retaining storage owner: {any}", .{err});
             };
             self.publisher = null;
+        };
+        if (jackstay.enabled) if (self.input_executor) |executor| {
+            executor.close() catch |err| {
+                log.err("Jackstay input cleanup unconfirmed, retaining stopped executor: {any}", .{err});
+            };
+            self.input_executor = null;
         };
         if (self.whiskers_client) |*client| client.deinit();
         for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);

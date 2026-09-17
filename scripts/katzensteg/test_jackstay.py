@@ -1,5 +1,6 @@
 """Native CPU connector checks using separately executed, terminal-free peers."""
 import os
+import ctypes as C
 import json
 from pathlib import Path
 import select
@@ -203,9 +204,50 @@ class CpuConnections(unittest.TestCase):
                 listener.settimeout(5)
                 consumer = Peer("", path, command=[str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", path])
                 self.addCleanup(consumer.cleanup)
-                with listener.accept()[0]:
+                stream = listener.accept()[0]
+                fd = C.c_int32(stream.detach())
+                suffix = "dylib" if sys.platform == "darwin" else "so"
+                library = C.CDLL(str(ROOT / "zig-out/lib" / f"libjackstay.{suffix}"))
+                library.ft_source_bootstrap_accept.argtypes = [C.POINTER(C.c_int32), C.c_void_p, C.POINTER(C.c_void_p)]
+                server = C.c_void_p()
+                self.assertEqual(library.ft_source_bootstrap_accept(C.byref(fd), None, C.byref(server)), 0)
+                self.assertIsNone(server.value)
+                # Bootstrap is complete; deliberately stall cancellable CPU setup.
+                with socket.socket(fileno=fd.value):
                     consumer.process.stdin.write(b'{"type":"shutdown"}\n')
                     consumer.finish()
+
+    def test_host_shutdown_during_bootstrap_uses_bounded_exit(self):
+        with tempfile.TemporaryDirectory(prefix="ks-js-", dir="/tmp") as tmp:
+            path = str(Path(tmp) / "source")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(path)
+                listener.listen(1)
+                listener.settimeout(5)
+                consumer = Peer("", path, command=[str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", path])
+                self.addCleanup(consumer.cleanup)
+                with listener.accept()[0]:
+                    started = time.monotonic()
+                    consumer.process.stdin.write(b'{"type":"shutdown"}\n')
+                    consumer.process.wait(timeout=4)
+                    self.assertLess(time.monotonic() - started, 4)
+                    # Bootstrap currently has no cancellation handle. The launcher
+                    # forces exit after its grace period; never claim clean exit.
+                    self.assertNotEqual(consumer.process.returncode, 0)
+
+    def test_optional_input_does_not_hide_bootstrap_protocol_failure(self):
+        with tempfile.TemporaryDirectory(prefix="ks-js-", dir="/tmp") as tmp:
+            path = str(Path(tmp) / "source")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(path)
+                listener.listen(1)
+                listener.settimeout(5)
+                consumer = Peer("", path, command=[str(ROOT / "zig-out/bin/katzensteg"), "--embed-jsonl", "jackstay-source", path])
+                self.addCleanup(consumer.cleanup)
+                with listener.accept()[0] as peer:
+                    peer.sendall(b"not a bootstrap reply")
+                consumer.process.wait(timeout=8)
+                self.assertNotEqual(consumer.process.returncode, 0)
 
     def test_two_independent_consumers(self):
         with tempfile.TemporaryDirectory(prefix="ks-js-", dir="/tmp") as tmp:
@@ -223,7 +265,7 @@ class CpuConnections(unittest.TestCase):
                 consumer.finish()
             publisher.finish()
 
-    def test_publisher_shutdown_cancels_stalled_admission(self):
+    def test_publisher_shutdown_waits_for_bounded_bootstrap(self):
         with tempfile.TemporaryDirectory(prefix="ks-js-", dir="/tmp") as tmp:
             path = Path(tmp) / "source"
             publisher = Peer("publish", path)

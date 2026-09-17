@@ -9,7 +9,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(args);
     if (args.len != 3) return error.Usage;
     if (std.mem.startsWith(u8, args[1], "publish")) {
-        const publisher = try js.Publisher.create(init.io, a, args[2], if (std.mem.eql(u8, args[1], "publish-small")) .{ .memory_budget = 384 * 1024 } else .{});
+        const publisher = try js.Publisher.create(init.io, a, args[2], if (std.mem.eql(u8, args[1], "publish-small")) .{ .memory_budget = 384 * 1024 } else .{}, null);
         try reply("ready\n");
         while (try line()) |command| {
             var words = std.mem.tokenizeScalar(u8, command, ' ');
@@ -25,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         var fd = try js.endpoint.connect(args[2]);
         defer if (fd >= 0) os.posix.close(fd);
+        _ = try js.bootstrap.connect(&fd, .observe);
         var connection = try js.media.Connection.init(&fd);
         defer connection.deinit();
         try connection.attachHolding(if (std.mem.eql(u8, args[1], "consume-one")) 1 else 2);
