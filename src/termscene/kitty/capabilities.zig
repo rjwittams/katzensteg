@@ -33,6 +33,7 @@ pub const TerminalIdentity = enum {
 pub const Capabilities = struct {
     terminal: TerminalIdentity = .unknown,
     graphics_basic: Feature = .{},
+    shared_memory_rgba: Feature = .{},
     file_regular_whole_rgba: Feature = .{},
     file_regular_offset_rgba: Feature = .{},
 };
@@ -70,6 +71,7 @@ pub fn probe(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const
     caps.graphics_basic.probe = if (try detect.detectGraphicsSupportOnTty(allocator, tty)) .supported else .unsupported;
     caps.file_regular_whole_rgba.probe = if (try detect.detectFileTransmissionSupportWhole(allocator, tty, path)) .supported else .unsupported;
     caps.file_regular_offset_rgba.probe = if (try detect.detectFileTransmissionSupportOffset(allocator, tty, path)) .supported else .unsupported;
+    caps.shared_memory_rgba.probe = if (try detect.detectSharedMemorySupport(allocator, tty)) .supported else .unsupported;
     applyKnownCompat(&caps);
     return caps;
 }

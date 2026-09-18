@@ -44,6 +44,7 @@ pub const RenderBatchSink = struct {
 
     const UploadState = union(render_batch_protocol.UploadProfile) {
         direct_apc,
+        shm,
         file_whole: RotatingFileUploadState,
         file_offset_ring: FileUploadState,
     };
@@ -72,6 +73,8 @@ pub const RenderBatchSink = struct {
     // means no clip (whole rect_cells is the placement target).
     clip_cells: ?render_batch_protocol.PresentationRectCells = null,
     upload: UploadState = .direct_apc,
+    // Lifetime is the producer connection, not the current attach policy.
+    shm_pool: @import("termscene").kitty.shared_memory.Pool,
     placeholder: ?render_batch_protocol.PlaceholderPresentation = null,
     placeholder_uploaded: bool = false,
     placeholder_scaled: std.ArrayList(u8) = .empty,
@@ -84,12 +87,14 @@ pub const RenderBatchSink = struct {
             .io = io,
             .allocator = allocator,
             .window_id = window_id,
+            .shm_pool = .{ .allocator = allocator },
             .frame_json = .init(allocator),
         };
     }
 
     pub fn deinit(self: *RenderBatchSink) void {
         self.deinitUploadState();
+        self.shm_pool.deinit();
         self.clearGroup(&self.deletes);
         self.clearGroup(&self.uploads);
         self.clearGroup(&self.placements);
@@ -257,6 +262,10 @@ pub const RenderBatchSink = struct {
         const upload_start_ns = self.traceBlockingStart();
         switch (self.upload) {
             .direct_apc => try kitty_protocol.writeTransmitRgba(&out.writer, image_id, rgba, w, h),
+            .shm => {
+                const object = try self.shm_pool.create(rgba, self.seq + 1);
+                try kitty_protocol.writeTransmitRgbaShm(&out.writer, .suppress_fail, image_id, object.name(), w, h);
+            },
             .file_whole => |*state| {
                 const index = state.next_index;
                 state.next_index = (state.next_index + 1) % state.paths.len;
@@ -355,6 +364,8 @@ pub const RenderBatchSink = struct {
     pub fn flushFrame(self: *RenderBatchSink, writer: anytype) !void {
         const pending_bytes = self.pendingFrameBytes();
         self.seq += 1;
+        // Never replay one-shot APCs after a possibly partial pipe write.
+        defer self.clearRetainingCapacity();
         const start_ns = self.traceBlockingStart();
         // Runtime supplies an unbuffered pipe writer. Encode in memory so JSON
         // escaping does not turn each character into a separate pipe write.
@@ -370,7 +381,6 @@ pub const RenderBatchSink = struct {
         });
         try writer.writeAll(self.frame_json.written());
         self.traceBlockingWriteSince("flush_frame_jsonl", start_ns, pending_bytes);
-        self.clearRetainingCapacity();
     }
 
     pub fn pendingFrameBytes(self: *const RenderBatchSink) usize {
@@ -450,7 +460,25 @@ pub const RenderBatchSink = struct {
         return self.deletes.items.len != 0 or self.uploads.items.len != 0 or self.placements.items.len != 0 or self.after.items.len != 0;
     }
 
+    pub fn uploadIsShm(self: *const RenderBatchSink) bool {
+        return self.upload == .shm;
+    }
+
+    pub fn reserveUploads(self: *RenderBatchSink, count: usize, bytes: usize) !void {
+        if (self.upload == .shm) try self.shm_pool.reserveBatch(count, bytes);
+    }
+
+    pub fn endUploadReservation(self: *RenderBatchSink) void {
+        if (self.upload == .shm) self.shm_pool.endReservation();
+    }
+
+    pub fn discardBatch(self: *RenderBatchSink, seq: u64) void {
+        if (seq <= self.seq) self.shm_pool.discard(seq);
+    }
+
     pub fn clearRetainingCapacity(self: *RenderBatchSink) void {
+        // Unsent composition (including a failed frame) owns the next sequence.
+        self.shm_pool.discard(self.seq + 1);
         self.clearGroup(&self.deletes);
         self.clearGroup(&self.uploads);
         self.clearGroup(&self.placements);
@@ -469,6 +497,7 @@ pub const RenderBatchSink = struct {
         const io = self.io;
         return switch (policy.profile) {
             .direct_apc => .direct_apc,
+            .shm => .shm,
             .file_whole => blk: {
                 const path = policy.path orelse return error.MissingUploadFilePath;
                 break :blk .{ .file_whole = try initRotatingFileUploadState(io, self.allocator, path) };
@@ -484,6 +513,7 @@ pub const RenderBatchSink = struct {
         const io = self.io;
         switch (self.upload) {
             .direct_apc => {},
+            .shm => {},
             .file_whole => |*state| {
                 for (&state.paths) |*path| {
                     upload_path.deleteBasePath(io, path.*);
@@ -855,4 +885,68 @@ test "placeholder upload bounds leave native framebuffer available for observati
     try sink.restorePlaceholder();
     try std.testing.expect(std.mem.indexOf(u8, sink.uploads.items[0], "s=4,v=2,i=77") != null);
     try std.testing.expectEqual(@as(u64, 1), sink.placeholder_frame.frame_id);
+}
+
+test "SHM batches keep sent uploads alive and discard only unsent or host-rejected frames" {
+    var sink = RenderBatchSink.init(std.testing.io, std.testing.allocator, "main");
+    defer sink.deinit();
+    try sink.setUploadPolicy(.{ .profile = .shm });
+    var wire = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer wire.deinit();
+
+    try sink.uploadRgba(100000, &.{ 1, 2, 3, 255 }, 1, 1);
+    const sent = sink.shm_pool.objects.items[0];
+    try sink.flushFrame(&wire.writer);
+    try std.testing.expect(!sent.consumed());
+    try std.testing.expect(std.mem.indexOf(u8, wire.written(), "t=s") != null);
+    try sink.uploadRgba(100000, &.{ 4, 5, 6, 255 }, 1, 1);
+    const unsent = sink.shm_pool.objects.items[1];
+    sink.clearRetainingCapacity();
+    try std.testing.expect(unsent.consumed());
+    try std.testing.expect(!sent.consumed());
+    // Submission to a host is not submission to the terminal.
+    sink.discardBatch(1);
+    try std.testing.expect(sent.consumed());
+    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.objects.items.len);
+
+    try sink.uploadRgba(100000, &.{ 7, 8, 9, 255 }, 1, 1);
+    const next = sink.shm_pool.objects.items[0];
+    try std.testing.expect(!std.mem.eql(u8, sent.name(), next.name()));
+    try sink.flushFrame(&wire.writer);
+    sink.discardBatch(1); // An old discard cannot release a newer frame.
+    try std.testing.expect(!next.consumed());
+    next.unlink(); // Terminal opens/maps and unlinks the name.
+    sink.shm_pool.reap();
+    try std.testing.expectEqual(@as(usize, 0), sink.shm_pool.objects.items.len);
+}
+
+test "changing upload policy does not unlink a previously submitted SHM object" {
+    var sink = RenderBatchSink.init(std.testing.io, std.testing.allocator, "main");
+    defer sink.deinit();
+    try sink.setUploadPolicy(.{ .profile = .shm });
+    try sink.uploadRgba(1, &.{ 1, 2, 3, 255 }, 1, 1);
+    const sent = sink.shm_pool.objects.items[0];
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try sink.flushFrame(&out.writer);
+    try sink.setUploadPolicy(.{ .profile = .direct_apc });
+    try std.testing.expect(!sent.consumed());
+    sink.discardBatch(1);
+    try std.testing.expect(sent.consumed());
+}
+
+test "failed output never replays SHM APCs or assumes that partial writes were consumed" {
+    const FailingWriter = struct {
+        fn writeAll(_: @This(), _: []const u8) error{BrokenPipe}!void {
+            return error.BrokenPipe;
+        }
+    };
+    var sink = RenderBatchSink.init(std.testing.io, std.testing.allocator, "main");
+    defer sink.deinit();
+    try sink.setUploadPolicy(.{ .profile = .shm });
+    try sink.uploadRgba(1, &.{ 1, 2, 3, 255 }, 1, 1);
+    const sent = sink.shm_pool.objects.items[0];
+    try std.testing.expectError(error.BrokenPipe, sink.flushFrame(FailingWriter{}));
+    try std.testing.expect(!sink.hasPendingBytes());
+    try std.testing.expect(!sent.consumed());
 }

@@ -46,6 +46,7 @@ const Session = struct {
     producer: Producer,
     directory: []const u8,
     upload_path: []const u8,
+    upload_profile: protocol.UploadProfile = .file_whole,
     image_id: u32,
     observation_path: []const u8,
     grid: ?Grid = null,
@@ -323,11 +324,21 @@ const Host = struct {
     }
 
     fn attach(_: *Host, session: *Session) !void {
+        if (std.c.getenv("KATZENSTEG_OUTPUT_PROFILE")) |value| {
+            if (std.mem.eql(u8, std.mem.span(value), "shm")) session.upload_profile = .shm;
+        }
         try control.writeInitialControl(session.producer.channel.writer(), .{
             .rect_cells = .{ .row = 1, .col = 1, .cols = 1, .rows = 1 },
             .placeholder = .{ .image_id = session.image_id, .cols = 1, .rows = 1 },
-            .upload = .{ .profile = .file_whole, .path = session.upload_path },
+            // This host does not own terminal input and must not consume probe
+            // replies intended for the wrapped application. SHM is explicit here.
+            .upload = .{ .profile = session.upload_profile, .path = session.upload_path },
         });
+    }
+
+    fn discardBatch(session: *Session, seq: u64) !void {
+        if (session.upload_profile != .shm) return;
+        try session.producer.channel.writer().print("{{\"type\":\"discard_batch\",\"window_id\":\"main\",\"seq\":{d}}}\n", .{seq});
     }
 
     fn drain(self: *Host, session: *Session) !void {
@@ -368,13 +379,18 @@ const Host = struct {
                     session.source_px = status.source_px;
                     session.ready = status.ready_to_show;
                 },
-                .frame_batch => |batch| if (session.grid != null and session.closing_at == null) {
+                .frame_batch => |batch| {
+                    if (session.grid == null or session.closing_at != null) {
+                        try discardBatch(session, batch.seq);
+                        continue;
+                    }
                     // Do not start an APC while the host application's output
                     // is still queued. Drop the whole batch before any bytes are
                     // written; ask the producer for its latest retained scene
                     // when the terminal clears, even with idle refresh disabled.
                     if (self.terminal.outputQueued()) {
                         session.restore_pending = true;
+                        try discardBatch(session, batch.seq);
                         continue;
                     }
                     const groups = @import("../terminal_batch_applier.zig").BatchGroupsView{ .deletes = batch.groups.deletes, .uploads = batch.groups.uploads, .placements = batch.groups.placements, .after = batch.groups.after };

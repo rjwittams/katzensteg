@@ -196,3 +196,15 @@ test("current-generation retirement clears covered artwork even when panel paddi
 	assert.equal(writes.join(""), deleted);
 	assert.equal(queue.dispose(), "");
 });
+
+test("SHM uploads are consumed once even when their placements are stale", () => {
+	const queue = new PendingBatches();
+	const writes: string[] = [];
+	const shm = "\x1b_Gq=2,a=t,t=s,i=10;L2tzLXRlc3Q=\x1b\\";
+	queue.setGeneration(2);
+	queue.enqueue(batch(1, 1, { uploads: [shm], placements: [placement] }));
+	queue.flush(frame(writes), true);
+	assert.equal(writes.join(""), shm);
+	queue.flush(frame(writes), true);
+	assert.equal(writes.join(""), shm);
+});

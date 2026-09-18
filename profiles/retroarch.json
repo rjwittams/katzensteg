@@ -8,8 +8,7 @@
         "window_policy": "terminal_only",
         "input": true,
         "input_claim": true,
-        "input_claim_focus": false,
-        "output_profile": "file_whole"
+        "input_claim_focus": false
       }
     },
     "capture.gl_pbo": {

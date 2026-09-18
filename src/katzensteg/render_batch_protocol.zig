@@ -59,6 +59,7 @@ pub const IdRange = struct {
 
 pub const UploadProfile = enum {
     direct_apc,
+    shm,
     file_whole,
     file_offset_ring,
 };
@@ -220,6 +221,7 @@ pub const ControlMessage = union(enum) {
     detach: DetachMessage,
     input: InputMessage,
     shutdown,
+    discard_batch: u64,
     observe: ObserveMessage,
 };
 
@@ -321,6 +323,10 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
     const window_value = root.get("window_id") orelse return error.InvalidMessage;
     if (window_value != .string) return error.InvalidMessage;
     if (!std.mem.eql(u8, window_value.string, "main")) return error.UnsupportedWindow;
+
+    if (std.mem.eql(u8, type_value.string, "discard_batch")) {
+        return .{ .discard_batch = try jsonU64(root.get("seq") orelse return error.InvalidMessage) };
+    }
 
     if (std.mem.eql(u8, type_value.string, "detach")) {
         return .{ .detach = .{ .window_id = "main" } };
@@ -491,7 +497,7 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
         },
         .observe => |observe| allocator.free(observe.path),
         .detach => {},
-        .shutdown => {},
+        .shutdown, .discard_batch => {},
     }
 }
 
@@ -506,6 +512,7 @@ pub fn parseAspect(value: []const u8) ?PresentationAspect {
 
 fn parseUploadProfile(value: []const u8) ?UploadProfile {
     if (std.mem.eql(u8, value, "direct_apc")) return .direct_apc;
+    if (std.mem.eql(u8, value, "shm")) return .shm;
     if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
     if (std.mem.eql(u8, value, "file_offset_ring")) return .file_offset_ring;
     return null;
@@ -522,7 +529,7 @@ fn parseUploadPolicy(allocator: std.mem.Allocator, value: ?std.json.Value) !Uplo
         break :blk try allocator.dupe(u8, path_value.string);
     } else null;
     errdefer if (path) |owned_path| allocator.free(owned_path);
-    if (profile != .direct_apc and path == null) return error.InvalidMessage;
+    if ((profile == .file_whole or profile == .file_offset_ring) and path == null) return error.InvalidMessage;
     const high_water: u64 = if (upload_value.object.get("high_water")) |high_water_value|
         try jsonU64(high_water_value)
     else
@@ -992,4 +999,18 @@ test "placeholder target pixels are bounded and preserve source aspect without u
     try std.testing.expectError(error.InvalidMessage, target.validate());
     target.target_px = .{ .w = 16384, .h = 16384 };
     try std.testing.expectError(error.InvalidMessage, target.validate());
+}
+
+test "SHM attach needs no file path and host can discard a batch by sequence" {
+    var attach = try parseControlMessage(std.testing.allocator,
+        \\{"type":"attach","window_id":"main","placeholder":{"image_id":777,"cols":2,"rows":2},"upload":{"profile":"shm"}}
+    );
+    defer deinitControlMessage(std.testing.allocator, &attach);
+    try std.testing.expectEqual(UploadProfile.shm, attach.attach.upload.profile);
+    try std.testing.expect(attach.attach.upload.path == null);
+    var discard = try parseControlMessage(std.testing.allocator,
+        \\{"type":"discard_batch","window_id":"main","seq":42}
+    );
+    defer deinitControlMessage(std.testing.allocator, &discard);
+    try std.testing.expectEqual(@as(u64, 42), discard.discard_batch);
 }

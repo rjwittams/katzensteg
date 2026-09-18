@@ -476,7 +476,7 @@ fn parseRuntimeObject(value: std.json.Value, platform: ProfilePlatform) !ParsedR
     if (value.object.get("output_profile")) |profile| {
         const selected = try selectedPlatformString(profile, platform, error.InvalidRuntime) orelse null;
         if (selected) |profile_value| {
-            runtime.output_profile = config.parseOutputProfile(profile_value) orelse return error.InvalidRuntime;
+            runtime.output_profile = if (std.mem.eql(u8, profile_value, "auto")) null else config.parseOutputProfile(profile_value) orelse return error.InvalidRuntime;
             fields.output_profile = true;
         }
     }
@@ -1119,7 +1119,8 @@ test "bundled retroarch profiles use neutral ROM paths" {
 
 test "parseDirectories silently skips non-existent directories" {
     const io = std.testing.io;
-    var catalog = try ProfileCatalog.parseDirectories(io,
+    var catalog = try ProfileCatalog.parseDirectories(
+        io,
         std.testing.allocator,
         &.{ "profiles", "/tmp/katzensteg-nonexistent-profiles-dir-xyzzy" },
     );
@@ -1149,7 +1150,8 @@ test "parseDirectories overlays profiles from multiple directories" {
     const overlay_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(overlay_dir);
 
-    var catalog = try ProfileCatalog.parseDirectories(io,
+    var catalog = try ProfileCatalog.parseDirectories(
+        io,
         std.testing.allocator,
         &.{ "profiles", overlay_dir },
     );
@@ -1192,7 +1194,7 @@ test "bundled profiles include ffplay passthrough launch target" {
     try std.testing.expect(!profile.hidden);
     try std.testing.expectEqualStrings("ffplay", profile.target);
     try std.testing.expectEqual(@as(usize, 0), profile.args.len);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
     try std.testing.expectEqualStrings("software", envValue(profile, "SDL_RENDER_DRIVER").?);
     try std.testing.expect(envValue(profile, "LD_PRELOAD") != null or envValue(profile, "DYLD_INSERT_LIBRARIES") != null);
 }
@@ -1314,7 +1316,7 @@ test "bundled profiles include gamescope SDL Vulkan probe" {
     try std.testing.expect(profile.args.len > 0);
     try std.testing.expect(profile.runtime.vulkan_capture);
     try std.testing.expect(profile.runtime.input_enabled);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
     try std.testing.expect(profile.seed_files.len > 0);
 }
 
@@ -1327,7 +1329,7 @@ test "bundled profiles include embed basic SDL probe" {
     try std.testing.expect(!profile.isBroken());
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/basic-sdl-demo", profile.target);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
 }
 
 test "bundled profiles include embed luchs static probe" {
@@ -1341,7 +1343,7 @@ test "bundled profiles include embed luchs static probe" {
     try std.testing.expect(profile.args.len >= 1);
     try std.testing.expectEqualStrings("--frames=180", profile.args[profile.args.len - 2]);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
 }
 
 test "bundled profiles include embed luchs interactive probe" {
@@ -1359,7 +1361,7 @@ test "bundled profiles include embed luchs interactive probe" {
     }
     try std.testing.expectEqualStrings("{repo}/tools/luchs/testdata/interactive.html", profile.args[profile.args.len - 1]);
     try std.testing.expectEqual(config.PresentationSink.tty, profile.runtime.presentation_sink);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
 }
 
 test "bundled profiles include Tempest Rising gamescope launch target" {
@@ -1393,7 +1395,7 @@ fn expectSteamGamescopeProfile(profile: *const LaunchProfile) !void {
     try std.testing.expect(profile.args.len > 0);
     try std.testing.expect(profile.runtime.vulkan_capture);
     try std.testing.expect(profile.runtime.input_enabled);
-    try std.testing.expectEqual(config.OutputProfile.file_whole, profile.runtime.output_profile.?);
+    try std.testing.expect(profile.runtime.output_profile == null);
     try std.testing.expect(profile.seed_files.len > 0);
     var child_boundary: ?usize = null;
     for (profile.args, 0..) |arg, index| {

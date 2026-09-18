@@ -124,7 +124,7 @@ are wanted.
 - `KATZENSTEG_PANEL_REAL_WINDOW` overrides the profile's real-window visibility.
 - `KATZENSTEG_PANEL_Z_BASE` overrides the embed `z_base` (default: `-100`, to keep Pi overlay text chrome above Katzensteg full-frame placements).
 
-The live panel uses `file_whole` upload transport with a temp upload path under the system temp directory.
+The live panel defaults to `file_whole` upload transport with a temp upload path under the system temp directory. Start pi with `KATZENSTEG_OUTPUT_PROFILE=shm` to use POSIX shared-memory uploads with a local compatible terminal. The extension does not yet probe for SHM support; automatic host negotiation is follow-up work. Both modes require a producer and terminal that can access the same upload resources.
 
 The extension queues pending batches until pi commits its next render; it does not cache images or replay old file uploads after terminal damage. Continuous full-frame producers are expected to restore their output on the next update. Recovery for sparse or paused producers is deferred until a real failure warrants it. Pending output is bounded at 64 MiB; exceeding that stops the producer rather than silently dropping resource operations.
 

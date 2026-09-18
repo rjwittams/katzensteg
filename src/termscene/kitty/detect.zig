@@ -42,6 +42,16 @@ pub fn detectGraphicsSupportOnTty(allocator: std.mem.Allocator, tty: system_io.f
     return std.mem.indexOf(u8, reply, "OK") != null;
 }
 
+pub fn detectSharedMemorySupport(allocator: std.mem.Allocator, tty: system_io.fs.File) !bool {
+    const object = @import("shared_memory.zig").Object.create(&.{ 0, 0, 0, 255 }) catch return false;
+    defer object.unlink();
+    var output = tty.writerStreaming(&.{});
+    try protocol.writeQueryShmRgba(&output.interface, object.name());
+    const reply = try readRepliesFromFile(allocator, tty, 300);
+    defer allocator.free(reply);
+    return std.mem.indexOf(u8, reply, "\x1b_Gi=33;OK\x1b\\") != null;
+}
+
 pub fn detectFileTransmissionSupport(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8) !bool {
     return detectFileTransmissionSupportOffset(allocator, tty, path);
 }
@@ -75,7 +85,7 @@ fn prepareFileOffsetProbeData(io: std.Io, path: []const u8) !void {
     const file = try system_io.fs.openFileAbsolute(io, path, .{ .mode = .read_write });
     defer file.close();
     const bytes = [_]u8{
-        0, 0, 0, 255,
+        0,   0, 0, 255,
         255, 0, 0, 255,
     };
     try file.pwriteAll(&bytes, 0);

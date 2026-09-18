@@ -172,3 +172,28 @@ quirk and hosts pass it to the target as `pixel_origin`.
 The WM host converts pixel reports to cells for its own hit testing and drags,
 forwards them unchanged (grid-local pixels for placeholder sessions), and
 replays the DECRQM reply to each producer once.
+
+### Shared-memory terminal uploads
+
+`termscene/kitty/shared_memory.zig` owns POSIX upload objects for both the direct
+backend and the hosted batch sink. Objects have private permissions and unique
+names. The terminal unlinks each name after mapping it; the producer reaps its
+tracking entry only after the name disappears. Names are never reused, and a
+pipe write does not count as consumption. No timeout releases submitted pixels.
+
+Outstanding uploads have a 64-object, 64 MiB admission budget. One oversized
+image or complete scene may exceed it only when there are no outstanding
+uploads. Hosted scenes reserve their whole upload set before changing cached
+images or placements. Pressure rejects new frames without overwriting pending
+ones. Composition failures release unsent objects; teardown releases leftovers.
+An uncatchable producer termination can leave named objects behind.
+
+Hosts selecting `shm` must send
+`{"type":"discard_batch","window_id":"main","seq":N}` when they discard a
+complete batch before any of its graphics reach the terminal or an output queue.
+The producer releases only that batch's objects. Headless wrap mode uses this
+when host graphics cannot be inserted at a safe boundary. Partially submitted
+batches must never be reported as discarded. The desktop WM and pi consume
+uploads in order, including those whose placements are no longer visible.
+Refreshes create new upload objects; an old SHM APC cannot be replayed after its
+name has been consumed.

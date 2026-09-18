@@ -1681,6 +1681,38 @@ pub const FrameBuilder = struct {
     }
 
     fn renderPresentJobBatchInner(self: *FrameBuilder, sink: *RenderBatchSink, state: *RendererState, job: *PresentJob) !void {
+        // Admission must happen before updating published assets or placement
+        // state, so pressure drops a whole frame and the next one can retry.
+        if (sink.uploadIsShm()) {
+            var count: usize = 0;
+            var bytes: usize = 0;
+            switch (job.*) {
+                .framebuffer => |fb| {
+                    count = 1;
+                    bytes = fb.rgba.len;
+                    if (sink.placeholder) |target| {
+                        const size = target.uploadSize(.{ .w = fb.width, .h = fb.height });
+                        bytes = @as(usize, @intCast(size.w)) * @as(usize, @intCast(size.h)) * 4;
+                    }
+                },
+                .scene => |scene_job| {
+                    for (scene_job.publications) |publication| switch (publication) {
+                        .new_asset => |asset| if (!self.published_assets.contains(asset.asset_id)) {
+                            count += 1;
+                            bytes += asset.rgba.len;
+                        },
+                    };
+                    for (scene_job.solids) |solid| {
+                        if (!self.solid_images.contains(std.mem.readInt(u32, &solid.color, .little))) {
+                            count += 1;
+                            bytes += 4;
+                        }
+                    }
+                },
+            }
+            try sink.reserveUploads(count, bytes);
+        }
+        defer sink.endUploadReservation();
         if (sink.placeholder != null) {
             const fb = switch (job.*) {
                 .framebuffer => |fb| fb,
@@ -2261,6 +2293,10 @@ pub const FrameBuilder = struct {
         const old_placement = CompositePlacement{ .image_id = state.composite_image_id, .placement_id = state.composite_placement_id };
         state.composite_image_id = self.allocImageId();
         state.composite_placement_id = self.allocCompositePlacementId();
+        errdefer {
+            state.composite_image_id = old_placement.image_id;
+            state.composite_placement_id = old_placement.placement_id;
+        }
         self.last_composite_image_id = state.composite_image_id;
         var scaled_buf: ?[]u8 = null;
         defer if (scaled_buf) |scratch| self.allocator.free(scratch);
@@ -3099,7 +3135,10 @@ pub const FrameBuilder = struct {
         if (self.solid_images.get(key)) |image_id| return image_id;
         const image_id = self.allocImageId();
         const pixel = [_]u8{ color[0], color[1], color[2], color[3] };
-        backend.registerRawImage(image_id, &pixel, 1, 1) catch |err| logger.writeFmtScoped(.info, .frame_builder, "solid image upload failed: {any}", .{err});
+        backend.registerRawImage(image_id, &pixel, 1, 1) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "solid image upload failed: {any}", .{err});
+            return image_id; // Do not cache an upload rejected by backpressure.
+        };
         self.solid_images.put(key, image_id) catch {};
         return image_id;
     }
@@ -5906,4 +5945,34 @@ test "retained observation preserves fills and cursor pixels" {
     state.lines.clearRetainingCapacity();
     const observed = try snapshot.observation(allocator);
     try std.testing.expectEqualSlices(u8, reference.rgba, observed.pixels.items);
+}
+
+test "SHM pressure skips a framebuffer before changing active placement and retries after consumption" {
+    const io = std.testing.io;
+    var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
+    defer builder.deinit();
+    const renderer: core.CoreHandle = 0x2201;
+    try builder.renderers.put(renderer, RendererState.init(std.testing.allocator, 1, 1));
+    var sink = RenderBatchSink.init(io, std.testing.allocator, "main");
+    defer sink.deinit();
+    sink.attach(.{ .row = 1, .col = 1, .rows = 2, .cols = 2 });
+    try sink.setUploadPolicy(.{ .profile = .shm });
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    for (0..ts_kitty.shared_memory.Pool.max_objects) |_| {
+        try sink.uploadRgba(100000, &.{ 1, 2, 3, 255 }, 1, 1);
+        try sink.flushFrame(&out.writer);
+    }
+    out.clearRetainingCapacity();
+    var pixel = [_]u8{ 4, 5, 6, 255 };
+    var job = PresentJob{ .framebuffer = .{ .width = 1, .height = 1, .rgba = &pixel, .owns_rgba = false } };
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+    try std.testing.expectEqual(@as(u32, 0), builder.renderers.getPtr(renderer).?.composite_image_id);
+    sink.shm_pool.objects.items[0].unlink();
+    builder.renderPresentJobBatch(&logger, &sink, renderer, &job, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "t=s") != null);
+    try std.testing.expect(builder.renderers.getPtr(renderer).?.composite_image_id != 0);
 }

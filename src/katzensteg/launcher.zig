@@ -1353,7 +1353,7 @@ test "launcher resolves profile into launch plan with default log and runtime po
     try std.testing.expectEqual(@as(usize, 0), plan.env.len);
     try std.testing.expectEqual(.queued_replay, plan.runtime.intercept_mode);
     try std.testing.expectEqual(.terminal_only, plan.runtime.window_policy);
-    try std.testing.expectEqual(.file_whole, plan.runtime.output_profile.?);
+    try std.testing.expect(plan.runtime.output_profile == null);
 }
 
 test "launcher resolved plan expands profile env and preserves explicit output" {

@@ -1,3 +1,4 @@
+pub const shared_memory = @import("shared_memory.zig");
 pub const backend = @import("backend.zig");
 pub const Backend = backend.Backend;
 pub const KittyBackend = Backend;
