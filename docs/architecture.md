@@ -169,6 +169,15 @@ existing image layers. Direct text and graphics writes share the presentation
 mutex, so a menu update cannot interrupt an image upload. Menu hit testing and
 click consumption remain in the input model.
 
+The desktop WM frames terminal reports across reads before its native input
+model routes them. It shares attention matching and command decoding with
+direct takeover; ordinary input retains its original terminal encoding for
+forwarding. Focus reports on the existing producer control channel release
+held input and suspend the SDL projections while the menu or launch prompt
+owns focus. Consumed presses and mouse gestures stay consumed after focus
+returns. The WM command row uses the same termscene text rendering in its
+already-reserved status band.
+
 Terminal keyboard reports are decoded by `src/katzensteg/terminal_keys.zig`,
 one decoder for the legacy xterm forms and the kitty keyboard protocol. The
 direct tty pushes the protocol flags (disambiguated escapes, event types,

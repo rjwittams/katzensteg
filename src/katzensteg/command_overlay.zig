@@ -17,20 +17,25 @@ pub const Overlay = struct {
 
     pub fn present(self: *Overlay, backend: *ts.kitty.Backend, snapshot: menu.Snapshot) !void {
         self.engine.beginScene();
-        if (snapshot.region()) |region| {
+        if (snapshot.region() != null) {
             const buffer = try self.engine.allocator.alloc(u8, snapshot.cols);
             defer self.engine.allocator.free(buffer);
-            try self.engine.text(.{
-                .key = ts.types.NodeKey.text(0x4b5343, 1),
-                .pos = .{ .col = region.tty_rect.col, .row = region.tty_rect.row },
-                .content = snapshot.line(buffer),
-                .z = region.z,
-                .mode = .terminal,
-                .style = .{ .fg = .{ .r = 255, .g = 255, .b = 255 }, .bg = .{ .r = 35, .g = 45, .b = 65 } },
-            });
+            try self.engine.text(textNode(snapshot, buffer).?);
         }
         try self.engine.diff();
         try backend.applyTextOps(self.engine.text_ops.items);
         try self.engine.commit();
     }
 };
+
+pub fn textNode(snapshot: menu.Snapshot, buffer: []u8) ?ts.types.TextNode {
+    const region = snapshot.region() orelse return null;
+    return .{
+        .key = ts.types.NodeKey.text(0x4b5343, 1),
+        .pos = .{ .col = region.tty_rect.col, .row = region.tty_rect.row },
+        .content = snapshot.line(buffer),
+        .z = region.z,
+        .mode = .terminal,
+        .style = .{ .fg = .{ .r = 255, .g = 255, .b = 255 }, .bg = .{ .r = 35, .g = 45, .b = 65 } },
+    };
+}

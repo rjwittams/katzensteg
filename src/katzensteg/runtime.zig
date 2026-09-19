@@ -696,20 +696,20 @@ pub const Runtime = struct {
         self.input_mutex.lock();
         defer self.input_mutex.unlock();
         const model = &(self.input_parser orelse return buttons);
-        if (model.command_key == null) return buttons;
+        if (model.command_key == null and !model.source_focus_owned) return buttons;
         return model.nativeMouseButtons(buttons);
     }
 
-    pub fn commandModeActive(self: *Runtime) bool {
+    pub fn inputFocusSuspended(self: *Runtime) bool {
         self.input_mutex.lock();
         defer self.input_mutex.unlock();
-        return if (self.input_parser) |*model| model.routing_mode == .command else false;
+        return if (self.input_parser) |*model| !model.applicationFocused() else false;
     }
 
-    pub fn commandRoutingEnabled(self: *Runtime) bool {
+    pub fn focusRoutingEnabled(self: *Runtime) bool {
         self.input_mutex.lock();
         defer self.input_mutex.unlock();
-        return if (self.input_parser) |*model| model.command_key != null else false;
+        return if (self.input_parser) |*model| model.command_key != null or model.source_focus_owned else false;
     }
 
     // Called with input_mutex held. Only the launcher owns process deadlines.
@@ -823,7 +823,7 @@ pub const Runtime = struct {
         self.lockInput("terminal_mouse_state");
         defer self.input_mutex.unlock();
         const parser = &(self.input_parser orelse return null);
-        if (!self.mouse_ownership.terminalOwns() and parser.routing_mode != .command) return null;
+        if (!self.mouse_ownership.terminalOwns() and parser.applicationFocused()) return null;
         parser.observeState(.pointer);
         return parser.mouseState();
     }
@@ -833,10 +833,10 @@ pub const Runtime = struct {
         self.lockInput("terminal_relative_mouse_state");
         defer self.input_mutex.unlock();
         const parser = &(self.input_parser orelse return null);
-        if (!self.mouse_ownership.terminalOwns() and parser.routing_mode != .command) return null;
+        if (!self.mouse_ownership.terminalOwns() and parser.applicationFocused()) return null;
         parser.observeState(.pointer);
         const state = parser.mouseState();
-        if (parser.routing_mode == .command) {
+        if (!parser.applicationFocused()) {
             _ = self.relative_mouse_baseline.snap(state);
             return .{ .x = state.x, .y = state.y, .buttons = 0 };
         }

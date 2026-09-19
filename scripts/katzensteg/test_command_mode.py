@@ -34,7 +34,7 @@ class CommandMode(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
 
-    def run_app(self, version, ignore=False, command_key="^]", intercept_mode="queued_replay"):
+    def run_app(self, version, ignore=False, command_key="^]", intercept_mode="queued_replay", wm=False):
         case = tempfile.TemporaryDirectory(prefix='case-', dir=self.root)
         self.addCleanup(case.cleanup)
         folder = Path(case.name)
@@ -53,7 +53,7 @@ class CommandMode(unittest.TestCase):
         def ctty():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        supervisor = subprocess.Popen([sys.executable, '-c', supervisor_code, str(folder), str(ROOT/'zig-out/bin/katzensteg'), f'test.command{version}'], env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=ctty)
+        supervisor = subprocess.Popen([sys.executable, '-c', supervisor_code, str(folder), str(ROOT / ('zig-out/bin/katzensteg-wm' if wm else 'zig-out/bin/katzensteg')), f'test.command{version}'], env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=ctty)
         def cleanup():
             try: os.killpg(supervisor.pid, signal.SIGKILL)
             except ProcessLookupError: pass
@@ -113,6 +113,27 @@ class CommandMode(unittest.TestCase):
                 wait(lambda: 'focus 1' in events() and b'\x1b[40X' in output())
                 os.write(master, b'\x1dq')
                 wait(lambda: (folder/'exit').exists())
+                self.assertEqual((folder/'exit').read_text(), '0')
+
+    def test_wm_prefix_focus_literal_and_focused_quit(self):
+        for version in (2, 3):
+            with self.subTest(sdl=version):
+                folder, master, _, _, events, wait = self.run_app(version, wm=True)
+                os.write(master, b'qnhl\t')
+                wait(lambda: 'key 43 0' in events())
+                self.assertFalse((folder/'exit').exists())
+                os.write(master, b'\x1b[?31u\x1b[119;1:1u')
+                wait(lambda: 'key 26 1' in events())
+                os.write(master, b'\x1b[93;5:')
+                os.write(master, b'1u\x1b[93;5:3u')
+                wait(lambda: 'focus 0 keys 0 buttons 0 flags 0' in events())
+                wait(lambda: b'q Quit | Esc Return | n Launch' in (folder/'terminal').read_bytes())
+                os.write(master, b'\x1b[93;5:1u\x1b[93;5:3u\x1b[119;1:2u\x1b[119;1:3u')
+                wait(lambda: 'key 48 0' in events())
+                self.assertEqual(events().count('key 26 1'), 1)
+                os.write(master, b'\x1dq')
+                wait(lambda: (folder/'exit').exists())
+                self.assertIn('quit', events())
                 self.assertEqual((folder/'exit').read_text(), '0')
 
     def test_none_passes_attention_and_q_to_the_app(self):

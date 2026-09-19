@@ -6,6 +6,7 @@ pub const Action = enum { quit, cancel };
 /// Immutable input-owned state sent to presentation; coordinates are terminal cells.
 pub const Snapshot = struct {
     active: bool = false,
+    desktop: bool = false,
     hint: bool = false,
     quitting: bool = false,
     binding: u8 = ']',
@@ -26,8 +27,8 @@ pub const Snapshot = struct {
     pub fn line(self: Snapshot, buffer: []u8) []const u8 {
         const out = buffer[0..@min(buffer.len, self.cols)];
         @memset(out, ' ');
-        var text: [128]u8 = undefined;
-        const message = if (self.quitting) " Quitting... waiting for app" else std.fmt.bufPrint(&text, " q Quit | Esc Return | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch unreachable;
+        var text: [256]u8 = undefined;
+        const message = if (self.desktop and self.hint) " q Quit | Esc Return | Unknown key" else if (self.desktop) std.fmt.bufPrint(&text, " q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch unreachable else if (self.quitting) " Quitting... waiting for app" else std.fmt.bufPrint(&text, " q Quit | Esc Return | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch unreachable;
         const len = @min(message.len, out.len);
         @memcpy(out[0..len], message[0..len]);
         return out;

@@ -133,7 +133,7 @@ KATZENSTEG_REAL_WINDOW=hide ./zig-out/bin/katzensteg-wm \
 Both commands run the same WM: window borders, movement, resizing, focus,
 layouts, input routing and lifecycle handling. `--presentation positioned`
 selects the default explicitly. Presentation selection is global for now;
-initial profiles, interactive launches with `n`, and external registrations
+initial profiles, interactive launches with Ctrl-] then `n`, and external registrations
 through `--listen` all use the selected mode.
 
 In placeholder mode the WM allocates a separate image ID for each producer,
@@ -144,8 +144,10 @@ positions and stacks the text grids, including clearing cells vacated by moved
 or closed windows. Moving or raising a window does not change its producer's
 virtual placement; resizing sends a new grid size when needed.
 
-The usual controls apply: `h/j/k/l` move, `H/J/K/L` resize, Tab cycles focus,
-`t` tiles, `c` cascades, and `q` quits the WM. Mouse focus and title/border
+Press Ctrl-] before each WM command: `h/j/k/l` move, `H/J/K/L` resize, Tab
+cycles focus, `t` tiles, `c` cascades, and `n` opens the launch prompt. `q` closes
+the focused producer; `Q` quits the whole WM. Escape returns to the producer,
+and a doubled Ctrl-] sends one literal tap. Mouse focus and title/border
 controls work as in positioned mode. The WM translates content mouse events
 into the grid's local coordinates before forwarding them. Hiding real SDL
 windows avoids their mouse focus taking precedence over forwarded input.
@@ -240,8 +242,10 @@ game. It shows `q Quit`, `Esc Return` and the configured prefix for a literal
 tap. Unknown keys leave it armed and display a hint; there is no timeout. Click
 and release on Quit or Return to choose that action. Other mouse input and
 bracketed pastes are discarded while armed. The row updates even when the game
-is not drawing, and follows terminal resizes. The desktop WM prefix remains a
-later stage of [#52](https://github.com/rjwittams/katzensteg/issues/52).
+is not drawing, and follows terminal resizes. The desktop WM uses the same
+prefix and decoder, with its own commands shown in the existing status row.
+Bare letters and Tab reach the focused producer. The launch prompt accepts
+both legacy bytes and Kitty keyboard reports.
 
 Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
 disable the mode. The inheritable profile field is `runtime.command_key`, with

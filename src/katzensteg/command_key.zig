@@ -25,3 +25,50 @@ pub fn label(binding: ?u8, buf: *[2]u8) []const u8 {
     buf.* = .{ '^', key };
     return buf;
 }
+
+pub const Context = enum { direct, desktop };
+pub const Command = enum {
+    literal,
+    cancel,
+    quit,
+    quit_host,
+    launch,
+    focus_next,
+    move_left,
+    move_down,
+    move_up,
+    move_right,
+    resize_narrower,
+    resize_shorter,
+    resize_taller,
+    resize_wider,
+    cascade,
+    tile,
+    unknown,
+};
+
+/// Command vocabulary shared by direct takeover and the desktop input model.
+/// Callers own press tracking and only decode a fresh press while armed.
+pub fn decode(binding: u8, key: native.Key, context: Context) Command {
+    if (matches(binding, key)) return .literal;
+    if (std.mem.eql(u8, key.name.slice(), "Escape")) return .cancel;
+    if (key.modifiers.suppressText()) return .unknown;
+    if (key.codepoint() == 'q') return .quit;
+    if (context == .direct) return .unknown;
+    if (std.mem.eql(u8, key.name.slice(), "Tab")) return .focus_next;
+    return switch (key.codepoint() orelse return .unknown) {
+        'Q' => .quit_host,
+        'n' => .launch,
+        'h' => .move_left,
+        'j' => .move_down,
+        'k' => .move_up,
+        'l' => .move_right,
+        'H' => .resize_narrower,
+        'J' => .resize_shorter,
+        'K' => .resize_taller,
+        'L' => .resize_wider,
+        'c' => .cascade,
+        't' => .tile,
+        else => .unknown,
+    };
+}

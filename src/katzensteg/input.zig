@@ -200,6 +200,8 @@ pub const InputModel = struct {
     // Disabled until a local tty owner explicitly installs its binding.
     command_key: ?u8 = null,
     routing_mode: RoutingMode = .app,
+    source_focused: bool = true,
+    source_focus_owned: bool = false,
     command_hint: bool = false,
     command_pointer_action: ?command_menu.Action = null,
     consumed_terminal_buttons: u32 = 0,
@@ -362,7 +364,7 @@ pub const InputModel = struct {
             .y = self.last_mouse_y,
             .precise_x = self.precise_mouse_x,
             .precise_y = self.precise_mouse_y,
-            .buttons = if (self.routing_mode == .command) 0 else self.mouse_buttons | self.remote_buttons | (self.native_buttons & ~self.blocked_native_buttons),
+            .buttons = if (!self.applicationFocused()) 0 else self.mouse_buttons | self.remote_buttons | (self.native_buttons & ~self.blocked_native_buttons),
         };
     }
 
@@ -373,7 +375,7 @@ pub const InputModel = struct {
     }
 
     pub fn copyKeyboardState(self: *TerminalInputParser, out: []u8, now_ns: i128) void {
-        if (self.routing_mode == .command) {
+        if (!self.applicationFocused()) {
             @memset(out, 0);
             return;
         }
@@ -733,10 +735,13 @@ pub const InputModel = struct {
 
         switch (bytes[start]) {
             'O' => {
-                self.focus_generation +%= 1;
+                try self.setSourceFocus(false);
                 return start + 1;
             },
-            'I' => return start + 1,
+            'I' => {
+                try self.setSourceFocus(true);
+                return start + 1;
+            },
             '<' => return try self.parseSgrMouse(bytes, start),
             'M' => return try self.parseLegacyMouse(bytes, start),
             else => {},
@@ -941,6 +946,7 @@ pub const InputModel = struct {
 
     fn emitMouseCode(self: *TerminalInputParser, b: i32, report_x: i32, report_y: i32, pressed: bool, units: terminal_keys.MouseUnits) !void {
         if (try self.routeCommandMouse(b, report_x, report_y, pressed, units)) return;
+        if (!self.source_focused) return;
         const point = self.mapReportToSdl(report_x, report_y, units) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
             // button state and last mouse position unchanged until region
@@ -1049,6 +1055,7 @@ pub const InputModel = struct {
     /// which shortcut modifiers suppress.
     pub fn pressKey(self: *InputModel, key: native_key.Key, text: []const u8) !void {
         if (try self.routeKey(key)) return;
+        if (!self.source_focused) return;
 
         const commits_text = text.len != 0 and !key.modifiers.suppressText();
         switch (key.action) {
@@ -1098,16 +1105,16 @@ pub const InputModel = struct {
     /// Real-window input remains usable outside command mode, but a held
     /// physical press cannot reappear after the virtual focus-loss barrier.
     pub fn routeNativeKey(self: *InputModel, scan: i32, down: bool) bool {
-        if (self.command_key == null or scan <= 0 or scan >= sdl_num_scancodes) return false;
+        if ((self.command_key == null and !self.source_focus_owned) or scan <= 0 or scan >= sdl_num_scancodes) return false;
         const index: usize = @intCast(scan);
         self.native_keys[index] = @intFromBool(down);
-        const blocked = self.blocked_native_keys[index] or self.routing_mode == .command;
+        const blocked = self.blocked_native_keys[index] or !self.applicationFocused();
         self.blocked_native_keys[index] = down and blocked;
         return blocked;
     }
 
     pub fn nativeModifiers(self: *const InputModel, raw: u16) u16 {
-        if (self.routing_mode == .command) return 0;
+        if (!self.applicationFocused()) return 0;
         var result = raw;
         for ([_]u16{ 0x40, 1, 0x100, 0x400, 0x80, 2, 0x200, 0x800 }, 224..) |mask, scan| {
             if (self.blocked_native_keys[scan]) result &= ~mask;
@@ -1118,14 +1125,14 @@ pub const InputModel = struct {
     pub fn nativeMouseButtons(self: *InputModel, buttons: u32) u32 {
         self.native_buttons = buttons;
         self.blocked_native_buttons &= buttons;
-        if (self.routing_mode == .command) self.blocked_native_buttons |= buttons;
+        if (!self.applicationFocused()) self.blocked_native_buttons |= buttons;
         return buttons & ~self.blocked_native_buttons;
     }
 
     pub fn routeNativeButton(self: *InputModel, button: u8, down: bool) bool {
-        if (button == 0 or button > 32) return self.routing_mode == .command;
+        if (button == 0 or button > 32) return !self.applicationFocused();
         const mask = sdlButtonMask(button);
-        const blocked = self.routing_mode == .command or self.blocked_native_buttons & mask != 0;
+        const blocked = !self.applicationFocused() or self.blocked_native_buttons & mask != 0;
         _ = self.nativeMouseButtons(if (down) self.native_buttons | mask else self.native_buttons & ~mask);
         return blocked;
     }
@@ -1153,21 +1160,20 @@ pub const InputModel = struct {
         try self.consumePress(key);
         if (self.routing_mode == .app) {
             try self.enterCommandMode();
-        } else if (attention) {
-            try self.leaveCommandMode();
-            var down = try bindStatic(key);
-            down.native.press = try self.mintPress();
-            down.native.action = .down;
-            try self.append(.{ .key_down = down });
-            var up = down;
-            up.native.action = .up;
-            try self.append(.{ .key_up = up });
-        } else if (std.mem.eql(u8, key.name.slice(), "Escape")) {
-            try self.leaveCommandMode();
-        } else if (key.codepoint() == 'q' and !key.modifiers.suppressText()) {
-            try self.requestQuit();
-        } else {
-            self.command_hint = true;
+        } else switch (command_binding.decode(self.command_key.?, key, .direct)) {
+            .literal => {
+                try self.leaveCommandMode();
+                var down = try bindStatic(key);
+                down.native.press = try self.mintPress();
+                down.native.action = .down;
+                try self.append(.{ .key_down = down });
+                var up = down;
+                up.native.action = .up;
+                try self.append(.{ .key_up = up });
+            },
+            .cancel => try self.leaveCommandMode(),
+            .quit => try self.requestQuit(),
+            else => self.command_hint = true,
         }
         return true;
     }
@@ -1176,7 +1182,26 @@ pub const InputModel = struct {
         return .{ .active = self.routing_mode == .command, .hint = self.command_hint, .quitting = self.quit_requested, .binding = self.command_key orelse ']', .cols = cols, .rows = rows };
     }
 
+    pub fn applicationFocused(self: *const InputModel) bool {
+        return self.source_focused and self.routing_mode != .command;
+    }
+
+    fn setSourceFocus(self: *InputModel, focused: bool) !void {
+        self.source_focus_owned = true;
+        if (self.source_focused == focused) return;
+        self.source_focused = focused;
+        if (focused) {
+            if (self.routing_mode != .command) try self.append(.{ .focus = true });
+        } else try self.releaseLocalFocus();
+    }
+
     fn enterCommandMode(self: *InputModel) !void {
+        self.routing_mode = .command;
+        self.command_hint = false;
+        try self.releaseLocalFocus();
+    }
+
+    fn releaseLocalFocus(self: *InputModel) !void {
         // Keep the input decoder's pending bytes: the command may share a read
         // with its prefix. Retire queued app work before emitting cleanup.
         var i: usize = 0;
@@ -1185,8 +1210,6 @@ pub const InputModel = struct {
                 _ = self.queue.orderedRemove(i);
             } else i += 1;
         }
-        self.routing_mode = .command;
-        self.command_hint = false;
         for (&self.local_presses) |*slot| if (slot.*) |held| {
             try self.consumePress(held.native);
             var up = held;

@@ -142,15 +142,15 @@ class PlaceholderHostTest(unittest.TestCase):
                 pump_until(lambda: all(screen.frames.get(i, 0) >= 3 for i in (100000, 300000)) and screen.cells.get((20, 50)) == (GLYPH, 300000))
                 # The higher window's border is text, not the lower image.
                 self.assertEqual(screen.cells[2, 3][0], "┌")
-                os.write(master, b"\t")  # Focus second (already on top).
+                os.write(master, b"\x1d\t")  # Focus second (already on top).
                 pump_until(lambda: any(c == "*" for (r, _), (c, _) in screen.cells.items() if r == 3))
-                os.write(master, b"\t")  # Raise first over second.
+                os.write(master, b"\x1d\t")  # Raise first over second.
                 pump_until(lambda: screen.cells.get((20, 50)) == (GLYPH, 100000))
                 before_size = screen.placements[100000]
-                os.write(master, b"l")
+                os.write(master, b"\x1dl")
                 pump_until(lambda: screen.cells.get((1, 2), (None,))[0] == "┌" and screen.cells.get((1, 1), (None,))[0] == " ")
                 self.assertEqual(screen.placements[100000], before_size, "moving must not resize the virtual placement")
-                os.write(master, b"H")
+                os.write(master, b"\x1dH")
                 pump_until(lambda: screen.placements[100000] != before_size)
                 # Translate a click on the first displayed source cell to (0,0).
                 cells = sorted(pos for pos, value in screen.cells.items() if value == (GLYPH, 100000))
@@ -166,7 +166,7 @@ class PlaceholderHostTest(unittest.TestCase):
                 second_log = (folder / "second.log").read_text()
                 self.assertNotIn("key_down key=A", second_log)
                 launcher.unlink()
-                os.write(master, b"n")
+                os.write(master, b"\x1dn")
                 # The 100-column status line may truncate the prompt text.
                 time.sleep(0.05)
                 os.write(master, b"unavailable\r")
@@ -174,7 +174,13 @@ class PlaceholderHostTest(unittest.TestCase):
                 pump_until(lambda: "launch failed: unavailable: FileNotFound" in wm_log.read_text())
                 previous_frames = screen.frames[100000]
                 pump_until(lambda: screen.frames[100000] > previous_frames)
-                os.write(master, b"q")
+                # q closes only the focused producer; the other keeps rendering.
+                os.write(master, b"\x1dq")
+                pump_until(lambda: "shutdown sent profile=first" in wm_log.read_text())
+                self.assertIsNone(proc.poll())
+                previous_frames = screen.frames[300000]
+                pump_until(lambda: screen.frames[300000] > previous_frames)
+                os.write(master, b"\x1dQ")
                 pump_until(lambda: proc.poll() is not None)
                 # On macOS the controlling slave can become ENOTTY on leader
                 # exit. Verify the WM's normal screen restoration on the wire.
@@ -193,7 +199,7 @@ class PlaceholderHostTest(unittest.TestCase):
                 if proc.poll() is None:
                     os.write(master, b"\x1b")
                     time.sleep(0.05)
-                    os.write(master, b"q")
+                    os.write(master, b"\x1dQ")
                     deadline = time.monotonic() + 8
                     while proc.poll() is None and time.monotonic() < deadline:
                         if select.select([master], [], [], 0.05)[0]:

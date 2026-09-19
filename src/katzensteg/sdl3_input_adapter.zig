@@ -93,7 +93,7 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
             if (!parser.routeNativeKey(@intCast(i), keys[i])) rt.keyboard_state[i] = @intFromBool(keys[i]);
         }
     }
-    if (parser.routing_mode == .command) @memset(&rt.keyboard_state, 0);
+    if (!parser.applicationFocused()) @memset(&rt.keyboard_state, 0);
     var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
     parser.copyKeyboardState(&terminal_state, system_io.time.nanoTimestamp());
     for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
@@ -103,7 +103,7 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
 }
 
 pub fn claimedWindowFlags(rt: *runtime_mod.Runtime, flags: sdl.SDL_WindowFlags) sdl.SDL_WindowFlags {
-    if (rt.commandModeActive()) return flags & ~(sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS);
+    if (rt.inputFocusSuspended()) return flags & ~(sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS);
     if (!rt.input_claimed or !rt.input_claim_focus) return flags;
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
 }
@@ -116,12 +116,12 @@ pub fn shouldSuppressEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event
             if (event.type == sdl.SDL_KEYDOWN or event.type == sdl.SDL_KEYUP) {
                 if (model.routeNativeKey(event.key.scancode, event.type == sdl.SDL_KEYDOWN)) return true;
             }
-            if (model.command_key != null and (event.type == sdl.SDL_MOUSEBUTTONDOWN or event.type == sdl.SDL_MOUSEBUTTONUP)) {
+            if ((model.command_key != null or model.source_focus_owned) and (event.type == sdl.SDL_MOUSEBUTTONDOWN or event.type == sdl.SDL_MOUSEBUTTONUP)) {
                 if (model.routeNativeButton(event.button.button, event.type == sdl.SDL_MOUSEBUTTONDOWN)) return true;
             }
         }
     }
-    if (rt.commandModeActive()) {
+    if (rt.inputFocusSuspended()) {
         switch (event.type) {
             sdl.SDL_KEYDOWN, sdl.SDL_KEYUP, sdl.SDL_TEXTINPUT, sdl.SDL_MOUSEMOTION, sdl.SDL_MOUSEBUTTONDOWN, sdl.SDL_MOUSEBUTTONUP, sdl.SDL_MOUSEWHEEL => return true,
             else => {},
@@ -399,7 +399,7 @@ pub fn mergedModifiers(rt: *runtime_mod.Runtime, native: u16) u16 {
     defer rt.input_mutex.unlock();
     const model = &(rt.input_parser orelse return native);
     model.observeModifiers();
-    if (model.routing_mode == .command) return 0;
+    if (!model.applicationFocused()) return 0;
     return model.nativeModifiers(native) | model.heldModifiers();
 }
 

@@ -248,6 +248,15 @@ pub const Backend = struct {
         _ = self.retransmitted_images.remove(image_id);
     }
 
+    pub fn writeText(out: *std.Io.Writer, node: types.TextNode) !void {
+        try protocol.moveCursor(out, node.pos.row, node.pos.col);
+        if (node.style.bg) |bg| {
+            try out.print("\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, bg.r, bg.g, bg.b, node.content });
+        } else {
+            try out.print("\x1b[38;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, node.content });
+        }
+    }
+
     pub fn applyTextOps(self: *Backend, text_ops: []const backend.TextOp) !void {
         for (text_ops) |op| {
             const key_int = keyToInt(op.key);
@@ -262,12 +271,7 @@ pub const Backend = struct {
                             try self.writer().print("\x1b[0m\x1b[{d}X", .{old.len});
                         }
                     }
-                    try protocol.moveCursor(self.writer(), node.pos.row, node.pos.col);
-                    if (node.style.bg) |bg| {
-                        try self.writer().print("\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, bg.r, bg.g, bg.b, node.content });
-                    } else {
-                        try self.writer().print("\x1b[38;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, node.content });
-                    }
+                    try writeText(self.writer(), node);
                     try self.texts.put(key_int, .{ .row = node.pos.row, .col = node.pos.col, .len = node.content.len });
                 },
                 .remove => {

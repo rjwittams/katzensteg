@@ -1128,7 +1128,7 @@ pub export fn ks_SDL_WaitEventTimeout(event: ?*sdl.SDL_Event, timeout: c_int) ca
 fn pollForEvent(rt: *runtime.Runtime, event: ?*sdl.SDL_Event) c_int {
     if (rt.hasRemoteInput()) real_sdl.SDL_PumpEvents();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandRoutingEnabled()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.focusRoutingEnabled()) {
         rt.claimRealWindowMouse();
     } else if (sdl_input.popInputEvent(rt, event)) {
         if (event) |out| traceSdlEvent("SDL_PollEvent synthetic", out, false);
@@ -1214,7 +1214,7 @@ pub export fn ks_SDL_GetModState() callconv(.c) c_int {
 pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
     const rt = runtime.get();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandModeActive()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.inputFocusSuspended()) {
         rt.claimRealWindowMouse();
         var real_x: c_int = 0;
         var real_y: c_int = 0;
@@ -1241,7 +1241,7 @@ pub export fn ks_SDL_GetMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint
 pub export fn ks_SDL_GetRelativeMouseState(x: ?*c_int, y: ?*c_int) callconv(.c) sdl.Uint32 {
     const rt = runtime.get();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandModeActive()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.inputFocusSuspended()) {
         rt.claimRealWindowMouse();
         return rt.filterNativeMouseButtons(real_sdl.SDL_GetRelativeMouseState(x, y)) | rt.remoteMouseButtons();
     }
