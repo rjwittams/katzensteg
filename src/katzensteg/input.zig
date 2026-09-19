@@ -5,6 +5,9 @@ const render_batch_protocol = @import("render_batch_protocol.zig");
 const native_key = @import("native_key.zig");
 const terminal_keys = @import("terminal_keys.zig");
 
+const command_binding = @import("command_key.zig");
+pub const RoutingMode = enum { app, command };
+
 pub const NativeKey = native_key.Key;
 
 const max_pending_bytes = 256;
@@ -167,6 +170,8 @@ pub const MouseOwnership = struct {
 };
 
 pub const InputEvent = union(enum) {
+    focus: bool,
+    quit,
     key_down: KeyEvent,
     key_up: KeyEvent,
     text: TextEvent,
@@ -191,10 +196,20 @@ pub const InputModel = struct {
     pub const DeliveryKind = enum { keyboard, pointer, text, scroll, cleanup };
     const Delivery = struct { ticket: u64, remaining: usize = 0, kind: DeliveryKind };
     pub const Press = struct { controller: u64, identity: u64, binding: KeyEvent };
+    // Disabled until a local tty owner explicitly installs its binding.
+    command_key: ?u8 = null,
+    routing_mode: RoutingMode = .app,
+    command_hint: bool = false,
+    paste_active: bool = false,
+    paste_drop: bool = false,
+    quit_requested: bool = false,
+    consumed_presses: [max_local_presses * 2]?NativeKey = @splat(null),
     remote_presses: [256]?Press = @splat(null),
     remote_controller: u64 = 0,
     remote_buttons: u32 = 0,
     native_keys: [sdl_num_scancodes]u8 = @splat(0),
+    blocked_native_keys: [sdl_num_scancodes]bool = @splat(false),
+    blocked_native_buttons: u32 = 0,
     native_buttons: u32 = 0,
     native_mouse_x: ?f32 = null,
     native_mouse_y: ?f32 = null,
@@ -344,7 +359,7 @@ pub const InputModel = struct {
             .y = self.last_mouse_y,
             .precise_x = self.precise_mouse_x,
             .precise_y = self.precise_mouse_y,
-            .buttons = self.mouse_buttons | self.remote_buttons | self.native_buttons,
+            .buttons = if (self.routing_mode == .command) 0 else self.mouse_buttons | self.remote_buttons | (self.native_buttons & ~self.blocked_native_buttons),
         };
     }
 
@@ -355,6 +370,10 @@ pub const InputModel = struct {
     }
 
     pub fn copyKeyboardState(self: *TerminalInputParser, out: []u8, now_ns: i128) void {
+        if (self.routing_mode == .command) {
+            @memset(out, 0);
+            return;
+        }
         self.expireKeyboardState(now_ns);
         const n = @min(out.len, self.keyboard_state.len);
         @memcpy(out[0..n], self.keyboard_state[0..n]);
@@ -388,8 +407,12 @@ pub const InputModel = struct {
     // Called by an adapter that immediately projects the returned event. Text
     // remains borrowed until the source next pumps its completed work.
     pub fn popForAdapter(self: *InputModel, max_text_bytes: usize, min_type: u32, max_type: u32) ?InputEvent {
+        return self.popForAdapterTypes(inputEventSdlType, max_text_bytes, min_type, max_type);
+    }
+
+    pub fn popForAdapterTypes(self: *InputModel, comptime eventType: fn (InputEvent) u32, max_text_bytes: usize, min_type: u32, max_type: u32) ?InputEvent {
         for (self.queue.items, 0..) |queued, idx| {
-            const event_type = inputEventSdlType(queued.event);
+            const event_type = eventType(queued.event);
             if (event_type < min_type or event_type > max_type) continue;
             if (queued.event == .text_commit and queued.event.text_commit.len > max_text_bytes) {
                 const text = queued.event.text_commit;
@@ -580,6 +603,21 @@ pub const InputModel = struct {
     }
 
     fn parseOne(self: *TerminalInputParser, bytes: []const u8) !usize {
+        if (self.paste_active) {
+            const end = "\x1b[201~";
+            if (std.mem.startsWith(u8, bytes, end)) {
+                self.paste_active = false;
+                return end.len;
+            }
+            if (std.mem.startsWith(u8, end, bytes)) return 0;
+            if (self.paste_drop) return 1;
+            const len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return 1;
+            if (bytes.len < len) return 0;
+            _ = std.unicode.utf8Decode(bytes[0..len]) catch return len;
+            // A paste is text, including newlines, never command keystrokes.
+            try self.append(.{ .text = TextEvent.init(bytes[0..len]) });
+            return len;
+        }
         const first = bytes[0];
         if (first == 0x1b) {
             if (try self.parseEscape(bytes)) |consumed| {
@@ -635,6 +673,8 @@ pub const InputModel = struct {
         }
         if (first >= 1 and first <= 26) {
             try self.tapCharacter('a' + first - 1, "", .{ .control = true });
+        } else if (first == 0 or (first >= 0x1c and first <= 0x1f)) {
+            try self.tapCharacter(first + 0x40, "", .{ .control = true });
         }
         return 1;
     }
@@ -704,6 +744,11 @@ pub const InputModel = struct {
         }
 
         const final = csiFinalIndex(bytes, start) orelse return null;
+        if (bytes[final] == '~' and std.mem.eql(u8, bytes[start..final], "200")) {
+            self.paste_active = true;
+            self.paste_drop = self.routing_mode == .command;
+            return final + 1;
+        }
         // Key reports in either the legacy or the kitty encoding; any other
         // control sequence is consumed without leaking into text.
         if (terminal_keys.decodeCsi(bytes[start..final], bytes[final], self.keyboardReportsEvents())) |report| {
@@ -803,6 +848,7 @@ pub const InputModel = struct {
     }
 
     fn injectPointerAt(self: *TerminalInputParser, event: render_batch_protocol.PointerEventPayload, x: i32, y: i32) !void {
+        if (self.routing_mode == .command) return;
         switch (event.kind) {
             .wheel => {
                 // Only line-mode deltas are normalised today. Pixel- and page-mode
@@ -859,6 +905,7 @@ pub const InputModel = struct {
     }
 
     fn emitMouseCode(self: *TerminalInputParser, b: i32, report_x: i32, report_y: i32, pressed: bool, units: terminal_keys.MouseUnits) !void {
+        if (self.routing_mode == .command) return;
         const point = self.mapReportToSdl(report_x, report_y, units) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
             // button state and last mouse position unchanged until region
@@ -966,6 +1013,8 @@ pub const InputModel = struct {
     /// projected into the SDL-shaped queue. `text` is the key's text commit,
     /// which shortcut modifiers suppress.
     pub fn pressKey(self: *InputModel, key: native_key.Key, text: []const u8) !void {
+        if (try self.routeKey(key)) return;
+
         const commits_text = text.len != 0 and !key.modifiers.suppressText();
         switch (key.action) {
             .tap => {
@@ -998,10 +1047,8 @@ pub const InputModel = struct {
                     event = slot.*.?;
                     slot.* = null;
                 } else {
-                    // A release whose down was discarded (focus loss, for
-                    // example) still clears the projected state.
-                    event = try bindStatic(key);
-                    event.native.press = try self.mintPress();
+                    // Its press was already released at a routing/focus barrier.
+                    return;
                 }
                 event.repeat = false;
                 event.native.action = .up;
@@ -1011,6 +1058,142 @@ pub const InputModel = struct {
                 try self.append(.{ .key_up = event });
             },
         }
+    }
+
+    /// Real-window input remains usable outside command mode, but a held
+    /// physical press cannot reappear after the virtual focus-loss barrier.
+    pub fn routeNativeKey(self: *InputModel, scan: i32, down: bool) bool {
+        if (self.command_key == null or scan <= 0 or scan >= sdl_num_scancodes) return false;
+        const index: usize = @intCast(scan);
+        self.native_keys[index] = @intFromBool(down);
+        const blocked = self.blocked_native_keys[index] or self.routing_mode == .command;
+        self.blocked_native_keys[index] = down and blocked;
+        return blocked;
+    }
+
+    pub fn nativeModifiers(self: *const InputModel, raw: u16) u16 {
+        if (self.routing_mode == .command) return 0;
+        var result = raw;
+        for ([_]u16{ 0x40, 1, 0x100, 0x400, 0x80, 2, 0x200, 0x800 }, 224..) |mask, scan| {
+            if (self.blocked_native_keys[scan]) result &= ~mask;
+        }
+        return result;
+    }
+
+    pub fn nativeMouseButtons(self: *InputModel, buttons: u32) u32 {
+        self.native_buttons = buttons;
+        self.blocked_native_buttons &= buttons;
+        if (self.routing_mode == .command) self.blocked_native_buttons |= buttons;
+        return buttons & ~self.blocked_native_buttons;
+    }
+
+    pub fn routeNativeButton(self: *InputModel, button: u8, down: bool) bool {
+        if (button == 0 or button > 32) return self.routing_mode == .command;
+        const mask = sdlButtonMask(button);
+        const blocked = self.routing_mode == .command or self.blocked_native_buttons & mask != 0;
+        _ = self.nativeMouseButtons(if (down) self.native_buttons | mask else self.native_buttons & ~mask);
+        return blocked;
+    }
+
+    fn consumePress(self: *InputModel, key: NativeKey) !void {
+        if (key.action == .tap or key.action == .up) return;
+        for (&self.consumed_presses) |*slot| if (slot.* == null) {
+            slot.* = key;
+            return;
+        };
+        return error.Capacity;
+    }
+
+    fn routeKey(self: *InputModel, key: NativeKey) !bool {
+        for (&self.consumed_presses) |*slot| if (slot.*) |held| {
+            if (held.sameKey(&key)) {
+                if (key.action == .up) slot.* = null;
+                return true;
+            }
+        };
+        const attention = if (self.command_key) |binding| command_binding.matches(binding, key) else false;
+        if (self.routing_mode == .app and !attention) return false;
+        // Neither a repeat nor a release can arm or execute a command.
+        if (key.action == .up or key.action == .repeat) return true;
+        try self.consumePress(key);
+        if (self.routing_mode == .app) {
+            try self.enterCommandMode();
+        } else if (attention) {
+            try self.leaveCommandMode();
+            var down = try bindStatic(key);
+            down.native.press = try self.mintPress();
+            down.native.action = .down;
+            try self.append(.{ .key_down = down });
+            var up = down;
+            up.native.action = .up;
+            try self.append(.{ .key_up = up });
+        } else if (std.mem.eql(u8, key.name.slice(), "Escape")) {
+            try self.leaveCommandMode();
+        } else if (key.codepoint() == 'q' and !key.modifiers.suppressText()) {
+            try self.requestQuit();
+        } else {
+            self.command_hint = true;
+        }
+        return true;
+    }
+
+    fn enterCommandMode(self: *InputModel) !void {
+        // Keep the input decoder's pending bytes: the command may share a read
+        // with its prefix. Retire queued app work before emitting cleanup.
+        var i: usize = 0;
+        while (i < self.queue.items.len) {
+            if (self.queue.items[i].controller == 0) {
+                _ = self.queue.orderedRemove(i);
+            } else i += 1;
+        }
+        self.routing_mode = .command;
+        self.command_hint = false;
+        for (&self.local_presses) |*slot| if (slot.*) |held| {
+            try self.consumePress(held.native);
+            var up = held;
+            up.native.action = .up;
+            up.repeat = false;
+            up.mods = 0;
+            up.native.modifiers = .{};
+            slot.* = null;
+            try self.append(.{ .key_up = up });
+        };
+        for (self.native_keys, 0..) |held, scan| {
+            if (held == 0) continue;
+            self.blocked_native_keys[scan] = true;
+            const name = native_key.domCode(@intCast(scan)) orelse continue;
+            var up = try bindStatic(try NativeKey.physical(name));
+            up.native.press = try self.mintPress();
+            up.native.action = .up;
+            try self.append(.{ .key_up = up });
+        }
+        self.keyboard_state = @splat(0);
+        self.keyboard_deadline_ns = @splat(0);
+        const buttons = self.mouse_buttons | self.native_buttons;
+        self.blocked_native_buttons |= self.native_buttons;
+        self.mouse_buttons = 0;
+        for (0..32) |bit| {
+            if (buttons & (@as(u32, 1) << @intCast(bit)) != 0) try self.append(.{ .mouse_button = .{
+                .x = self.last_mouse_x,
+                .y = self.last_mouse_y,
+                .button = @intCast(bit + 1),
+                .pressed = false,
+            } });
+        }
+        self.focus_generation +%= 1;
+        try self.append(.{ .focus = false });
+    }
+
+    fn leaveCommandMode(self: *InputModel) !void {
+        self.routing_mode = .app;
+        self.command_hint = false;
+        try self.append(.{ .focus = true });
+    }
+
+    pub fn requestQuit(self: *InputModel) !void {
+        if (self.quit_requested) return;
+        try self.append(.quit);
+        self.quit_requested = true;
     }
 
     fn tapNamed(self: *TerminalInputParser, name: []const u8) !void {
@@ -1248,8 +1431,10 @@ fn orphanTailFinalIndex(bytes: []const u8) ?usize {
     return null;
 }
 
-fn inputEventSdlType(event: InputEvent) u32 {
+pub fn inputEventSdlType(event: InputEvent) u32 {
     return switch (event) {
+        .focus => 0x200,
+        .quit => 0x100,
         .key_down => sdl_event_key_down,
         .key_up => sdl_event_key_up,
         .text, .text_commit => sdl_event_text_input,
@@ -2140,4 +2325,101 @@ test "terminal input parser honours a zero-based pixel origin" {
     const before = parser.mapping_generation;
     parser.setTarget(.{ .cols = 100, .rows = 50, .w = 800, .h = 400, .cell_px = .{ .w = 10, .h = 20 }, .pixel_origin = 1 });
     try std.testing.expect(parser.mapping_generation != before);
+}
+
+test "command prefix releases held input and cancels without leaking repeats" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    model.command_key = ']';
+    try model.feed("\x1b[?31u\x1b[119;1:1u\x1b[<0;2;2M");
+    while (model.pop() != null) {}
+    try model.feed("\x1b[93;5:1u");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try std.testing.expectEqual(@as(i32, 26), model.pop().?.key_up.scancode);
+    try std.testing.expect(!model.pop().?.mouse_button.pressed);
+    try std.testing.expect(!model.pop().?.focus);
+    try std.testing.expect(model.pop() == null);
+    var state: [sdl_num_scancodes]u8 = undefined;
+    model.copyKeyboardState(&state, 0);
+    try std.testing.expectEqual(@as(u8, 0), state[26]);
+    try std.testing.expectEqual(@as(u32, 0), model.mouseState().buttons);
+    try model.feed("\x1b[27;1:1u");
+    try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
+    try std.testing.expect(model.pop().?.focus);
+    try model.feed("\x1b[119;1:2u\x1b[93;5:2u\x1b[27;1:2u\x1b[119;1:3u\x1b[93;5:3u\x1b[27;1:3u");
+    try std.testing.expect(model.pop() == null);
+    try model.feed("\x1b[119;1:1u");
+    try std.testing.expectEqual(@as(i32, 26), model.pop().?.key_down.scancode);
+}
+
+test "command doubled prefix is one literal tap in legacy and kitty encodings" {
+    for ([_][]const u8{ "\x1d\x1d", "\x1b[?31u\x1b[93;5:1u\x1b[93;5:3u\x1b[93;5:1u" }) |bytes| {
+        var model = InputModel.init(std.testing.allocator);
+        defer model.deinit();
+        model.command_key = ']';
+        try model.feed(bytes);
+        try std.testing.expect(!model.pop().?.focus);
+        try std.testing.expect(model.pop().?.focus);
+        const down = model.pop().?.key_down;
+        const up = model.pop().?.key_up;
+        try std.testing.expectEqual(@as(i32, ']'), down.keycode);
+        try std.testing.expectEqual(@as(u16, 0x40), down.mods);
+        try std.testing.expectEqual(down.native.press, up.native.press);
+        try model.feed("\x1b[93;5:2u\x1b[93;5:3u");
+        try std.testing.expect(model.pop() == null);
+    }
+}
+
+test "command paste cannot cancel or quit even across read boundaries" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    model.command_key = ']';
+    try model.feed("\x1d");
+    _ = model.pop();
+    for ("\x1b[200~\x1b\x1dq\x1b[201~") |byte| try model.feed(&.{byte});
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try std.testing.expect(!model.quit_requested);
+    try std.testing.expect(!model.command_hint);
+    try model.feed("x\x1b[<0;3;3M");
+    try std.testing.expect(model.command_hint);
+    try std.testing.expect(model.pop() == null);
+    try model.feed("q");
+    try std.testing.expect(model.quit_requested);
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).quit, std.meta.activeTag(model.pop().?));
+    try model.feed("q");
+    try std.testing.expect(model.pop() == null);
+}
+
+test "command routing blocks native held keys until their physical release" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    model.command_key = ']';
+    try std.testing.expect(!model.routeNativeKey(26, true));
+    try model.feed("\x1d");
+    try std.testing.expectEqual(@as(i32, 26), model.pop().?.key_up.scancode);
+    _ = model.pop();
+    try model.feed("\x1b[27u");
+    _ = model.pop();
+    try std.testing.expect(model.routeNativeKey(26, true));
+    try std.testing.expect(model.routeNativeKey(26, false));
+    try std.testing.expect(!model.routeNativeKey(26, true));
+}
+
+test "command binding uses base layout and disabled models forward the prefix" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    try model.feed("\x1dq");
+    try std.testing.expectEqual(@as(i32, ']'), model.pop().?.key_down.keycode);
+    while (model.pop() != null) {}
+    model.command_key = ']';
+    // Logical layout key differs, but its reported base position is BracketRight.
+    try model.feed("\x1b[?31u\x1b[229::93;5:1u");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try std.testing.expect(!model.pop().?.focus);
+    // Releasing with a changed logical name still retires the consumed press.
+    try model.feed("\x1b[93::93;1:3u\x1b[27;1:1u");
+    try std.testing.expect(model.pop().?.focus);
+    try model.feed("\x1b[93;7:1u"); // Alt+Ctrl is not the configured prefix.
+    try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
+    try std.testing.expectEqual(@as(i32, ']'), model.pop().?.key_down.keycode);
 }

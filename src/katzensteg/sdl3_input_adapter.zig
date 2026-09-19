@@ -16,10 +16,14 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
         defer rt.input_mutex.unlock();
         var parser = &(rt.input_parser orelse break :blk false);
         if (event == null) break :blk parser.pendingCount() > 0;
-        const input_event = parser.popForAdapter(16384, 0, std.math.maxInt(u32)) orelse break :blk false;
+        const input_event = parser.popForAdapterTypes(eventType, 16384, 0, std.math.maxInt(u32)) orelse break :blk false;
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
+            if (input_event == .focus) {
+                var ids = rt.sdl_window_ids.keyIterator();
+                if (ids.next()) |id| out.window.windowID = id.*;
+            }
             cursor_event = out.*;
         }
         break :blk true;
@@ -36,10 +40,14 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
         var parser = &(rt.input_parser orelse break :blk false);
-        const input_event = parser.popForAdapter(16384, min_type, max_type) orelse break :blk false;
+        const input_event = parser.popForAdapterTypes(eventType, 16384, min_type, max_type) orelse break :blk false;
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
+            if (input_event == .focus) {
+                var ids = rt.sdl_window_ids.keyIterator();
+                if (ids.next()) |id| out.window.windowID = id.*;
+            }
             cursor_event = out.*;
         }
         break :blk true;
@@ -50,6 +58,7 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
 }
 
 pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *sdl.SDL_Event) void {
+    if (event.type == sdl.SDL_MOUSEMOTION) event.motion.state = rt.filterNativeMouseButtons(event.motion.state);
     if (rt.hasRemoteInput()) {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
@@ -81,9 +90,10 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
         const n: usize = @min(rt.keyboard_state.len, @as(usize, @intCast(@max(0, real_count))));
         var i: usize = 0;
         while (i < n) : (i += 1) {
-            rt.keyboard_state[i] = @intFromBool(keys[i]);
+            if (!parser.routeNativeKey(@intCast(i), keys[i])) rt.keyboard_state[i] = @intFromBool(keys[i]);
         }
     }
+    if (parser.routing_mode == .command) @memset(&rt.keyboard_state, 0);
     var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
     parser.copyKeyboardState(&terminal_state, system_io.time.nanoTimestamp());
     for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
@@ -92,12 +102,32 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const sdl.S
     return @ptrCast(&rt.keyboard_state[0]);
 }
 
-pub fn claimedWindowFlags(rt: *const runtime_mod.Runtime, flags: sdl.SDL_WindowFlags) sdl.SDL_WindowFlags {
+pub fn claimedWindowFlags(rt: *runtime_mod.Runtime, flags: sdl.SDL_WindowFlags) sdl.SDL_WindowFlags {
+    if (rt.commandModeActive()) return flags & ~(sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS);
     if (!rt.input_claimed or !rt.input_claim_focus) return flags;
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
 }
 
 pub fn shouldSuppressEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+    {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        if (rt.input_parser) |*model| {
+            if (event.type == sdl.SDL_KEYDOWN or event.type == sdl.SDL_KEYUP) {
+                if (model.routeNativeKey(event.key.scancode, event.type == sdl.SDL_KEYDOWN)) return true;
+            }
+            if (model.command_key != null and (event.type == sdl.SDL_MOUSEBUTTONDOWN or event.type == sdl.SDL_MOUSEBUTTONUP)) {
+                if (model.routeNativeButton(event.button.button, event.type == sdl.SDL_MOUSEBUTTONDOWN)) return true;
+            }
+        }
+    }
+    if (rt.commandModeActive()) {
+        switch (event.type) {
+            sdl.SDL_KEYDOWN, sdl.SDL_KEYUP, sdl.SDL_TEXTINPUT, sdl.SDL_MOUSEMOTION, sdl.SDL_MOUSEBUTTONDOWN, sdl.SDL_MOUSEBUTTONUP, sdl.SDL_MOUSEWHEEL => return true,
+            else => {},
+        }
+        if (event.type == sdl.SDL_WINDOWEVENT_FOCUS_GAINED or event.type == sdl.SDL_WINDOWEVENT_FOCUS_LOST) return true;
+    }
     if (shouldSuppressRemoteRelease(rt, event)) return true;
     if (!rt.input_claimed) return false;
     return shouldSuppressClaimedWindowEvent(true, event.type);
@@ -142,6 +172,16 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
     @memset(&event.padding, 0);
     const now = real_sdl.SDL_GetTicks();
     switch (input_event) {
+        .focus => |focused| event.window = .{
+            .type = if (focused) sdl.SDL_WINDOWEVENT_FOCUS_GAINED else sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+            .timestamp = now,
+            .windowID = 0,
+            .data1 = 0,
+            .data2 = 0,
+            .reserved = 0,
+        },
+        .quit => event.type = sdl.SDL_QUIT,
+
         .key_down => |key| event.key = .{
             .type = sdl.SDL_KEYDOWN,
             .reserved = 0,
@@ -240,7 +280,8 @@ test "SDL mouse events are recognized for ownership handoff" {
 }
 
 test "claimed input keeps SDL window focused locally" {
-    var rt: runtime_mod.Runtime = undefined;
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
     rt.input_claimed = true;
     rt.input_claim_focus = true;
 
@@ -358,7 +399,8 @@ pub fn mergedModifiers(rt: *runtime_mod.Runtime, native: u16) u16 {
     defer rt.input_mutex.unlock();
     const model = &(rt.input_parser orelse return native);
     model.observeModifiers();
-    return native | model.heldModifiers();
+    if (model.routing_mode == .command) return 0;
+    return model.nativeModifiers(native) | model.heldModifiers();
 }
 
 test "native motion updates canonical remote-release position" {
@@ -381,4 +423,36 @@ test "native motion updates canonical remote-release position" {
     try std.testing.expectEqual(@as(i32, 100), rt.input_parser.?.mouseState().x);
     try std.testing.expectEqual(@as(i32, 120), rt.input_parser.?.mouseState().y);
     try std.testing.expectEqual(@as(u32, 1), rt.input_parser.?.mouseState().buttons);
+}
+
+test "command focus and quit agree with SDL state and event range reads" {
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_claimed = true;
+    rt.input_claim_focus = true;
+    rt.input_parser = input.InputModel.init(rt.allocator);
+    rt.input_parser.?.command_key = ']';
+    try rt.input_parser.?.feed("\x1d");
+    try std.testing.expectEqual(@as(sdl.SDL_WindowFlags, 0), claimedWindowFlags(&rt, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS));
+    var real_keys = [_]bool{true} ** input.sdl_num_scancodes;
+    const keys = mergedKeyboardState(&rt, &real_keys, real_keys.len, null).?;
+    try std.testing.expectEqual(false, keys[26]);
+    try std.testing.expectEqual(@as(u16, 0), mergedModifiers(&rt, 0x40));
+    var event: sdl.SDL_Event = undefined;
+    try std.testing.expect(popInputEventInRange(&rt, &event, sdl.SDL_WINDOWEVENT_FOCUS_LOST, sdl.SDL_WINDOWEVENT_FOCUS_LOST));
+    try std.testing.expectEqual(sdl.SDL_WINDOWEVENT_FOCUS_LOST, event.type);
+    try rt.input_parser.?.feed("\x1b[27u");
+    try std.testing.expect(popInputEvent(&rt, &event));
+    try std.testing.expectEqual(sdl.SDL_WINDOWEVENT_FOCUS_GAINED, event.type);
+    try rt.input_parser.?.feed("\x1dq");
+    try std.testing.expect(popInputEventInRange(&rt, &event, sdl.SDL_QUIT, sdl.SDL_QUIT));
+    try std.testing.expectEqual(sdl.SDL_QUIT, event.type);
+}
+
+fn eventType(event: input.InputEvent) u32 {
+    return switch (event) {
+        .focus => |focused| if (focused) sdl.SDL_WINDOWEVENT_FOCUS_GAINED else sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+        else => input.inputEventSdlType(event),
+    };
 }

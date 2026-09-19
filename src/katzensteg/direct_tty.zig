@@ -73,13 +73,13 @@ pub const DirectTty = struct {
         // flag stack is per screen, so this only affects the alternate screen
         // entered above. The query's reply tells the parser which flags took
         // effect; terminals without the protocol ignore both sequences.
-        try writer.interface.writeAll(kitty_keyboard_push ++ kitty_keyboard_query);
+        try writer.interface.writeAll(kitty_keyboard_push ++ kitty_keyboard_query ++ "\x1b[?2004h");
         try writer.interface.flush();
     }
 
     pub fn disableInputCapture(self: *DirectTty) !void {
         var writer = self.file.writerStreaming(&.{});
-        try writer.interface.writeAll(kitty_keyboard_pop ++ "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
+        try writer.interface.writeAll(kitty_keyboard_pop ++ "\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l");
         try writer.interface.flush();
     }
 

@@ -177,6 +177,8 @@ pub const Runtime = struct {
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
     sdl_window_ids: std.AutoHashMap(u32, core.CoreHandle),
     input_parser: ?input_mod.TerminalInputParser = null,
+    command_notify_fd: ?std.posix.fd_t = null,
+    command_quit_notified: bool = false,
     // Last terminal protocol replies written to the log, so each change is
     // recorded once.
     logged_keyboard_flags: u32 = 0,
@@ -432,6 +434,11 @@ pub const Runtime = struct {
         }
         if (runtime.input_enabled) {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
+            if (runtime.input_claimed) runtime.input_parser.?.command_key = config.command_key;
+            runtime.command_notify_fd = config.command_notify_fd;
+            if (runtime.command_notify_fd) |fd| {
+                _ = system_io.posix.fcntl(fd, std.posix.F.SETFD, @as(u32, std.posix.FD_CLOEXEC)) catch {};
+            }
             runtime.updateInputTarget();
             runtime.tty.?.enableInputCapture() catch |err| {
                 log.warn("terminal input capture enable failed: {any}", .{err});
@@ -560,6 +567,7 @@ pub const Runtime = struct {
             tty.disableInputCapture() catch {};
             self.pollTerminalInput();
         }
+        if (self.command_notify_fd) |fd| system_io.posix.close(fd);
         if (self.input_parser) |*parser| parser.deinit();
         self.observation.deinit(self.allocator);
         self.placeholder_scene.deinit(self.allocator);
@@ -676,6 +684,35 @@ pub const Runtime = struct {
         self.updateInputTarget();
     }
 
+    pub fn filterNativeMouseButtons(self: *Runtime, buttons: u32) u32 {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        const model = &(self.input_parser orelse return buttons);
+        if (model.command_key == null) return buttons;
+        return model.nativeMouseButtons(buttons);
+    }
+
+    pub fn commandModeActive(self: *Runtime) bool {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        return if (self.input_parser) |*model| model.routing_mode == .command else false;
+    }
+
+    pub fn commandRoutingEnabled(self: *Runtime) bool {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        return if (self.input_parser) |*model| model.command_key != null else false;
+    }
+
+    // Called with input_mutex held. Only the launcher owns process deadlines.
+    fn notifyCommandQuit(self: *Runtime, model: *input_mod.InputModel) void {
+        if (!model.quit_requested or self.command_quit_notified) return;
+        self.command_quit_notified = true;
+        if (self.command_notify_fd) |fd| {
+            if (!@import("launcher/command_lifetime.zig").notify(fd)) log.warn("command quit notification failed", .{});
+        }
+    }
+
     pub fn pollTerminalInput(self: *Runtime) void {
         if (!self.input_enabled) return;
         self.refreshTerminalSizeIfNeeded();
@@ -714,6 +751,7 @@ pub const Runtime = struct {
                 self.input_mutex.unlock();
                 return;
             };
+            self.notifyCommandQuit(parser);
             if (parser.keyboard_protocol_flags != self.logged_keyboard_flags) {
                 self.logged_keyboard_flags = parser.keyboard_protocol_flags;
                 log.info("terminal keyboard protocol flags={d}", .{parser.keyboard_protocol_flags});
@@ -732,8 +770,8 @@ pub const Runtime = struct {
         if (!self.input_enabled) return null;
         self.lockInput("terminal_mouse_state");
         defer self.input_mutex.unlock();
-        if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
+        if (!self.mouse_ownership.terminalOwns() and parser.routing_mode != .command) return null;
         parser.observeState(.pointer);
         return parser.mouseState();
     }
@@ -742,10 +780,15 @@ pub const Runtime = struct {
         if (!self.input_enabled) return null;
         self.lockInput("terminal_relative_mouse_state");
         defer self.input_mutex.unlock();
-        if (!self.mouse_ownership.terminalOwns()) return null;
         const parser = &(self.input_parser orelse return null);
+        if (!self.mouse_ownership.terminalOwns() and parser.routing_mode != .command) return null;
         parser.observeState(.pointer);
-        return self.relative_mouse_baseline.snap(parser.mouseState());
+        const state = parser.mouseState();
+        if (parser.routing_mode == .command) {
+            _ = self.relative_mouse_baseline.snap(state);
+            return .{ .x = state.x, .y = state.y, .buttons = 0 };
+        }
+        return self.relative_mouse_baseline.snap(state);
     }
 
     pub fn claimRealWindowMouse(self: *Runtime) void {
@@ -1288,6 +1331,9 @@ pub const Runtime = struct {
                 self.detachBatchWindow(sink, "main");
             },
             .shutdown => {
+                self.input_mutex.lock();
+                if (self.input_parser) |*model| model.requestQuit() catch {};
+                self.input_mutex.unlock();
                 self.host_closed = true;
                 self.detachBatchWindow(sink, "main");
             },

@@ -227,6 +227,37 @@ and deletes only its own images. Small writes reduce interference with the
 application's terminal output; they cannot guarantee atomic output between
 independent writers.
 
+### Direct-terminal command mode
+
+Direct SDL2/SDL3 takeover sessions accept **Ctrl-]** as an attention key. Release
+it, then press `q` to request app exit, or Escape to return to the app. Press
+Ctrl-] twice to send one literal Ctrl-] tap. Holding the prefix does not count as
+a second press when the terminal reports key releases.
+
+Entering command mode releases held keys and mouse buttons and reports focus
+loss to SDL. Mouse input and bracketed pastes are discarded while armed. There
+is no timeout. This first implementation has no visible command row; unknown
+keys leave the mode armed. The overlay and desktop WM prefix are later stages
+of [#52](https://github.com/rjwittams/katzensteg/issues/52).
+
+Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
+disable the mode. The inheritable profile field is `runtime.command_key`, with
+the same caret notation. Environment configuration overrides the profile.
+Legacy terminals cannot distinguish some control keys from Tab, Enter or
+Escape; Ctrl-] avoids these ambiguities. Kitty reports match the base-layout
+position plus modifiers when available.
+
+Quit first queues an SDL quit event. The launcher allows 1.5 seconds for exit,
+then sends TERM and, after another 250 ms, KILL if necessary. For a direct
+session these signals target the launched child, which shares the terminal's
+foreground process group with its caller. Terminal settings are restored after
+forced termination. Launch through `katzensteg` for this supervision; direct
+preload diagnostics can only offer the app the SDL quit event.
+
+Hosted producers and terminal-free Jackstay publishers keep command mode
+disabled, even when the environment sets a key. Their host owns input routing.
+Wrapping an application still passes Ctrl-C through unchanged.
+
 ### Wrapping the application
 
 `--wrap` runs a command on an inner PTY while the WM owns the outer terminal's

@@ -3,8 +3,10 @@ const system_io = @import("platform");
 const attach_host = @import("attach_host.zig");
 const launcher_context = @import("launcher/context.zig");
 const destination_mod = @import("launcher/destination.zig");
+const command_lifetime = @import("launcher/command_lifetime.zig");
 const launcher_exec = @import("launcher/exec.zig");
 const launcher_plan = @import("launcher/plan.zig");
+const config_mod = @import("config.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
 
@@ -375,8 +377,9 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
             }
         }
     }
+    var command_label: [2]u8 = undefined;
     std.debug.print(
-        "runtime:\n  intercept_mode={s}\n  composite_mode={s}\n  window_policy={s}\n  real_window={s}\n  present_fps={d}\n  input={}\n  input_claim={}\n  input_claim_focus={}\n  output_profile={s}\n  gl_capture={s}\n  vulkan_capture={}\n",
+        "runtime:\n  intercept_mode={s}\n  composite_mode={s}\n  window_policy={s}\n  real_window={s}\n  present_fps={d}\n  input={}\n  input_claim={}\n  input_claim_focus={}\n  command_key={s}\n  output_profile={s}\n  gl_capture={s}\n  vulkan_capture={}\n",
         .{
             @tagName(plan.runtime.intercept_mode),
             @tagName(plan.runtime.composite_mode),
@@ -386,6 +389,7 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
             plan.runtime.input_enabled,
             plan.runtime.input_claimed,
             plan.runtime.input_claim_focus,
+            config_mod.command_binding.label(plan.runtime.command_key, &command_label),
             if (plan.runtime.output_profile) |output_profile| @tagName(output_profile) else "auto",
             @tagName(plan.runtime.gl_capture),
             plan.runtime.vulkan_capture,
@@ -437,6 +441,10 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     }
     defer if (embed_pipes) |*pipes| pipes.deinit();
 
+    var command_supervisor: ?command_lifetime.Supervisor = if (destination == .standalone) try command_lifetime.Supervisor.init(io) else null;
+    defer if (command_supervisor) |*supervisor| supervisor.deinit();
+    if (command_supervisor) |*supervisor| plan.runtime.command_notify_fd = supervisor.child_fd;
+    if (destination != .standalone) plan.runtime.command_key = null;
     const runtime_config_path = try writeRuntimeConfig(io, allocator, plan.runtime);
     defer allocator.free(runtime_config_path);
     defer system_io.fs.deleteFileAbsolute(io, runtime_config_path) catch {};
@@ -470,7 +478,7 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
             return spawnFailureExitCode(err);
         }
     else
-        spawnAndWaitWithOutput(allocator, &child, plan.stdout, plan.stderr) catch |err| {
+        spawnAndWaitWithOutputSupervised(&child, plan.stdout, plan.stderr, if (command_supervisor) |*supervisor| supervisor else null) catch |err| {
             if (destination == .standalone) resetTerminalBestEffort(io);
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
@@ -670,12 +678,17 @@ fn defaultEmbedRuntimeFds() EmbedRuntimeFds {
 }
 
 fn applyEmbedJsonlRuntime(runtime: *RuntimeConfig, fds: EmbedRuntimeFds) void {
+    runtime.command_key = null;
     runtime.presentation_sink = .jsonl_fd;
     runtime.presentation_fd = fds.presentation_fd;
     runtime.presentation_control_fd = fds.control_fd;
 }
 
 fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *system_io.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec) !system_io.process.Child.Term {
+    return spawnAndWaitWithOutputSupervised(child, stdout_spec, stderr_spec, null);
+}
+
+fn spawnAndWaitWithOutputSupervised(child: *system_io.process.Child, stdout_spec: OutputSpec, stderr_spec: OutputSpec, supervisor: ?*command_lifetime.Supervisor) !system_io.process.Child.Term {
     const io = child.io;
     var stdout_sink: ?FileSink = try openStdoutSink(io, stdout_spec);
     defer if (stdout_sink) |*sink| sink.deinit();
@@ -683,6 +696,9 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *system_io.process.Child,
     defer if (stderr_sink) |*sink| sink.deinit();
 
     try child.spawn();
+    errdefer _ = child.kill() catch {};
+    if (supervisor) |owner| try owner.started(child.id);
+    defer if (supervisor) |owner| owner.stop.store(true, .seq_cst);
 
     var drain_stop = std.atomic.Value(bool).init(false);
     var stdout_thread: ?std.Thread = null;
@@ -704,6 +720,7 @@ fn spawnAndWaitWithOutput(_: std.mem.Allocator, child: *system_io.process.Child,
     }
 
     const term = try child.wait();
+    if (supervisor) |owner| owner.stop.store(true, .seq_cst);
     drain_stop.store(true, .seq_cst);
     if (stdout_thread) |thread| thread.join();
     if (stderr_thread) |thread| thread.join();
@@ -941,17 +958,7 @@ fn embedControlLineRequestsShutdown(line: []const u8) bool {
 }
 
 fn terminateEmbedChildAfterGrace(child_pgid: std.posix.pid_t, stop: ?*std.atomic.Value(bool)) void {
-    if (child_pgid <= 0) return;
-    for (0..60) |_| {
-        if (stop) |flag| if (flag.load(.seq_cst)) return;
-        system_io.time.sleep(25 * std.time.ns_per_ms);
-    }
-    std.posix.kill(-child_pgid, std.posix.SIG.TERM) catch {};
-    for (0..10) |_| {
-        if (stop) |flag| if (flag.load(.seq_cst)) return;
-        system_io.time.sleep(25 * std.time.ns_per_ms);
-    }
-    std.posix.kill(-child_pgid, std.posix.SIG.KILL) catch {};
+    if (child_pgid > 0) command_lifetime.terminateAfterGrace(-child_pgid, stop, null);
 }
 
 const CopyFileArgs = struct {
@@ -1191,8 +1198,13 @@ fn writeRuntimeConfig(io: std.Io, allocator: std.mem.Allocator, runtime: Runtime
 }
 
 fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: RuntimeConfig) !void {
+    var command_label: [2]u8 = undefined;
+    try writer.writeAll("{\"command_key\":");
+    try std.json.Stringify.value(config_mod.command_binding.label(runtime.command_key, &command_label), .{}, writer);
+    try writer.writeAll(",\"command_notify_fd\":");
+    if (runtime.command_notify_fd) |fd| try writer.print("{d}", .{fd}) else try writer.writeAll("null");
     try writer.print(
-        "{{\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"input_claim_focus\":{},\"output_profile\":",
+        ",\"composite_mode\":\"{s}\",\"intercept_mode\":\"{s}\",\"window_policy\":\"{s}\",\"real_window\":\"{s}\",\"present_fps\":{d},\"input\":{},\"input_claim\":{},\"input_claim_focus\":{},\"output_profile\":",
         .{
             @tagName(runtime.composite_mode),
             @tagName(runtime.intercept_mode),
@@ -1236,7 +1248,7 @@ fn resetTerminalBestEffort(io: std.Io) void {
 }
 
 fn terminalResetSequence() []const u8 {
-    return "\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l" ++
+    return "\x1b[<u\x1b[?2004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l" ++
         "\x1b[0m\x1b[?25h\x1b[?1049l" ++
         "\x1b_Gq=2,a=d,d=A;\x1b\\";
 }
@@ -1678,4 +1690,16 @@ test "runtime config JSON includes render batch fds" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_sink\":\"jsonl_fd\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_fd\":100") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"presentation_control_fd\":101") != null);
+}
+
+test "launcher command configuration round trips escaped caret bindings" {
+    var runtime = defaultRuntimeConfig();
+    runtime.command_key = '\\';
+    var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer writer.deinit();
+    try writeRuntimeConfigJson(&writer.writer, runtime);
+    const decoded = try config_mod.parseRuntimeConfigJsonSlice(std.testing.allocator, writer.written());
+    try std.testing.expectEqual(runtime.command_key, decoded.command_key);
+    applyEmbedJsonlRuntime(&runtime, defaultEmbedRuntimeFds());
+    try std.testing.expect(runtime.command_key == null);
 }

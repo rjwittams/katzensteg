@@ -28,6 +28,7 @@ pub const RuntimeFieldSet = struct {
     input: bool = false,
     input_claim: bool = false,
     input_claim_focus: bool = false,
+    command_key: bool = false,
     output_profile: bool = false,
     gl_capture: bool = false,
     vulkan_capture: bool = false,
@@ -473,6 +474,12 @@ fn parseRuntimeObject(value: std.json.Value, platform: ProfilePlatform) !ParsedR
             fields.input_claim_focus = true;
         }
     }
+    if (value.object.get("command_key")) |key| {
+        if (try selectedPlatformString(key, platform, error.InvalidRuntime)) |selected| {
+            runtime.command_key = config.command_binding.parse(selected) catch return error.InvalidRuntime;
+            fields.command_key = true;
+        }
+    }
     if (value.object.get("output_profile")) |profile| {
         const selected = try selectedPlatformString(profile, platform, error.InvalidRuntime) orelse null;
         if (selected) |profile_value| {
@@ -716,6 +723,10 @@ fn inheritRuntime(child: *LaunchProfile, parent: *const LaunchProfile) void {
     if (!child.runtime_fields.input_claim and parent.runtime_fields.input_claim) {
         child.runtime.input_claimed = parent.runtime.input_claimed;
         child.runtime_fields.input_claim = true;
+    }
+    if (!child.runtime_fields.command_key and parent.runtime_fields.command_key) {
+        child.runtime.command_key = parent.runtime.command_key;
+        child.runtime_fields.command_key = true;
     }
     if (!child.runtime_fields.input_claim_focus and parent.runtime_fields.input_claim_focus) {
         child.runtime.input_claim_focus = parent.runtime.input_claim_focus;
@@ -1435,4 +1446,17 @@ fn colonEnvContains(value: []const u8, needle: []const u8) bool {
             return false;
         }
     }
+}
+
+test "command key inherits and explicit none overrides the parent" {
+    var catalog = try ProfileCatalog.parse(std.testing.allocator,
+        \\{"profiles": {
+        \\  "base": {"target":"/bin/echo", "runtime":{"command_key":"^X"}},
+        \\  "child": {"extends":["base"]},
+        \\  "disabled": {"extends":["base"], "runtime":{"command_key":"none"}}
+        \\}}
+    );
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(?u8, 'X'), catalog.find("child").?.runtime.command_key);
+    try std.testing.expect(catalog.find("disabled").?.runtime.command_key == null);
 }

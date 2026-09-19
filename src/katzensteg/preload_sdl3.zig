@@ -1120,7 +1120,7 @@ pub export fn ks_SDL_PollEvent(event: ?*sdl.SDL_Event) callconv(.c) sdl.SDL_bool
     const rt = runtime.get();
     if (rt.hasRemoteInput()) real_sdl.SDL_PumpEvents();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandRoutingEnabled()) {
         rt.claimRealWindowMouse();
     } else if (sdl_input.popInputEvent(rt, event)) {
         if (event) |out| traceSdlEvent("SDL_PollEvent synthetic", out, false);
@@ -1179,7 +1179,7 @@ pub export fn ks_SDL_PeepEvents(events: ?[*]sdl.SDL_Event, numevents: c_int, act
     var kept: c_int = 0;
     while (real_index < real_rc) : (real_index += 1) {
         const current = &rest_ptr[@intCast(real_index)];
-        if (sdl_input.shouldSuppressRemoteRelease(rt, current)) continue;
+        if (sdl_input.shouldSuppressEvent(rt, current)) continue;
         noteDeliveredWindowSizeEvent(rt, current);
         sdl_input.noteRealEvent(rt, current);
         rest_ptr[@intCast(kept)] = current.*;
@@ -1221,6 +1221,7 @@ pub export fn ks_SDL_HasKeyboard() callconv(.c) sdl.SDL_bool {
 }
 
 pub export fn ks_SDL_GetKeyboardFocus() callconv(.c) ?*sdl.SDL_Window {
+    if (runtime.get().commandModeActive()) return null;
     return real_sdl.SDL_GetKeyboardFocus();
 }
 
@@ -1234,7 +1235,7 @@ pub export fn ks_SDL_GetKeyboardState(numkeys: ?*c_int) callconv(.c) ?[*]const s
 
 pub export fn ks_SDL_GetModState() callconv(.c) sdl.SDL_Keymod {
     const rt = runtime.get();
-    if (!rt.hasRemoteInput()) return real_sdl.SDL_GetModState();
+    if (!rt.input_enabled) return real_sdl.SDL_GetModState();
     sdl_input.refreshInput(rt);
     return sdl_input.mergedModifiers(rt, real_sdl.SDL_GetModState());
 }
@@ -1246,7 +1247,7 @@ pub export fn ks_SDL_SetModState(modstate: sdl.SDL_Keymod) callconv(.c) void {
 pub export fn ks_SDL_GetMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Uint32 {
     const rt = runtime.get();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandModeActive()) {
         rt.claimRealWindowMouse();
         var real_x: f32 = 0;
         var real_y: f32 = 0;
@@ -1255,7 +1256,7 @@ pub export fn ks_SDL_GetMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Uint32 {
         const buttons = real_sdl.SDL_GetMouseState(out_x, out_y);
         rt.dispatchCursorPosition(.{ .x = @intFromFloat(out_x.*), .y = @intFromFloat(out_y.*) });
         traceLimited(rt, &trace_get_mouse_state, "SDL_GetMouseState real pos={d:.1},{d:.1} buttons=0x{x}", .{ out_x.*, out_y.*, buttons });
-        return buttons | rt.remoteMouseButtons();
+        return rt.filterNativeMouseButtons(buttons) | rt.remoteMouseButtons();
     }
     if (rt.terminalMouseState()) |state| {
         if (x) |out_x| out_x.* = state.precise_x orelse @floatFromInt(state.x);
@@ -1267,7 +1268,7 @@ pub export fn ks_SDL_GetMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Uint32 {
     const buttons = real_sdl.SDL_GetMouseState(x, y);
     if (buttons != 0) rt.claimRealWindowMouse();
     traceLimited(rt, &trace_get_mouse_state, "SDL_GetMouseState fallback buttons=0x{x}", .{buttons});
-    return buttons | rt.remoteMouseButtons();
+    return rt.filterNativeMouseButtons(buttons) | rt.remoteMouseButtons();
 }
 
 pub export fn ks_SDL_GetGlobalMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Uint32 {
@@ -1277,9 +1278,9 @@ pub export fn ks_SDL_GetGlobalMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Ui
 pub export fn ks_SDL_GetRelativeMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.Uint32 {
     const rt = runtime.get();
     sdl_input.refreshInput(rt);
-    if (realMouseFocused() and !rt.hasRemoteInput()) {
+    if (realMouseFocused() and !rt.hasRemoteInput() and !rt.commandModeActive()) {
         rt.claimRealWindowMouse();
-        return real_sdl.SDL_GetRelativeMouseState(x, y) | rt.remoteMouseButtons();
+        return rt.filterNativeMouseButtons(real_sdl.SDL_GetRelativeMouseState(x, y)) | rt.remoteMouseButtons();
     }
     if (rt.terminalRelativeMouseState()) |state| {
         if (x) |out_x| out_x.* = state.precise_xrel orelse @floatFromInt(state.xrel);
@@ -1290,7 +1291,7 @@ pub export fn ks_SDL_GetRelativeMouseState(x: ?*f32, y: ?*f32) callconv(.c) sdl.
     const xrel = if (x) |out_x| out_x.* else 0.0;
     const yrel = if (y) |out_y| out_y.* else 0.0;
     if (buttons != 0 or xrel != 0 or yrel != 0) rt.claimRealWindowMouse();
-    return buttons | rt.remoteMouseButtons();
+    return rt.filterNativeMouseButtons(buttons) | rt.remoteMouseButtons();
 }
 
 pub export fn ks_SDL_SetWindowRelativeMouseMode(window: ?*sdl.SDL_Window, enabled: sdl.SDL_bool) callconv(.c) sdl.SDL_bool {

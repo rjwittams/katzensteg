@@ -156,6 +156,7 @@ pub fn resolvedRuntimeConfig(profile: *const profiles.LaunchProfile) RuntimeConf
     if (fields.input) runtime.input_enabled = profile.runtime.input_enabled;
     if (fields.input_claim) runtime.input_claimed = profile.runtime.input_claimed;
     if (fields.input_claim_focus) runtime.input_claim_focus = profile.runtime.input_claim_focus;
+    if (fields.command_key) runtime.command_key = profile.runtime.command_key;
     if (fields.output_profile) runtime.output_profile = profile.runtime.output_profile;
     if (fields.gl_capture) runtime.gl_capture = profile.runtime.gl_capture;
     if (fields.vulkan_capture) runtime.vulkan_capture = profile.runtime.vulkan_capture;

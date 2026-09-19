@@ -183,6 +183,8 @@ pub const Controller = struct {
     fn forward(self: *Controller, event: input.InputEvent, target: input.Target) !void {
         const caps = self.admission.capabilities;
         switch (event) {
+            // Local presentation/lifetime events are never remote app input.
+            .focus, .quit => return,
             .key_down, .key_up => |key| {
                 const native = &key.native;
                 if (native.name.isEmpty() or native.press == 0) return error.Unsupported;
