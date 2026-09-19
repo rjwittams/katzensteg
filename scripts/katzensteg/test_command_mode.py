@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import signal
@@ -33,7 +34,7 @@ class CommandMode(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
 
-    def run_app(self, version, ignore=False, command_key="^]"):
+    def run_app(self, version, ignore=False, command_key="^]", intercept_mode="queued_replay"):
         case = tempfile.TemporaryDirectory(prefix='case-', dir=self.root)
         self.addCleanup(case.cleanup)
         folder = Path(case.name)
@@ -44,7 +45,7 @@ class CommandMode(unittest.TestCase):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 960, 480))
         env = dict(os.environ, KATZENSTEG_PROFILE_DIR=f'{ROOT / "profiles"}:{self.root}', KATZENSTEG_REPO=str(ROOT),
                    KS_COMMAND_REPORT=str(folder/'events'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software',
-                   KATZENSTEG_REAL_WINDOW='hide', KATZENSTEG_OUTPUT_PROFILE='direct_apc', KATZENSTEG_COMMAND_KEY=command_key)
+                   KATZENSTEG_REAL_WINDOW='hide', KATZENSTEG_OUTPUT_PROFILE='direct_apc', KATZENSTEG_COMMAND_KEY=command_key, KATZENSTEG_INTERCEPT_MODE=intercept_mode)
         env.pop('KATZENSTEG_TARGET', None)
         if ignore: env['KS_IGNORE_QUIT'] = '1'
         # Keep the controlling session alive after launcher exit, including on macOS.
@@ -62,7 +63,8 @@ class CommandMode(unittest.TestCase):
         def wait(predicate, timeout=8):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                if select.select([master], [], [], .02)[0]: os.read(master, 65536)
+                if select.select([master], [], [], .02)[0]:
+                    with (folder/'terminal').open('ab') as output: output.write(os.read(master, 65536))
                 if predicate(): return
             self.fail(f'timed out; events={events()!r}; exited={(folder/"exit").read_text() if (folder/"exit").exists() else None}')
         wait(lambda: 'ready ' in events())
@@ -88,6 +90,30 @@ class CommandMode(unittest.TestCase):
                 self.assertEqual((folder/'exit').read_text(), '0')
                 self.assertIn('quit', events())
                 self.assertEqual(termios.tcgetattr(slave), original)
+
+    def test_menu_updates_without_another_game_frame(self):
+        for mode in ('queued_replay', 'sync_compose'):
+            with self.subTest(mode=mode):
+                folder, master, slave, _, events, wait = self.run_app(2, intercept_mode=mode)
+                def output(): return (folder/'terminal').read_bytes()
+                os.write(master, b'\x1d')
+                wait(lambda: b'q Quit | Esc Return | ^] Literal' in output())
+                self.assertIn(b'\x1b[24;1H', output())
+                layers = re.findall(rb',z=(-?\d+)', output())
+                self.assertTrue(layers, 'expected the initial game image placement')
+                self.assertTrue(all(int(z) < -1073741824 for z in layers), layers)
+                os.write(master, b'x')
+                wait(lambda: b'Unknown key' in output())
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 1200, 600))
+                wait(lambda: b'\x1b[30;1H' in output())
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 20, 40, 480, 400))
+                wait(lambda: b'\x1b[20;1H' in output())
+                # Clicking Return consumes both halves of the click.
+                os.write(master, b'\x1b[<0;13;20M\x1b[<0;13;20m')
+                wait(lambda: 'focus 1' in events() and b'\x1b[40X' in output())
+                os.write(master, b'\x1dq')
+                wait(lambda: (folder/'exit').exists())
+                self.assertEqual((folder/'exit').read_text(), '0')
 
     def test_none_passes_attention_and_q_to_the_app(self):
         folder, master, _, _, events, wait = self.run_app(2, command_key='none')

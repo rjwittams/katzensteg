@@ -67,6 +67,8 @@ const QueuedLockCapture = struct {
 };
 
 const ts_scene = termscene.scene;
+const command_menu = @import("command_menu.zig");
+const command_overlay = @import("command_overlay.zig");
 const ts_kitty = termscene.kitty;
 
 var preload_io: std.Io.Threaded = .init_single_threaded;
@@ -123,6 +125,9 @@ pub const Runtime = struct {
     logger: Logger,
     tty: ?DirectTty = null,
     engine: ?ts_scene.SceneEngine = null,
+    command_overlay: ?command_overlay.Overlay = null,
+    command_menu_snapshot: command_menu.Snapshot = .{},
+    command_menu_mutex: system_io.Mutex = .{},
     backend: ?ts_kitty.Backend = null,
     batch_writer: ?system_io.fs.File = null,
     batch_control: ?system_io.fs.File = null,
@@ -435,6 +440,7 @@ pub const Runtime = struct {
         if (runtime.input_enabled) {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
             if (runtime.input_claimed) runtime.input_parser.?.command_key = config.command_key;
+            runtime.frame_builder.direct_text_overlay = runtime.input_parser.?.command_key != null;
             runtime.command_notify_fd = config.command_notify_fd;
             if (runtime.command_notify_fd) |fd| {
                 _ = system_io.posix.fcntl(fd, std.posix.F.SETFD, @as(u32, std.posix.FD_CLOEXEC)) catch {};
@@ -520,6 +526,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         defer self.presentation_mutex.deinit();
+        defer self.command_menu_mutex.deinit();
         defer self.input_mutex.deinit();
         defer self.queue_mutex.deinit();
         defer self.queue_cond.deinit();
@@ -567,6 +574,7 @@ pub const Runtime = struct {
             tty.disableInputCapture() catch {};
             self.pollTerminalInput();
         }
+        if (self.command_overlay) |*overlay| overlay.deinit();
         if (self.command_notify_fd) |fd| system_io.posix.close(fd);
         if (self.input_parser) |*parser| parser.deinit();
         self.observation.deinit(self.allocator);
@@ -715,6 +723,7 @@ pub const Runtime = struct {
 
     pub fn pollTerminalInput(self: *Runtime) void {
         if (!self.input_enabled) return;
+        defer self.publishCommandMenu();
         self.refreshTerminalSizeIfNeeded();
         const tty = &(self.tty orelse return);
         var buf: [256]u8 = undefined;
@@ -764,6 +773,49 @@ pub const Runtime = struct {
             self.input_mutex.unlock();
             if (n < buf.len) return;
         }
+    }
+
+    fn publishCommandMenu(self: *Runtime) void {
+        // Serialize snapshots from multiple SDL polling threads, but never hold
+        // the input mutex while entering presentation (which updates targets).
+        self.command_menu_mutex.lock();
+        defer self.command_menu_mutex.unlock();
+        self.lockInput("command_menu_snapshot");
+        const parser = &(self.input_parser orelse {
+            self.input_mutex.unlock();
+            return;
+        });
+        const tty = self.tty orelse {
+            self.input_mutex.unlock();
+            return;
+        };
+        if (parser.command_key == null) {
+            self.input_mutex.unlock();
+            return;
+        }
+        const snapshot = parser.commandMenuSnapshot(tty.cols, tty.rows);
+        self.input_mutex.unlock();
+        if (std.meta.eql(snapshot, self.command_menu_snapshot)) return;
+        self.command_menu_snapshot = snapshot;
+        const cmd = Command{ .command_menu = snapshot };
+        switch (self.intercept_mode) {
+            .sync_compose => self.presentCommandMenu(snapshot),
+            .queued_replay => self.enqueueCommand(cmd),
+        }
+    }
+
+    pub fn presentCommandMenu(self: *Runtime, snapshot: command_menu.Snapshot) void {
+        self.lockPresentation("command_menu");
+        defer self.presentation_mutex.unlock();
+        if (self.backend == null or self.tty == null) return;
+        if (self.command_overlay == null) {
+            if (!snapshot.active) return;
+            self.command_overlay = command_overlay.Overlay.init(self.allocator);
+        }
+        self.command_overlay.?.present(&self.backend.?, snapshot) catch |err| {
+            log.warn("command menu presentation failed: {any}", .{err});
+        };
+        self.updateInputTarget();
     }
 
     pub fn terminalMouseState(self: *Runtime) ?input_mod.MouseState {
@@ -825,7 +877,7 @@ pub const Runtime = struct {
         return self.real_window_visibility.restoreAction();
     }
 
-    fn lockPresentation(self: *Runtime, comptime context: []const u8) void {
+    pub fn lockPresentation(self: *Runtime, comptime context: []const u8) void {
         self.lockTraced(&self.presentation_mutex, "presentation_mutex", context);
     }
 
@@ -911,6 +963,8 @@ pub const Runtime = struct {
         if (!(self.active and self.tty != null and self.engine != null and self.backend != null)) return;
         const start_ns = system_io.time.nanoTimestamp();
         self.refreshTerminalSizeIfNeeded();
+        self.lockPresentation("direct_external_framebuffer");
+        defer self.presentation_mutex.unlock();
         self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
         const duration = system_io.time.nanoTimestamp() - start_ns;
@@ -1088,7 +1142,7 @@ pub const Runtime = struct {
         defer self.input_mutex.unlock();
         var parser = &(self.input_parser orelse return);
         const tty = self.tty orelse return;
-        parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, self.presentation_layout));
+        parser.setTarget(buildInputTarget(&tty, self.input_window_w, self.input_window_h, parser.commandMenuSnapshot(tty.cols, tty.rows).withChrome(self.presentation_layout)));
     }
 
     pub fn pollBatchControl(self: *Runtime) void {

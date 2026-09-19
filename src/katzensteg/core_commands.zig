@@ -7,6 +7,7 @@ const CorePoint = core.CorePoint;
 const ExternalFramebufferFormat = frame_builder.ExternalFramebufferFormat;
 
 pub const Command = union(enum) {
+    command_menu: @import("command_menu.zig").Snapshot,
     create_window: struct { window: CoreHandle, w: i32, h: i32 },
     window_size: struct { window: CoreHandle, w: i32, h: i32 },
     create_renderer: struct { window: CoreHandle, renderer: CoreHandle },

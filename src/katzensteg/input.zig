@@ -6,6 +6,7 @@ const native_key = @import("native_key.zig");
 const terminal_keys = @import("terminal_keys.zig");
 
 const command_binding = @import("command_key.zig");
+const command_menu = @import("command_menu.zig");
 pub const RoutingMode = enum { app, command };
 
 pub const NativeKey = native_key.Key;
@@ -200,6 +201,8 @@ pub const InputModel = struct {
     command_key: ?u8 = null,
     routing_mode: RoutingMode = .app,
     command_hint: bool = false,
+    command_pointer_action: ?command_menu.Action = null,
+    consumed_terminal_buttons: u32 = 0,
     paste_active: bool = false,
     paste_drop: bool = false,
     quit_requested: bool = false,
@@ -904,8 +907,40 @@ pub const InputModel = struct {
         self.mouse_activity = true;
     }
 
+    fn routeCommandMouse(self: *InputModel, b: i32, x: i32, y: i32, pressed: bool, units: terminal_keys.MouseUnits) !bool {
+        const armed = self.routing_mode == .command;
+        if (!armed and self.consumed_terminal_buttons == 0) return false;
+        if ((b & (32 | 64)) != 0 or b == 4 or b == 5) return true;
+        const button = b & 3;
+        const mask = if (button == 3) self.consumed_terminal_buttons else sdlButtonMask(terminalButtonToSdl(@intCast(button)));
+        var col = x;
+        var row = y;
+        if (units == .pixel) {
+            const cell = self.target.cell_px orelse return true;
+            if (cell.w <= 0 or cell.h <= 0) return true;
+            col = @as(i32, @intFromFloat(@floor(@as(f32, @floatFromInt(@max(x - self.target.pixel_origin, 0))) / cell.w))) + 1;
+            row = @as(i32, @intFromFloat(@floor(@as(f32, @floatFromInt(@max(y - self.target.pixel_origin, 0))) / cell.h))) + 1;
+        }
+        const hit = self.commandMenuSnapshot(@intCast(self.target.cols), @intCast(self.target.rows)).hit(col, row);
+        if (pressed and button != 3) {
+            self.consumed_terminal_buttons |= mask;
+            if (armed and button == 0) self.command_pointer_action = hit;
+        } else {
+            self.consumed_terminal_buttons &= ~mask;
+            const action = self.command_pointer_action;
+            if (button == 0 or button == 3) {
+                self.command_pointer_action = null;
+                if (armed and action != null and action == hit) switch (action.?) {
+                    .quit => try self.requestQuit(),
+                    .cancel => try self.leaveCommandMode(),
+                };
+            }
+        }
+        return true;
+    }
+
     fn emitMouseCode(self: *TerminalInputParser, b: i32, report_x: i32, report_y: i32, pressed: bool, units: terminal_keys.MouseUnits) !void {
-        if (self.routing_mode == .command) return;
+        if (try self.routeCommandMouse(b, report_x, report_y, pressed, units)) return;
         const point = self.mapReportToSdl(report_x, report_y, units) orelse {
             // For now, terminal chrome/letterbox cells do not target SDL. Keep
             // button state and last mouse position unchanged until region
@@ -1137,6 +1172,10 @@ pub const InputModel = struct {
         return true;
     }
 
+    pub fn commandMenuSnapshot(self: *const InputModel, cols: u16, rows: u16) command_menu.Snapshot {
+        return .{ .active = self.routing_mode == .command, .hint = self.command_hint, .quitting = self.quit_requested, .binding = self.command_key orelse ']', .cols = cols, .rows = rows };
+    }
+
     fn enterCommandMode(self: *InputModel) !void {
         // Keep the input decoder's pending bytes: the command may share a read
         // with its prefix. Retire queued app work before emitting cleanup.
@@ -1169,6 +1208,8 @@ pub const InputModel = struct {
         }
         self.keyboard_state = @splat(0);
         self.keyboard_deadline_ns = @splat(0);
+        self.consumed_terminal_buttons |= self.mouse_buttons;
+        self.command_pointer_action = null;
         const buttons = self.mouse_buttons | self.native_buttons;
         self.blocked_native_buttons |= self.native_buttons;
         self.mouse_buttons = 0;
@@ -1187,6 +1228,7 @@ pub const InputModel = struct {
     fn leaveCommandMode(self: *InputModel) !void {
         self.routing_mode = .app;
         self.command_hint = false;
+        self.command_pointer_action = null;
         try self.append(.{ .focus = true });
     }
 
@@ -2422,4 +2464,33 @@ test "command binding uses base layout and disabled models forward the prefix" {
     try model.feed("\x1b[93;7:1u"); // Alt+Ctrl is not the configured prefix.
     try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
     try std.testing.expectEqual(@as(i32, ']'), model.pop().?.key_down.keycode);
+}
+
+test "command menu clicks require matching release and consume pointer gestures" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    model.command_key = ']';
+    try model.feed("\x1d");
+    _ = model.pop();
+    try model.feed("\x1b[<0;13;24M");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try model.feed("\x1b[<0;13;23m");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try model.feed("\x1b[<0;13;24M\x1b[<0;13;24m");
+    try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
+    try std.testing.expect(model.pop().?.focus);
+    try std.testing.expect(model.pop() == null);
+    try model.feed("\x1d\x1b[<0;3;24M\x1b[27u\x1b[<0;3;24m");
+    try std.testing.expect(!model.pop().?.focus);
+    try std.testing.expect(model.pop().?.focus);
+    try std.testing.expect(model.pop() == null);
+    try std.testing.expect(!model.quit_requested);
+    // Pixel reports use the terminal's pixel origin and cell size, not game pixels.
+    model.mouse_units = .pixel;
+    model.target.pixel_origin = 0;
+    model.target.cell_px = .{ .w = 10, .h = 20 };
+    try model.feed("\x1d\x1b[<0;25;470M\x1b[<0;25;470m");
+    try std.testing.expect(!model.pop().?.focus);
+    try std.testing.expectEqual(std.meta.Tag(InputEvent).quit, std.meta.activeTag(model.pop().?));
+    try std.testing.expect(model.pop() == null);
 }

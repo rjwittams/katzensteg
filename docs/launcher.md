@@ -235,10 +235,13 @@ Ctrl-] twice to send one literal Ctrl-] tap. Holding the prefix does not count a
 a second press when the terminal reports key releases.
 
 Entering command mode releases held keys and mouse buttons and reports focus
-loss to SDL. Mouse input and bracketed pastes are discarded while armed. There
-is no timeout. This first implementation has no visible command row; unknown
-keys leave the mode armed. The overlay and desktop WM prefix are later stages
-of [#52](https://github.com/rjwittams/katzensteg/issues/52).
+loss to SDL. A command row covers the bottom terminal row without resizing the
+game. It shows `q Quit`, `Esc Return` and the configured prefix for a literal
+tap. Unknown keys leave it armed and display a hint; there is no timeout. Click
+and release on Quit or Return to choose that action. Other mouse input and
+bracketed pastes are discarded while armed. The row updates even when the game
+is not drawing, and follows terminal resizes. The desktop WM prefix remains a
+later stage of [#52](https://github.com/rjwittams/katzensteg/issues/52).
 
 Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
 disable the mode. The inheritable profile field is `runtime.command_key`, with

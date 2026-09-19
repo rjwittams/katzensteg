@@ -158,9 +158,16 @@ framed at the source so its contents cannot execute commands.
 
 Command quit has two outputs: a model event for SDL and a one-byte notification
 to the launcher over a private inherited socket. The launcher owns the grace
-period and TERM/KILL escalation. The runtime does not kill its host process or
-write a command response to the terminal. Command-mode hints remain model
-state for the later presentation overlay.
+period and TERM/KILL escalation. The runtime does not kill its host process.
+
+The input boundary sends immutable command-menu snapshots to presentation,
+through the replay queue when enabled. A separate termscene text scene owns
+the bottom-row chrome; it does not depend on game frames or refit their grid.
+Direct command-enabled sessions place game images below non-default terminal
+text backgrounds, preserving their relative z order. Hosted output keeps its
+existing image layers. Direct text and graphics writes share the presentation
+mutex, so a menu update cannot interrupt an image upload. Menu hit testing and
+click consumption remain in the input model.
 
 Terminal keyboard reports are decoded by `src/katzensteg/terminal_keys.zig`,
 one decoder for the legacy xterm forms and the kitty keyboard protocol. The
