@@ -214,7 +214,7 @@ pub const WmMouseInputState = struct {
             return .{ .action = if (had_drag) .consume else .none };
         }
         if (self.drag) |drag| return .{ .action = .{ .mouse_drag = drag.update(cell, terminal) } };
-        if ((mouse.button & 3) != 0) return .{ .action = .none };
+        if ((mouse.button & (32 | 64 | 3)) != 0) return .{ .action = .none };
 
         const hit = mouseHitTest(outer, cell);
         switch (hit) {
@@ -780,11 +780,18 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         }
     }
 
+    // Capability probes read terminal replies directly. Finish them before
+    // enabling input, then reuse the terminal's profile for every producer.
+    const output_profile = blk: {
+        var probe_upload = try selectUploadPolicy(allocator, tty.file);
+        defer deinitUploadPolicy(io, allocator, &probe_upload);
+        break :blk probe_upload.profile;
+    };
     try tty.enableInputCapture();
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
-        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, &event_log) catch |err| {
+        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, output_profile, &event_log) catch |err| {
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
             continue;
@@ -877,7 +884,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 const session_id = next_session_id;
                 next_session_id += 1;
                 channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
-                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, &event_log) catch |err| {
+                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, output_profile, &event_log) catch |err| {
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -937,7 +944,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                                     try event_log.record(.parse_error, "session limit reached");
                                 } else launch: {
                                     const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
-                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, &event_log) catch |err| {
+                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, output_profile, &event_log) catch |err| {
                                         try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
                                         break :launch;
                                     };
@@ -966,23 +973,40 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     },
                     .command => |action| .{ .action = desktopCommandAction(action) },
                     .forward, .pointer => |bytes| blk: {
+                        var window_pointer = false;
                         if (event == .pointer) {
                             const pointer = parseSgrMouseAt(bytes, 0, terminal) orelse break :blk .{ .action = .consume };
                             const menu = command_menu.Snapshot{ .active = command_input.armed, .rows = @intCast(terminal.rows), .cols = @intCast(terminal.cols) };
-                            if (command_input.routePointer(pointer.button, pointer.pressed, menu.hit(pointer.col, pointer.row))) break :blk .{ .action = .consume };
+                            const cell = Cell{ .row = pointer.row, .col = pointer.col };
+                            tty_lock.lock();
+                            const chrome = if (hitSessionIndex(sessions[0..initialized], z_order[0..initialized], cell)) |index|
+                                switch (mouseHitTest(sessions[index].window.outer, cell)) {
+                                    .title, .close, .resize_right, .resize_bottom, .resize_bottom_right => true,
+                                    .desktop, .content => false,
+                                }
+                            else
+                                false;
+                            tty_lock.unlock();
+                            switch (command_input.routePointer(pointer.button, pointer.pressed, menu.hit(pointer.col, pointer.row), chrome)) {
+                                .consume => break :blk .{ .action = .consume },
+                                .window => window_pointer = true,
+                                .application => {},
+                            }
                         }
                         if (keyboardFlagsReply(bytes)) |flags| tty.keyboard_protocol_flags = flags;
                         if (mouseUnitsReply(bytes)) |units| tty.mouse_units = units;
                         terminal.mouse_units = tty.mouse_units;
                         tty_lock.lock();
                         defer tty_lock.unlock();
-                        break :blk readInputForSessionsBytes(bytes, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
+                        var routed = readInputForSessionsBytes(bytes, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
+                        if (window_pointer and routed.action == .forward) routed.action = .consume;
+                        break :blk routed;
                     },
                 };
 
                 if (input.focus_changed) {
                     command_input.focusByClick();
-                    syncInputFocus(sessions[0..initialized], focused_index);
+                    syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
                     try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                     try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -1151,20 +1175,20 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
     var producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
     errdefer producer.deinit();
-    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, events);
+    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, output_profile, events);
     session.producer.child = producer.child;
     return session;
 }
 
 // Takes ownership of the channel only on success. Both owned and external
 // producers use the same presentation allocation and initial attach.
-fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
-    var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
+    var upload = try uploadPolicyForSession(allocator, output_profile, session_index);
     errdefer deinitUploadPolicy(io, allocator, &upload);
     const owned_title = try allocator.dupe(u8, title);
     errdefer allocator.free(owned_title);
@@ -2211,16 +2235,10 @@ fn deinitUploadPolicy(io: std.Io, allocator: std.mem.Allocator, upload: *render_
     upload.path = null;
 }
 
-fn uploadPolicyForSession(allocator: std.mem.Allocator, tty: system_io.fs.File, session_index: usize) !render_batch_protocol.UploadPolicy {
-    const io = tty.io;
-    var upload = try selectUploadPolicy(allocator, tty);
-    errdefer deinitUploadPolicy(io, allocator, &upload);
-    if (upload.path) |path| {
-        upload.path = try sessionUploadPath(allocator, path, session_index);
-        upload_path_mod.deleteBasePath(io, path);
-        allocator.free(path);
-    }
-    return upload;
+fn uploadPolicyForSession(allocator: std.mem.Allocator, profile: render_batch_protocol.UploadProfile, session_index: usize) !render_batch_protocol.UploadPolicy {
+    const base_path = try upload_path_mod.makeUploadPath(allocator);
+    defer allocator.free(base_path);
+    return .{ .profile = profile, .path = try sessionUploadPath(allocator, base_path, session_index) };
 }
 
 fn sessionUploadPath(allocator: std.mem.Allocator, base_path: []const u8, session_index: usize) ![]u8 {
@@ -2290,7 +2308,7 @@ fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: [
     var changed_focus = false;
     if (mouse.drag == null) {
         if (parseSgrMouseAt(bytes, 0, terminal)) |event| {
-            if (event.pressed and (event.button & 3) == 0) {
+            if (event.pressed and (event.button & (32 | 64 | 3)) == 0) {
                 const cell = Cell{ .row = event.row, .col = event.col };
                 if (hitSessionIndex(sessions, z_order, cell)) |hit_index| {
                     if (focused_index.* != hit_index) {

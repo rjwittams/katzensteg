@@ -3,6 +3,8 @@ const native = @import("native_key.zig");
 const keys = @import("terminal_keys.zig");
 const binding = @import("command_key.zig");
 
+pub const PointerRoute = enum { application, window, consume };
+
 pub const Event = union(enum) {
     forward: []u8,
     pointer: []u8,
@@ -24,6 +26,7 @@ pub const Model = struct {
     offset: usize = 0,
     paste: bool = false,
     mouse_buttons: u32 = 0,
+    window_pointer: bool = false,
     blocked_buttons: u32 = 0,
     menu_press: ?@import("command_menu.zig").Action = null,
     drop_paste: bool = false,
@@ -75,6 +78,8 @@ pub const Model = struct {
     pub fn blur(self: *Model) void {
         self.blurKeys();
         self.blocked_buttons |= self.mouse_buttons;
+        if (self.window_pointer) self.blocked_buttons |= 1;
+        self.window_pointer = false;
         self.mouse_buttons = 0;
         self.menu_press = null;
     }
@@ -87,8 +92,22 @@ pub const Model = struct {
         self.mouse_buttons &= 1;
     }
 
-    pub fn routePointer(self: *Model, button: i32, pressed: bool, hit: ?@import("command_menu.zig").Action) bool {
-        if (button & (32 | 64) != 0) return self.armed or self.prompt or self.blocked_buttons != 0;
+    pub fn routePointer(self: *Model, button: i32, pressed: bool, hit: ?@import("command_menu.zig").Action, chrome: bool) PointerRoute {
+        // Own the entire chrome gesture, even when it crosses content or the
+        // menu. A press held before a focus change cannot start a new drag.
+        if (self.window_pointer) {
+            if (button & 64 != 0) return .consume;
+            if (!pressed and (button & 3 == 0 or button & 3 == 3)) {
+                self.window_pointer = false;
+                return .window;
+            }
+            return if (button & 3 == 0) .window else .consume;
+        }
+        if (chrome and hit == null and pressed and button & (32 | 64 | 3) == 0 and (self.blocked_buttons | self.mouse_buttons) & 1 == 0) {
+            self.window_pointer = true;
+            return .window;
+        }
+        if (button & (32 | 64) != 0) return if (self.armed or self.prompt or self.blocked_buttons != 0) .consume else .application;
         const index: u5 = @intCast(button & 3);
         const mask: u32 = @as(u32, 1) << index;
         const consumed = self.armed or self.prompt or self.blocked_buttons & mask != 0 or (index == 3 and self.blocked_buttons != 0);
@@ -114,7 +133,7 @@ pub const Model = struct {
                 }
             }
         }
-        return consumed;
+        return if (consumed) .consume else .application;
     }
 
     pub fn finishPrompt(self: *Model) void {
@@ -340,23 +359,45 @@ test "desktop mouse menu consumes releases across keyboard cancellation" {
     defer model.deinit();
     try model.feed("\x1d");
     try std.testing.expect(!model.next(false).?.focus);
-    try std.testing.expect(model.routePointer(0, true, .cancel));
-    try std.testing.expect(model.routePointer(0, false, .cancel));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, true, .cancel, false));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, false, .cancel, false));
     try std.testing.expect(model.next(false).?.focus);
     try model.feed("\x1d");
     try std.testing.expect(!model.next(false).?.focus);
-    try std.testing.expect(model.routePointer(0, true, .quit));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, true, .quit, false));
     try model.feed("\x1b[27u");
     try std.testing.expect(model.next(false).?.focus);
-    try std.testing.expect(model.routePointer(0, false, .quit));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, false, .quit, false));
     try std.testing.expect(model.next(false) == null);
 }
 
 test "desktop click focus keeps the new click paired while retiring old keys" {
     var model = Model.init(std.testing.allocator, ']');
     defer model.deinit();
-    try std.testing.expect(!model.routePointer(0, true, null));
+    try std.testing.expectEqual(PointerRoute.application, model.routePointer(0, true, null, false));
     model.focusByClick();
-    try std.testing.expect(!model.routePointer(0, false, null));
+    try std.testing.expectEqual(PointerRoute.application, model.routePointer(0, false, null, false));
     try std.testing.expectEqual(@as(u32, 0), model.mouse_buttons);
+}
+
+test "desktop chrome owns drags through menu and content without resuming the application" {
+    var model = Model.init(std.testing.allocator, ']');
+    defer model.deinit();
+    try model.feed("\x1d");
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expectEqual(PointerRoute.window, model.routePointer(0, true, null, true));
+    model.focusByClick();
+    try std.testing.expectEqual(PointerRoute.window, model.routePointer(32, true, .quit, false));
+    try std.testing.expectEqual(PointerRoute.window, model.routePointer(0, false, .quit, false));
+    try std.testing.expect(model.armed);
+    try std.testing.expect(model.next(false) == null);
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, true, null, false));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(32, true, null, true));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, false, null, true));
+    // A drag interrupted by command entry is blocked until release.
+    try std.testing.expectEqual(PointerRoute.window, model.routePointer(0, true, null, true));
+    model.blur();
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(32, true, null, true));
+    try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, false, null, true));
+    try std.testing.expectEqual(PointerRoute.window, model.routePointer(0, true, null, true));
 }

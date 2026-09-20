@@ -100,6 +100,12 @@ class Screen:
 
 class PlaceholderHostTest(unittest.TestCase):
     def test_normal_wm_hosts_two_producers(self):
+        self.check_mouse_geometry(False)
+
+    def test_menu_keeps_window_geometry_mouse_controls(self):
+        self.check_mouse_geometry(True)
+
+    def check_mouse_geometry(self, armed):
         with tempfile.TemporaryDirectory(prefix="wm-placeholder-") as directory:
             folder = Path(directory)
             # A private executable pair lets the test remove the launcher to
@@ -112,8 +118,9 @@ class PlaceholderHostTest(unittest.TestCase):
             (folder / "profiles.json").write_text(json.dumps({"profiles": profiles}))
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 1000, 800))
-            env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_OUTPUT_PROFILE="file_whole", KATZENSTEG_PROFILE_DIR=str(REPO / "profiles") + ":" + directory)
+            env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_PROFILE_DIR=str(REPO / "profiles") + ":" + directory)
             env.pop("KATZENSTEG_TARGET", None)
+            env.pop("KATZENSTEG_OUTPUT_PROFILE", None)
 
             def controlling_terminal():
                 os.setsid()
@@ -121,11 +128,13 @@ class PlaceholderHostTest(unittest.TestCase):
 
             proc = subprocess.Popen([str(wm), "--presentation", "placeholder", "first", "second"], env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
             screen = Screen()
+            mouse_queries_answered = 0
 
-            def pump_until(predicate, timeout=15):
+            def pump_until(predicate, timeout=8):
+                nonlocal mouse_queries_answered
                 deadline = time.monotonic() + timeout
                 while not predicate():
-                    self.assertLess(time.monotonic(), deadline, (proc.poll(), screen.frames, screen.placements, {p.name: p.read_text()[-3000:] for p in folder.glob("*.log")}))
+                    self.assertLess(time.monotonic(), deadline, (proc.poll(), screen.frames, screen.placements, [(pos, char) for pos, (char, _) in screen.cells.items() if char in "┌└┐┘"], {p.name: p.read_text()[-3000:] for p in folder.glob("*.log")}))
                     ready, _, _ = select.select([master], [], [], 0.05)
                     if ready:
                         try:
@@ -135,6 +144,10 @@ class PlaceholderHostTest(unittest.TestCase):
                                 raise
                             data = b""
                         screen.feed(data)
+                        queries = screen.raw.count(b"\x1b[?1016$p")
+                        if queries > mouse_queries_answered:
+                            os.write(master, b"\x1b[?1016;1$y" * (queries - mouse_queries_answered))
+                            mouse_queries_answered = queries
                     if proc.poll() is not None and not predicate():
                         self.fail((proc.returncode, screen.frames))
 
@@ -147,11 +160,29 @@ class PlaceholderHostTest(unittest.TestCase):
                 os.write(master, b"\x1d\t")  # Raise first over second.
                 pump_until(lambda: screen.cells.get((20, 50)) == (GLYPH, 100000))
                 before_size = screen.placements[100000]
-                os.write(master, b"\x1dl")
+                # Move the focused window by dragging its title, using pixel reports.
+                if armed: os.write(master, b"\x1d")
+                os.write(master, b"\x1b[<0;95;30M\x1b[<32;105;30M\x1b[<0;105;30m")
                 pump_until(lambda: screen.cells.get((1, 2), (None,))[0] == "┌" and screen.cells.get((1, 1), (None,))[0] == " ")
                 self.assertEqual(screen.placements[100000], before_size, "moving must not resize the virtual placement")
-                os.write(master, b"\x1dH")
-                pump_until(lambda: screen.placements[100000] != before_size)
+                # Resize the bottom-right corner, also with pixel reports.
+                # The WM fits the height to the source aspect ratio.
+                pump_until(lambda: any(c == 2 and char == "└" for (r, c), (char, _) in screen.cells.items()))
+                right = max(c for (r, c), (char, _) in screen.cells.items() if r == 1 and char == "┐")
+                bottom = max(r for (r, c), (char, _) in screen.cells.items() if c == 2 and char == "└")
+                x, y = (right - 1) * 10 + 5, (bottom - 1) * 20 + 10
+                os.write(master, f"\x1b[<0;{x};{y}M\x1b[<32;{x - 10};{y - 20}M\x1b[<0;{x - 10};{y - 20}m".encode())
+                pump_until(lambda: screen.placements[100000][0] < before_size[0] and any(c == right - 1 and r < bottom and char == "┘" for (r, c), (char, _) in screen.cells.items()))
+                if armed:
+                    # Geometry keeps command mode active, with content blocked.
+                    os.write(master, b"\x1b[<0;205;210M\x1b[<0;205;210m")
+                    os.write(master, b"z")
+                    pump_until(lambda: "Unknown key" in "".join(screen.cells.get((40, c), (" ",))[0] for c in range(1, 101)))
+                for name in ("first", "second"):
+                    self.assertNotIn("mouse_button_down", (folder / (name + ".log")).read_text())
+                if armed:
+                    os.write(master, b"\x1b[27u")
+                os.write(master, b"\x1b[?1016;2$y")
                 # Translate a click on the first displayed source cell to (0,0).
                 cells = sorted(pos for pos, value in screen.cells.items() if value == (GLYPH, 100000))
                 row, col = cells[0]
