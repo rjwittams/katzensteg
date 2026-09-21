@@ -551,7 +551,7 @@ pub const Runtime = struct {
             self.input_executor = null;
         };
         if (self.whiskers_client) |*client| client.deinit();
-        for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommandLocked(cmd);
+        for (self.queue.items[self.queue_head..]) |*cmd| self.recycleCommand(cmd);
         self.queue.deinit(self.allocator);
         self.renderer_output_sizes.deinit(self.allocator);
         self.payload_pool.deinit(self.allocator);
@@ -1564,20 +1564,23 @@ pub const Runtime = struct {
         defer self.queue_mutex.unlock();
         var owned = cmd;
         if (self.shutdown_worker) {
-            self.recycleCommandLocked(&owned);
+            self.recycleCommand(&owned);
             return;
         }
         if (isPresentCommand(owned) and self.pending_presents > 0) {
             self.dropQueuedFrameLocalsBeforeLatestPresent();
         }
+        const was_empty = self.queue_head == self.queue.items.len;
         self.queue.append(self.allocator, owned) catch |err| {
             log.warn("failed to enqueue command: {any}", .{err});
-            self.recycleCommandLocked(&owned);
+            self.recycleCommand(&owned);
             return;
         };
         if (isPresentCommand(owned)) self.pending_presents += 1;
         self.maybeCompactQueue();
-        self.queue_cond.signal();
+        // The worker only waits on an empty queue. Further appends cannot
+        // enable progress and need not signal the condition again.
+        if (was_empty) self.queue_cond.signal();
     }
 
     pub fn dispatchCursorPosition(self: *Runtime, position: ?core.CorePoint) void {
@@ -1639,13 +1642,9 @@ pub const Runtime = struct {
         return self.payload_pool.copyMany(self.allocator, n, sources);
     }
 
+    // The caller owns cmd exclusively. Payloads synchronizes its own pool;
+    // retiring a command does not touch the queue or need its mutex.
     pub fn recycleCommand(self: *Runtime, cmd: *Command) void {
-        self.lockQueue("recycle_command");
-        defer self.queue_mutex.unlock();
-        self.recycleCommandLocked(cmd);
-    }
-
-    fn recycleCommandLocked(self: *Runtime, cmd: *Command) void {
         switch (cmd.*) {
             .update_texture => |*c| {
                 if (c.pixels) |buf| self.payload_pool.release(self.allocator, buf);
@@ -1702,7 +1701,7 @@ pub const Runtime = struct {
             const cmd = self.queue.items[idx];
             if (isFrameLocalCommand(cmd)) {
                 var doomed = cmd;
-                self.recycleCommandLocked(&doomed);
+                self.recycleCommand(&doomed);
                 dropped_any = true;
                 continue;
             }
@@ -1737,7 +1736,7 @@ pub const Runtime = struct {
             if (textureUpload(cmd)) |upload| {
                 if (replacements.contains(upload.texture)) {
                     var doomed = cmd;
-                    self.recycleCommandLocked(&doomed);
+                    self.recycleCommand(&doomed);
                     continue;
                 }
                 if (upload.full) replacements.put(upload.texture, {}) catch {};
@@ -1793,6 +1792,45 @@ test "external framebuffer present is a frame-local present command" {
     const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
     try std.testing.expect(isFrameLocalCommand(cmd));
     try std.testing.expect(isPresentCommand(cmd));
+}
+
+test "worker owned payload can retire while a producer holds the queue" {
+    var rt = Runtime.initShutdownStub();
+    defer rt.deinit();
+    const pixels = try rt.acquirePayloadBuffer(4);
+    const Retire = struct {
+        mutex: system_io.Mutex = .{},
+        changed: system_io.Condition = .{},
+        done: bool = false,
+        cmd: Command,
+
+        fn run(self: *@This(), runtime: *Runtime) void {
+            runtime.recycleCommand(&self.cmd);
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.done = true;
+            self.changed.signal();
+        }
+    };
+    var retire = Retire{ .cmd = .{ .update_texture = .{ .texture = 1, .rect = null, .pixels = pixels, .pitch = 4 } } };
+    defer retire.mutex.deinit();
+    defer retire.changed.deinit();
+    rt.queue_mutex.lock();
+    const thread = std.Thread.spawn(.{}, Retire.run, .{ &retire, &rt }) catch |err| {
+        rt.queue_mutex.unlock();
+        return err;
+    };
+    retire.mutex.lock();
+    while (!retire.done) {
+        retire.changed.timedWait(&retire.mutex, std.time.ns_per_s) catch break;
+    }
+    const retired_without_queue = retire.done;
+    retire.mutex.unlock();
+    // Unlock before joining even on failure: a regression should fail, not hang.
+    rt.queue_mutex.unlock();
+    thread.join();
+    try std.testing.expect(retired_without_queue);
+    try std.testing.expectEqual(@as(usize, 0), rt.payload_pool.live_bytes);
 }
 
 test "stalled replay consumer retains only latest full video upload" {
@@ -2542,39 +2580,48 @@ fn workerMain(runtime: *Runtime) void {
         const cmd_is_present = isPresentCommand(cmd);
         runtime.queue_mutex.unlock();
         core_dispatch.handleCommand(runtime, cmd);
-        runtime.lockQueue("worker_recycle_command");
-        if (cmd_is_present) runtime.worker_frame_active = false;
-        runtime.recycleCommandLocked(&cmd);
-        runtime.queue_mutex.unlock();
+        if (cmd_is_present) {
+            runtime.lockQueue("worker_finish_frame");
+            runtime.worker_frame_active = false;
+            runtime.queue_mutex.unlock();
+        }
+        runtime.recycleCommand(&cmd);
     }
 }
 
 pub fn get() *Runtime {
     global_mutex.lock();
     defer global_mutex.unlock();
-    if (global_runtime == null) {
-        if (global_shutdown_started) {
-            global_runtime = Runtime.initShutdownStub();
-            global_runtime_is_stub = true;
-            return &global_runtime.?;
-        }
-        global_runtime = Runtime.init();
-        global_runtime_is_stub = false;
-        if (global_runtime) |*runtime| {
-            if (runtime.whiskers_client) |*client| {
-                if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") == null) {
-                    client.start();
-                }
+    // Capture the payload by pointer: comparing this large optional to null
+    // can copy the entire Runtime in Debug builds on the per-draw hot path.
+    if (global_runtime) |*runtime| return runtime;
+    return initGlobalLocked();
+}
+
+// Keep initialization's large stack temporaries off the per-command path.
+// The caller holds global_mutex through initialization and worker startup.
+noinline fn initGlobalLocked() *Runtime {
+    if (global_shutdown_started) {
+        global_runtime = Runtime.initShutdownStub();
+        global_runtime_is_stub = true;
+        return &global_runtime.?;
+    }
+    global_runtime = Runtime.init();
+    global_runtime_is_stub = false;
+    if (global_runtime) |*runtime| {
+        if (runtime.whiskers_client) |*client| {
+            if (std.c.getenv("KATZENSTEG_WHISKERS_FORCE_CAPTURE") == null) {
+                client.start();
             }
-            if (runtime.intercept_mode == .queued_replay) {
-                if (std.Thread.spawn(.{}, workerMain, .{runtime})) |thread| {
-                    runtime.worker_thread = thread;
-                } else |err| {
-                    log.warn("failed to start queued replay worker: {any}", .{err});
-                    runtime.active = false;
-                    runtime.shutdown_worker = true;
-                    runtime.payload_pool.close();
-                }
+        }
+        if (runtime.intercept_mode == .queued_replay) {
+            if (std.Thread.spawn(.{}, workerMain, .{runtime})) |thread| {
+                runtime.worker_thread = thread;
+            } else |err| {
+                log.warn("failed to start queued replay worker: {any}", .{err});
+                runtime.active = false;
+                runtime.shutdown_worker = true;
+                runtime.payload_pool.close();
             }
         }
     }

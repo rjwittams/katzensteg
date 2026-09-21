@@ -58,6 +58,24 @@ python3 -m unittest discover -s scripts/katzensteg -p 'test_*.py'
 scripts/katzensteg/bootstrap_external_projects.py --doctor-only --root ~/dev
 ```
 
+### Capture CPU benchmark
+
+`benchmark_capture.py` launches a fixed SDL2 workload through the normal
+launcher on an isolated PTY. It draws 3,000 small rectangles per frame for
+120 frames, using the SDL dummy driver and file uploads at 320×240 pixels.
+
+```sh
+python3 scripts/katzensteg/benchmark_capture.py
+```
+
+Compare `cpu_ms_per_frame` across the three runs before and after a change,
+using the same build mode. Process CPU includes the replay worker. The script
+checks that every submitted frame was uploaded, so dropping frames cannot
+produce a misleading improvement. `--frames`, `--rectangles`, and `--runs`
+adjust the workload; `--build-prefix` selects an isolated build's `bin` and
+`lib` directories. Timing is diagnostic, not a CI threshold. This measures
+capture and presentation overhead, not terminal-emulator CPU or GPU readback.
+
 ## Runtime I/O
 
 Standalone programs use the I/O capability supplied by `std.process.Init`.
