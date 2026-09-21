@@ -1233,6 +1233,7 @@ pub const InputModel = struct {
         self.keyboard_deadline_ns = @splat(0);
         self.consumed_terminal_buttons |= self.mouse_buttons;
         self.command_pointer_action = null;
+        // Remote holds belong to the Jackstay executor and its controller reset.
         const buttons = self.mouse_buttons | self.native_buttons;
         self.blocked_native_buttons |= self.native_buttons;
         self.mouse_buttons = 0;
@@ -2516,4 +2517,28 @@ test "command menu clicks require matching release and consume pointer gestures"
     try std.testing.expect(!model.pop().?.focus);
     try std.testing.expectEqual(std.meta.Tag(InputEvent).quit, std.meta.activeTag(model.pop().?));
     try std.testing.expect(model.pop() == null);
+}
+
+test "command pixel clicks respect both axes at zero and one based cell boundaries" {
+    for ([_]i32{ 0, 1 }) |origin| {
+        var model = InputModel.init(std.testing.allocator);
+        defer model.deinit();
+        model.command_key = ']';
+        model.setTarget(.{ .cols = 80, .rows = 24, .w = 320, .h = 240, .cell_px = .{ .w = 10, .h = 20 }, .pixel_origin = origin });
+        try model.feed("\x1b[?1016;1$y\x1d");
+        try std.testing.expect(!model.pop().?.focus);
+        // Return starts at cell (11,24). Adjacent pixels belong to other cells.
+        const x = 10 * 10 + origin;
+        const y = 23 * 20 + origin;
+        var bytes: [128]u8 = undefined;
+        for ([_][2]i32{ .{ x, y - 1 }, .{ x - 1, y } }) |point| {
+            try model.feed(try std.fmt.bufPrint(&bytes, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ point[0], point[1], point[0], point[1] }));
+            try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+            try std.testing.expect(model.pop() == null);
+        }
+        try model.feed(try std.fmt.bufPrint(&bytes, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ x, y, x, y }));
+        try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
+        try std.testing.expect(model.pop().?.focus);
+        try std.testing.expect(model.pop() == null);
+    }
 }

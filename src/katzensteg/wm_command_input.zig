@@ -52,6 +52,9 @@ pub const Model = struct {
         try self.pending.appendSlice(self.allocator, bytes);
     }
     fn push(self: *Model, event: Event) void {
+        // next() drains these before dispatching another token; a dispatch
+        // currently emits at most two events (command/literal plus focus).
+        std.debug.assert(self.event_len < self.events.len);
         self.events[self.event_len] = event;
         self.event_len += 1;
     }

@@ -7,6 +7,7 @@ pub const Supervisor = struct {
     parent_fd: std.posix.fd_t,
     child_fd: ?std.posix.fd_t,
     stop: std.atomic.Value(bool) = .init(false),
+    // Set before TERM (not just KILL): either escalation may bypass tty cleanup.
     escalated: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     tty: ?os.fs.File = null,

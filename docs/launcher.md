@@ -251,7 +251,8 @@ Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
 disable the mode. The inheritable profile field is `runtime.command_key`, with
 the same caret notation. Environment configuration overrides the profile.
 Legacy terminals cannot distinguish some control keys from Tab, Enter or
-Escape; Ctrl-] avoids these ambiguities. Kitty reports match the base-layout
+Escape, and `^@` uses the NUL encoding shared with Ctrl-Space. Ctrl-] avoids
+these ambiguities. Kitty reports match the base-layout
 position plus modifiers when available.
 
 Quit first queues an SDL quit event. The launcher allows 1.5 seconds for exit,

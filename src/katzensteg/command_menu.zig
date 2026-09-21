@@ -27,10 +27,18 @@ pub const Snapshot = struct {
     pub fn line(self: Snapshot, buffer: []u8) []const u8 {
         const out = buffer[0..@min(buffer.len, self.cols)];
         @memset(out, ' ');
-        var text: [256]u8 = undefined;
-        const message = if (self.desktop and self.hint) " q Quit | Esc Return | Unknown key" else if (self.desktop) std.fmt.bufPrint(&text, " q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch unreachable else if (self.quitting) " Quitting... waiting for app" else std.fmt.bufPrint(&text, " q Quit | Esc Return | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch unreachable;
-        const len = @min(message.len, out.len);
-        @memcpy(out[0..len], message[0..len]);
+        // Fill the terminal-width slice directly. A full writer means the
+        // visible prefix is complete; the remaining text is simply clipped.
+        var writer = std.Io.Writer.fixed(out);
+        if (self.desktop and self.hint) {
+            writer.writeAll(" q Quit | Esc Return | Unknown key") catch {};
+        } else if (self.desktop) {
+            writer.print(" q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^{c} Literal", .{std.ascii.toUpper(self.binding)}) catch {};
+        } else if (self.quitting) {
+            writer.writeAll(" Quitting... waiting for app") catch {};
+        } else {
+            writer.print(" q Quit | Esc Return | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch {};
+        }
         return out;
     }
 
@@ -80,4 +88,26 @@ test "direct content stays below text backgrounds in its original order" {
     try std.testing.expectEqual(@as(i32, 100), contentZ(100) - contentZ(0));
     try std.testing.expect(contentZ(std.math.maxInt(i32)) < @divExact(std.math.minInt(i32), 2));
     try std.testing.expectEqual(std.math.minInt(i32), contentZ(std.math.minInt(i32)));
+}
+
+test "menu text clips at each terminal width and pads the whole row" {
+    const cases = .{
+        .{ Snapshot{}, " q Quit | Esc Return | ^] Literal" },
+        .{ Snapshot{ .hint = true }, " q Quit | Esc Return | ^] Literal | Unknown key" },
+        .{ Snapshot{ .quitting = true }, " Quitting... waiting for app" },
+        .{ Snapshot{ .desktop = true }, " q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^] Literal" },
+        .{ Snapshot{ .desktop = true, .hint = true }, " q Quit | Esc Return | Unknown key" },
+    };
+    inline for (cases) |case| {
+        var snapshot = case[0];
+        var buffer: [300]u8 = undefined;
+        for (0..buffer.len + 1) |width| {
+            snapshot.cols = @intCast(width);
+            const line = snapshot.line(&buffer);
+            try std.testing.expectEqual(width, line.len);
+            const visible = @min(width, case[1].len);
+            try std.testing.expectEqualStrings(case[1][0..visible], line[0..visible]);
+            for (line[visible..]) |char| try std.testing.expectEqual(@as(u8, ' '), char);
+        }
+    }
 }

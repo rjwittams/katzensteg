@@ -20,6 +20,7 @@ pub fn matches(binding: u8, key: native.Key) bool {
     return key.codepoint() == character;
 }
 
+/// The returned label borrows the caller's buffer.
 pub fn label(binding: ?u8, buf: *[2]u8) []const u8 {
     const key = binding orelse return "none";
     buf.* = .{ '^', key };
