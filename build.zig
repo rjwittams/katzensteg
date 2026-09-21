@@ -25,12 +25,12 @@ pub fn build(b: *std.Build) void {
         const prefix = jackstay_prefix orelse @panic("-Djackstay=true requires -Djackstay-prefix; see docs/jackstay.md");
         const library = if (is_macos) "libjackstay.dylib" else "libjackstay.so";
         jackstay_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
-        jackstay_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
-        jackstay_mod.linkSystemLibrary("jackstay", .{ .use_pkg_config = .no });
-        // Relocatable installed packages; the explicit prefix also serves test binaries.
+        // Link the prepared file directly: -ljackstay also makes Zig inject
+        // its build directory as an automatic runtime search path.
+        jackstay_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) });
+        // Installed artifacts resolve Jackstay within their own package.
         jackstay_mod.addRPathSpecial(if (is_macos) "@loader_path/../lib" else "$ORIGIN/../lib");
         jackstay_mod.addRPathSpecial(if (is_macos) "@loader_path" else "$ORIGIN");
-        jackstay_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
         const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
         b.getInstallStep().dependOn(&install.step);
     }
@@ -63,7 +63,8 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
-    addUnitTest(b, test_step, "jackstay-test", "src/jackstay/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
+    const test_library_dir = if (enable_jackstay) b.pathJoin(&.{ jackstay_prefix.?, "lib" }) else null;
+    addUnitTest(b, test_step, "jackstay-test", "src/jackstay/tests.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     if (enable_jackstay) {
         const probe = b.addExecutable(.{ .name = "katzensteg-jackstay-probe", .use_llvm = use_llvm, .root_module = projectModule(b, .{
             .root_source_file = b.path("src/jackstay/probe.zig"),
@@ -73,9 +74,9 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(probe);
         b.step("jackstay-probe", "Build the Jackstay cross-process fixture").dependOn(&b.addInstallArtifact(probe, .{}).step);
     }
-    if (enable_jackstay) addUnitTest(b, test_step, "katzensteg-jackstay-input-test", "src/katzensteg/jackstay_input_executor_test.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    if (enable_jackstay) addUnitTest(b, test_step, "katzensteg-jackstay-controller-test", "src/katzensteg/jackstay_input_controller_test.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "platform-test", "src/platform/tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
+    if (enable_jackstay) addUnitTest(b, test_step, "katzensteg-jackstay-input-test", "src/katzensteg/jackstay_input_executor_test.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    if (enable_jackstay) addUnitTest(b, test_step, "katzensteg-jackstay-controller-test", "src/katzensteg/jackstay_input_controller_test.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "platform-test", "src/platform/tests.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
 
     // On macOS, Zig emits debug-map binaries (no inline __DWARF); a UUID-matched
     // .dSYM bundle must sit next to each dylib for Instruments / lldb to symbolicate
@@ -798,49 +799,49 @@ pub fn build(b: *std.Build) void {
     luchs_build_step.dependOn(&install_luchs.step);
     if (install_luchs_helper_step) |step| luchs_build_step.dependOn(step);
 
-    addUnitTest(b, test_step, "termscene-shared-memory-test", "src/termscene/kitty/shared_memory.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "termscene-profile-test", "src/termscene/kitty_tests.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-log-test", "src/katzensteg/log.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-render-batch-protocol-test", "src/katzensteg/render_batch_protocol.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-attach-protocol-test", "src/katzensteg/attach_protocol.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-wm-command-input-test", "src/katzensteg/wm_command_input.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "termscene-shared-memory-test", "src/termscene/kitty/shared_memory.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "termscene-profile-test", "src/termscene/kitty_tests.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "termscene-protocol-test", "src/termscene/kitty/protocol.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-config-test", "src/katzensteg/config.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-log-test", "src/katzensteg/log.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-render-batch-protocol-test", "src/katzensteg/render_batch_protocol.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-attach-protocol-test", "src/katzensteg/attach_protocol.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-terminal-batch-applier-test", "src/katzensteg/terminal_batch_applier.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-command-input-test", "src/katzensteg/wm_command_input.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-host-test", "src/katzensteg/wm_host.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .xev = xev_mod,
         .link_libc = true,
     });
-    addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
     });
-    addUnitTest(b, test_step, "katzensteg-frame-builder-test", "src/katzensteg/frame_builder.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-frame-builder-test", "src/katzensteg/frame_builder.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_libc = true,
     });
-    addUnitTest(b, test_step, "katzensteg-runtime-test", "src/katzensteg/runtime.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-runtime-test", "src/katzensteg/runtime.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_libc = true,
         .link_sdl2 = true,
     });
-    addUnitTest(b, test_step, "katzensteg-sdl2-input-adapter-test", "src/katzensteg/sdl2_input_adapter.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-sdl2-input-adapter-test", "src/katzensteg/sdl2_input_adapter.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
         .link_sdl2 = true,
     });
-    addUnitTest(b, test_step, "katzensteg-sdl3-input-adapter-test", "src/katzensteg/sdl3_input_adapter.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-sdl3-input-adapter-test", "src/katzensteg/sdl3_input_adapter.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl3_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
         .link_libc = true,
         .link_sdl3 = true,
     });
-    addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .katzensteg_build_options = test_preload_options.createModule(),
@@ -848,21 +849,21 @@ pub fn build(b: *std.Build) void {
         .link_sdl2 = true,
         .link_opengl = true,
     });
-    addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-launcher-context-test", "src/katzensteg/launcher/context.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-launcher-destination-test", "src/katzensteg/launcher/destination.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "katzensteg-wm-cli-test", "src/katzensteg/wm/cli.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-wm-client-test", "src/katzensteg/wm/client.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "katzensteg-wm-listener-test", "src/katzensteg/wm/listener.zig", target, optimize, use_llvm, .{ .link_libc = true });
-    addUnitTest(b, test_step, "katzensteg-wm-event-test", "src/katzensteg/wm/event.zig", target, optimize, use_llvm, .{});
-    addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-launcher-context-test", "src/katzensteg/launcher/context.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-launcher-destination-test", "src/katzensteg/launcher/destination.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "katzensteg-wm-cli-test", "src/katzensteg/wm/cli.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-wm-client-test", "src/katzensteg/wm/client.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "katzensteg-wm-listener-test", "src/katzensteg/wm/listener.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "katzensteg-wm-event-test", "src/katzensteg/wm/event.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .link_libc = true,
     });
-    addUnitTest(b, test_step, "katzensteg-launcher-test", "src/katzensteg/launcher.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "katzensteg-launcher-test", "src/katzensteg/launcher.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
     });
-    addUnitTest(b, test_step, "luchs-test", "tools/luchs/src/main.zig", target, optimize, use_llvm, .{
+    addUnitTest(b, test_step, "luchs-test", "tools/luchs/src/main.zig", target, optimize, use_llvm, test_library_dir, .{
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_sdl2 = true,
     });
@@ -887,6 +888,7 @@ fn addUnitTest(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     use_llvm: ?bool,
+    test_library_dir: ?[]const u8,
     options: UnitTestOptions,
 ) void {
     const unit_test = b.addTest(.{
@@ -899,6 +901,8 @@ fn addUnitTest(
             .link_libc = options.link_libc,
         }),
     });
+    // Test executables run from Zig's cache, outside the installed bin/lib tree.
+    if (test_library_dir) |dir| unit_test.root_module.addRPath(.{ .cwd_relative = dir });
     if (options.termscene) |mod| unit_test.root_module.addImport("termscene", mod);
     if (options.xev) |mod| unit_test.root_module.addImport("xev", mod);
     if (options.katzensteg_sdl) |mod| unit_test.root_module.addImport("katzensteg_sdl", mod);

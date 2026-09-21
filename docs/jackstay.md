@@ -15,15 +15,19 @@ The dependency revision and C ABI are pinned in
 Prepare the ABI 0.8 headers and shared library, then enable the connectors:
 
 ```sh
-python3 scripts/katzensteg/prepare_jackstay.py --prefix /tmp/ks-jackstay
-zig build -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
-zig build test -Djackstay=true -Djackstay-prefix=/tmp/ks-jackstay
+ks_jackstay_prefix="${XDG_CACHE_HOME:-$HOME/.cache}/katzensteg/jackstay"
+python3 scripts/katzensteg/prepare_jackstay.py --prefix "$ks_jackstay_prefix"
+zig build -Djackstay=true -Djackstay-prefix="$ks_jackstay_prefix"
+zig build test -Djackstay=true -Djackstay-prefix="$ks_jackstay_prefix"
 ```
 
 The helper clones the pinned revision and runs a locked Cargo release build.
 `--source /path/to/checkout` instead uses a clean checkout at that exact revision.
-The installed package includes the library in `zig-out/lib`; runtime ABI checking
-rejects mismatches. A normal build requires neither Jackstay headers nor its
+The prepared dependency stays in the local cache for subsequent builds and tests.
+The installed package includes the library in `zig-out/lib` and resolves it through
+package-relative paths; it does not search the preparation directory at runtime.
+Only Zig unit-test executables, which run from the build cache, use that directory
+as a library search path. Runtime ABI checking rejects mismatches. A normal build requires neither Jackstay headers nor its
 library. Selecting either connector in a disabled build reports
 `JackstayUnavailable` before launching a child.
 
@@ -251,7 +255,7 @@ also trigger cleanup. Viewport changes alone do not count as focus loss.
 
 ```sh
 python3 scripts/katzensteg/test_jackstay.py
-KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
+KATZENSTEG_JACKSTAY_PREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/katzensteg/jackstay" \
 JACKSTAY_REFERENCE_VIEWER=/path/to/capture-viewer-sdl \
   python3 scripts/katzensteg/test_jackstay_input.py
 zig build                      # default, Vulkan enabled; Jackstay disabled
