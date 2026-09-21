@@ -110,9 +110,12 @@ class PlaceholderHostTest(unittest.TestCase):
             folder = Path(directory)
             # A private executable pair lets the test remove the launcher to
             # exercise a failed interactive launch without touching the build.
-            wm = folder / "katzensteg-wm"
+            # Preserve the installed bin/../lib layout for optional libraries.
+            (folder / "bin").mkdir()
+            (folder / "lib").symlink_to(REPO / "zig-out/lib", target_is_directory=True)
+            wm = folder / "bin/katzensteg-wm"
             shutil.copy2(REPO / "zig-out/bin/katzensteg-wm", wm)
-            launcher = folder / "katzensteg"
+            launcher = folder / "bin/katzensteg"
             launcher.symlink_to(REPO / "zig-out/bin/katzensteg")
             profiles = {name: {"extends": ["probe.input"], "stdout": str(folder / (name + ".log")), "stderr": "stdout"} for name in ("first", "second")}
             (folder / "profiles.json").write_text(json.dumps({"profiles": profiles}))
@@ -149,7 +152,7 @@ class PlaceholderHostTest(unittest.TestCase):
                             os.write(master, b"\x1b[?1016;1$y" * (queries - mouse_queries_answered))
                             mouse_queries_answered = queries
                     if proc.poll() is not None and not predicate():
-                        self.fail((proc.returncode, screen.frames))
+                        self.fail((proc.returncode, screen.frames, bytes(screen.raw[-4096:])))
 
             try:
                 pump_until(lambda: all(screen.frames.get(i, 0) >= 3 for i in (100000, 300000)) and screen.cells.get((20, 50)) == (GLYPH, 300000))
