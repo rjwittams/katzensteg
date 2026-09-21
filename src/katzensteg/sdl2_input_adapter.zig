@@ -17,6 +17,10 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
+            if (input_event == .focus) {
+                var ids = rt.sdl_window_ids.keyIterator();
+                if (ids.next()) |id| out.window.windowID = id.*;
+            }
             cursor_event = out.*;
         }
         break :blk true;
@@ -37,6 +41,10 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
+            if (input_event == .focus) {
+                var ids = rt.sdl_window_ids.keyIterator();
+                if (ids.next()) |id| out.window.windowID = id.*;
+            }
             cursor_event = out.*;
         }
         break :blk true;
@@ -47,6 +55,7 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
 }
 
 pub fn noteRealEvent(rt: *runtime_mod.Runtime, event: *sdl.SDL_Event) void {
+    if (event.type == sdl.SDL_MOUSEMOTION) event.motion.state = rt.filterNativeMouseButtons(event.motion.state);
     if (rt.hasRemoteInput()) {
         rt.input_mutex.lock();
         defer rt.input_mutex.unlock();
@@ -76,8 +85,11 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, r
     @memset(&rt.keyboard_state, 0);
     if (real_state) |keys| {
         const n: usize = @min(rt.keyboard_state.len, @as(usize, @intCast(@max(0, real_count))));
-        @memcpy(rt.keyboard_state[0..n], keys[0..n]);
+        for (keys[0..n], 0..) |held, scan| {
+            if (!parser.routeNativeKey(@intCast(scan), held != 0)) rt.keyboard_state[scan] = held;
+        }
     }
+    if (!parser.applicationFocused()) @memset(&rt.keyboard_state, 0);
     var terminal_state = [_]u8{0} ** input.sdl_num_scancodes;
     parser.copyKeyboardState(&terminal_state, system_io.time.nanoTimestamp());
     for (&rt.keyboard_state, terminal_state) |*dst, src| dst.* |= src;
@@ -86,12 +98,32 @@ pub fn mergedKeyboardState(rt: *runtime_mod.Runtime, real_state: ?[*]const u8, r
     return &rt.keyboard_state;
 }
 
-pub fn claimedWindowFlags(rt: *const runtime_mod.Runtime, flags: u32) u32 {
+pub fn claimedWindowFlags(rt: *runtime_mod.Runtime, flags: u32) u32 {
+    if (rt.inputFocusSuspended()) return flags & ~(sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS);
     if (!rt.input_claimed or !rt.input_claim_focus) return flags;
     return flags | sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS;
 }
 
 pub fn shouldSuppressEvent(rt: *runtime_mod.Runtime, event: *const sdl.SDL_Event) bool {
+    {
+        rt.input_mutex.lock();
+        defer rt.input_mutex.unlock();
+        if (rt.input_parser) |*model| {
+            if (event.type == sdl.SDL_KEYDOWN or event.type == sdl.SDL_KEYUP) {
+                if (model.routeNativeKey(event.key.keysym.scancode, event.type == sdl.SDL_KEYDOWN)) return true;
+            }
+            if ((model.command_key != null or model.source_focus_owned) and (event.type == sdl.SDL_MOUSEBUTTONDOWN or event.type == sdl.SDL_MOUSEBUTTONUP)) {
+                if (model.routeNativeButton(event.button.button, event.type == sdl.SDL_MOUSEBUTTONDOWN)) return true;
+            }
+        }
+    }
+    if (rt.inputFocusSuspended()) {
+        switch (event.type) {
+            sdl.SDL_KEYDOWN, sdl.SDL_KEYUP, sdl.SDL_TEXTINPUT, sdl.SDL_MOUSEMOTION, sdl.SDL_MOUSEBUTTONDOWN, sdl.SDL_MOUSEBUTTONUP, sdl.SDL_MOUSEWHEEL => return true,
+            else => {},
+        }
+        if (event.type == sdl.SDL_WINDOWEVENT and (event.window.event == sdl.SDL_WINDOWEVENT_FOCUS_GAINED or event.window.event == sdl.SDL_WINDOWEVENT_FOCUS_LOST)) return true;
+    }
     if (shouldSuppressRemoteRelease(rt, event)) return true;
     if (!rt.input_claimed) return false;
     if (event.type != sdl.SDL_WINDOWEVENT) return false;
@@ -140,6 +172,16 @@ fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
     @memset(&event.padding, 0);
     const now = real_sdl.SDL_GetTicks();
     switch (input_event) {
+        .focus => |focused| event.window = .{
+            .type = sdl.SDL_WINDOWEVENT,
+            .timestamp = now,
+            .windowID = 0,
+            .data1 = 0,
+            .data2 = 0,
+            .event = if (focused) sdl.SDL_WINDOWEVENT_FOCUS_GAINED else sdl.SDL_WINDOWEVENT_FOCUS_LOST,
+        },
+        .quit => event.type = sdl.SDL_QUIT,
+
         .key_down => |key| event.key = .{
             .type = sdl.SDL_KEYDOWN,
             .timestamp = now,
@@ -219,7 +261,8 @@ test "SDL mouse events are recognized for ownership handoff" {
 }
 
 test "claimed input keeps SDL window focused locally" {
-    var rt: runtime_mod.Runtime = undefined;
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
     rt.input_claimed = true;
     rt.input_claim_focus = true;
 
@@ -337,7 +380,8 @@ pub fn mergedModifiers(rt: *runtime_mod.Runtime, native: u16) u16 {
     defer rt.input_mutex.unlock();
     const model = &(rt.input_parser orelse return native);
     model.observeModifiers();
-    return native | model.heldModifiers();
+    if (!model.applicationFocused()) return 0;
+    return model.nativeModifiers(native) | model.heldModifiers();
 }
 
 test "native motion updates canonical remote-release position" {
@@ -360,4 +404,29 @@ test "native motion updates canonical remote-release position" {
     try std.testing.expectEqual(@as(i32, 100), rt.input_parser.?.mouseState().x);
     try std.testing.expectEqual(@as(i32, 120), rt.input_parser.?.mouseState().y);
     try std.testing.expectEqual(@as(u32, 1), rt.input_parser.?.mouseState().buttons);
+}
+
+test "command focus and quit agree with SDL state and event range reads" {
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_claimed = true;
+    rt.input_claim_focus = true;
+    rt.input_parser = input.InputModel.init(rt.allocator);
+    rt.input_parser.?.command_key = ']';
+    try rt.input_parser.?.feed("\x1d");
+    try std.testing.expectEqual(@as(u32, 0), claimedWindowFlags(&rt, sdl.SDL_WINDOW_INPUT_FOCUS | sdl.SDL_WINDOW_MOUSE_FOCUS));
+    var real_keys = [_]u8{1} ** input.sdl_num_scancodes;
+    const keys = mergedKeyboardState(&rt, &real_keys, real_keys.len, null).?;
+    try std.testing.expectEqual(@as(u8, 0), keys[26]);
+    try std.testing.expectEqual(@as(u16, 0), mergedModifiers(&rt, 0x40));
+    var event: sdl.SDL_Event = undefined;
+    try std.testing.expect(popInputEventInRange(&rt, &event, sdl.SDL_WINDOWEVENT, sdl.SDL_WINDOWEVENT));
+    try std.testing.expectEqual(sdl.SDL_WINDOWEVENT_FOCUS_LOST, event.window.event);
+    try rt.input_parser.?.feed("\x1b[27u");
+    try std.testing.expect(popInputEvent(&rt, &event));
+    try std.testing.expectEqual(sdl.SDL_WINDOWEVENT_FOCUS_GAINED, event.window.event);
+    try rt.input_parser.?.feed("\x1dq");
+    try std.testing.expect(popInputEventInRange(&rt, &event, sdl.SDL_QUIT, sdl.SDL_QUIT));
+    try std.testing.expectEqual(sdl.SDL_QUIT, event.type);
 }

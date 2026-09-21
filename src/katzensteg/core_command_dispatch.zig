@@ -10,6 +10,8 @@ const CoreHandle = core.CoreHandle;
 const ExternalFramebufferFormat = @import("frame_builder.zig").ExternalFramebufferFormat;
 
 pub fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns: i128) void {
+    rt.lockPresentation("direct_render_present");
+    defer rt.presentation_mutex.unlock();
     rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
@@ -67,6 +69,7 @@ pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height
 
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
     switch (cmd) {
+        .command_menu => |snapshot| rt.presentCommandMenu(snapshot),
         .create_window => |c| rt.frame_builder.onCreateWindow(c.window, c.w, c.h),
         .window_size => |c| rt.frame_builder.onWindowSize(c.window, c.w, c.h),
         .renderer_output_size => |c| rt.frame_builder.onRendererOutputSize(c.renderer, c.w, c.h),

@@ -560,6 +560,11 @@ pub const FrameBuilder = struct {
     composite_placement_id_start: u32 = 1,
     composite_placement_id_end: u32 = std.math.maxInt(u32),
     placement_audit_enabled: bool = false,
+    direct_text_overlay: bool = false,
+
+    fn directZ(self: *const FrameBuilder, z: i32) i32 {
+        return if (self.direct_text_overlay) @import("command_menu.zig").contentZ(z) else z;
+    }
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, stats_enabled: bool, composite_mode: CompositeMode, dump_composites: bool, debug_composite: bool) FrameBuilder {
         return .{
@@ -1524,12 +1529,12 @@ pub const FrameBuilder = struct {
                     const namespace = if (scene_job.had_clear and i == 0) bg_namespace else fill_namespace;
                     const key_id: u32 = if (namespace == bg_namespace) 1 else @intCast(solid_sprite_index + 1);
                     if (namespace == fill_namespace) solid_sprite_index += 1;
-                    engine.sprite(.{ .key = ts_types.NodeKey.sprite(namespace, key_id), .image = image, .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .dest_rect = solid.dest_rect, .z = solid.z }) catch {};
+                    engine.sprite(.{ .key = ts_types.NodeKey.sprite(namespace, key_id), .image = image, .source_rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .dest_rect = solid.dest_rect, .z = self.directZ(solid.z) }) catch {};
                 }
                 for (scene_job.sprites, 0..) |sprite, i| {
                     const image_id = self.published_assets.get(sprite.asset_id) orelse continue;
                     const image: ts_types.ImageHandle = @enumFromInt(image_id);
-                    engine.sprite(.{ .key = ts_types.NodeKey.sprite(sprite_namespace, @as(u32, @intCast(i + 1))), .image = image, .source_rect = .{ .x = sprite.source_rect.x, .y = sprite.source_rect.y, .w = sprite.source_rect.w, .h = sprite.source_rect.h }, .dest_rect = sprite.dest_rect, .z = sprite.z }) catch {};
+                    engine.sprite(.{ .key = ts_types.NodeKey.sprite(sprite_namespace, @as(u32, @intCast(i + 1))), .image = image, .source_rect = .{ .x = sprite.source_rect.x, .y = sprite.source_rect.y, .w = sprite.source_rect.w, .h = sprite.source_rect.h }, .dest_rect = sprite.dest_rect, .z = self.directZ(sprite.z) }) catch {};
                 }
                 engine.diff() catch |err| {
                     logger.writeFmtScoped(.info, .frame_builder, "scene diff failed: {any}", .{err});
@@ -2312,8 +2317,8 @@ pub const FrameBuilder = struct {
             logger.writeFmtScoped(
                 .info,
                 .frame_builder,
-                "placement trace direct_fullscreen op=place image={d} placement={d} old_image={d} old_placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} src=0,0 {d}x{d} z=100 tty={d}x{d} px={d}x{d}",
-                .{ state.composite_image_id, state.composite_placement_id, old_placement.image_id, old_placement.placement_id, state.output_w, state.output_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, upload_size.w, upload_size.h, tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
+                "placement trace direct_fullscreen op=place image={d} placement={d} old_image={d} old_placement={d} source={d}x{d} upload={d}x{d} cell={d},{d} {d}x{d} src=0,0 {d}x{d} z={d} tty={d}x{d} px={d}x{d}",
+                .{ state.composite_image_id, state.composite_placement_id, old_placement.image_id, old_placement.placement_id, state.output_w, state.output_h, upload_size.w, upload_size.h, dest.col, dest.row, dest.w, dest.h, upload_size.w, upload_size.h, self.directZ(100), tty.cols, tty.rows, tty.pixel_width, tty.pixel_height },
             );
         }
         try backend.registerRawImage(state.composite_image_id, upload_buf, upload_size.w, upload_size.h);
@@ -2327,7 +2332,7 @@ pub const FrameBuilder = struct {
             .src_y = 0,
             .src_w = upload_size.w,
             .src_h = upload_size.h,
-            .z = 100,
+            .z = self.directZ(100),
         });
         if (state.rememberFullscreenPlacement(old_placement)) |evicted| {
             if (placementTraceEnabled()) {
@@ -2538,7 +2543,7 @@ pub const FrameBuilder = struct {
                 .src_y = 0,
                 .src_w = tile.src_rect.w,
                 .src_h = tile.src_rect.h,
-                .z = 100,
+                .z = self.directZ(100),
             });
             if (old_image_id != 0 and old_placement_id != 0) {
                 kitty_protocol.writeDeleteExactPlacement(writer, .{ .image_id = old_image_id, .placement_id = old_placement_id }) catch |err| {

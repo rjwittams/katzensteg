@@ -148,6 +148,36 @@ queue. SDL adapters refine bindings against the live keymap; presenters forward
 the native key without translating SDL numbers back into names. The HTTP
 adapter does not inject SDL events directly.
 
+The input model also owns the local app/command routing state. A direct tty
+owner installs its attention-key binding; hosted and terminal-free models leave
+it disabled. A consumed press stays consumed through repeat and release, even
+across a routing change. Entering command mode retires queued local app work,
+releases held keys/buttons and queues focus loss. The SDL adapters project
+focus, quit, event ranges and state reads from that model. Bracketed paste is
+framed at the source so its contents cannot execute commands.
+
+Command quit has two outputs: a model event for SDL and a one-byte notification
+to the launcher over a private inherited socket. The launcher owns the grace
+period and TERM/KILL escalation. The runtime does not kill its host process.
+
+The input boundary sends immutable command-menu snapshots to presentation,
+through the replay queue when enabled. A separate termscene text scene owns
+the bottom-row chrome; it does not depend on game frames or refit their grid.
+Direct command-enabled sessions place game images below non-default terminal
+text backgrounds, preserving their relative z order. Hosted output keeps its
+existing image layers. Direct text and graphics writes share the presentation
+mutex, so a menu update cannot interrupt an image upload. Menu hit testing and
+click consumption remain in the input model.
+
+The desktop WM frames terminal reports across reads before its native input
+model routes them. It shares attention matching and command decoding with
+direct takeover; ordinary input retains its original terminal encoding for
+forwarding. Focus reports on the existing producer control channel release
+held input and suspend the SDL projections while the menu or launch prompt
+owns focus. Consumed presses and mouse gestures stay consumed after focus
+returns. The WM command row uses the same termscene text rendering in its
+already-reserved status band.
+
 Terminal keyboard reports are decoded by `src/katzensteg/terminal_keys.zig`,
 one decoder for the legacy xterm forms and the kitty keyboard protocol. The
 direct tty pushes the protocol flags (disambiguated escapes, event types,

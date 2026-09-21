@@ -133,7 +133,7 @@ KATZENSTEG_REAL_WINDOW=hide ./zig-out/bin/katzensteg-wm \
 Both commands run the same WM: window borders, movement, resizing, focus,
 layouts, input routing and lifecycle handling. `--presentation positioned`
 selects the default explicitly. Presentation selection is global for now;
-initial profiles, interactive launches with `n`, and external registrations
+initial profiles, interactive launches with Ctrl-] then `n`, and external registrations
 through `--listen` all use the selected mode.
 
 In placeholder mode the WM allocates a separate image ID for each producer,
@@ -144,8 +144,10 @@ positions and stacks the text grids, including clearing cells vacated by moved
 or closed windows. Moving or raising a window does not change its producer's
 virtual placement; resizing sends a new grid size when needed.
 
-The usual controls apply: `h/j/k/l` move, `H/J/K/L` resize, Tab cycles focus,
-`t` tiles, `c` cascades, and `q` quits the WM. Mouse focus and title/border
+Press Ctrl-] before each WM command: `h/j/k/l` move, `H/J/K/L` resize, Tab
+cycles focus, `t` tiles, `c` cascades, and `n` opens the launch prompt. `q` closes
+the focused producer; `Q` quits the whole WM. Escape returns to the producer,
+and a doubled Ctrl-] sends one literal tap. Mouse focus and title/border
 controls work as in positioned mode. The WM translates content mouse events
 into the grid's local coordinates before forwarding them. Hiding real SDL
 windows avoids their mouse focus taking precedence over forwarded input.
@@ -226,6 +228,43 @@ cursor movement. It emits file-upload graphics commands with quiet responses
 and deletes only its own images. Small writes reduce interference with the
 application's terminal output; they cannot guarantee atomic output between
 independent writers.
+
+### Direct-terminal command mode
+
+Direct SDL2/SDL3 takeover sessions accept **Ctrl-]** as an attention key. Release
+it, then press `q` to request app exit, or Escape to return to the app. Press
+Ctrl-] twice to send one literal Ctrl-] tap. Holding the prefix does not count as
+a second press when the terminal reports key releases.
+
+Entering command mode releases held keys and mouse buttons and reports focus
+loss to SDL. A command row covers the bottom terminal row without resizing the
+game. It shows `q Quit`, `Esc Return` and the configured prefix for a literal
+tap. Unknown keys leave it armed and display a hint; there is no timeout. Click
+and release on Quit or Return to choose that action. Other mouse input and
+bracketed pastes are discarded while armed. The row updates even when the game
+is not drawing, and follows terminal resizes. The desktop WM uses the same
+prefix and decoder, with its own commands shown in the existing status row.
+Bare letters and Tab reach the focused producer. The launch prompt accepts
+both legacy bytes and Kitty keyboard reports.
+
+Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
+disable the mode. The inheritable profile field is `runtime.command_key`, with
+the same caret notation. Environment configuration overrides the profile.
+Legacy terminals cannot distinguish some control keys from Tab, Enter or
+Escape, and `^@` uses the NUL encoding shared with Ctrl-Space. Ctrl-] avoids
+these ambiguities. Kitty reports match the base-layout
+position plus modifiers when available.
+
+Quit first queues an SDL quit event. The launcher allows 1.5 seconds for exit,
+then sends TERM and, after another 250 ms, KILL if necessary. For a direct
+session these signals target the launched child, which shares the terminal's
+foreground process group with its caller. Terminal settings are restored after
+forced termination. Launch through `katzensteg` for this supervision; direct
+preload diagnostics can only offer the app the SDL quit event.
+
+Hosted producers and terminal-free Jackstay publishers keep command mode
+disabled, even when the environment sets a key. Their host owns input routing.
+Wrapping an application still passes Ctrl-C through unchanged.
 
 ### Wrapping the application
 

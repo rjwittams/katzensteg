@@ -7,6 +7,10 @@ const Listener = @import("wm/listener.zig").Listener;
 const ClientChannel = @import("wm/client.zig").ClientChannel;
 const render_batch_protocol = @import("render_batch_protocol.zig");
 const terminal_keys = @import("terminal_keys.zig");
+const wm_command_input = @import("wm_command_input.zig");
+const command_binding = @import("command_key.zig");
+const command_menu = @import("command_menu.zig");
+const command_overlay = @import("command_overlay.zig");
 const attach_protocol = @import("attach_protocol.zig");
 const terminal_batch_applier = @import("terminal_batch_applier.zig");
 const blocking_trace = @import("blocking_trace.zig");
@@ -210,7 +214,7 @@ pub const WmMouseInputState = struct {
             return .{ .action = if (had_drag) .consume else .none };
         }
         if (self.drag) |drag| return .{ .action = .{ .mouse_drag = drag.update(cell, terminal) } };
-        if ((mouse.button & 3) != 0) return .{ .action = .none };
+        if ((mouse.button & (32 | 64 | 3)) != 0) return .{ .action = .none };
 
         const hit = mouseHitTest(outer, cell);
         switch (hit) {
@@ -260,6 +264,7 @@ const WmChromeSnapshot = struct {
 };
 
 pub const WmDesktopRedrawState = struct {
+    menu: command_menu.Snapshot = .{},
     previous_chrome: [default_wm_session_capacity]WmChromeSnapshot = undefined,
     previous_count: usize = 0,
 
@@ -470,6 +475,7 @@ const WmProducerSession = struct {
     presentation_status: WmPresentationStatus = .{},
     initial_presentation_resolved: bool = false,
     input_was_focused: bool = false,
+    input_focus_initialized: bool = false,
     // Only launchers started by this host are waited for/reaped.
     producer: Producer = .{},
     stdout_buffer: std.ArrayList(u8) = .empty,
@@ -725,6 +731,12 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     // Bind before opening the terminal, so a bad address cannot take it over.
     var listener: ?Listener = if (options.listen_path) |path| try Listener.init(io, allocator, path) else null;
     defer if (listener) |*host| host.deinit();
+    const key_env = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_COMMAND_KEY") catch null;
+    defer if (key_env) |value| allocator.free(value);
+    const command_key = if (key_env) |value| try command_binding.parse(value) else @as(?u8, ']');
+    var command_input = wm_command_input.Model.init(allocator, command_key);
+    defer command_input.deinit();
+    var last_input_ms: i64 = 0;
     var tty = try DirectTty.init(io);
     defer tty.deinit();
 
@@ -768,11 +780,18 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         }
     }
 
+    // Capability probes read terminal replies directly. Finish them before
+    // enabling input, then reuse the terminal's profile for every producer.
+    const output_profile = blk: {
+        var probe_upload = try selectUploadPolicy(allocator, tty.file);
+        defer deinitUploadPolicy(io, allocator, &probe_upload);
+        break :blk probe_upload.profile;
+    };
     try tty.enableInputCapture();
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
-        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, &event_log) catch |err| {
+        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, output_profile, &event_log) catch |err| {
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
             continue;
@@ -801,11 +820,10 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
-    var prompt_active = false;
     var wm_events = try WmEventLoop.init();
     defer wm_events.deinit();
     while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
-        syncInputFocus(sessions[0..initialized], if (prompt_active) null else focused_index);
+        syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
         for (sessions[0..initialized]) |*session| {
@@ -866,7 +884,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 const session_id = next_session_id;
                 next_session_id += 1;
                 channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
-                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, &event_log) catch |err| {
+                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, output_profile, &event_log) catch |err| {
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -893,139 +911,190 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             }
             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
         }
-        if (prompt_active and wm_events.tty_ready) {
-            wm_events.tty_ready = false;
-            const prompt = try readLaunchPromptInput(&tty, &input_buf, &launch_prompt, allocator);
-            switch (prompt) {
-                .none => {},
-                .changed => {
-                    try recordLaunchPrompt(&event_log, launch_prompt.items);
+        if (!shutdown_sent) {
+            if (wm_events.tty_ready) {
+                wm_events.tty_ready = false;
+                const n = system_io.posix.read(tty.file.handle, &input_buf) catch 0;
+                if (n > 0) {
+                    last_input_ms = system_io.time.milliTimestamp();
+                    try command_input.feed(input_buf[0..n]);
+                }
+            }
+            while (command_input.next(system_io.time.milliTimestamp() - last_input_ms >= 50)) |event| {
+                const input: InputRead = switch (event) {
+                    .prompt_key => |key| {
+                        const prompt = try applyLaunchPromptKey(key, &launch_prompt, allocator);
+                        switch (prompt) {
+                            .none => {},
+                            .changed => {
+                                try recordLaunchPrompt(&event_log, launch_prompt.items);
+                                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                            },
+                            .cancel => {
+                                command_input.finishPrompt();
+                                launch_prompt.clearRetainingCapacity();
+                                try event_log.record(.launch_prompt, "cancelled");
+                                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                            },
+                            .submit => {
+                                command_input.finishPrompt();
+                                if (launch_prompt.items.len == 0) {
+                                    try event_log.record(.launch_prompt, "empty");
+                                } else if (availableSessionSlot(sessions[0..initialized], session_capacity) == null) {
+                                    try event_log.record(.parse_error, "session limit reached");
+                                } else launch: {
+                                    const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
+                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, output_profile, &event_log) catch |err| {
+                                        try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
+                                        break :launch;
+                                    };
+                                    session.session_id = next_session_id;
+                                    next_session_id += 1;
+                                    installSession(allocator, sessions, &initialized, new_index, session, z_order);
+                                    try startSessionProcessPolling(&sessions[new_index]);
+                                    focused_index = new_index;
+                                    bringWindowToFront(z_order[0..initialized], focused_index);
+                                    mouse_state = .{};
+                                    try startSessionStdoutPolling(&sessions[new_index]);
+                                    try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                                    try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                                }
+                                launch_prompt.clearRetainingCapacity();
+                                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                            },
+                        }
+
+                        continue;
+                    },
+                    .focus => |active| {
+                        syncInputFocus(sessions[0..initialized], if (active) focused_index else null);
+                        mouse_state = .{};
+                        continue;
+                    },
+                    .command => |action| .{ .action = desktopCommandAction(action) },
+                    .forward, .pointer => |bytes| blk: {
+                        var window_pointer = false;
+                        if (event == .pointer) {
+                            const pointer = parseSgrMouseAt(bytes, 0, terminal) orelse break :blk .{ .action = .consume };
+                            const menu = command_menu.Snapshot{ .active = command_input.armed, .rows = @intCast(terminal.rows), .cols = @intCast(terminal.cols) };
+                            const cell = Cell{ .row = pointer.row, .col = pointer.col };
+                            tty_lock.lock();
+                            const chrome = if (hitSessionIndex(sessions[0..initialized], z_order[0..initialized], cell)) |index|
+                                switch (mouseHitTest(sessions[index].window.outer, cell)) {
+                                    .title, .close, .resize_right, .resize_bottom, .resize_bottom_right => true,
+                                    .desktop, .content => false,
+                                }
+                            else
+                                false;
+                            tty_lock.unlock();
+                            switch (command_input.routePointer(pointer.button, pointer.pressed, menu.hit(pointer.col, pointer.row), chrome)) {
+                                .consume => break :blk .{ .action = .consume },
+                                .window => window_pointer = true,
+                                .application => {},
+                            }
+                        }
+                        if (keyboardFlagsReply(bytes)) |flags| tty.keyboard_protocol_flags = flags;
+                        if (mouseUnitsReply(bytes)) |units| tty.mouse_units = units;
+                        terminal.mouse_units = tty.mouse_units;
+                        tty_lock.lock();
+                        defer tty_lock.unlock();
+                        var routed = readInputForSessionsBytes(bytes, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
+                        if (window_pointer and routed.action == .forward) routed.action = .consume;
+                        break :blk routed;
+                    },
+                };
+
+                if (input.focus_changed) {
+                    command_input.focusByClick();
+                    syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
+                    try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                    try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
-                .cancel => {
-                    prompt_active = false;
-                    launch_prompt.clearRetainingCapacity();
-                    try event_log.record(.launch_prompt, "cancelled");
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
-                .submit => {
-                    prompt_active = false;
-                    if (launch_prompt.items.len == 0) {
-                        try event_log.record(.launch_prompt, "empty");
-                    } else if (availableSessionSlot(sessions[0..initialized], session_capacity) == null) {
-                        try event_log.record(.parse_error, "session limit reached");
-                    } else launch: {
-                        const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
-                        var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, &event_log) catch |err| {
-                            try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
-                            break :launch;
+                }
+                switch (input.action) {
+                    .none, .consume => {},
+                    .start_launch => {
+                        launch_prompt.clearRetainingCapacity();
+                        try recordLaunchPrompt(&event_log, launch_prompt.items);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                    },
+                    .focus_next => {
+                        if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
+                            focused_index = next_index;
+                            bringWindowToFront(z_order[0..initialized], focused_index);
+                            mouse_state = .{};
+                            try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                            try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                        }
+                    },
+                    .close_focused => {
+                        if (initialized == 0) continue;
+                        const focused = &sessions[focused_index];
+                        try shutdownSession(focused, &event_log, &logger);
+                        if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
+                            focused_index = next_index;
+                            bringWindowToFront(z_order[0..initialized], focused_index);
+                            mouse_state = .{};
+                            try event_log.record(.focus_changed, sessions[focused_index].profile_name);
+                            try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                        }
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                    },
+                    .forward => {
+                        if (initialized == 0) continue;
+                        try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, tty.keyboard_protocol_flags, &event_log, &logger);
+                    },
+                    .quit => {
+                        shutdown_sent = true;
+                        shutdown_deadline_ms = system_io.time.milliTimestamp() + 2000;
+                        for (sessions[0..initialized]) |*session| try shutdownSession(session, &event_log, &logger);
+                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                    },
+                    .window => |action| {
+                        if (initialized == 0) continue;
+                        const focused = &sessions[focused_index];
+                        const presentation_status = blk: {
+                            tty_lock.lock();
+                            defer tty_lock.unlock();
+                            break :blk focused.presentation_status;
                         };
-                        session.session_id = next_session_id;
-                        next_session_id += 1;
-                        installSession(allocator, sessions, &initialized, new_index, session, z_order);
-                        try startSessionProcessPolling(&sessions[new_index]);
-                        focused_index = new_index;
-                        bringWindowToFront(z_order[0..initialized], focused_index);
-                        mouse_state = .{};
-                        try startSessionStdoutPolling(&sessions[new_index]);
-                        try event_log.record(.focus_changed, sessions[focused_index].profile_name);
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                    }
-                    launch_prompt.clearRetainingCapacity();
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
+                        if (applyWindowActionWithPresentation(&focused.window, action, terminal, presentation_status)) {
+                            try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                        }
+                    },
+                    .layout => |action| {
+                        if (applyLayoutAction(sessions[0..initialized], action, terminal)) {
+                            mouse_state = .{};
+                            try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                        }
+                    },
+                    .mouse_drag => |outer| {
+                        if (initialized == 0) continue;
+                        const focused = &sessions[focused_index];
+                        const presentation_status = blk: {
+                            tty_lock.lock();
+                            defer tty_lock.unlock();
+                            break :blk focused.presentation_status;
+                        };
+                        const next_outer = if (mouse_state.drag) |drag|
+                            constrainOuterForPresentation(outer, resizeAxisForMouseHit(drag.hit), terminal, presentation_status)
+                        else
+                            outer;
+                        if (!std.meta.eql(focused.window.outer, next_outer)) {
+                            focused.window.outer = clampOuterRect(next_outer, terminal);
+                            try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                        }
+                    },
+                }
             }
-            continue;
-        }
-        if (!shutdown_sent and wm_events.tty_ready) {
-            wm_events.tty_ready = false;
-            const input = readInputForSessionsLocked(&tty_lock, &tty, &input_buf, &mouse_state, sessions[0..initialized], z_order[0..initialized], &focused_index, terminal);
-            terminal.mouse_units = tty.mouse_units;
-            if (input.focus_changed) {
-                syncInputFocus(sessions[0..initialized], focused_index);
-                try event_log.record(.focus_changed, sessions[focused_index].profile_name);
-                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+            const menu = command_menu.Snapshot{ .active = command_input.armed, .hint = command_input.hint, .binding = command_key orelse ']', .cols = @intCast(terminal.cols), .rows = @intCast(terminal.rows), .desktop = true };
+            if (!std.meta.eql(menu, redraw_state.menu)) {
+                redraw_state.menu = menu;
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-            }
-            switch (input.action) {
-                .none, .consume => {},
-                .start_launch => {
-                    prompt_active = true;
-                    launch_prompt.clearRetainingCapacity();
-                    try recordLaunchPrompt(&event_log, launch_prompt.items);
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
-                .focus_next => {
-                    if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
-                        focused_index = next_index;
-                        bringWindowToFront(z_order[0..initialized], focused_index);
-                        mouse_state = .{};
-                        try event_log.record(.focus_changed, sessions[focused_index].profile_name);
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                    }
-                },
-                .close_focused => {
-                    if (initialized == 0) continue;
-                    const focused = &sessions[focused_index];
-                    try shutdownSession(focused, &event_log, &logger);
-                    if (nextVisibleSessionIndex(sessions[0..initialized], focused_index)) |next_index| {
-                        focused_index = next_index;
-                        bringWindowToFront(z_order[0..initialized], focused_index);
-                        mouse_state = .{};
-                        try event_log.record(.focus_changed, sessions[focused_index].profile_name);
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                    }
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
-                .forward => {
-                    if (initialized == 0) continue;
-                    try forwardInputToSession(&sessions[focused_index], input.bytes, terminal, tty.keyboard_protocol_flags, &event_log, &logger);
-                },
-                .quit => {
-                    shutdown_sent = true;
-                    shutdown_deadline_ms = system_io.time.milliTimestamp() + 2000;
-                    for (sessions[0..initialized]) |*session| try shutdownSession(session, &event_log, &logger);
-                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                },
-                .window => |action| {
-                    if (initialized == 0) continue;
-                    const focused = &sessions[focused_index];
-                    const presentation_status = blk: {
-                        tty_lock.lock();
-                        defer tty_lock.unlock();
-                        break :blk focused.presentation_status;
-                    };
-                    if (applyWindowActionWithPresentation(&focused.window, action, terminal, presentation_status)) {
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                    }
-                },
-                .layout => |action| {
-                    if (applyLayoutAction(sessions[0..initialized], action, terminal)) {
-                        mouse_state = .{};
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                    }
-                },
-                .mouse_drag => |outer| {
-                    if (initialized == 0) continue;
-                    const focused = &sessions[focused_index];
-                    const presentation_status = blk: {
-                        tty_lock.lock();
-                        defer tty_lock.unlock();
-                        break :blk focused.presentation_status;
-                    };
-                    const next_outer = if (mouse_state.drag) |drag|
-                        constrainOuterForPresentation(outer, resizeAxisForMouseHit(drag.hit), terminal, presentation_status)
-                    else
-                        outer;
-                    if (!std.meta.eql(focused.window.outer, next_outer)) {
-                        focused.window.outer = clampOuterRect(next_outer, terminal);
-                        try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
-                        try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
-                    }
-                },
             }
         }
     }
@@ -1106,20 +1175,20 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
     var producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
     errdefer producer.deinit();
-    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, events);
+    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, output_profile, events);
     session.producer.child = producer.child;
     return session;
 }
 
 // Takes ownership of the channel only on success. Both owned and external
 // producers use the same presentation allocation and initial attach.
-fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, events: *ProtocolEventLog) !WmProducerSession {
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
-    var upload = try uploadPolicyForSession(allocator, tty_file, session_index);
+    var upload = try uploadPolicyForSession(allocator, output_profile, session_index);
     errdefer deinitUploadPolicy(io, allocator, &upload);
     const owned_title = try allocator.dupe(u8, title);
     errdefer allocator.free(owned_title);
@@ -2044,10 +2113,11 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
 fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
     for (sessions, 0..) |*session, i| {
         const active = focused != null and focused.? == i;
-        if (session.input_was_focused and !active and session.producer.channel.controlFile() != null) {
-            _ = tryWriteInputControl(session.producer.channel.writer(), "\x1b[O");
+        if ((!session.input_focus_initialized or session.input_was_focused != active) and session.producer.channel.controlFile() != null) {
+            _ = tryWriteInputControl(session.producer.channel.writer(), if (active) "\x1b[I" else "\x1b[O");
         }
         session.input_was_focused = active;
+        session.input_focus_initialized = true;
     }
 }
 
@@ -2165,16 +2235,10 @@ fn deinitUploadPolicy(io: std.Io, allocator: std.mem.Allocator, upload: *render_
     upload.path = null;
 }
 
-fn uploadPolicyForSession(allocator: std.mem.Allocator, tty: system_io.fs.File, session_index: usize) !render_batch_protocol.UploadPolicy {
-    const io = tty.io;
-    var upload = try selectUploadPolicy(allocator, tty);
-    errdefer deinitUploadPolicy(io, allocator, &upload);
-    if (upload.path) |path| {
-        upload.path = try sessionUploadPath(allocator, path, session_index);
-        upload_path_mod.deleteBasePath(io, path);
-        allocator.free(path);
-    }
-    return upload;
+fn uploadPolicyForSession(allocator: std.mem.Allocator, profile: render_batch_protocol.UploadProfile, session_index: usize) !render_batch_protocol.UploadPolicy {
+    const base_path = try upload_path_mod.makeUploadPath(allocator);
+    defer allocator.free(base_path);
+    return .{ .profile = profile, .path = try sessionUploadPath(allocator, base_path, session_index) };
 }
 
 fn sessionUploadPath(allocator: std.mem.Allocator, base_path: []const u8, session_index: usize) ![]u8 {
@@ -2235,39 +2299,16 @@ const InputRead = struct {
     focus_changed: bool = false,
 };
 
-fn readInput(tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, outer: Rect, terminal: TerminalSize) InputRead {
-    const n = system_io.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
-    if (n == 0) return .{ .action = .none };
-    return readInputBytes(buf[0..n], mouse, outer, terminal);
-}
-
-fn readInputForSessionsLocked(tty_lock: *system_io.Mutex, tty: *DirectTty, buf: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
-    const n = system_io.posix.read(tty.file.handle, buf) catch return .{ .action = .none };
-    if (n == 0) return .{ .action = .none };
-    if (keyboardFlagsReply(buf[0..n])) |flags| tty.keyboard_protocol_flags = flags;
-    if (mouseUnitsReply(buf[0..n])) |units| tty.mouse_units = units;
-    tty_lock.lock();
-    defer tty_lock.unlock();
-    return readInputForSessionsBytes(buf[0..n], mouse, sessions, z_order, focused_index, terminal);
-}
-
 fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
-    const action = inputActionFromBytes(bytes);
-    switch (action) {
-        .quit, .focus_next, .start_launch => return .{ .action = action },
-        .none => {},
-        else => {},
-    }
     if (sessions.len == 0) return .{ .action = .none };
     if (focused_index.* >= sessions.len) focused_index.* = 0;
     if (!sessionIsVisible(&sessions[focused_index.*])) {
         focused_index.* = nextVisibleSessionIndex(sessions, focused_index.*) orelse return .{ .action = .none };
     }
-    if (action != .none) return .{ .action = action };
     var changed_focus = false;
     if (mouse.drag == null) {
         if (parseSgrMouseAt(bytes, 0, terminal)) |event| {
-            if (event.pressed and (event.button & 3) == 0) {
+            if (event.pressed and (event.button & (32 | 64 | 3)) == 0) {
                 const cell = Cell{ .row = event.row, .col = event.col };
                 if (hitSessionIndex(sessions, z_order, cell)) |hit_index| {
                     if (focused_index.* != hit_index) {
@@ -2286,8 +2327,6 @@ fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: [
 }
 
 fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal: TerminalSize) InputRead {
-    const action = inputActionFromBytes(bytes);
-    if (action != .none) return .{ .action = action };
     const content = contentRectForOuter(outer);
     const mouse_input = mouse.readMouseInput(bytes, outer, content, terminal);
     if (mouse_input.action != .none) return mouse_input;
@@ -2296,82 +2335,24 @@ fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal:
     return .{ .action = .none };
 }
 
-fn inputActionFromBytes(bytes: []const u8) InputAction {
-    // One character per input byte at most, so a chunk from the tty read
-    // buffer always fits and no hotkey is lost to truncation.
-    var scratch: [wm_input_buffer_len]u8 = undefined;
-    const keys = hotkeyChars(bytes, &scratch);
-    for (keys) |byte| {
-        switch (byte) {
-            'q', 'Q' => return .quit,
-            'n' => return .start_launch,
-            '\t' => return .focus_next,
-            else => {},
-        }
-    }
-    for (keys) |byte| {
-        switch (byte) {
-            'h' => return .{ .window = .move_left },
-            'j' => return .{ .window = .move_down },
-            'k' => return .{ .window = .move_up },
-            'l' => return .{ .window = .move_right },
-            'H' => return .{ .window = .resize_narrower },
-            'J' => return .{ .window = .resize_shorter },
-            'K' => return .{ .window = .resize_taller },
-            'L' => return .{ .window = .resize_wider },
-            'c' => return .{ .layout = .cascade },
-            't' => return .{ .layout = .tile },
-            else => {},
-        }
-    }
-    return .none;
-}
-
-/// The characters typed in a chunk of terminal input: plain bytes, plus the
-/// key of each kitty `CSI u` press report. Other control sequences (mouse,
-/// arrows, protocol replies) contribute nothing, so their letters are never
-/// mistaken for hotkeys.
-fn hotkeyChars(bytes: []const u8, out: []u8) []const u8 {
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len and count < out.len) {
-        const byte = bytes[i];
-        if (byte != 0x1b and byte != 0x9b) {
-            out[count] = byte;
-            count += 1;
-            i += 1;
-            continue;
-        }
-        var start = i + 1;
-        if (byte == 0x1b) {
-            if (start >= bytes.len or bytes[start] != '[') {
-                i += 1;
-                continue;
-            }
-            start += 1;
-        }
-        var final = start;
-        while (final < bytes.len and !(bytes[final] >= 0x40 and bytes[final] <= 0x7e)) final += 1;
-        if (final >= bytes.len) break;
-        if (bytes[final] == 'u') {
-            if (terminal_keys.decodeCsi(bytes[start..final], 'u', true)) |report| switch (report) {
-                .key => |decoded| if (decoded.key.action != .up and !decoded.key.modifiers.suppressText()) {
-                    if (decoded.key.codepoint()) |cp| {
-                        if (cp < 0x80) {
-                            out[count] = @intCast(cp);
-                            count += 1;
-                        }
-                    } else if (std.mem.eql(u8, decoded.key.name.slice(), "Tab")) {
-                        out[count] = '\t';
-                        count += 1;
-                    }
-                },
-                .protocol_flags, .mouse_units => {},
-            };
-        }
-        i = final + 1;
-    }
-    return out[0..count];
+fn desktopCommandAction(action: command_binding.Command) InputAction {
+    return switch (action) {
+        .quit => .close_focused,
+        .quit_host => .quit,
+        .launch => .start_launch,
+        .focus_next => .focus_next,
+        .move_left => .{ .window = .move_left },
+        .move_down => .{ .window = .move_down },
+        .move_up => .{ .window = .move_up },
+        .move_right => .{ .window = .move_right },
+        .resize_narrower => .{ .window = .resize_narrower },
+        .resize_shorter => .{ .window = .resize_shorter },
+        .resize_taller => .{ .window = .resize_taller },
+        .resize_wider => .{ .window = .resize_wider },
+        .cascade => .{ .layout = .cascade },
+        .tile => .{ .layout = .tile },
+        else => .consume,
+    };
 }
 
 /// The kitty keyboard flags in a `CSI ? flags u` reply, if the chunk holds one.
@@ -2388,35 +2369,20 @@ fn keyboardFlagsReply(bytes: []const u8) ?u32 {
     return null;
 }
 
-fn readLaunchPromptInput(tty: *DirectTty, buf: []u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
-    const n = system_io.posix.read(tty.file.handle, buf) catch return .none;
-    if (n == 0) return .none;
-    return applyLaunchPromptBytes(buf[0..n], prompt, allocator);
-}
-
-fn applyLaunchPromptBytes(bytes: []const u8, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
-    var changed = false;
-    for (bytes) |byte| {
-        switch (byte) {
-            0x1b => return .cancel,
-            '\r', '\n' => return .submit,
-            0x7f, 0x08 => {
-                if (prompt.items.len > 0) {
-                    _ = prompt.pop();
-                    changed = true;
-                }
-            },
-            else => {
-                if (isProfileNameByte(byte)) {
-                    if (prompt.items.len < max_launch_prompt_len) {
-                        try prompt.append(allocator, byte);
-                        changed = true;
-                    }
-                }
-            },
-        }
+fn applyLaunchPromptKey(key: @import("native_key.zig").Key, prompt: *std.ArrayList(u8), allocator: std.mem.Allocator) !LaunchPromptAction {
+    if (key.action == .up or key.action == .repeat) return .none;
+    if (std.mem.eql(u8, key.name.slice(), "Escape")) return .cancel;
+    if (std.mem.eql(u8, key.name.slice(), "Enter")) return .submit;
+    if (std.mem.eql(u8, key.name.slice(), "Backspace")) {
+        if (prompt.items.len == 0) return .none;
+        _ = prompt.pop();
+        return .changed;
     }
-    return if (changed) .changed else .none;
+    if (key.modifiers.suppressText()) return .none;
+    const cp = key.codepoint() orelse return .none;
+    if (cp > 127 or !isProfileNameByte(@intCast(cp)) or prompt.items.len >= max_launch_prompt_len) return .none;
+    try prompt.append(allocator, @intCast(cp));
+    return .changed;
 }
 
 fn isProfileNameByte(byte: u8) bool {
@@ -2564,6 +2530,25 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
         try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, focused.presentation_status, events);
     } else {
         try renderEmptyStatusAndReturn(writer, terminal, events);
+    }
+    if (events.last()) |event| {
+        if (event.kind == .launch_prompt and std.mem.startsWith(u8, event.detail, "launch:")) {
+            try moveCursor(writer, terminal.rows, 1);
+            try writer.writeAll("\x1b[2K\x1b[7m");
+            var remaining: usize = @intCast(@max(0, terminal.cols));
+            try writeStatusPart(writer, &remaining, " ");
+            try writeStatusPart(writer, &remaining, event.detail);
+            try writeStatusPart(writer, &remaining, "  [Enter launch, Esc cancel]");
+            try writer.writeAll("\x1b[0m");
+        }
+    }
+    if (redraw_state.menu.active) {
+        var snapshot = redraw_state.menu;
+        snapshot.cols = @intCast(@max(0, terminal.cols));
+        snapshot.rows = @intCast(@max(0, terminal.rows));
+        const text = try events.allocator.alloc(u8, snapshot.cols);
+        defer events.allocator.free(text);
+        if (command_overlay.textNode(snapshot, text)) |node| try ts_kitty.Backend.writeText(writer, node);
     }
     redraw_state.capture(sessions, z_order);
 }
@@ -3670,46 +3655,6 @@ test "wm viewport control can be sent best-effort after producer exit" {
     }));
 }
 
-test "wm input parser prioritizes quit in coalesced input" {
-    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("lq"));
-    try std.testing.expectEqual(InputAction.start_launch, inputActionFromBytes("n"));
-    try std.testing.expectEqual(InputAction{ .window = .move_right }, inputActionFromBytes("l"));
-    try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\t"));
-    try std.testing.expectEqual(InputAction{ .layout = .tile }, inputActionFromBytes("t"));
-    try std.testing.expectEqual(InputAction{ .layout = .cascade }, inputActionFromBytes("c"));
-}
-
-test "wm input parser reads kitty key reports and ignores other control sequences" {
-    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113u"));
-    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[113;1;113u"));
-    try std.testing.expectEqual(InputAction{ .window = .move_left }, inputActionFromBytes("\x1b[104u"));
-    try std.testing.expectEqual(InputAction{ .window = .resize_narrower }, inputActionFromBytes("\x1b[104:72;2u"));
-    try std.testing.expectEqual(InputAction.focus_next, inputActionFromBytes("\x1b[9u"));
-    // Releases, shortcuts, replies and non-key sequences are not hotkeys.
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;1:3u"));
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[113;5u"));
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[?31u"));
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[1;2H"));
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[<35;5;6M"));
-    try std.testing.expectEqual(InputAction.quit, inputActionFromBytes("\x1b[<35;5;6Mq"));
-    try std.testing.expectEqual(@as(?u32, 31), keyboardFlagsReply("\x1b[<0;1;1M\x1b[?31u"));
-    try std.testing.expectEqual(@as(?u32, null), keyboardFlagsReply("\x1b[?1006h"));
-}
-
-test "wm launch prompt edits profile names" {
-    var prompt = std.ArrayList(u8).empty;
-    defer prompt.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptBytes("sonic!", &prompt, std.testing.allocator));
-    try std.testing.expectEqualStrings("sonic", prompt.items);
-
-    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptBytes(&.{0x7f}, &prompt, std.testing.allocator));
-    try std.testing.expectEqualStrings("soni", prompt.items);
-
-    try std.testing.expectEqual(LaunchPromptAction.cancel, try applyLaunchPromptBytes(&.{0x1b}, &prompt, std.testing.allocator));
-    try std.testing.expectEqual(LaunchPromptAction.submit, try applyLaunchPromptBytes("\r", &prompt, std.testing.allocator));
-}
-
 test "wm mouse hit test separates title border and content" {
     const outer = Rect{ .row = 2, .col = 3, .rows = 12, .cols = 40 };
 
@@ -4287,7 +4232,6 @@ test "WM converts pixel mouse reports to cells for itself and forwards grid-loca
     try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, .pixel), mouseUnitsReply("\x1b[?31u\x1b[?1016;1$y"));
     try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, .cell), mouseUnitsReply("\x1b[?1016;2$y"));
     try std.testing.expectEqual(@as(?terminal_keys.MouseUnits, null), mouseUnitsReply("\x1b[?1006;1$y"));
-    try std.testing.expectEqual(InputAction.none, inputActionFromBytes("\x1b[?1016;1$y"));
 }
 
 test "WM clipped placeholder text retains its source row and column indices" {

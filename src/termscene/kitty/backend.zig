@@ -248,6 +248,15 @@ pub const Backend = struct {
         _ = self.retransmitted_images.remove(image_id);
     }
 
+    pub fn writeText(out: *std.Io.Writer, node: types.TextNode) !void {
+        try protocol.moveCursor(out, node.pos.row, node.pos.col);
+        if (node.style.bg) |bg| {
+            try out.print("\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, bg.r, bg.g, bg.b, node.content });
+        } else {
+            try out.print("\x1b[38;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, node.content });
+        }
+    }
+
     pub fn applyTextOps(self: *Backend, text_ops: []const backend.TextOp) !void {
         for (text_ops) |op| {
             const key_int = keyToInt(op.key);
@@ -255,23 +264,20 @@ pub const Backend = struct {
                 .add, .update => {
                     const node = op.node orelse continue;
                     if (self.texts.get(key_int)) |old| {
-                        if (old.row == node.pos.row and old.col == node.pos.col and old.len > node.content.len) {
+                        if (old.len > 0 and (old.row != node.pos.row or old.col != node.pos.col or old.len > node.content.len)) {
                             try protocol.moveCursor(self.writer(), old.row, old.col);
-                            try writeSpaces(self.writer(), old.len);
+                            // ECH clips at the margin after a resize; spaces could wrap
+                            // and scroll the bottom row. Reset the old background too.
+                            try self.writer().print("\x1b[0m\x1b[{d}X", .{old.len});
                         }
                     }
-                    try protocol.moveCursor(self.writer(), node.pos.row, node.pos.col);
-                    if (node.style.bg) |bg| {
-                        try self.writer().print("\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, bg.r, bg.g, bg.b, node.content });
-                    } else {
-                        try self.writer().print("\x1b[38;2;{d};{d};{d}m{s}\x1b[0m", .{ node.style.fg.r, node.style.fg.g, node.style.fg.b, node.content });
-                    }
+                    try writeText(self.writer(), node);
                     try self.texts.put(key_int, .{ .row = node.pos.row, .col = node.pos.col, .len = node.content.len });
                 },
                 .remove => {
                     if (self.texts.fetchRemove(key_int)) |entry| {
                         try protocol.moveCursor(self.writer(), entry.value.row, entry.value.col);
-                        try writeSpaces(self.writer(), entry.value.len);
+                        if (entry.value.len > 0) try self.writer().print("\x1b[0m\x1b[{d}X", .{entry.value.len});
                     }
                 },
             }
@@ -357,16 +363,28 @@ pub const Backend = struct {
         if (self.next_placement_id == 0) self.next_placement_id = 1;
         return id;
     }
-
-    fn writeSpaces(out: *std.Io.Writer, count: usize) !void {
-        var buf: [128]u8 = [_]u8{' '} ** 128;
-        var remaining = count;
-        while (remaining > 0) {
-            const n = @min(remaining, buf.len);
-            try out.writeAll(buf[0..n]);
-            remaining -= n;
-        }
-    }
 };
 
 pub const KittyBackend = Backend;
+
+test "moving and removing terminal text erase old cells without wrapping" {
+    var tmp = system_io.fs.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile("text", .{ .read = true });
+    defer file.close();
+    var output = Backend.init(std.testing.allocator, file);
+    defer output.deinit();
+    const key = types.NodeKey.text(1, 1);
+    var node = types.TextNode{ .key = key, .pos = .{ .row = 24, .col = 1 }, .content = "old menu" };
+    try output.applyTextOps(&.{.{ .tag = .add, .key = key, .node = node }});
+    node.pos.row = 30;
+    node.content = "new menu";
+    try output.applyTextOps(&.{.{ .tag = .update, .key = key, .node = node }});
+    try output.applyTextOps(&.{.{ .tag = .remove, .key = key, .node = null }});
+    try file.seekTo(0);
+    var buffer: [1024]u8 = undefined;
+    const bytes = buffer[0..try file.readAll(&buffer)];
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\x1b[24;1H\x1b[0m\x1b[8X\x1b[30;1H") != null);
+    try std.testing.expect(std.mem.endsWith(u8, bytes, "\x1b[30;1H\x1b[0m\x1b[8X"));
+    try std.testing.expectEqual(@as(usize, 0), output.texts.count());
+}

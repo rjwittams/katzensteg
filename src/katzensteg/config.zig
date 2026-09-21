@@ -2,6 +2,8 @@ const std = @import("std");
 const system_io = @import("platform");
 const window_policy = @import("window_policy.zig");
 
+pub const command_binding = @import("command_key.zig");
+
 const log = std.log.scoped(.config);
 
 pub const CompositeMode = enum {
@@ -41,6 +43,8 @@ pub const RuntimeConfig = struct {
     input_enabled: bool = true,
     input_claimed: bool = true,
     input_claim_focus: bool = true,
+    command_key: ?u8 = ']',
+    command_notify_fd: ?i32 = null,
     gamepad_background: bool = false,
     stats: bool = false,
     image_gc: bool = false,
@@ -79,6 +83,7 @@ pub const runtime_field_metadata = [_]RuntimeFieldMetadata{
     .{ .name = "input", .env_name = "KATZENSTEG_INPUT", .mutability = .hot_apply },
     .{ .name = "input_claim", .env_name = "KATZENSTEG_INPUT_CLAIM", .mutability = .hot_apply },
     .{ .name = "input_claim_focus", .env_name = "KATZENSTEG_INPUT_CLAIM_FOCUS", .mutability = .hot_apply },
+    .{ .name = "command_key", .env_name = "KATZENSTEG_COMMAND_KEY", .mutability = .restart_required },
     .{ .name = "gamepad_background", .env_name = "KATZENSTEG_GAMEPAD_BACKGROUND", .mutability = .hot_apply },
     .{ .name = "stats", .env_name = "KATZENSTEG_STATS", .mutability = .hot_apply },
     .{ .name = "image_gc", .env_name = "KATZENSTEG_IMAGE_GC", .mutability = .hot_apply },
@@ -172,6 +177,12 @@ pub fn parseRuntimeConfigJsonSlice(allocator: std.mem.Allocator, bytes: []const 
     applyJsonBool(parsed.value, "input", &config.input_enabled);
     applyJsonBool(parsed.value, "input_claim", &config.input_claimed);
     applyJsonBool(parsed.value, "input_claim_focus", &config.input_claim_focus);
+    if (parsed.value.object.get("command_key")) |value| {
+        if (value == .string) config.command_key = command_binding.parse(value.string) catch config.command_key;
+    }
+    if (parsed.value.object.get("command_notify_fd")) |value| {
+        if (value == .integer and value.integer >= 0 and value.integer <= std.math.maxInt(i32)) config.command_notify_fd = @intCast(value.integer);
+    }
     applyJsonBool(parsed.value, "gamepad_background", &config.gamepad_background);
     applyJsonBool(parsed.value, "stats", &config.stats);
     applyJsonBool(parsed.value, "image_gc", &config.image_gc);
@@ -263,6 +274,10 @@ pub fn applyRuntimeConfigEnvValue(config: *RuntimeConfig, env_name: []const u8, 
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_INPUT_CLAIM_FOCUS")) {
         config.input_claim_focus = parseEnabledEnvValue(value);
+        return true;
+    }
+    if (std.mem.eql(u8, env_name, "KATZENSTEG_COMMAND_KEY")) {
+        config.command_key = command_binding.parse(value) catch config.command_key;
         return true;
     }
     if (std.mem.eql(u8, env_name, "KATZENSTEG_GAMEPAD_BACKGROUND")) {
@@ -541,4 +556,15 @@ test "output profile auto clears an explicit SHM override" {
     try std.testing.expectEqual(OutputProfile.shm, config.output_profile.?);
     try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_OUTPUT_PROFILE", "auto"));
     try std.testing.expect(config.output_profile == null);
+}
+
+test "command key config survives JSON and environment overrides" {
+    var config = try parseRuntimeConfigJsonSlice(std.testing.allocator, "{\"command_key\":\"^X\"}");
+    try std.testing.expectEqual(@as(?u8, 'X'), config.command_key);
+    try std.testing.expect(applyRuntimeConfigEnvValue(&config, "KATZENSTEG_COMMAND_KEY", "none"));
+    try std.testing.expect(config.command_key == null);
+    _ = applyRuntimeConfigEnvValue(&config, "KATZENSTEG_COMMAND_KEY", "invalid");
+    try std.testing.expect(config.command_key == null);
+    _ = applyRuntimeConfigEnvValue(&config, "KATZENSTEG_COMMAND_KEY", "^]");
+    try std.testing.expectEqual(@as(?u8, ']'), config.command_key);
 }

@@ -100,20 +100,30 @@ class Screen:
 
 class PlaceholderHostTest(unittest.TestCase):
     def test_normal_wm_hosts_two_producers(self):
+        self.check_mouse_geometry(False)
+
+    def test_menu_keeps_window_geometry_mouse_controls(self):
+        self.check_mouse_geometry(True)
+
+    def check_mouse_geometry(self, armed):
         with tempfile.TemporaryDirectory(prefix="wm-placeholder-") as directory:
             folder = Path(directory)
             # A private executable pair lets the test remove the launcher to
             # exercise a failed interactive launch without touching the build.
-            wm = folder / "katzensteg-wm"
+            # Preserve the installed bin/../lib layout for optional libraries.
+            (folder / "bin").mkdir()
+            (folder / "lib").symlink_to(REPO / "zig-out/lib", target_is_directory=True)
+            wm = folder / "bin/katzensteg-wm"
             shutil.copy2(REPO / "zig-out/bin/katzensteg-wm", wm)
-            launcher = folder / "katzensteg"
+            launcher = folder / "bin/katzensteg"
             launcher.symlink_to(REPO / "zig-out/bin/katzensteg")
             profiles = {name: {"extends": ["probe.input"], "stdout": str(folder / (name + ".log")), "stderr": "stdout"} for name in ("first", "second")}
             (folder / "profiles.json").write_text(json.dumps({"profiles": profiles}))
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 1000, 800))
-            env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_OUTPUT_PROFILE="file_whole", KATZENSTEG_PROFILE_DIR=str(REPO / "profiles") + ":" + directory)
+            env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_PROFILE_DIR=str(REPO / "profiles") + ":" + directory)
             env.pop("KATZENSTEG_TARGET", None)
+            env.pop("KATZENSTEG_OUTPUT_PROFILE", None)
 
             def controlling_terminal():
                 os.setsid()
@@ -121,11 +131,13 @@ class PlaceholderHostTest(unittest.TestCase):
 
             proc = subprocess.Popen([str(wm), "--presentation", "placeholder", "first", "second"], env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
             screen = Screen()
+            mouse_queries_answered = 0
 
-            def pump_until(predicate, timeout=15):
+            def pump_until(predicate, timeout=8):
+                nonlocal mouse_queries_answered
                 deadline = time.monotonic() + timeout
                 while not predicate():
-                    self.assertLess(time.monotonic(), deadline, (proc.poll(), screen.frames, screen.placements, {p.name: p.read_text()[-3000:] for p in folder.glob("*.log")}))
+                    self.assertLess(time.monotonic(), deadline, (proc.poll(), screen.frames, screen.placements, [(pos, char) for pos, (char, _) in screen.cells.items() if char in "┌└┐┘"], {p.name: p.read_text()[-3000:] for p in folder.glob("*.log")}))
                     ready, _, _ = select.select([master], [], [], 0.05)
                     if ready:
                         try:
@@ -135,23 +147,45 @@ class PlaceholderHostTest(unittest.TestCase):
                                 raise
                             data = b""
                         screen.feed(data)
+                        queries = screen.raw.count(b"\x1b[?1016$p")
+                        if queries > mouse_queries_answered:
+                            os.write(master, b"\x1b[?1016;1$y" * (queries - mouse_queries_answered))
+                            mouse_queries_answered = queries
                     if proc.poll() is not None and not predicate():
-                        self.fail((proc.returncode, screen.frames))
+                        self.fail((proc.returncode, screen.frames, bytes(screen.raw[-4096:])))
 
             try:
                 pump_until(lambda: all(screen.frames.get(i, 0) >= 3 for i in (100000, 300000)) and screen.cells.get((20, 50)) == (GLYPH, 300000))
                 # The higher window's border is text, not the lower image.
                 self.assertEqual(screen.cells[2, 3][0], "┌")
-                os.write(master, b"\t")  # Focus second (already on top).
+                os.write(master, b"\x1d\t")  # Focus second (already on top).
                 pump_until(lambda: any(c == "*" for (r, _), (c, _) in screen.cells.items() if r == 3))
-                os.write(master, b"\t")  # Raise first over second.
+                os.write(master, b"\x1d\t")  # Raise first over second.
                 pump_until(lambda: screen.cells.get((20, 50)) == (GLYPH, 100000))
                 before_size = screen.placements[100000]
-                os.write(master, b"l")
+                # Move the focused window by dragging its title, using pixel reports.
+                if armed: os.write(master, b"\x1d")
+                os.write(master, b"\x1b[<0;95;30M\x1b[<32;105;30M\x1b[<0;105;30m")
                 pump_until(lambda: screen.cells.get((1, 2), (None,))[0] == "┌" and screen.cells.get((1, 1), (None,))[0] == " ")
                 self.assertEqual(screen.placements[100000], before_size, "moving must not resize the virtual placement")
-                os.write(master, b"H")
-                pump_until(lambda: screen.placements[100000] != before_size)
+                # Resize the bottom-right corner, also with pixel reports.
+                # The WM fits the height to the source aspect ratio.
+                pump_until(lambda: any(c == 2 and char == "└" for (r, c), (char, _) in screen.cells.items()))
+                right = max(c for (r, c), (char, _) in screen.cells.items() if r == 1 and char == "┐")
+                bottom = max(r for (r, c), (char, _) in screen.cells.items() if c == 2 and char == "└")
+                x, y = (right - 1) * 10 + 5, (bottom - 1) * 20 + 10
+                os.write(master, f"\x1b[<0;{x};{y}M\x1b[<32;{x - 10};{y - 20}M\x1b[<0;{x - 10};{y - 20}m".encode())
+                pump_until(lambda: screen.placements[100000][0] < before_size[0] and any(c == right - 1 and r < bottom and char == "┘" for (r, c), (char, _) in screen.cells.items()))
+                if armed:
+                    # Geometry keeps command mode active, with content blocked.
+                    os.write(master, b"\x1b[<0;205;210M\x1b[<0;205;210m")
+                    os.write(master, b"z")
+                    pump_until(lambda: "Unknown key" in "".join(screen.cells.get((40, c), (" ",))[0] for c in range(1, 101)))
+                for name in ("first", "second"):
+                    self.assertNotIn("mouse_button_down", (folder / (name + ".log")).read_text())
+                if armed:
+                    os.write(master, b"\x1b[27u")
+                os.write(master, b"\x1b[?1016;2$y")
                 # Translate a click on the first displayed source cell to (0,0).
                 cells = sorted(pos for pos, value in screen.cells.items() if value == (GLYPH, 100000))
                 row, col = cells[0]
@@ -166,7 +200,7 @@ class PlaceholderHostTest(unittest.TestCase):
                 second_log = (folder / "second.log").read_text()
                 self.assertNotIn("key_down key=A", second_log)
                 launcher.unlink()
-                os.write(master, b"n")
+                os.write(master, b"\x1dn")
                 # The 100-column status line may truncate the prompt text.
                 time.sleep(0.05)
                 os.write(master, b"unavailable\r")
@@ -174,7 +208,13 @@ class PlaceholderHostTest(unittest.TestCase):
                 pump_until(lambda: "launch failed: unavailable: FileNotFound" in wm_log.read_text())
                 previous_frames = screen.frames[100000]
                 pump_until(lambda: screen.frames[100000] > previous_frames)
-                os.write(master, b"q")
+                # q closes only the focused producer; the other keeps rendering.
+                os.write(master, b"\x1dq")
+                pump_until(lambda: "shutdown sent profile=first" in wm_log.read_text())
+                self.assertIsNone(proc.poll())
+                previous_frames = screen.frames[300000]
+                pump_until(lambda: screen.frames[300000] > previous_frames)
+                os.write(master, b"\x1dQ")
                 pump_until(lambda: proc.poll() is not None)
                 # On macOS the controlling slave can become ENOTTY on leader
                 # exit. Verify the WM's normal screen restoration on the wire.
@@ -193,7 +233,7 @@ class PlaceholderHostTest(unittest.TestCase):
                 if proc.poll() is None:
                     os.write(master, b"\x1b")
                     time.sleep(0.05)
-                    os.write(master, b"q")
+                    os.write(master, b"\x1dQ")
                     deadline = time.monotonic() + 8
                     while proc.poll() is None and time.monotonic() < deadline:
                         if select.select([master], [], [], 0.05)[0]:

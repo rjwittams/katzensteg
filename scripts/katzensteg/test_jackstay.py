@@ -4,6 +4,8 @@ import ctypes as C
 import json
 from pathlib import Path
 import select
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -70,6 +72,41 @@ class CpuConnections(unittest.TestCase):
         self.addCleanup(consumer.cleanup)
         self.assertEqual(consumer.read(), "ready")
         return publisher, consumer
+
+    def test_installed_package_is_relocatable(self):
+        # Installed artifacts must not fall back to the dependency build tree.
+        for name in ("katzensteg-wm", "katzensteg-jackstay-probe"):
+            binary = ROOT / "zig-out/bin" / name
+            if sys.platform == "darwin":
+                metadata = subprocess.check_output(["otool", "-l", str(binary)], text=True)
+                paths = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", metadata)
+                relative = "@loader_path/"
+            else:
+                metadata = subprocess.check_output(["readelf", "-d", str(binary)], text=True)
+                paths = [path for entry in re.findall(r"\((?:RUNPATH|RPATH)\).*?\[(.*?)\]", metadata) for path in entry.split(":")]
+                relative = "$ORIGIN/"
+            self.assertTrue(paths, metadata)
+            self.assertTrue(all(path == relative[:-1] or path.startswith(relative) for path in paths), (name, paths))
+        with tempfile.TemporaryDirectory(prefix="ks-js-relocated-", dir="/tmp") as tmp:
+            folder = Path(tmp)
+            (folder / "bin").mkdir()
+            (folder / "lib").mkdir()
+            probe = folder / "bin/katzensteg-jackstay-probe"
+            shutil.copy2(ROOT / "zig-out/bin/katzensteg-jackstay-probe", probe)
+            library = "libjackstay.dylib" if sys.platform == "darwin" else "libjackstay.so"
+            shutil.copy2(ROOT / "zig-out/lib" / library, folder / "lib" / library)
+            path = folder / "source"
+            peers = []
+            for mode in ("publish", "consume"):
+                peer = Peer(mode, path, command=[str(probe), mode, str(path)])
+                self.addCleanup(peer.cleanup)
+                self.assertEqual(peer.read(), "ready")
+                peers.append(peer)
+            publisher, consumer = peers
+            self.assertEqual(publisher.send("1 7"), "published")
+            self.assertEqual(consumer.send("next"), "1 7")
+            consumer.finish()
+            publisher.finish()
 
     def test_held_frame_survives_resize_and_connection_close(self):
         with tempfile.TemporaryDirectory(prefix="ks-js-", dir="/tmp") as tmp:
