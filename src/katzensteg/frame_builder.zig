@@ -2858,14 +2858,19 @@ pub const FrameBuilder = struct {
                 copy.alpha_mod,
             });
         }
-        const now = system_io.time.nanoTimestamp();
-        if (self.dump_composites and now - self.last_composite_dump_ns >= 2 * std.time.ns_per_s) {
-            self.dumpCompositeFrame(logger, buf, state.output_w, state.output_h);
-            self.last_composite_dump_ns = now;
+        if (self.dump_composites) {
+            const now = system_io.time.nanoTimestamp();
+            if (now - self.last_composite_dump_ns >= 2 * std.time.ns_per_s) {
+                self.dumpCompositeFrame(logger, buf, state.output_w, state.output_h);
+                self.last_composite_dump_ns = now;
+            }
         }
+        // This comparison only suppresses diagnostics. Presentation checks the
+        // finished frame separately, after cursor composition.
+        if (!self.debug_composite) return;
         if (state.composite_last_presented) |last| {
             if (last.len == buf.len and std.mem.eql(u8, last, buf)) {
-                if (self.debug_composite and !state.logged_debug_composite_unchanged) {
+                if (!state.logged_debug_composite_unchanged) {
                     logger.writeScoped(.info, .frame_builder, "composite unchanged; skipping tile uploads");
                     state.logged_debug_composite_unchanged = true;
                 }
@@ -2873,7 +2878,7 @@ pub const FrameBuilder = struct {
             }
         }
         state.logged_debug_composite_unchanged = false;
-        if (self.debug_composite) _ = self.logCompositeStats(logger, buf, state.output_w, state.output_h);
+        _ = self.logCompositeStats(logger, buf, state.output_w, state.output_h);
     }
 
     fn findLastFramebufferOverwriteCopy(self: *FrameBuilder, state: *const RendererState) ?usize {
@@ -3408,27 +3413,30 @@ pub const FrameBuilder = struct {
     fn clearFramebuffer(buf: []u8, w: i32, h: i32, color: [4]u8) void {
         _ = w;
         _ = h;
-        var i: usize = 0;
-        while (i < buf.len) : (i += 4) {
-            buf[i + 0] = color[0];
-            buf[i + 1] = color[1];
-            buf[i + 2] = color[2];
-            buf[i + 3] = 255;
-        }
+        @memset(std.mem.bytesAsSlice(u32, buf), opaquePixel(color));
+    }
+
+    fn opaquePixel(color: [4]u8) u32 {
+        // Preserve RGBA byte order on either endianness. bytesAsSlice keeps the
+        // buffer's byte alignment, so callers need no aligned allocation.
+        return @bitCast([4]u8{ color[0], color[1], color[2], 255 });
     }
 
     fn compositeFill(dst: []u8, dst_w: i32, dst_h: i32, rect: core.CoreRect, color: [4]u8) void {
         const clipped = clipRect(rect, .{ .x = 0, .y = 0, .w = dst_w, .h = dst_h }) orelse return;
-        var y = clipped.y;
-        while (y < clipped.y + clipped.h) : (y += 1) {
-            var x = clipped.x;
-            while (x < clipped.x + clipped.w) : (x += 1) {
-                const di: usize = @intCast((y * dst_w + x) * 4);
-                dst[di + 0] = color[0];
-                dst[di + 1] = color[1];
-                dst[di + 2] = color[2];
-                dst[di + 3] = 255;
-            }
+        const pixels = std.mem.bytesAsSlice(u32, dst);
+        const pixel = opaquePixel(color);
+        const stride: usize = @intCast(dst_w);
+        const width: usize = @intCast(clipped.w);
+        const height: usize = @intCast(clipped.h);
+        var start: usize = @intCast(clipped.y * dst_w + clipped.x);
+        if (width == stride) {
+            @memset(pixels[start..][0 .. width * height], pixel);
+            return;
+        }
+        for (0..height) |_| {
+            @memset(pixels[start..][0..width], pixel);
+            start += stride;
         }
     }
 
@@ -4162,6 +4170,62 @@ test "composite framebuffer writes final opaque alpha inline" {
     };
     FrameBuilder.compositeCopy(&dst, 2, 2, &src, 1, 1, false, .{ .x = 0, .y = 0, .w = 1, .h = 1 }, .{ .x = 0, .y = 1, .w = 1, .h = 1 }, default_blend_mode, .{ 255, 255, 255 }, 255);
     try std.testing.expectEqualSlices(u8, &.{ 100, 110, 120, 255 }, dst[8..12]);
+}
+
+test "framebuffer clear preserves RGBA bytes in unaligned buffers" {
+    var storage: [4 + 7 * 3 * 4]u8 align(4) = undefined;
+    for (0..4) |offset| {
+        for ([_]usize{ 0, 1, 7 * 3 }) |pixels| {
+            @memset(&storage, 0xa5);
+            const end = offset + pixels * 4;
+            FrameBuilder.clearFramebuffer(storage[offset..end], @intCast(pixels), 1, .{ 13, 71, 209, 0 });
+            for (storage, 0..) |byte, i| {
+                const expected: u8 = if (i >= offset and i < end)
+                    ([_]u8{ 13, 71, 209, 255 })[(i - offset) % 4]
+                else
+                    0xa5;
+                try std.testing.expectEqual(expected, byte);
+            }
+        }
+    }
+}
+
+test "composite fills clip to the framebuffer and preserve surrounding pixels" {
+    const w = 7;
+    const h = 3;
+    var storage: [4 + w * h * 4]u8 align(4) = undefined;
+    const rects = [_]core.CoreRect{
+        .{ .x = 0, .y = 0, .w = w, .h = h },
+        .{ .x = -2, .y = -1, .w = 11, .h = 5 },
+        .{ .x = -2, .y = -1, .w = 4, .h = 3 },
+        .{ .x = 5, .y = 1, .w = 4, .h = 3 },
+        .{ .x = 2, .y = 0, .w = 1, .h = h },
+        .{ .x = 1, .y = 1, .w = 5, .h = 1 },
+        .{ .x = 6, .y = 2, .w = 1, .h = 1 },
+        .{ .x = -3, .y = 0, .w = 2, .h = 1 },
+        .{ .x = w, .y = 0, .w = 2, .h = 1 },
+        .{ .x = 0, .y = h, .w = 2, .h = 1 },
+        .{ .x = 0, .y = 0, .w = 0, .h = h },
+        .{ .x = 0, .y = 0, .w = w, .h = 0 },
+    };
+    for (0..4) |offset| {
+        for (rects) |rect| {
+            @memset(&storage, 0xa5);
+            const end = offset + w * h * 4;
+            FrameBuilder.compositeFill(storage[offset..end], w, h, rect, .{ 13, 71, 209, 17 });
+            for (storage, 0..) |byte, i| {
+                var expected: u8 = 0xa5;
+                if (i >= offset and i < end) {
+                    const pixel = (i - offset) / 4;
+                    const x: i32 = @intCast(pixel % w);
+                    const y: i32 = @intCast(pixel / w);
+                    if (x >= rect.x and x < rect.x + rect.w and y >= rect.y and y < rect.y + rect.h)
+                        expected = ([_]u8{ 13, 71, 209, 255 })[(i - offset) % 4];
+                }
+                try std.testing.expectEqual(expected, byte);
+            }
+        }
+    }
 }
 
 test "scaled composite copy preserves nearest-neighbor mapping" {
