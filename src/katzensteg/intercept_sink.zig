@@ -37,11 +37,11 @@ fn convertSurface(surface: ?*sdl.SDL_Surface) ?*sdl.SDL_Surface {
 }
 
 pub fn dispatchCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
-    const start_ns = system_io.time.nanoTimestamp();
-    defer rt.noteProducerTime(switch (cmd) {
+    const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
+    defer if (start_ns) |start| rt.noteProducerTime(switch (cmd) {
         .render_present => .render_present,
         else => .generic,
-    }, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
+    }, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     switch (rt.intercept_mode) {
         .sync_compose => {
             var owned = cloneCommand(rt, cmd) catch {
@@ -219,8 +219,8 @@ pub fn onUpdateNvTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, r
 }
 
 pub fn enqueueUpdateTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, rect: ?*const sdl.SDL_Rect, pixels: ?*const anyopaque, pitch: i32) void {
-    const start_ns = system_io.time.nanoTimestamp();
-    defer rt.noteProducerTime(.update_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
+    const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
+    defer if (start_ns) |start| rt.noteProducerTime(.update_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     var copied: ?[]u8 = null;
     if (pixels) |p| {
         const byte_len: usize = if (rect) |r| @intCast(pitch * r.h) else blk: {
@@ -322,8 +322,8 @@ fn planeBytes(plane: ?[*]const u8, pitch: i32, rows: i32) ?[]const u8 {
 }
 
 pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
-    const start_ns = system_io.time.nanoTimestamp();
-    defer rt.noteProducerTime(.render_present, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
+    const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
+    defer if (start_ns) |start| rt.noteProducerTime(.render_present, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     if (width <= 0 or height <= 0) return;
     const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
     if (pixels.len < byte_len) {
@@ -339,8 +339,8 @@ pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, h
 }
 
 pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
-    const start_ns = system_io.time.nanoTimestamp();
-    defer rt.noteProducerTime(.create_texture_from_surface, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
+    const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
+    defer if (start_ns) |start| rt.noteProducerTime(.create_texture_from_surface, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     const texture_handle = sdl_adapter.handleFromPtr(texture);
     if (surface == null) {
         const metadata = textureMetadataOrFallback(texture);
@@ -411,8 +411,8 @@ pub fn onCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_T
 }
 
 pub fn enqueueQueuedUnlockTexture(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture) void {
-    const start_ns = system_io.time.nanoTimestamp();
-    defer rt.noteProducerTime(.unlock_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start_ns)));
+    const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
+    defer if (start_ns) |start| rt.noteProducerTime(.unlock_texture, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     const texture_handle = sdl_adapter.handleFromPtr(texture);
     const capture = rt.takeQueuedLock(texture_handle) orelse {
         log.warn("queued unlock without remembered lock capture", .{});

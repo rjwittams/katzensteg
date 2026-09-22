@@ -155,7 +155,11 @@ class PlaceholderHostTest(unittest.TestCase):
                         self.fail((proc.returncode, screen.frames, bytes(screen.raw[-4096:])))
 
             try:
-                pump_until(lambda: all(screen.frames.get(i, 0) >= 3 for i in (100000, 300000)) and screen.cells.get((20, 50)) == (GLYPH, 300000))
+                # The grid is written before the border, and a PTY read may
+                # split that redraw. Wait for both before inspecting chrome.
+                pump_until(lambda: all(screen.frames.get(i, 0) >= 3 for i in (100000, 300000))
+                           and screen.cells.get((20, 50)) == (GLYPH, 300000)
+                           and screen.cells.get((2, 3), (None,))[0] == "┌")
                 # The higher window's border is text, not the lower image.
                 self.assertEqual(screen.cells[2, 3][0], "┌")
                 os.write(master, b"\x1d\t")  # Focus second (already on top).
