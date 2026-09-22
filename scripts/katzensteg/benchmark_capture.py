@@ -98,6 +98,7 @@ def main():
                 result.update(run=run + 1, uploads=uploads,
                               cpu_ms_per_frame=result['cpu_seconds'] * 1000 / args.frames)
                 print(json.dumps(result), flush=True)
+                # Include the warm-up present, which is outside the CPU timing.
                 if uploads < args.frames + 1:
                     raise RuntimeError('frames were dropped; reduce workload before comparing CPU cost')
             finally:
