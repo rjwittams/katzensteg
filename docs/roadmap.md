@@ -57,9 +57,9 @@ diagnostic follow-ups remain in the issue tracker.
   across capture, Jackstay and terminal output needs measurements from those
   full paths.
 - **Installed and remote use:** the package in #58 is a prerequisite for the
-  separate fleet and crew-image work. The broader brief at
-  `~/dev/project-map/briefs/fleet-porthole-katzensteg-coverage-2026-09-17.md`
-  covers signing, rollout and container images; those are not implemented here.
+  separate fleet and crew-image work. Fleet signing and rollout, plus adding
+  Katzensteg and its Jackstay runtime to container images, remain outside this
+  repo's current implementation.
 
 The support boundary and ownership rules live in [architecture.md](architecture.md),
 the optional connector contract in [jackstay.md](jackstay.md), and local app
