@@ -2,9 +2,9 @@
 
 Katzensteg puts native application graphics in your terminal.
 
-It currently works by launching applications with the Katzensteg runtime injected into the process, using `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` on macOS. The runtime captures the app's SDL2 output and presents it through kitty-compatible terminal graphics.
+It currently works by launching applications with the Katzensteg runtime injected into the process, using `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` on macOS. The runtime captures tested SDL2/SDL3 and graphics presentation paths and sends them to a terminal or a host.
 
-The current practical support boundary is workload-specific. Several larger test applications have needed app-side patches or build modes so they expose an SDL2 output/input path for Katzensteg to capture. The current proving ground is games and emulators: RetroArch, ScummVM, Moonlight, Chiaki, small SDL probes, and similar workloads.
+The current practical support boundary is workload-specific. Several larger test applications have needed app-side patches or build modes so they expose a capturable output/input path. The current proving ground is games and emulators: RetroArch, ScummVM, Moonlight, Chiaki, small SDL probes, and similar workloads.
 
 This is alpha software. It is already useful for experiments and demos, but the interfaces, profiles, and supported app matrix are still moving.
 
@@ -12,12 +12,13 @@ Project site: <https://katzensteg.dev>
 
 ## What Works Today
 
-- SDL2 software and renderer paths used by the current probes and patched app profiles.
+- SDL2 and SDL3 software and renderer paths used by the current probes and patched app profiles.
 - Keyboard and mouse input for the main tested paths.
 - Launcher profiles for repeatable app runs.
+- Direct terminal output, hosted panels and optional Jackstay CPU publishing.
 - Kitty-compatible output in terminals such as Kitty and Ghostty, with additional compatibility testing in WezTerm and iTerm2.
 
-OpenGL and Vulkan capture work exists in the tree for specific experiments and profiles. The README should not be read as a promise that arbitrary SDL2, OpenGL, or Vulkan applications work out of the box.
+OpenGL, Vulkan and Metal capture work exists for specific experiments and profiles. These paths do not imply support for arbitrary applications using those APIs.
 
 ## Try It
 
@@ -60,12 +61,13 @@ For real app profiles, start with `--dry-run`. Many of them expect local app che
 ## Requirements
 
 - Zig 0.16.0.
-- SDL2 development headers and libraries.
+- SDL2 and SDL3 development headers and libraries.
 - A terminal with kitty graphics protocol support.
 - libyuv on Linux.
 - Vulkan loader and headers for Vulkan capture.
 
-There is no `build.zig.zon` yet, so dependencies come from your system package manager.
+`build.zig.zon` pins the libxev fork used by the desktop WM. SDL, Vulkan and
+other system libraries still come from the host package manager.
 
 ## Running Apps
 
@@ -114,6 +116,7 @@ Runtime logs go to `/tmp/katzensteg-*`.
 
 ## Docs
 
+- `docs/roadmap.md` - current work, tracked next steps, and later directions.
 - `docs/architecture.md` - current architecture and support boundary.
 - `docs/launcher.md` - launcher and profile usage.
 - `docs/external-projects.md` - external app fork inventory.

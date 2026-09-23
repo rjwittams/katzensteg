@@ -1,5 +1,8 @@
 # Metal interception tracer bullet
 
+Historical implementation outline. The layer now exists; current behavior and
+remaining validation are in [metal-capture-plan.md](metal-capture-plan.md).
+
 ## Scope
 
 Build a macOS-only Metal capture layer that proves the same external

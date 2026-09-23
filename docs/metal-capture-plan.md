@@ -1,9 +1,12 @@
-# Metal capture plan
+# Metal capture status
 
-Metal support should follow the existing external-framebuffer path rather than
-adding terminal/compositor behavior. The capture layer should publish BGRA/RGBA
-frames through `ks_katzensteg_present_external_framebuffer`; `frame_builder`
-already converts those formats before terminal presentation.
+The macOS-only `libkatzensteg-metal-layer.dylib` now hooks `CAMetalLayer`
+drawables and Metal command-buffer presentation. It copies supported BGRA
+drawables to shared buffers and publishes compact rows through
+`ks_katzensteg_present_external_framebuffer`. The existing queued framebuffer
+path owns terminal presentation. This is narrow probe-level support; real-app
+acceptance with the Porthole native viewer is tracked in
+[issue #57](https://github.com/rjwittams/katzensteg/issues/57).
 
 ## Test targets
 
@@ -17,33 +20,31 @@ already converts those formats before terminal presentation.
   A capture hook inserted into the same command buffer should naturally run after
   the viewer's wait and blit.
 
-## Proposed implementation
+## Implemented path
 
-1. Add a macOS-only `libkatzensteg-metal-layer.dylib` built from Objective-C/C
-   and linked against `Metal`, `QuartzCore`, `Foundation`, and `objc`.
-2. Enable it through launcher profiles with `DYLD_INSERT_LIBRARIES` and
+1. The macOS build produces `libkatzensteg-metal-layer.dylib`; the SDL2 and
+   SDL3 Metal probe profiles load it with `DYLD_INSERT_LIBRARIES` and enable
    `KATZENSTEG_METAL_CAPTURE`.
-3. Swizzle/interpose Objective-C methods:
+2. The layer hooks Objective-C methods:
    - `-[CAMetalLayer nextDrawable]` to observe drawable/layer metadata.
    - `-[MTLCommandBuffer presentDrawable:]`.
    - `-[MTLCommandBuffer presentDrawable:atTime:]`.
    - `-[MTLCommandBuffer presentDrawable:afterMinimumDuration:]`.
-4. On present, encode a copy from `drawable.texture` to a CPU-visible
+3. On present, encode a copy from `drawable.texture` to a CPU-visible
    `MTLBuffer`, then add a completion handler that compacts rows and calls
    `ks_katzensteg_present_external_framebuffer`.
-5. Start with `MTLPixelFormatBGRA8Unorm` and `MTLPixelFormatBGRA8Unorm_sRGB`;
-   both map to existing `.bgra8`.
+4. Only `MTLPixelFormatBGRA8Unorm` and `MTLPixelFormatBGRA8Unorm_sRGB` pass
+   the current format check. Other formats are skipped with a file-log entry.
 
-## Open decisions
+## Limits and follow-up
 
-- Threading: completion handlers should not directly mutate terminal presentation
-  state. Prefer the queued external-framebuffer path, or add an explicit exported
-  queue-only entry point for foreign GPU callbacks.
-- Row layout: Metal copy-to-buffer paths usually need aligned `bytesPerRow`;
-  either compact rows in the Metal layer before calling core, or add a strided
-  framebuffer export.
-- `framebufferOnly`: probes and Porthole set `CAMetalLayer.framebufferOnly = NO`,
-  which permits blit/readback. A general capture layer may need to force this
-  before the first drawable, with logging when it observes incompatible layers.
-- Filtering: decide whether the layer captures every `CAMetalLayer` in-process or
-  only drawables from SDL-created windows/profile-marked targets.
+- The completion handler publishes copied pixels into the queued framebuffer
+  path. It must not write to the terminal or mutate presentation state itself.
+- The layer aligns Metal row pitch and compacts rows before calling core. A
+  strided core API is not needed for this producer.
+- The `nextDrawable` hook sets `framebufferOnly = NO` before obtaining a
+  drawable; capture skips and logs an incompatible drawable if one remains.
+- Hook installation scans Metal command queue and buffer classes. Filtering
+  drawables to selected windows or profiles is not yet specified.
+- The Porthole native viewer's shared-event and IOSurface path needs the real
+  workload check in #57 before claiming support beyond the probes.
