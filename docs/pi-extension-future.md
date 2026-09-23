@@ -1,6 +1,7 @@
 # pi-extension: future policies and known placement issues
 
-Captured for later. Nothing here is committed work — these are intentions and observations.
+This note retains both completed work and directions that still need a concrete
+consumer. The [roadmap](roadmap.md) links the current tracked slices.
 
 ## Resolved: multi-producer pause
 
@@ -22,13 +23,14 @@ The protocol now carries `clip_cells` (and `terminal_cells`) alongside `rect_cel
 
 Inline panels in `katzensteg-panel.ts` derive both rects from `SurfaceRect.rows`/`totalRows`/`row` and emit a zero-clip when the rect goes undefined. The floating overlay path uses the same machinery (clip is `undefined` in practice since overlays don't scroll).
 
+## Resolved: occlusions between inline / floating panels
+
+The pi surface API reports coverage from higher overlays, including borders.
+The extension passes it to producers as `occlusion_rects` on `attach` and
+`viewport`. Floating and inline panels use the same coverage path. Tool-result
+image cropping remains pi renderer work; see the extension README.
+
 ## Open gaps
-
-### Occlusions between inline / floating panels
-
-The pi-extension does not send `occlusion_rects` to producers, so a floating overlay covering part of an inline panel is invisible to the inline panel's producer — it still emits placements behind the overlay. Kitty's z-ordering hides the worst symptoms, but the producer is wasting work and the layering is not declared.
-
-What we want: pi-extension computes per-producer occlusion rects from the set of other higher-z surfaces overlapping its rect, and includes them in `viewport`/`attach` messages. Existing protocol field is `occlusion_rects` (already plumbed through the producer); pi-side just needs to populate it.
 
 ### Image alignment within the bounding box
 
@@ -54,9 +56,11 @@ For panels that scroll out of view permanently (or for long periods), the produc
 
 For now: simplest is "kill them once they go off screen" if we can reliably detect off-screen (rect undefined for long enough).
 
-## Future: interactive resize
+## Future: profile-specific source resize
 
-We want users to be able to resize panels with the mouse. The behavior on resize is profile-dependent:
+Users can already drag floating panel edges and corners or select size presets.
+That changes the presentation viewport. The remaining question is whether a
+particular producer should also resize its underlying application window:
 
 - **Text-heavy** (HTML renderers, markdown viewers, etc.) — resize the *underlying window's pixel size* so text reflows at the new size. The image rendered by the producer reflects the new layout.
 - **Fixed-resolution / non-resizable** (most retro emulators) — keep the underlying pixel size; scale the image into the new placement size. Producer doesn't know it was resized.
@@ -64,9 +68,12 @@ We want users to be able to resize panels with the mouse. The behavior on resize
 
 Implementation sketch: profile metadata declares whether the underlying window is resizable; pi-extension sends a resize control message (existing `viewport` already conveys new `rect_cells`); the producer interprets that against its profile metadata.
 
-## Future: connect-within-host
+## Resolved: shell launches join the pi host
 
-Idea: an env var (`KATZENSTEG_PI_PANEL_ID=…`) lets an agent running in a Bash tool launch a program that automatically shows up in pi as a panel. The "display" of that pi command panel is extended to include the spawned program. Possibly done via the bash tool itself, possibly a separate tool/extension point.
+The interactive extension now exports `KATZENSTEG_TARGET=jsonl:<socket>` to
+bash and `!` commands. An ordinary `katzensteg <profile>` launch opens a new
+floating panel; see the extension README. Choosing a different placement from
+launch context is still a direction in [issue #31](https://github.com/rjwittams/katzensteg/issues/31).
 
 ## Future: content-handler / inline markdown render
 

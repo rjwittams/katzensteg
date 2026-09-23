@@ -2,7 +2,7 @@
 
 Katzensteg is currently an injected runtime plus a launcher.
 
-The launcher starts a target application from a JSON profile. The runtime is injected into that process with `LD_PRELOAD` on Linux or `DYLD_INSERT_LIBRARIES` on macOS. Once inside the process, Katzensteg intercepts the SDL2 presentation/input surface that the application exposes, mirrors the rendered output into terminal graphics, and routes terminal input back into SDL where supported.
+The launcher starts a target application from a JSON profile. The runtime is injected into that process with `LD_PRELOAD` on Linux or `DYLD_INSERT_LIBRARIES` on macOS. Once inside the process, Katzensteg captures tested SDL2/SDL3 and graphics presentation paths, sends frames to a terminal or host, and routes input back into SDL where supported.
 
 ## Current Support Boundary
 
@@ -10,11 +10,11 @@ The current support boundary is defined by tested workloads, not by a blanket AP
 
 The best-tested paths are:
 
-- SDL2 software and renderer output used by the current probes and patched app profiles.
+- SDL2 and SDL3 software and renderer output used by the current probes and patched app profiles.
 - SDL keyboard and mouse event paths used by those profiles.
 - Terminal graphics output using kitty-compatible protocol support.
 
-Several larger applications in the smoke matrix needed app-side patches or build modes so they expose an SDL2 renderer/input path. OpenGL and Vulkan capture work exists in the tree, and some profiles exercise those paths, but none of this should be read as arbitrary SDL2, OpenGL, or Vulkan application support.
+Several larger applications in the smoke matrix needed app-side patches or build modes so they expose a capturable output/input path. OpenGL, Vulkan and narrow Metal capture paths exist in the tree, with profiles for specific probes and applications. These do not establish arbitrary application support.
 
 ## Main Pieces
 
@@ -36,7 +36,7 @@ The launcher should be the place to encode repeatable run policy. Avoid adding n
 
 The runtime lives under `src/katzensteg/`. It owns:
 
-- SDL2 capture and replay state for tested paths
+- SDL2 and SDL3 capture and replay state for tested paths
 - frame composition
 - terminal graphics output
 - keyboard and mouse input mapping

@@ -38,7 +38,7 @@ For example, a host can request the existing presentation again after a text red
 
 Send the current clipping, z-base, and terminal geometry fields as well when they apply.
 
-The protocol/runtime tests cover generation parsing, malformed fields, pending output retaining its old generation, same-geometry generation changes, explicit placement refresh, and unchanged-request deduplication. `zig build test` and the default `zig build -Doptimize=Debug` pass with Zig 0.15.2.
+The protocol/runtime tests cover generation parsing, malformed fields, pending output retaining its old generation, same-geometry generation changes, explicit placement refresh, and unchanged-request deduplication. The original port passed with Zig 0.15.2; the current repository toolchain is Zig 0.16.0.
 
 ## Transport and recovery
 
