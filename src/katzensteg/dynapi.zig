@@ -8,7 +8,7 @@
 //! Katzensteg does not supply an SDL of its own. `install` asks the SDL that
 //! loaded it to fill the table (its exported `SDL_DYNAPI_entry` only runs
 //! `initialize_jumptable`, which checks the version and size, writes the
-//! `_REAL` functions and copies them out; SDL2 SDL_dynapi.c:227-356), keeps
+//! `_REAL` functions and copies them out; SDL2 SDL_dynapi.c:306-356), keeps
 //! that copy as the real functions, and then replaces the wrapped slots.
 //!
 //! This runs while SDL holds the spinlock of `SDL_InitDynamicAPI`, before its
@@ -135,7 +135,7 @@ var installed_table: ?*anyopaque = null;
 
 /// The body of each SDL major version's `SDL_DYNAPI_entry`: returns 0 when
 /// the table is wrapped and stores the real functions in `real_out`, or -1
-/// so SDL falls back to its own functions (SDL_dynapi.c:483-499).
+/// so SDL falls back to its own functions (SDL2 SDL_dynapi.c:483-499).
 pub export fn ks_dynapi_install(
     expected_apiver: u32,
     apiver: u32,
