@@ -28,6 +28,16 @@ pub const File = struct {
     pub fn read(self: File, bytes: []u8) !usize {
         return raw.read(self.handle, bytes);
     }
+    /// Reads buffered bytes without waiting for a pipe writer. Returns
+    /// WouldBlock for an open, empty pipe and 0 at EOF. The caller must be
+    /// the pipe's only reader, including through duplicated handles.
+    pub fn readPipeAvailable(self: File, bytes: []u8) !usize {
+        if (is_windows) return raw.readPipeAvailable(self.handle, bytes);
+        if (bytes.len == 0) return 0;
+        var fds = [_]std.posix.pollfd{.{ .fd = self.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try raw.poll(&fds, 0) == 0) return error.WouldBlock;
+        return raw.read(self.handle, bytes);
+    }
     pub fn write(self: File, bytes: []const u8) !usize {
         return raw.write(self.handle, bytes);
     }

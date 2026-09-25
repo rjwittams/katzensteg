@@ -7,8 +7,7 @@ const HANDLE = windows.HANDLE;
 const BOOL = windows.BOOL;
 const DWORD = u32;
 
-// WouldBlock is never returned here; it stays in the set so callers written
-// against the POSIX adapter's nonblocking contract compile unchanged.
+// Pipe polling reports WouldBlock when a writer is still open but idle.
 pub const ReadError = error{ WouldBlock, BrokenPipe, Unexpected };
 pub const WriteError = error{ BrokenPipe, Unexpected };
 pub const PReadError = ReadError || error{Unseekable};
@@ -69,6 +68,7 @@ const k32 = struct {
     extern "kernel32" fn ReadConsoleInputW(handle: HANDLE, records: [*]InputRecord, len: DWORD, read: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn SetFilePointerEx(handle: HANDLE, distance: i64, new_position: ?*i64, method: DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn ReadFile(handle: HANDLE, buffer: [*]u8, len: DWORD, read: *DWORD, overlapped: ?*Overlapped) callconv(.winapi) BOOL;
+    extern "kernel32" fn PeekNamedPipe(handle: HANDLE, buffer: ?*anyopaque, len: DWORD, read: ?*DWORD, available: ?*DWORD, remaining: ?*DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn WriteFile(handle: HANDLE, buffer: [*]const u8, len: DWORD, written: *DWORD, overlapped: ?*Overlapped) callconv(.winapi) BOOL;
     extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
@@ -158,6 +158,20 @@ pub fn read(handle: HANDLE, buf: []u8) ReadError!usize {
         return mapReadError();
     }
     return n;
+}
+
+/// Reads only buffered bytes from a byte pipe with a single reader. The
+/// caller must own reads exclusively so no other read can consume the bytes
+/// between PeekNamedPipe and ReadFile or block a peek on this handle.
+pub fn readPipeAvailable(handle: HANDLE, buf: []u8) ReadError!usize {
+    if (buf.len == 0) return 0;
+    var available: DWORD = 0;
+    if (!ok(k32.PeekNamedPipe(handle, null, 0, null, &available, null))) {
+        if (k32.GetLastError() == ERROR_BROKEN_PIPE) return 0;
+        return mapReadError();
+    }
+    if (available == 0) return error.WouldBlock;
+    return read(handle, buf[0..@min(buf.len, available)]);
 }
 
 fn mapReadError() ReadError {

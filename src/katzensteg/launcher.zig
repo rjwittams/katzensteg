@@ -1029,10 +1029,9 @@ fn destroyRawPipe(pipe: [2]std.posix.fd_t) void {
 
 fn drainPipeToSink(args: DrainArgs) void {
     defer args.source.close();
-    setNonBlocking(args.source.handle);
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = args.source.read(&buf) catch |err| switch (err) {
+        const n = args.source.readPipeAvailable(&buf) catch |err| switch (err) {
             error.WouldBlock => {
                 if (args.stop.load(.seq_cst)) return;
                 system_io.time.sleep(10 * std.time.ns_per_ms);
@@ -1046,7 +1045,7 @@ fn drainPipeToSink(args: DrainArgs) void {
 }
 
 fn setNonBlocking(fd: std.posix.fd_t) void {
-    // Windows anonymous pipes stay blocking; the drain ends at end of file.
+    // POSIX hosted transport only; standalone drains use readPipeAvailable.
     if (builtin.os.tag == .windows) return;
     const flags = system_io.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
     var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
@@ -1493,7 +1492,7 @@ test "launcher creates seed file parent directories" {
 }
 
 test "launcher output drain does not wait for orphaned descendants" {
-    // Needs /bin/sh; a Windows pipe drain blocks until every writer exits.
+    // Needs /bin/sh; test_launcher_output.py covers the same case on Windows.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const output_path = "/tmp/katzensteg-launcher-orphan-output-test.out";
