@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 // API builds through the loading SDL (real_gl_sdl.c). macOS links OpenGL.
 // opengl32.dll exports only OpenGL 1.1, so Windows tests resolve through the
 // SDL they link, too.
-const use_linux_real = (builtin.os.tag == .linux and !builtin.is_test) or builtin.os.tag == .windows;
+const use_resolved_gl = (builtin.os.tag == .linux and !builtin.is_test) or builtin.os.tag == .windows;
 
 extern fn ks_real_gl_available() c_int;
 extern fn ks_real_glReadBuffer(mode: c_uint) void;
@@ -54,29 +54,29 @@ extern fn glTexImage2D(target: c_uint, level: c_int, internalformat: c_int, widt
 extern fn glBlitFramebuffer(srcX0: c_int, srcY0: c_int, srcX1: c_int, srcY1: c_int, dstX0: c_int, dstY0: c_int, dstX1: c_int, dstY1: c_int, mask: c_uint, filter: c_uint) void;
 
 pub fn available() bool {
-    if (use_linux_real) return ks_real_gl_available() != 0;
+    if (use_resolved_gl) return ks_real_gl_available() != 0;
     return true;
 }
 
-pub const ReadBuffer = if (use_linux_real) ks_real_glReadBuffer else glReadBuffer;
-pub const PixelStorei = if (use_linux_real) ks_real_glPixelStorei else glPixelStorei;
-pub const GetIntegerv = if (use_linux_real) ks_real_glGetIntegerv else glGetIntegerv;
-pub const ReadPixels = if (use_linux_real) ks_real_glReadPixels else glReadPixels;
-pub const GetError = if (use_linux_real) ks_real_glGetError else glGetError;
-pub const GenBuffers = if (use_linux_real) ks_real_glGenBuffers else glGenBuffers;
-pub const DeleteBuffers = if (use_linux_real) ks_real_glDeleteBuffers else glDeleteBuffers;
-pub const BindBuffer = if (use_linux_real) ks_real_glBindBuffer else glBindBuffer;
-pub const BufferData = if (use_linux_real) ks_real_glBufferData else glBufferData;
-pub const MapBuffer = if (use_linux_real) ks_real_glMapBuffer else glMapBuffer;
-pub const UnmapBuffer = if (use_linux_real) ks_real_glUnmapBuffer else glUnmapBuffer;
-pub const GenFramebuffers = if (use_linux_real) ks_real_glGenFramebuffers else glGenFramebuffers;
-pub const DeleteFramebuffers = if (use_linux_real) ks_real_glDeleteFramebuffers else glDeleteFramebuffers;
-pub const BindFramebuffer = if (use_linux_real) ks_real_glBindFramebuffer else glBindFramebuffer;
-pub const CheckFramebufferStatus = if (use_linux_real) ks_real_glCheckFramebufferStatus else glCheckFramebufferStatus;
-pub const FramebufferTexture2D = if (use_linux_real) ks_real_glFramebufferTexture2D else glFramebufferTexture2D;
-pub const GenTextures = if (use_linux_real) ks_real_glGenTextures else glGenTextures;
-pub const DeleteTextures = if (use_linux_real) ks_real_glDeleteTextures else glDeleteTextures;
-pub const BindTexture = if (use_linux_real) ks_real_glBindTexture else glBindTexture;
-pub const TexParameteri = if (use_linux_real) ks_real_glTexParameteri else glTexParameteri;
-pub const TexImage2D = if (use_linux_real) ks_real_glTexImage2D else glTexImage2D;
-pub const BlitFramebuffer = if (use_linux_real) ks_real_glBlitFramebuffer else glBlitFramebuffer;
+pub const ReadBuffer = if (use_resolved_gl) ks_real_glReadBuffer else glReadBuffer;
+pub const PixelStorei = if (use_resolved_gl) ks_real_glPixelStorei else glPixelStorei;
+pub const GetIntegerv = if (use_resolved_gl) ks_real_glGetIntegerv else glGetIntegerv;
+pub const ReadPixels = if (use_resolved_gl) ks_real_glReadPixels else glReadPixels;
+pub const GetError = if (use_resolved_gl) ks_real_glGetError else glGetError;
+pub const GenBuffers = if (use_resolved_gl) ks_real_glGenBuffers else glGenBuffers;
+pub const DeleteBuffers = if (use_resolved_gl) ks_real_glDeleteBuffers else glDeleteBuffers;
+pub const BindBuffer = if (use_resolved_gl) ks_real_glBindBuffer else glBindBuffer;
+pub const BufferData = if (use_resolved_gl) ks_real_glBufferData else glBufferData;
+pub const MapBuffer = if (use_resolved_gl) ks_real_glMapBuffer else glMapBuffer;
+pub const UnmapBuffer = if (use_resolved_gl) ks_real_glUnmapBuffer else glUnmapBuffer;
+pub const GenFramebuffers = if (use_resolved_gl) ks_real_glGenFramebuffers else glGenFramebuffers;
+pub const DeleteFramebuffers = if (use_resolved_gl) ks_real_glDeleteFramebuffers else glDeleteFramebuffers;
+pub const BindFramebuffer = if (use_resolved_gl) ks_real_glBindFramebuffer else glBindFramebuffer;
+pub const CheckFramebufferStatus = if (use_resolved_gl) ks_real_glCheckFramebufferStatus else glCheckFramebufferStatus;
+pub const FramebufferTexture2D = if (use_resolved_gl) ks_real_glFramebufferTexture2D else glFramebufferTexture2D;
+pub const GenTextures = if (use_resolved_gl) ks_real_glGenTextures else glGenTextures;
+pub const DeleteTextures = if (use_resolved_gl) ks_real_glDeleteTextures else glDeleteTextures;
+pub const BindTexture = if (use_resolved_gl) ks_real_glBindTexture else glBindTexture;
+pub const TexParameteri = if (use_resolved_gl) ks_real_glTexParameteri else glTexParameteri;
+pub const TexImage2D = if (use_resolved_gl) ks_real_glTexImage2D else glTexImage2D;
+pub const BlitFramebuffer = if (use_resolved_gl) ks_real_glBlitFramebuffer else glBlitFramebuffer;

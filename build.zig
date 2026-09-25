@@ -272,29 +272,6 @@ pub fn build(b: *std.Build) void {
     const sdl_dynapi_step = b.step("sdl-dynapi", "Build the SDL_DYNAMIC_API libraries, the launcher and the basic SDL demos");
     if (is_windows) {
         sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl2_lib, .{}).step);
-    } else {
-        // Linux and macOS keep their preload libraries and add the dynamic
-        // API one beside them.
-        const katzensteg_sdl2_dynapi_lib = b.addLibrary(.{
-            .linkage = .dynamic,
-            .name = "katzensteg-sdl2-dynapi",
-            .use_llvm = use_llvm,
-            .root_module = projectModule(b, .{
-                .root_source_file = b.path("src/katzensteg/preload.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
-        });
-        katzensteg_sdl2_dynapi_lib.root_module.addImport("termscene", termscene_mod);
-        katzensteg_sdl2_dynapi_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
-        katzensteg_sdl2_dynapi_lib.root_module.addImport("katzensteg_build_options", dynapi_preload_options.createModule());
-        katzensteg_sdl2_dynapi_lib.root_module.strip = false;
-        katzensteg_sdl2_dynapi_lib.root_module.omit_frame_pointer = false;
-        addDynapiSources(b, katzensteg_sdl2_dynapi_lib, target, "dynapi_sdl2.c");
-        b.installArtifact(katzensteg_sdl2_dynapi_lib);
-        if (dsym_step) |s| installDsym(b, katzensteg_sdl2_dynapi_lib, s);
-        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl2_dynapi_lib, .{}).step);
     }
 
     const katzensteg_sdl3_lib = b.addLibrary(.{
@@ -338,26 +315,33 @@ pub fn build(b: *std.Build) void {
     if (is_windows) {
         sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl3_lib, .{}).step);
     } else {
-        const katzensteg_sdl3_dynapi_lib = b.addLibrary(.{
-            .linkage = .dynamic,
-            .name = "katzensteg-sdl3-dynapi",
-            .use_llvm = use_llvm,
-            .root_module = projectModule(b, .{
-                .root_source_file = b.path("src/katzensteg/preload_sdl3.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
-        });
-        katzensteg_sdl3_dynapi_lib.root_module.addImport("termscene", termscene_mod);
-        katzensteg_sdl3_dynapi_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
-        katzensteg_sdl3_dynapi_lib.root_module.addImport("katzensteg_build_options", dynapi_preload_options.createModule());
-        katzensteg_sdl3_dynapi_lib.root_module.strip = false;
-        katzensteg_sdl3_dynapi_lib.root_module.omit_frame_pointer = false;
-        addDynapiSources(b, katzensteg_sdl3_dynapi_lib, target, "dynapi_sdl3.c");
-        b.installArtifact(katzensteg_sdl3_dynapi_lib);
-        if (dsym_step) |s| installDsym(b, katzensteg_sdl3_dynapi_lib, s);
-        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl3_dynapi_lib, .{}).step);
+        // Linux and macOS keep their preload libraries and add one dynamic
+        // API library per SDL version with the same build/install policy.
+        inline for (.{
+            .{ .name = "katzensteg-sdl2-dynapi", .root = "src/katzensteg/preload.zig", .sdl = katzensteg_sdl2_mod, .glue = "dynapi_sdl2.c" },
+            .{ .name = "katzensteg-sdl3-dynapi", .root = "src/katzensteg/preload_sdl3.zig", .sdl = katzensteg_sdl3_mod, .glue = "dynapi_sdl3.c" },
+        }) |adapter| {
+            const lib = b.addLibrary(.{
+                .linkage = .dynamic,
+                .name = adapter.name,
+                .use_llvm = use_llvm,
+                .root_module = projectModule(b, .{
+                    .root_source_file = b.path(adapter.root),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                }),
+            });
+            lib.root_module.addImport("termscene", termscene_mod);
+            lib.root_module.addImport("katzensteg_sdl", adapter.sdl);
+            lib.root_module.addImport("katzensteg_build_options", dynapi_preload_options.createModule());
+            lib.root_module.strip = false;
+            lib.root_module.omit_frame_pointer = false;
+            addDynapiSources(b, lib, target, adapter.glue);
+            b.installArtifact(lib);
+            if (dsym_step) |s| installDsym(b, lib, s);
+            sdl_dynapi_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+        }
     }
 
     if (is_macos) {
