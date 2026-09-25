@@ -149,9 +149,10 @@ fn readConsoleAvailable(handle: HANDLE, buf: []u8) ReadError!usize {
     var pending: DWORD = 0;
     if (!ok(k32.GetNumberOfConsoleInputEvents(handle, &pending))) return error.Unexpected;
     if (pending == 0) return 0;
-    // Each UTF-16 unit encodes to at most three UTF-8 bytes (a surrogate pair,
-    // two units, to four), so reading at most buf.len / 3 units always fits.
-    // A pair split across two reads decodes as two replacement characters.
+    // Each UTF-16 unit encodes to at most three UTF-8 bytes; a surrogate pair
+    // is two units producing four bytes, within that bound. So buf.len / 3
+    // units always fit. A pair split across two reads decodes as two
+    // replacement characters.
     var records: [128]InputRecord = undefined;
     const max_units = @min(records.len, @max(buf.len / 3, 1));
     const want = @min(@as(usize, pending), max_units);
@@ -163,6 +164,9 @@ fn readConsoleAvailable(handle: HANDLE, buf: []u8) ReadError!usize {
         if (record.event_type != KEY_EVENT) continue;
         const key = record.event.key;
         if (!ok(key.key_down) or key.unicode_char == 0) continue;
+        // Repeats beyond max_units are dropped with their consumed record.
+        // Virtual-terminal input delivers one record per character, so
+        // repeat counts above 1 come only from legacy key input.
         var repeat = @max(key.repeat_count, 1);
         while (repeat > 0 and unit_count < max_units) : (repeat -= 1) {
             units[unit_count] = key.unicode_char;
