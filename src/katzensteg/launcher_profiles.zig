@@ -1245,6 +1245,23 @@ test "bundled profiles include Cannonball launch target" {
     try std.testing.expectEqualStrings("$HOME/dev/cannonball/build/config.xml", profile.args[1]);
 }
 
+test "bundled ScummVM profiles resolve each platform's build output" {
+    const io = std.testing.io;
+    var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
+    defer linux_catalog.deinit();
+    var windows_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .windows);
+    defer windows_catalog.deinit();
+
+    try std.testing.expectEqualStrings("$HOME/dev/scummvm/scummvm", linux_catalog.find("bass").?.target);
+    const bass = windows_catalog.find("bass").?;
+    try std.testing.expectEqualStrings("$HOME/dev/scummvm/dists/msvc/Releasex64/scummvm", bass.target);
+    try std.testing.expectEqualStrings("sky", bass.args[bass.args.len - 1]);
+    try std.testing.expectEqualStrings(
+        "$HOME/dev/scummvm/dists/msvc/Releasex64/scummvm",
+        windows_catalog.find("scummvm.launcher").?.target,
+    );
+}
+
 test "bundled profiles include ffplay passthrough launch target" {
     const io = std.testing.io;
     var catalog = try ProfileCatalog.parseDirectory(io, std.testing.allocator, "profiles");
