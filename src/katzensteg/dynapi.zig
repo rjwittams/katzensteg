@@ -106,16 +106,27 @@ extern "c" fn dladdr(addr: ?*const anyopaque, info: *DlInfo) c_int;
 extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
 extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*const anyopaque;
 extern "c" fn dlclose(handle: ?*anyopaque) c_int;
+extern "c" fn dlerror() ?[*:0]const u8;
 
 fn posixModuleEntry(table: *const anyopaque) ?EntryFn {
     var info: DlInfo = undefined;
-    if (dladdr(table, &info) == 0) return null;
+    if (dladdr(table, &info) == 0) {
+        log.warn("dladdr found no module for the SDL jump table at {x}", .{@intFromPtr(table)});
+        return null;
+    }
+    const name = info.dli_fname orelse "(null)";
     // RTLD_NOLOAD returns the module already mapped (the SDL library, or the
     // executable for a static SDL); closing drops only this reference.
     const rtld_lazy_noload: c_int = if (builtin.os.tag.isDarwin()) 0x1 | 0x10 else 0x1 | 0x4;
-    const handle = dlopen(info.dli_fname, rtld_lazy_noload) orelse return null;
+    const handle = dlopen(info.dli_fname, rtld_lazy_noload) orelse {
+        log.warn("dlopen(RTLD_NOLOAD) of {s} failed: {s}", .{ name, if (dlerror()) |e| std.mem.span(e) else "no error" });
+        return null;
+    };
     defer _ = dlclose(handle);
-    return @ptrCast(dlsym(handle, "SDL_DYNAPI_entry") orelse return null);
+    return @ptrCast(dlsym(handle, "SDL_DYNAPI_entry") orelse {
+        log.warn("{s} has no SDL_DYNAPI_entry: {s}", .{ name, if (dlerror()) |e| std.mem.span(e) else "no error" });
+        return null;
+    });
 }
 
 /// Removes the variable that loaded Katzensteg, so processes the application
