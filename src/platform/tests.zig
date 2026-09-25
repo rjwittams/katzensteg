@@ -111,3 +111,12 @@ test "condition supports cross-thread wakeup and timeout" {
     state.mutex.unlock();
     thread.join();
 }
+
+test "pixel size replies prefer the text area and fall back to cells times the grid" {
+    const PixelSize = platform.terminal.PixelSize;
+    const parse = platform.terminal.parsePixelReply;
+    try std.testing.expectEqual(PixelSize{ .width = 800, .height = 600 }, parse("\x1b[6;20;10t\x1b[4;600;800t", 80, 24).?);
+    try std.testing.expectEqual(PixelSize{ .width = 800, .height = 480 }, parse("\x1b[?1;2c\x1b[6;20;10t", 80, 24).?);
+    try std.testing.expectEqual(@as(?PixelSize, null), parse("\x1b[4;600", 80, 24));
+    try std.testing.expectEqual(@as(?PixelSize, null), parse("\x1b[8;24;80t", 80, 24));
+}

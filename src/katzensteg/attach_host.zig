@@ -52,7 +52,7 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
 pub fn runExec(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, options: RunExecOptions) !u8 {
     var tty = try DirectTty.init(io);
     defer tty.deinit();
-    var upload = try selectUploadPolicy(allocator, tty.file);
+    var upload = try selectUploadPolicy(allocator, tty.terminal());
     defer deinitUploadPolicy(io, allocator, &upload);
 
     var output_writer = tty.file.writerStreaming(&.{});
@@ -132,8 +132,8 @@ fn childTermExitCode(term: system_io.process.Child.Term) u8 {
     };
 }
 
-fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.fs.File) !render_batch_protocol.UploadPolicy {
-    const io = tty.io;
+fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.terminal.Tty) !render_batch_protocol.UploadPolicy {
+    const io = tty.output.io;
     const path = try upload_path_mod.makeUploadPath(allocator);
     errdefer allocator.free(path);
     {

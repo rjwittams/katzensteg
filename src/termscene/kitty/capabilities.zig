@@ -66,7 +66,7 @@ pub fn applyKnownCompat(caps: *Capabilities) void {
     }
 }
 
-pub fn probe(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8) !Capabilities {
+pub fn probe(allocator: std.mem.Allocator, tty: detect.Tty, path: []const u8) !Capabilities {
     var caps: Capabilities = .{ .terminal = detectTerminalIdentity() };
     caps.graphics_basic.probe = if (try detect.detectGraphicsSupportOnTty(allocator, tty)) .supported else .unsupported;
     caps.file_regular_whole_rgba.probe = if (try detect.detectFileTransmissionSupportWhole(allocator, tty, path)) .supported else .unsupported;

@@ -4,14 +4,29 @@ const File = @import("fs.zig").File;
 const raw = @import("posix.zig");
 extern "c" fn _NSGetEnviron() *[*:null]?[*:0]u8;
 extern "c" var environ: [*:null]?[*:0]u8;
+const is_windows = @import("builtin").os.tag == .windows;
 fn environment() std.process.Environ {
+    // Windows reads the process environment block afresh on each query.
+    if (is_windows) return .{ .block = .global };
     const entries = if (@import("builtin").os.tag == .macos) _NSGetEnviron().* else environ;
     return .{ .block = .{ .slice = std.mem.span(entries) } };
 }
 pub fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
+    if (is_windows) return environment().getAlloc(allocator, key) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => error.EnvironmentVariableNotFound,
+        else => |e| e,
+    };
     const value = environment().getPosix(key) orelse return error.EnvironmentVariableNotFound;
     return allocator.dupe(u8, value);
 }
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+
+/// This process's numeric identifier, for naming per-process files.
+pub fn id() u32 {
+    if (is_windows) return GetCurrentProcessId();
+    return @intCast(std.c.getpid());
+}
+
 pub fn getEnvMap(allocator: std.mem.Allocator) !std.process.Environ.Map {
     return environment().createMap(allocator);
 }
@@ -103,6 +118,14 @@ pub const Child = struct {
     pub fn kill(self: *Child) !Term {
         if (self.term) |term| {
             self.closeStreams();
+            return term;
+        }
+        if (is_windows) {
+            // TerminateProcess, then the handle is reaped with the process.
+            self.child.?.kill(self.io);
+            self.closeStreams();
+            const term: Term = .{ .Unknown = 1 };
+            self.term = term;
             return term;
         }
         std.posix.kill(self.id, .KILL) catch |err| switch (err) {

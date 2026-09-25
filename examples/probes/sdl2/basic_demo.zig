@@ -5,7 +5,40 @@ const tex_w = 128;
 const tex_h = 128;
 const win_w = 640;
 const win_h = 480;
-const run_frames = 900;
+const default_frames = 900;
+const key_marks = 16;
+
+/// Key presses the demo has seen, drawn as a row of squares so a capture
+/// shows input reaching the application. Escape or `q` quits.
+const KeyLog = struct {
+    count: usize = 0,
+    scancodes: [key_marks]c_int = [_]c_int{0} ** key_marks,
+
+    fn record(self: *KeyLog, scancode: c_int) void {
+        self.scancodes[self.count % key_marks] = scancode;
+        self.count += 1;
+    }
+
+    fn draw(self: *const KeyLog, renderer: *sdl.SDL_Renderer) void {
+        const shown = @min(self.count, key_marks);
+        for (0..shown) |i| {
+            // Oldest first, so the newest press is always on the right.
+            const scancode: u8 = @truncate(@as(u32, @bitCast(self.scancodes[(self.count - shown + i) % key_marks])));
+            _ = sdl.SDL_SetRenderDrawColor(renderer, scancode *% 97, 255 -% scancode *% 41, scancode *% 13 +% 128, 255);
+            const mark = sdl.SDL_Rect{ .x = @intCast(8 + i * 24), .y = 8, .w = 16, .h = 16 };
+            _ = sdl.SDL_RenderFillRect(renderer, &mark);
+        }
+    }
+};
+
+/// `--frames N` sets how many frames to draw; 0 runs until quit.
+fn frameLimit(args: []const []const u8) !usize {
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--frames") and i + 1 < args.len) return std.fmt.parseInt(usize, args[i + 1], 10);
+    }
+    return default_frames;
+}
 
 fn fillTexture(buf: []u8, tick: usize) void {
     var y: usize = 0;
@@ -25,7 +58,8 @@ fn fillTexture(buf: []u8, tick: usize) void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const run_frames = try frameLimit(try init.minimal.args.toSlice(init.arena.allocator()));
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) return error.SDLInitFailed;
     defer sdl.SDL_Quit();
 
@@ -50,9 +84,16 @@ pub fn main() !void {
     defer sdl.SDL_DestroyTexture(surface_texture);
     _ = sdl.SDL_SetTextureBlendMode(surface_texture, sdl.SDL_BLENDMODE_BLEND);
 
+    var keys: KeyLog = .{};
     var frame: usize = 0;
-    while (frame < run_frames) : (frame += 1) {
-        sdl.SDL_PumpEvents();
+    frames: while (run_frames == 0 or frame < run_frames) : (frame += 1) {
+        var event: sdl.SDL_Event = undefined;
+        while (sdl.SDL_PollEvent(&event) != 0) {
+            if (event.type == sdl.SDL_QUIT) break :frames;
+            if (event.type != sdl.SDL_KEYDOWN or event.key.repeat != 0) continue;
+            if (event.key.keysym.sym == 27 or event.key.keysym.sym == 'q') break :frames;
+            keys.record(event.key.keysym.scancode);
+        }
         fillTexture(&pixels, frame);
         if (sdl.SDL_UpdateTexture(streaming, null, &pixels, tex_w * 4) != 0) return error.SDLUpdateTextureFailed;
         _ = sdl.SDL_SetTextureColorMod(surface_texture, 255, @intCast((frame * 3) % 255), @intCast((frame * 5) % 255));
@@ -84,6 +125,7 @@ pub fn main() !void {
         const dst_b = sdl.SDL_Rect{ .x = 360, .y = 180, .w = 160, .h = 160 };
         _ = sdl.SDL_RenderCopy(renderer, streaming, null, &dst_a);
         _ = sdl.SDL_RenderCopy(renderer, surface_texture, null, &dst_b);
+        keys.draw(renderer);
         sdl.SDL_RenderPresent(renderer);
         sdl.SDL_Delay(16);
     }

@@ -22,6 +22,7 @@ const blocking_trace = @import("blocking_trace.zig");
 const upload_path_mod = @import("upload_path.zig");
 const whiskers_client_mod = @import("whiskers_client.zig");
 const window_policy_mod = @import("window_policy.zig");
+const command_lifetime = @import("launcher/command_lifetime.zig");
 const WhiskersClient = whiskers_client_mod.WhiskersClient;
 const InspectResource = frame_builder_mod.InspectResource;
 const ResourceRecord = inspect_model.ResourceRecord;
@@ -182,7 +183,7 @@ pub const Runtime = struct {
     queued_lock_captures: std.AutoHashMap(usize, QueuedLockCapture),
     sdl_window_ids: std.AutoHashMap(u32, core.CoreHandle),
     input_parser: ?input_mod.TerminalInputParser = null,
-    command_notify_fd: ?std.posix.fd_t = null,
+    command_notify_fd: ?command_lifetime.NotifyFd = null,
     command_quit_notified: bool = false,
     // Last terminal protocol replies written to the log, so each change is
     // recorded once.
@@ -441,10 +442,7 @@ pub const Runtime = struct {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
             if (runtime.input_claimed) runtime.input_parser.?.command_key = config.command_key;
             runtime.frame_builder.direct_text_overlay = runtime.input_parser.?.command_key != null;
-            runtime.command_notify_fd = config.command_notify_fd;
-            if (runtime.command_notify_fd) |fd| {
-                _ = system_io.posix.fcntl(fd, std.posix.F.SETFD, @as(u32, std.posix.FD_CLOEXEC)) catch {};
-            }
+            runtime.command_notify_fd = command_lifetime.adoptNotifier(config.command_notify_fd);
             runtime.updateInputTarget();
             runtime.tty.?.enableInputCapture() catch |err| {
                 log.warn("terminal input capture enable failed: {any}", .{err});
@@ -575,7 +573,7 @@ pub const Runtime = struct {
             self.pollTerminalInput();
         }
         if (self.command_overlay) |*overlay| overlay.deinit();
-        if (self.command_notify_fd) |fd| system_io.posix.close(fd);
+        if (self.command_notify_fd) |fd| command_lifetime.releaseNotifier(fd);
         if (self.input_parser) |*parser| parser.deinit();
         self.observation.deinit(self.allocator);
         self.placeholder_scene.deinit(self.allocator);
@@ -588,6 +586,9 @@ pub const Runtime = struct {
     }
 
     fn initBatchPresentation(self: *Runtime, options: PresentationOptions) !void {
+        // Hosted presentation inherits POSIX pipe descriptors from its host;
+        // Windows hosts (the WM and its JSONL listener) are not ported yet.
+        if (builtin.os.tag == .windows) return error.Unsupported;
         const io = self.io;
         const presentation_fd = options.presentation_fd orelse return error.MissingPresentationFd;
         const control_fd = options.control_fd orelse return error.MissingPresentationControlFd;
@@ -717,7 +718,7 @@ pub const Runtime = struct {
         if (!model.quit_requested or self.command_quit_notified) return;
         self.command_quit_notified = true;
         if (self.command_notify_fd) |fd| {
-            if (!@import("launcher/command_lifetime.zig").notify(fd)) log.warn("command quit notification failed", .{});
+            if (!command_lifetime.notify(fd)) log.warn("command quit notification failed", .{});
         }
     }
 
@@ -728,7 +729,7 @@ pub const Runtime = struct {
         const tty = &(self.tty orelse return);
         var buf: [256]u8 = undefined;
         while (true) {
-            const n = system_io.posix.read(tty.file.handle, &buf) catch |err| {
+            const n = tty.input.read(&buf) catch |err| {
                 switch (err) {
                     error.WouldBlock => return,
                     else => {
@@ -2098,6 +2099,8 @@ test "batch viewport marks presentation reset pending without immediate flush" {
 }
 
 test "app-side input state reads do not apply batch control messages" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2152,6 +2155,8 @@ test "app-side input state reads do not wait on presentation work" {
 }
 
 test "batch viewport immediately reprojects retained presentation when writer is available" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2191,6 +2196,8 @@ test "batch viewport immediately reprojects retained presentation when writer is
 }
 
 test "batch generation fences pending bytes and refreshes unchanged retained placements" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2243,6 +2250,8 @@ test "batch generation fences pending bytes and refreshes unchanged retained pla
 }
 
 test "batch present reports source pixels and effective fitted rect" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2275,6 +2284,8 @@ test "batch present reports source pixels and effective fitted rect" {
 }
 
 test "batch present emits presentation status only when it changes" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2310,6 +2321,8 @@ test "batch present emits presentation status only when it changes" {
 }
 
 test "external framebuffer batch present reports presentation status" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2338,6 +2351,8 @@ test "external framebuffer batch present reports presentation status" {
 }
 
 test "external framebuffer batch present skips detached sink" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2360,6 +2375,8 @@ test "external framebuffer batch present skips detached sink" {
 }
 
 test "batch present uses host terminal pixels for effective fitted rect" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2388,6 +2405,8 @@ test "batch present uses host terminal pixels for effective fitted rect" {
 }
 
 test "batch renderer destroy emits retained placement deletes before forgetting state" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2428,6 +2447,8 @@ test "batch renderer destroy emits retained placement deletes before forgetting 
 }
 
 test "batch runtime deinit emits split placement deletes without renderer destroy" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     var runtime_deinited = false;
@@ -2470,6 +2491,8 @@ test "batch runtime deinit emits split placement deletes without renderer destro
 }
 
 test "batch renderer replacement emits retained placement deletes before overwriting state" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2510,6 +2533,8 @@ test "batch renderer replacement emits retained placement deletes before overwri
 }
 
 test "batch input poll drains control pipe before SDL event reads" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2689,7 +2714,7 @@ pub fn shutdownGlobal() callconv(.c) void {
 
 fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kitty.Options {
     const io = runtime.io;
-    const tty = runtime.tty.?.file;
+    const tty = runtime.tty.?.terminal();
     const forced_profile = mapOutputProfile(runtime.forced_output_profile);
     if (!runtime.file_transport_enabled) return .{ .quiet = if (runtime.debug_protocol_replies) .none else .suppress_fail };
 
@@ -2842,6 +2867,8 @@ test "runtime input target includes latest presentation layout" {
 }
 
 test "placeholder runtime composes scenes and resizes without uploading or deleting" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2915,6 +2942,8 @@ test "placeholder input maps the whole local grid independently of scene layout"
 }
 
 test "placeholder presentation uses target pixels without changing source coordinates" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var runtime = Runtime.initShutdownStub();
     defer runtime.deinit();
@@ -2938,6 +2967,8 @@ test "placeholder presentation uses target pixels without changing source coordi
 }
 
 test "synchronous external capture receives attach without an SDL renderer or input polling" {
+    // Hosted presentation uses POSIX pipes; Windows hosts are not ported yet.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = system_io.fs.tmpDir(.{});
     defer tmp.cleanup();

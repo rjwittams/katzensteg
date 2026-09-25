@@ -72,10 +72,12 @@ jobs:
       - name: Python tests
         run: |
           python3 scripts/katzensteg/test_bootstrap_external_projects.py
+          python3 scripts/katzensteg/test_dynapi_slots.py
           python3 scripts/katzensteg/test_env_scrub.py
           python3 scripts/katzensteg/test_image_fastpath_portable.py
           python3 scripts/katzensteg/test_katzensteg_banner.py
           python3 scripts/katzensteg/test_launcher_target.py
+          python3 scripts/katzensteg/test_launcher_output.py
           python3 scripts/katzensteg/test_injected_io.py
           python3 scripts/katzensteg/test_command_mode.py
           python3 scripts/katzensteg/test_embed_render_batches.py

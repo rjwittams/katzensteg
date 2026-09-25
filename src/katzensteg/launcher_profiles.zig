@@ -1,6 +1,7 @@
 const std = @import("std");
 const system_io = @import("platform");
 const config = @import("config.zig");
+const injection = @import("launcher/injection.zig");
 
 pub const EnvVar = struct {
     name: []const u8,
@@ -10,6 +11,7 @@ pub const EnvVar = struct {
 pub const ProfilePlatform = enum {
     linux,
     macos,
+    windows,
     other,
 };
 
@@ -51,6 +53,10 @@ pub const LaunchProfile = struct {
     seed_files: []const SeedFile = &.{},
     runtime: config.RuntimeConfig = .{},
     runtime_fields: RuntimeFieldSet = .{},
+    /// How the SDL adapter gets into the process; null means `auto`.
+    injection: ?injection.Injection = null,
+    /// The SDL adapter libraries for this platform, per mechanism.
+    sdl_adapter: ?injection.SdlAdapter = null,
     error_summary: ?[]const u8 = null,
 
     fn deinit(self: *LaunchProfile) void {
@@ -74,6 +80,7 @@ pub const LaunchProfile = struct {
             if (entry.content) |content| self.allocator.free(content);
         }
         self.allocator.free(self.seed_files);
+        if (self.sdl_adapter) |adapter| freeSdlAdapter(self.allocator, adapter);
         if (self.error_summary) |summary| self.allocator.free(summary);
     }
 
@@ -183,6 +190,7 @@ fn currentProfilePlatform() ProfilePlatform {
     return switch (@import("builtin").os.tag) {
         .linux => .linux,
         .macos => .macos,
+        .windows => .windows,
         else => .other,
     };
 }
@@ -267,12 +275,47 @@ fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.
     if (object.get("stderr")) |stderr_value| profile.stderr = try dupeOptionalPlatformString(allocator, stderr_value, platform, error.InvalidStderr);
     if (object.get("env")) |env_value| profile.env = try parseEnvMap(allocator, env_value, platform);
     if (object.get("seed_files")) |seed_files_value| profile.seed_files = try parseSeedFiles(allocator, seed_files_value, platform);
+    if (object.get("injection")) |injection_value| {
+        if (injection_value != .string) return error.InvalidInjection;
+        profile.injection = injection.Injection.parse(injection_value.string) orelse return error.InvalidInjection;
+    }
+    if (object.get("sdl_adapter")) |adapter_value| profile.sdl_adapter = try parseSdlAdapter(allocator, adapter_value, platform);
     if (object.get("runtime")) |runtime_value| {
         const parsed_runtime = try parseRuntimeObject(runtime_value, platform);
         profile.runtime = parsed_runtime.config;
         profile.runtime_fields = parsed_runtime.fields;
     }
     return profile;
+}
+
+/// `{"api": "sdl2", "preload": <platform string>, "dynapi": <platform string>}`.
+fn parseSdlAdapter(allocator: std.mem.Allocator, value: std.json.Value, platform: ProfilePlatform) !injection.SdlAdapter {
+    if (value != .object) return error.InvalidSdlAdapter;
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!std.mem.eql(u8, key, "api") and !std.mem.eql(u8, key, "preload") and !std.mem.eql(u8, key, "dynapi")) return error.InvalidSdlAdapter;
+    }
+    const api_value = value.object.get("api") orelse return error.InvalidSdlAdapter;
+    if (api_value != .string) return error.InvalidSdlAdapter;
+    var adapter = injection.SdlAdapter{ .api = injection.SdlApi.parse(api_value.string) orelse return error.InvalidSdlAdapter };
+    errdefer freeSdlAdapter(allocator, adapter);
+    if (value.object.get("preload")) |preload| adapter.preload = try dupeOptionalPlatformString(allocator, preload, platform, error.InvalidSdlAdapter);
+    if (value.object.get("dynapi")) |dynapi| adapter.dynapi = try dupeOptionalPlatformString(allocator, dynapi, platform, error.InvalidSdlAdapter);
+    return adapter;
+}
+
+fn freeSdlAdapter(allocator: std.mem.Allocator, adapter: injection.SdlAdapter) void {
+    if (adapter.preload) |path| allocator.free(path);
+    if (adapter.dynapi) |path| allocator.free(path);
+}
+
+fn dupeSdlAdapter(allocator: std.mem.Allocator, adapter: injection.SdlAdapter) !injection.SdlAdapter {
+    var copy = injection.SdlAdapter{ .api = adapter.api };
+    errdefer freeSdlAdapter(allocator, copy);
+    if (adapter.preload) |path| copy.preload = try allocator.dupe(u8, path);
+    if (adapter.dynapi) |path| copy.dynapi = try allocator.dupe(u8, path);
+    return copy;
 }
 
 fn parseStringArray(allocator: std.mem.Allocator, value: std.json.Value, err: anyerror) ![]const []const u8 {
@@ -336,6 +379,7 @@ fn validatePlatformStringObject(value: std.json.Value, err: anyerror) !void {
 fn isPlatformKey(key: []const u8) bool {
     return std.mem.eql(u8, key, "linux") or
         std.mem.eql(u8, key, "macos") or
+        std.mem.eql(u8, key, "windows") or
         std.mem.eql(u8, key, "other");
 }
 
@@ -343,6 +387,7 @@ fn platformKey(platform: ProfilePlatform) []const u8 {
     return switch (platform) {
         .linux => "linux",
         .macos => "macos",
+        .windows => "windows",
         .other => "other",
     };
 }
@@ -599,6 +644,10 @@ fn inheritFrom(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *con
     try inheritEnv(allocator, child, parent);
     try inheritSeedFiles(allocator, child, parent);
     inheritRuntime(child, parent);
+    if (child.injection == null) child.injection = parent.injection;
+    if (child.sdl_adapter == null) {
+        if (parent.sdl_adapter) |adapter| child.sdl_adapter = try dupeSdlAdapter(allocator, adapter);
+    }
 }
 
 fn dupeStringSlice(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
@@ -1207,7 +1256,7 @@ test "bundled profiles include ffplay passthrough launch target" {
     try std.testing.expectEqual(@as(usize, 0), profile.args.len);
     try std.testing.expect(profile.runtime.output_profile == null);
     try std.testing.expectEqualStrings("software", envValue(profile, "SDL_RENDER_DRIVER").?);
-    try std.testing.expect(envValue(profile, "LD_PRELOAD") != null or envValue(profile, "DYLD_INSERT_LIBRARIES") != null);
+    try std.testing.expectEqual(injection.SdlApi.sdl2, profile.sdl_adapter.?.api);
 }
 
 test "bundled Vulkan capture profile resolves platform layer paths" {
@@ -1228,36 +1277,44 @@ test "bundled Vulkan capture profile resolves platform layer paths" {
     try std.testing.expectEqualStrings("1", envValue(macos_profile, "KATZENSTEG_VULKAN_CAPTURE").?);
 }
 
-test "bundled SDL2 preload adapter resolves platform preload environment" {
+test "bundled SDL2 adapter offers preload and dynamic API libraries per platform" {
     const io = std.testing.io;
     var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
     var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
+    var windows_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .windows);
+    defer windows_catalog.deinit();
 
-    const linux_profile = linux_catalog.find("adapter.sdl2_preload").?;
-    const macos_profile = macos_catalog.find("adapter.sdl2_preload").?;
+    const linux = linux_catalog.find("adapter.sdl2_preload").?.sdl_adapter.?;
+    const macos = macos_catalog.find("adapter.sdl2_preload").?.sdl_adapter.?;
+    const windows = windows_catalog.find("adapter.sdl2_preload").?.sdl_adapter.?;
 
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.so", envValue(linux_profile, "LD_PRELOAD").?);
-    try std.testing.expect(envValue(linux_profile, "DYLD_INSERT_LIBRARIES") == null);
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
-    try std.testing.expect(envValue(macos_profile, "LD_PRELOAD") == null);
+    try std.testing.expectEqual(injection.SdlApi.sdl2, linux.api);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.so", linux.preload.?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.so", linux.dynapi.?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2.dylib", macos.preload.?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.dylib", macos.dynapi.?);
+    try std.testing.expect(windows.preload == null);
+    try std.testing.expectEqualStrings("{repo}/zig-out/bin/katzensteg-sdl2.dll", windows.dynapi.?);
+    // No profile names an environment variable for the loader any more;
+    // the launcher chooses it from the mechanism.
+    try std.testing.expect(envValue(linux_catalog.find("probe.input").?, "LD_PRELOAD") == null);
 }
 
-test "bundled SDL3 preload adapter resolves platform preload environment" {
+test "bundled SDL3 adapter offers preload libraries per platform" {
     const io = std.testing.io;
     var linux_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .linux);
     defer linux_catalog.deinit();
     var macos_catalog = try ProfileCatalog.parseDirectoryForPlatform(io, std.testing.allocator, "profiles", .macos);
     defer macos_catalog.deinit();
 
-    const linux_profile = linux_catalog.find("adapter.sdl3_preload").?;
-    const macos_profile = macos_catalog.find("adapter.sdl3_preload").?;
+    const linux = linux_catalog.find("adapter.sdl3_preload").?.sdl_adapter.?;
+    const macos = macos_catalog.find("adapter.sdl3_preload").?.sdl_adapter.?;
 
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", envValue(linux_profile, "LD_PRELOAD").?);
-    try std.testing.expect(envValue(linux_profile, "DYLD_INSERT_LIBRARIES") == null);
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
-    try std.testing.expect(envValue(macos_profile, "LD_PRELOAD") == null);
+    try std.testing.expectEqual(injection.SdlApi.sdl3, linux.api);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", linux.preload.?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", macos.preload.?);
 }
 
 test "bundled SDL3 input probe profile resolves SDL3 probe target and preload" {
@@ -1274,8 +1331,8 @@ test "bundled SDL3 input probe profile resolves SDL3 probe target and preload" {
     try std.testing.expectEqualStrings("{repo}/zig-out/bin/katzensteg-input-probe-sdl3", macos_profile.target);
     try std.testing.expectEqual(config.InterceptMode.queued_replay, linux_profile.runtime.intercept_mode);
     try std.testing.expectEqual(config.InterceptMode.queued_replay, macos_profile.runtime.intercept_mode);
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", envValue(linux_profile, "LD_PRELOAD").?);
-    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", envValue(macos_profile, "DYLD_INSERT_LIBRARIES").?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.so", linux_profile.sdl_adapter.?.preload.?);
+    try std.testing.expectEqualStrings("{repo}/zig-out/lib/libkatzensteg-sdl3.dylib", macos_profile.sdl_adapter.?.preload.?);
 }
 
 test "bundled profiles include experimental macOS SDL2 rebind adapter" {
@@ -1459,4 +1516,33 @@ test "command key inherits and explicit none overrides the parent" {
     defer catalog.deinit();
     try std.testing.expectEqual(@as(?u8, 'X'), catalog.find("child").?.runtime.command_key);
     try std.testing.expect(catalog.find("disabled").?.runtime.command_key == null);
+}
+
+test "profile injection and SDL adapter parse and inherit" {
+    var catalog = try ProfileCatalog.parseForPlatform(std.testing.allocator,
+        \\{
+        \\  "profiles": {
+        \\    "adapter": {
+        \\      "hidden": true,
+        \\      "sdl_adapter": {
+        \\        "api": "sdl2",
+        \\        "preload": { "linux": "/lib/ks.so" },
+        \\        "dynapi": { "linux": "/lib/ks-dynapi.so", "windows": "C:/ks.dll" }
+        \\      }
+        \\    },
+        \\    "app": { "target": "/bin/app", "extends": ["adapter"], "injection": "dynapi" },
+        \\    "bad_injection": { "target": "/bin/app", "injection": "detours" },
+        \\    "bad_adapter": { "target": "/bin/app", "sdl_adapter": { "api": "sdl4" } }
+        \\  }
+        \\}
+    , .windows);
+    defer catalog.deinit();
+    const app = catalog.find("app").?;
+    try std.testing.expectEqual(injection.Injection.dynapi, app.injection.?);
+    try std.testing.expectEqual(injection.SdlApi.sdl2, app.sdl_adapter.?.api);
+    try std.testing.expect(app.sdl_adapter.?.preload == null);
+    try std.testing.expectEqualStrings("C:/ks.dll", app.sdl_adapter.?.dynapi.?);
+    try std.testing.expect(catalog.find("adapter").?.injection == null);
+    try std.testing.expect(catalog.find("bad_injection").?.isBroken());
+    try std.testing.expect(catalog.find("bad_adapter").?.isBroken());
 }

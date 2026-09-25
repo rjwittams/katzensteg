@@ -90,8 +90,8 @@ fn releaseLoggerFileUser() void {
 
 fn ensureFileLocked() !*system_io.fs.File {
     if (file == null) {
-        var path_buf: [128]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "/tmp/katzensteg-{d}.log", .{std.c.getpid()});
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() });
         file = try system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = false, .read = false });
     }
     return &file.?;

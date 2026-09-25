@@ -175,9 +175,16 @@ pub const SDL_ShowCursor = if (use_c_real) ks_real_SDL_ShowCursor else sdl.SDL_S
 pub const SDL_FreeCursor = if (use_c_real) ks_real_SDL_FreeCursor else sdl.SDL_FreeCursor;
 pub const SDL_GetError = if (use_c_real) ks_real_SDL_GetError else sdl.SDL_GetError;
 
+/// Windows has no dlopen to interpose; the Vulkan loader override is
+/// POSIX-only.
 pub fn realDlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque {
-    if (use_c_real) return ks_real_dlopen(path, mode);
-    return dlopen(path, mode);
+    if (builtin.os.tag == .windows) {
+        return null;
+    } else if (use_c_real) {
+        return ks_real_dlopen(path, mode);
+    } else {
+        return dlopen(path, mode);
+    }
 }
 
 extern fn ks_real_SDL_GetRendererOutputSize(renderer: ?*sdl.SDL_Renderer, w: *c_int, h: *c_int) c_int;
