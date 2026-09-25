@@ -99,17 +99,8 @@ pub fn main(process_init: std.process.Init) !void {
     const stdout_file = system_io.fs.File.stdout(io);
     var writer_state = stdout_file.writerStreaming(&.{});
     const writer = &writer_state.interface;
-    const stdin_fd = system_io.fs.File.stdin(io).handle;
-    const original_termios = try system_io.posix.tcgetattr(stdin_fd);
-    defer system_io.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
-    var raw = original_termios;
-    raw.lflag.ECHO = false;
-    raw.lflag.ICANON = false;
-    raw.lflag.ISIG = false;
-    raw.iflag.IXON = false;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try system_io.posix.tcsetattr(stdin_fd, .FLUSH, raw);
+    const raw_mode = try system_io.terminal.RawMode.enter(system_io.fs.File.stdin(io), stdout_file);
+    defer raw_mode.restore();
 
     if (!try kitty_mod.detectGraphicsSupport(io, allocator, writer)) {
         std.debug.print("termscene-demo: kitty graphics protocol not detected.\n", .{});
