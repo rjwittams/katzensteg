@@ -1,5 +1,9 @@
 /* Helpers every SDL3 real-function backend provides beyond the X-macro
- * list; include after defining the list's ks_real_* functions. */
+ * list, built beside real_sdl3_linux.c or dynapi_sdl3.c. */
+
+#define KS_REAL(name, rettype, args, params) extern rettype ks_real_##name args;
+#define KS_REAL_VOID(name, args, params) extern void ks_real_##name args;
+#include "real_sdl3_functions.h"
 
 // SDL3 removed SDL_QueryTexture. Keep the adapter's compatibility helper local
 // and implement it through SDL3's size and property APIs.

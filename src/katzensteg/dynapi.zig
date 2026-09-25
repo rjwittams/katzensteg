@@ -32,8 +32,7 @@ pub const Slot = ?*const anyopaque;
 pub const InstallError = error{
     /// SDL's API version is not the one these slot numbers describe.
     VersionMismatch,
-    /// The loading SDL could not be found, or refused to fill the table.
-    RealEntryUnavailable,
+    /// The loading SDL refused to fill the table.
     RealEntryFailed,
     OutOfMemory,
 };

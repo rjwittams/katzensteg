@@ -327,6 +327,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl3_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/interpose_sdl3_linux.c") });
         katzensteg_sdl3_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_linux.c") });
         katzensteg_sdl3_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_linux.c") });
+        katzensteg_sdl3_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_compat.c") });
         katzensteg_sdl3_lib.version_script = b.path("src/katzensteg/katzensteg_sdl3_linux.map");
         katzensteg_sdl3_lib.root_module.linkSystemLibrary("yuv", .{});
     } else if (is_windows) {
@@ -1055,6 +1056,7 @@ fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Buil
 fn addDynapiSources(b: *std.Build, lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, glue: []const u8) void {
     const module = lib.root_module;
     module.addCSourceFile(.{ .file = b.path(b.fmt("src/katzensteg/{s}", .{glue})) });
+    if (std.mem.eql(u8, glue, "dynapi_sdl3.c")) module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_compat.c") });
     switch (target.result.os.tag) {
         .macos => {
             module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });

@@ -42,7 +42,6 @@ static void *ks_required_symbol(const char *name) {
     }
 
 #include "real_sdl3_functions.h"
-#include "real_sdl3_compat.h"
 
 KS_REAL(dlopen, void *, (const char *path, int mode), (path, mode))
 

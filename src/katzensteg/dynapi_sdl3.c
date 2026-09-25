@@ -10,4 +10,3 @@
 #define KS_DYNAPI_REAL "real_sdl3_functions.h"
 
 #include "dynapi_glue.inc"
-#include "real_sdl3_compat.h"
