@@ -431,6 +431,12 @@ pub fn pread(fd: posix.fd_t, buf: []u8, offset: u64) PReadError!usize {
     }
 }
 
+pub const Whence = enum(c_int) { set = std.c.SEEK.SET, current = std.c.SEEK.CUR, end = std.c.SEEK.END };
+
+pub fn seek(fd: posix.fd_t, offset: i64, whence: Whence) error{Unseekable}!void {
+    if (std.c.lseek(fd, offset, @intFromEnum(whence)) < 0) return error.Unseekable;
+}
+
 pub fn pipe2(flags: posix.O) PipeError![2]posix.fd_t {
     if (!builtin.target.os.tag.isDarwin() and @hasDecl(system, "pipe2")) {
         var fds: [2]posix.fd_t = undefined;

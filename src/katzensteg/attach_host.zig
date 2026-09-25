@@ -252,7 +252,9 @@ test "attach host exec loop applies fake peer frame batch" {
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
 
-    const code = try runExecWithWriter(io, std.testing.allocator, &.{ "python3", script_path }, &out.writer, .{
+    // On Windows `python3` is usually the Store installer alias.
+    const python = if (@import("builtin").os.tag == .windows) "python" else "python3";
+    const code = try runExecWithWriter(io, std.testing.allocator, &.{ python, script_path }, &out.writer, .{
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
     });
 

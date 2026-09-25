@@ -1,6 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
-const raw = @import("posix.zig");
+// Descriptor operations: read/write/close/pread/pwrite on the native handle.
+const is_windows = @import("builtin").os.tag == .windows;
+const raw = if (is_windows) @import("windows.zig") else @import("posix.zig");
 pub const File = struct {
     handle: std.posix.fd_t,
     io: Io,
@@ -84,10 +86,10 @@ pub const File = struct {
         return self.native().setLength(self.io, size);
     }
     pub fn seekTo(self: File, offset: u64) !void {
-        if (std.c.lseek(self.handle, @intCast(offset), std.c.SEEK.SET) < 0) return error.Unseekable;
+        return raw.seek(self.handle, @intCast(offset), .set);
     }
     pub fn seekFromEnd(self: File, offset: i64) !void {
-        if (std.c.lseek(self.handle, offset, std.c.SEEK.END) < 0) return error.Unseekable;
+        return raw.seek(self.handle, offset, .end);
     }
     pub fn sync(self: File) !void {
         return self.native().sync(self.io);
@@ -210,7 +212,9 @@ pub const CreateFlags = struct {
     exclusive: bool = false,
     mode: std.c.mode_t = 0o666,
     fn native(self: CreateFlags) Io.Dir.CreateFileOptions {
-        return .{ .read = self.read, .truncate = self.truncate, .exclusive = self.exclusive, .permissions = .fromMode(self.mode) };
+        // Windows files carry attributes, not a mode; the mode applies on POSIX only.
+        const permissions: Io.File.Permissions = if (is_windows) .default_file else .fromMode(self.mode);
+        return .{ .read = self.read, .truncate = self.truncate, .exclusive = self.exclusive, .permissions = permissions };
     }
 };
 pub fn cwd(io: Io) Dir {

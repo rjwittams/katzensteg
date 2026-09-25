@@ -888,6 +888,7 @@ test "placeholder upload bounds leave native framebuffer available for observati
 }
 
 test "SHM batches keep sent uploads alive and discard only unsent or host-rejected frames" {
+    if (!system_io.shm.supported) return error.SkipZigTest;
     var sink = RenderBatchSink.init(std.testing.io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.setUploadPolicy(.{ .profile = .shm });
@@ -921,6 +922,7 @@ test "SHM batches keep sent uploads alive and discard only unsent or host-reject
 }
 
 test "changing upload policy does not unlink a previously submitted SHM object" {
+    if (!system_io.shm.supported) return error.SkipZigTest;
     var sink = RenderBatchSink.init(std.testing.io, std.testing.allocator, "main");
     defer sink.deinit();
     try sink.setUploadPolicy(.{ .profile = .shm });
@@ -936,6 +938,7 @@ test "changing upload policy does not unlink a previously submitted SHM object" 
 }
 
 test "failed output never replays SHM APCs or assumes that partial writes were consumed" {
+    if (!system_io.shm.supported) return error.SkipZigTest;
     const FailingWriter = struct {
         fn writeAll(_: @This(), _: []const u8) error{BrokenPipe}!void {
             return error.BrokenPipe;

@@ -87,13 +87,39 @@ runtime still uses its existing OS threads; the desktop WM still uses libxev.
 `src/platform/` keeps file and directory operations attached to an explicit I/O
 capability. Raw descriptor operations preserve `WouldBlock` so the existing
 transport queues retain control of backpressure. Mutexes and conditions use
-pthread primitives, including timed condition waits. Owners destroy these
-objects after their users have stopped.
+pthread primitives (SRWLOCK and condition variables on Windows), including
+timed condition waits. Owners destroy these objects after their users have
+stopped. `platform.terminal` owns raw terminal mode and window size, and
+`platform.shm` owns Kitty `t=s` shared-memory objects; programs call these
+rather than termios, `ioctl` or `shm_open` directly.
 
 `test_injected_io.py` loads the core library into an ordinary C process and
 checks that startup, threaded logging, and shutdown preserve the application's
 SIGIO and SIGPIPE handlers. `test_embed_render_batches.py` covers SDL2 and SDL3
 with both synchronous composition and queued replay.
+
+## Windows
+
+Only the standalone termscene programs build on Windows so far; the preload
+runtime, launcher and desktop WM still assume POSIX descriptors, sockets and
+signals, and luchs is built on macOS only.
+
+```sh
+zig build termscene-examples
+```
+
+This installs `ttytris`, `termscene-demo`, `kitty-placement-repro` and
+`kitty-show-ppm`. `platform.terminal` puts the console into virtual-terminal
+input and output mode, and raw console reads return what is available, like
+termios `VMIN=0`/`VTIME=0`. Kitty graphics need a terminal behind a ConPTY that
+passes APC sequences through, such as a Wheelhouse Cleat pane with Cleat's
+bundled ConPTY; the inbox ConPTY drops them. Uploads use direct (`t=d`)
+transmission: `t=s` reports unsupported on Windows, because a named file
+mapping gives no consumption signal.
+
+`zig build test` still fails overall on Windows. The suites that build there
+pass, with POSIX-only cases skipped; the rest need POSIX sockets, pipes or
+signals, or SDL development libraries.
 
 ## Logs
 

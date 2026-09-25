@@ -8,3 +8,5 @@ pub const Condition = @import("sync.zig").Condition;
 pub const fs = @import("fs.zig");
 pub const process = @import("process.zig");
 pub const net = @import("net.zig");
+pub const terminal = @import("terminal.zig");
+pub const shm = @import("shm.zig");

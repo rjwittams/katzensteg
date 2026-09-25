@@ -1,7 +1,10 @@
 const std = @import("std");
 const platform = @import("platform");
+const is_windows = @import("builtin").os.tag == .windows;
 
 test "directory creation follows directory symlinks but rejects files and dangling links" {
+    // Creating symlinks on Windows needs a privilege test hosts may lack.
+    if (is_windows) return error.SkipZigTest;
     var tmp = platform.fs.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
@@ -34,6 +37,8 @@ test "file offsets and bounded reads preserve content and allocation ownership" 
 }
 
 test "buffered writer retains unsent data after nonblocking backpressure" {
+    // Nonblocking pipes are a POSIX descriptor contract.
+    if (is_windows) return error.SkipZigTest;
     const fds = try platform.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
     const input = platform.fs.File{ .handle = fds[0], .io = std.testing.io };
     defer input.close();
@@ -65,6 +70,8 @@ test "buffered writer retains unsent data after nonblocking backpressure" {
 }
 
 test "child reports spawn failure and transfers pipe ownership" {
+    // Process control still uses POSIX signals and /bin/sh.
+    if (is_windows) return error.SkipZigTest;
     const io = std.testing.io;
     var missing = platform.process.Child.init(io, &.{"/no/such/katzensteg-test-program"}, std.testing.allocator);
     try std.testing.expectError(error.FileNotFound, missing.spawn());
