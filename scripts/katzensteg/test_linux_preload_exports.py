@@ -260,7 +260,7 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/sdl3/abi.zig",
             "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
-            "src/katzensteg/real_sdl3_linux.c",
+            "src/katzensteg/real_sdl3_functions.h",
         ):
             text = (ROOT / rel).read_text()
             with self.subTest(path=rel, symbol="SDL_GL_GetDrawableSize"):
@@ -278,7 +278,7 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/sdl3/abi.zig",
             "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
-            "src/katzensteg/real_sdl3_linux.c",
+            "src/katzensteg/real_sdl3_functions.h",
         ):
             text = (ROOT / rel).read_text()
             with self.subTest(path=rel, symbol="SDL_ConvertSurfaceFormat"):
