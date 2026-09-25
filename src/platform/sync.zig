@@ -53,13 +53,13 @@ const PosixMutex = struct {
 };
 const PosixCondition = struct {
     native: std.c.pthread_cond_t = .{},
-    pub fn deinit(self: *Condition) void {
+    pub fn deinit(self: *PosixCondition) void {
         std.debug.assert(std.c.pthread_cond_destroy(&self.native) == .SUCCESS);
     }
-    pub fn wait(self: *Condition, mutex: *PosixMutex) void {
+    pub fn wait(self: *PosixCondition, mutex: *PosixMutex) void {
         std.debug.assert(std.c.pthread_cond_wait(&self.native, &mutex.native) == .SUCCESS);
     }
-    pub fn timedWait(self: *Condition, mutex: *PosixMutex, ns: u64) error{Timeout}!void {
+    pub fn timedWait(self: *PosixCondition, mutex: *PosixMutex, ns: u64) error{Timeout}!void {
         var deadline: std.c.timespec = undefined;
         std.debug.assert(std.c.clock_gettime(std.c.CLOCK.REALTIME, &deadline) == 0);
         const total = @as(u128, @intCast(deadline.nsec)) + ns;
@@ -71,10 +71,10 @@ const PosixCondition = struct {
             else => unreachable,
         }
     }
-    pub fn signal(self: *Condition) void {
+    pub fn signal(self: *PosixCondition) void {
         std.debug.assert(std.c.pthread_cond_signal(&self.native) == .SUCCESS);
     }
-    pub fn broadcast(self: *Condition) void {
+    pub fn broadcast(self: *PosixCondition) void {
         std.debug.assert(std.c.pthread_cond_broadcast(&self.native) == .SUCCESS);
     }
 };

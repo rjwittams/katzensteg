@@ -48,6 +48,7 @@ pub fn unlink(name: [:0]const u8) void {
 /// True only when the name is known to be gone. Other open failures (e.g.
 /// descriptor exhaustion) are not proof of consumption.
 pub fn removed(name: [:0]const u8) bool {
+    // Nothing is ever created where unsupported, so no object is outstanding.
     if (!supported) return true;
     const flags: std.c.O = .{ .ACCMODE = .RDONLY };
     const fd = std.c.shm_open(name, @bitCast(flags), @as(c_uint, 0));

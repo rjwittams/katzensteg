@@ -9,11 +9,16 @@ const win = struct {
     extern "kernel32" fn GetSystemTimePreciseAsFileTime(out: *u64) callconv(.winapi) void;
     extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 };
+// The performance-counter frequency is fixed at boot; query it once.
+var qpc_frequency = std.atomic.Value(i64).init(0);
 fn windowsMonotonic() i128 {
+    var freq = qpc_frequency.load(.monotonic);
+    if (freq == 0) {
+        _ = win.QueryPerformanceFrequency(&freq);
+        qpc_frequency.store(freq, .monotonic);
+    }
     var counter: i64 = 0;
-    var freq: i64 = 1;
     _ = win.QueryPerformanceCounter(&counter);
-    _ = win.QueryPerformanceFrequency(&freq);
     return @divFloor(@as(i128, counter) * ns_per_s, freq);
 }
 fn windowsRealtime() i128 {
@@ -35,7 +40,9 @@ pub fn milliTimestamp() i64 {
     return @intCast(@divFloor(nanoTimestamp(), ns_per_ms));
 }
 pub fn sleep(ns: u64) void {
-    if (is_windows) return win.Sleep(@intCast(@min(ns / ns_per_ms, std.math.maxInt(u32) - 1)));
+    // Sleep takes whole milliseconds; round up so it sleeps at least `ns`, as
+    // nanosleep does.
+    if (is_windows) return win.Sleep(@intCast(@min((ns + ns_per_ms - 1) / ns_per_ms, std.math.maxInt(u32) - 1)));
     var remaining: std.c.timespec = .{ .sec = @intCast(ns / ns_per_s), .nsec = @intCast(ns % ns_per_s) };
     while (std.c.nanosleep(&remaining, &remaining) != 0) {
         if (std.posix.errno(-1) != .INTR) return;
