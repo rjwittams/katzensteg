@@ -96,6 +96,9 @@ fn ensureFileLocked() !*system_io.fs.File {
     return error.LogFileUnavailable;
 }
 
+/// Leaves `file` null on failure; `ensureFileLocked` reports that and
+/// logging is then dropped, since the runtime must not write to stdout or
+/// stderr.
 fn openFileLocked() void {
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() }) catch return;

@@ -165,6 +165,10 @@ fn noteCursorPositionFromSdlEvent(rt: *runtime_mod.Runtime, event: *const sdl.SD
 /// Addresses a projected event to the application's SDL window, as SDL does
 /// for its keyboard and mouse focus window. Applications with several
 /// windows route input by `windowID`; 0 matches none of them.
+///
+/// Katzensteg presents one application window, so every event goes to the
+/// first tracked window. An application that shows several windows needs a
+/// focus window chosen by the input model instead.
 fn setEventWindowId(rt: *runtime_mod.Runtime, out: *sdl.SDL_Event, input_event: input.InputEvent) void {
     if (input_event == .quit) return;
     var ids = rt.sdl_window_ids.keyIterator();

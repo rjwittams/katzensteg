@@ -203,8 +203,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
     def test_expand_path_uses_user_profile_for_home_on_windows(self):
         bootstrap = load_module()
 
-        with mock.patch.object(bootstrap.sys, "platform", "win32"),                 mock.patch.dict(bootstrap.os.environ, {}, clear=False),                 mock.patch.object(bootstrap.os.path, "expanduser", side_effect=lambda value: value.replace("~", "C:/Users/u")):
-            bootstrap.os.environ.pop("HOME", None)
+        with mock.patch.object(bootstrap.sys, "platform", "win32"),                 mock.patch.dict(bootstrap.os.environ, {"HOME": ""}),                 mock.patch.object(bootstrap.os.path, "expanduser", side_effect=lambda value: value.replace("~", "C:/Users/u")):
             self.assertEqual(Path("C:/Users/u/roms/bass"), bootstrap.expand_path("$HOME/roms/bass"))
 
     def test_windows_builds_link_sdl2_dll_for_simple_apps(self):
