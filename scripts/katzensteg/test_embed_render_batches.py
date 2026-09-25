@@ -11,6 +11,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 
+def diagnostics(profile, since):
+    """The application's output and the runtime logs written since `since`."""
+    tmp = Path("/tmp")
+    parts = []
+    out = tmp / f"katzensteg-{profile.replace('.', '-')}.out"
+    logs = [p for p in tmp.glob("katzensteg-*.log") if p.stat().st_mtime >= since]
+    for path in ([out] if out.exists() else []) + logs:
+        text = path.read_text(errors="replace")
+        parts.append(f"\n--- {path} ---\n{text[-4000:]}")
+    return "".join(parts)
+
+
 class EmbedRenderBatchSmoke(unittest.TestCase):
     def test_basic_sdl_emits_frame_batch_after_attach(self):
         for profile in ("probe.embed.basic_sdl", "probe.embed.basic_sdl3"):
@@ -20,6 +32,7 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
                         self.check_frame_batch(profile, mode, injection)
 
     def check_frame_batch(self, profile, mode, injection):
+        started = time.time()
         launcher = REPO / "zig-out" / "bin" / "katzensteg"
         demo = REPO / "zig-out" / "bin" / "basic-sdl-demo"
         self.assertTrue(launcher.exists(), f"missing launcher: {launcher}")
@@ -128,7 +141,7 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
         stderr = proc.stderr.read() if proc.stderr is not None else ""
         if proc.stderr is not None:
             proc.stderr.close()
-        self.assertIsNotNone(frame_batch, f"no frame_batch in stdout={lines!r} stderr={stderr!r}")
+        self.assertIsNotNone(frame_batch, f"no frame_batch in stdout={lines!r} stderr={stderr!r}{diagnostics(profile, started)}")
         groups = frame_batch["groups"]
         self.assertGreater(len(groups["uploads"]), 0)
         self.assertTrue(upload_was_file)
