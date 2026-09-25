@@ -100,9 +100,10 @@ with both synchronous composition and queued replay.
 
 ## Windows
 
-The launcher, the SDL2 and SDL3 runtime libraries, the basic SDL demos and the
-standalone termscene programs build on Windows. The desktop WM, hosted
-destinations (`--embed-jsonl`, `KATZENSTEG_TARGET`) and luchs do not.
+The launcher, the SDL2 and SDL3 runtime libraries, the SDL probes, the Vulkan
+capture layer and the standalone termscene programs build on Windows. The
+desktop WM, hosted destinations (`--embed-jsonl`, `KATZENSTEG_TARGET`) and luchs
+do not.
 
 Link against the official SDL development packages (`SDL2-devel-<version>-mingw`
 and `SDL3-devel-<version>-mingw` from the libsdl-org releases) and run with the
@@ -110,10 +111,22 @@ official `SDL2.dll`/`SDL3.dll` from `SDL2-<version>-win32-x64.zip` and
 `SDL3-<version>-win32-x64.zip`. SDL 2.32.10 and 3.4.16 have been tested.
 
 ```sh
-zig build sdl-dynapi -Dsdl2-prefix=<SDL2-devel>/x86_64-w64-mingw32 -Dsdl3-prefix=<SDL3-devel>/x86_64-w64-mingw32
+zig build sdl-dynapi sdl-probes -Dsdl2-prefix=<SDL2-devel>/x86_64-w64-mingw32 -Dsdl3-prefix=<SDL3-devel>/x86_64-w64-mingw32
 cp SDL2.dll SDL3.dll zig-out/bin/
 zig-out/bin/katzensteg probe.embed.basic_sdl --frames 0
 ```
+
+`sdl-probes` builds the input, OpenGL and Vulkan probes and the Vulkan capture
+layer, so every scenario in [probe-parity.md](probe-parity.md) runs from its
+launcher profile (`probe.input`, `probe.gl.sdl3`, `probe.vulkan`, ...). Windows
+has no system Vulkan headers or loader import library without the Vulkan SDK:
+the build fetches the pinned Khronos `Vulkan-Headers` package and makes an
+import library for `vulkan-1.dll` from `examples/probes/windows/vulkan-1.def`.
+Running the Vulkan probes needs only the Vulkan runtime a GPU driver installs.
+The `capture.vulkan` profile fragment points `VK_LAYER_PATH` at
+`profiles/vulkan/windows`, whose manifest loads
+`zig-out/bin/katzensteg-vulkan-layer.dll`. The layer finds the runtime in the
+SDL adapter library already loaded in the process.
 
 `zig-out/bin` then holds `katzensteg.exe`, `katzensteg-sdl2.dll`,
 `katzensteg-sdl3.dll`, `basic-sdl-demo.exe` and `basic-sdl3-demo.exe`. SDL loads
@@ -145,7 +158,7 @@ termios `VMIN=0`/`VTIME=0`.
 Not yet on Windows: resizing the terminal while an application runs (there is
 no `SIGWINCH`), the launcher's quit supervision after Ctrl-] `q` (the SDL quit
 event is still sent), not waiting for orphaned descendants that hold the
-application's output pipe, GL capture validation, and Whiskers.
+application's output pipe, and Whiskers.
 
 `zig build test` still fails overall on Windows. Pass the same `-Dsdl2-prefix`
 and `-Dsdl3-prefix` to build and run the runtime, preload and SDL adapter
