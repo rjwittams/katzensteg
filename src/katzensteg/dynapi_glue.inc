@@ -24,7 +24,7 @@ typedef struct {
 } ks_dynapi_wrapper;
 
 extern int ks_dynapi_install(unsigned int expected_apiver, unsigned int apiver, void *table, unsigned int tablesize,
-                             const ks_dynapi_wrapper *wrappers, unsigned int wrapper_count, const void *self_entry,
+                             const ks_dynapi_wrapper *wrappers, unsigned int wrapper_count, const void *self_marker,
                              const char *env_name, void *const **real_out, unsigned int *real_count_out);
 extern void ks_katzensteg_log_c(const char *, const char *);
 
@@ -40,13 +40,17 @@ static const ks_dynapi_wrapper ks_dynapi_wrappers[] = {
 #undef KS_WRAP
 };
 
+/* An address inside this module that the dynamic linker cannot redirect to
+ * another one, unlike an exported function's. */
+static const char ks_dynapi_self_marker;
+
 static void *const *ks_dynapi_real;
 static unsigned int ks_dynapi_real_count;
 
 KS_DYNAPI_EXPORT int SDL_DYNAPI_entry(unsigned int apiver, void *table, unsigned int tablesize) {
     return ks_dynapi_install(KS_DYNAPI_VERSION, apiver, table, tablesize, ks_dynapi_wrappers,
                              (unsigned int)(sizeof(ks_dynapi_wrappers) / sizeof(ks_dynapi_wrappers[0])),
-                             (const void *)&SDL_DYNAPI_entry, KS_DYNAPI_ENV, &ks_dynapi_real, &ks_dynapi_real_count);
+                             &ks_dynapi_self_marker, KS_DYNAPI_ENV, &ks_dynapi_real, &ks_dynapi_real_count);
 }
 
 static void *ks_dynapi_real_slot(const char *name, unsigned int slot) {

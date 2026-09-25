@@ -35,8 +35,6 @@ pub const InstallError = error{
     /// The loading SDL could not be found, or refused to fill the table.
     RealEntryUnavailable,
     RealEntryFailed,
-    /// A second SDL asked after one was already wrapped.
-    AlreadyInstalled,
     OutOfMemory,
 };
 
@@ -76,12 +74,18 @@ pub fn install(
 
 /// The `SDL_DYNAPI_entry` of the module that owns `table`: the SDL whose
 /// first call is loading Katzensteg. Null when that module exports none, or
-/// when it is Katzensteg itself.
-pub fn loadingEntry(table: *const anyopaque, self_entry: *const anyopaque) ?EntryFn {
-    const found = if (builtin.os.tag == .windows) windowsModuleEntry(table) else posixModuleEntry(table);
-    const entry = found orelse return null;
-    if (@intFromPtr(entry) == @intFromPtr(self_entry)) return null;
-    return entry;
+/// when it is the module holding `self_marker` (Katzensteg itself).
+///
+/// The comparison is by module, not by the entry's address: on ELF,
+/// `&SDL_DYNAPI_entry` taken inside Katzensteg resolves through the global
+/// scope to the application's SDL, so it cannot identify Katzensteg.
+pub fn loadingEntry(table: *const anyopaque, self_marker: *const anyopaque) ?EntryFn {
+    if (builtin.os.tag == .windows) {
+        const module = windowsModule(table) orelse return null;
+        if (windowsModule(self_marker) == module) return null;
+        return @ptrCast(GetProcAddress(module, "SDL_DYNAPI_entry") orelse return null);
+    }
+    return posixModuleEntry(table, self_marker);
 }
 
 const HMODULE = *opaque {};
@@ -90,10 +94,10 @@ const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x2;
 extern "kernel32" fn GetModuleHandleExW(flags: u32, name: ?*const anyopaque, module: *?HMODULE) callconv(.winapi) c_int;
 extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 
-fn windowsModuleEntry(table: *const anyopaque) ?EntryFn {
+fn windowsModule(address: *const anyopaque) ?HMODULE {
     var module: ?HMODULE = null;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, table, &module) == 0) return null;
-    return @ptrCast(GetProcAddress(module orelse return null, "SDL_DYNAPI_entry") orelse return null);
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, address, &module) == 0) return null;
+    return module;
 }
 
 const DlInfo = extern struct {
@@ -108,15 +112,19 @@ extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*const anyopaque;
 extern "c" fn dlclose(handle: ?*anyopaque) c_int;
 extern "c" fn dlerror() ?[*:0]const u8;
 
-fn posixModuleEntry(table: *const anyopaque) ?EntryFn {
+fn posixModuleEntry(table: *const anyopaque, self_marker: *const anyopaque) ?EntryFn {
     var info: DlInfo = undefined;
     if (dladdr(table, &info) == 0) {
         log.warn("dladdr found no module for the SDL jump table at {x}", .{@intFromPtr(table)});
         return null;
     }
+    var self_info: DlInfo = undefined;
+    if (dladdr(self_marker, &self_info) != 0 and self_info.dli_fbase == info.dli_fbase) return null;
     const name = info.dli_fname orelse "(null)";
     // RTLD_NOLOAD returns the module already mapped (the SDL library, or the
-    // executable for a static SDL); closing drops only this reference.
+    // executable for a static SDL) and, like any successful dlopen, counts a
+    // reference (glibc dl-open.c; macOS dyld dlopen). Closing drops only that
+    // reference; SDL's own link keeps the module loaded.
     const rtld_lazy_noload: c_int = if (builtin.os.tag.isDarwin()) 0x1 | 0x10 else 0x1 | 0x4;
     const handle = dlopen(info.dli_fname, rtld_lazy_noload) orelse {
         log.warn("dlopen(RTLD_NOLOAD) of {s} failed: {s}", .{ name, if (dlerror()) |e| std.mem.span(e) else "no error" });
@@ -142,7 +150,9 @@ fn scrubEnvironment(name: [*:0]const u8) void {
 extern "kernel32" fn SetEnvironmentVariableA(name: [*:0]const u8, value: ?[*:0]const u8) callconv(.winapi) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-var installed_table: ?*anyopaque = null;
+/// The SDL table Katzensteg wraps. SDL2 and SDL3 serialize their own first
+/// calls but not each other's, so two SDLs in one process race to claim it.
+var installed_table = std.atomic.Value(?*anyopaque).init(null);
 
 /// The body of each SDL major version's `SDL_DYNAPI_entry`: returns 0 when
 /// the table is wrapped and stores the real functions in `real_out`, or -1
@@ -154,28 +164,29 @@ pub export fn ks_dynapi_install(
     tablesize: u32,
     wrappers: [*]const Wrapper,
     wrapper_count: u32,
-    self_entry: *const anyopaque,
+    self_marker: *const anyopaque,
     env_name: [*:0]const u8,
     real_out: *?[*]Slot,
     real_count_out: *u32,
 ) callconv(.c) i32 {
     const table_ptr = table orelse return -1;
-    if (installed_table) |previous| {
+    if (installed_table.cmpxchgStrong(null, table_ptr, .acq_rel, .acquire)) |previous| {
         // Two SDL copies in one process: keep wrapping the first.
         if (previous != table_ptr) {
             log.warn("a second SDL asked to load Katzensteg; leaving it unwrapped", .{});
             return -1;
         }
     }
-    const real_entry = loadingEntry(table_ptr, self_entry) orelse {
+    const real_entry = loadingEntry(table_ptr, self_marker) orelse {
         log.warn("the loading SDL exports no SDL_DYNAPI_entry; leaving it unwrapped", .{});
+        installed_table.store(null, .release);
         return -1;
     };
     const result = install(std.heap.c_allocator, expected_apiver, apiver, @ptrCast(@alignCast(table_ptr)), tablesize, real_entry, wrappers[0..wrapper_count]) catch |err| {
         log.warn("not wrapping SDL (api version {d}, table {d} bytes): {s}", .{ apiver, tablesize, @errorName(err) });
+        installed_table.store(null, .release);
         return -1;
     };
-    installed_table = table_ptr;
     real_out.* = result.real.ptr;
     real_count_out.* = @intCast(result.real.len);
     scrubEnvironment(env_name);

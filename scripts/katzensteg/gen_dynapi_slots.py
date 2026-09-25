@@ -63,12 +63,13 @@ def table_order(procs_text, defined):
                     # jump table includes the varargs entries.
                     value = rest.split()[0] not in defined
                 else:
-                    value = evaluate(rest, defined)
+                    # Conditions inside an inactive block are not evaluated.
+                    value = active and evaluate(rest, defined)
                 stack.append((active, value))
                 active = active and value
             elif kind == "elif":
                 parent, taken = stack[-1]
-                value = (not taken) and evaluate(rest, defined)
+                value = parent and not taken and evaluate(rest, defined)
                 stack[-1] = (parent, taken or value)
                 active = parent and value
             elif kind == "else":

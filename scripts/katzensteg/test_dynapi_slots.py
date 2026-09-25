@@ -58,6 +58,10 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("#define KS_SDL3_SLOT_SDL_Init 2", text)
         self.assertIn("#define KS_SDL3_SLOT_SDL_GetRendererInfo 0xffffffffu", text)
 
+    def test_conditions_inside_inactive_blocks_are_not_evaluated(self):
+        procs = "#ifdef __ANDROID__\n#if SDL_VERSION_ATLEAST(2,0,0)\n#elif SDL_OTHER(1)\n#endif\n#endif\nSDL_DYNAPI_PROC(int,SDL_Init,(Uint32 a),(a),return)\n"
+        self.assertEqual(["SDL_Init"], gen.table_order(procs, {"__LINUX__"}))
+
     def test_unsupported_conditionals_are_rejected(self):
         with self.assertRaises(ValueError):
             gen.table_order("#if SDL_VERSION_ATLEAST(2,0,0)\n#endif\n", set())
