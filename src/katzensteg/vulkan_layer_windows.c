@@ -53,7 +53,7 @@ bool ks_layer_os_own_directory(char *buffer, size_t capacity)
     if (len == 0 || len >= capacity) return false;
     char *slash = strrchr(buffer, '\\');
     char *forward = strrchr(buffer, '/');
-    if (forward > slash) slash = forward;
+    if (!slash || (forward && forward > slash)) slash = forward;
     if (!slash) return false;
     *slash = '\0';
     return true;
@@ -61,7 +61,9 @@ bool ks_layer_os_own_directory(char *buffer, size_t capacity)
 
 /* Child processes inherit the Win32 environment block, which is also what the
    Vulkan loader reads, so read and write that; keep this module's C runtime
-   copy in step for getenv. A NULL value removes the variable. */
+   copy in step for getenv. A NULL value removes the variable from the Win32
+   block; the C runtime copy is left empty, which getenv callers here treat
+   as unset. */
 static void set_process_env(const char *name, const char *value)
 {
     SetEnvironmentVariableA(name, value);
