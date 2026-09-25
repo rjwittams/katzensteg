@@ -89,6 +89,7 @@ jobs:
           python3 scripts/katzensteg/test_summarize_review_permissions.py
           python3 scripts/katzensteg/test_verify_review_posted.py
           python3 scripts/katzensteg/test_vulkan_linux_wiring.py
+          python3 scripts/katzensteg/test_vulkan_layer_windows_env.py
 
       - name: Prepare optional Jackstay dependency
         env:

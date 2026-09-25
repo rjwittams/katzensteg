@@ -8,6 +8,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LINUX_MANIFEST_PATH = ROOT / "profiles" / "vulkan" / "linux" / "VK_LAYER_KATZENSTEG_capture.json"
 MACOS_MANIFEST_PATH = ROOT / "profiles" / "vulkan" / "macos" / "VK_LAYER_KATZENSTEG_capture.json"
+WINDOWS_MANIFEST_PATH = ROOT / "profiles" / "vulkan" / "windows" / "VK_LAYER_KATZENSTEG_capture.json"
 RUNNER_PATH = ROOT / "scripts" / "katzensteg" / "run-vulkan-probe.sh"
 RETROARCH_RUNNER_PATH = ROOT / "scripts" / "katzensteg" / "run-retroarch-vulkan.sh"
 
@@ -54,13 +55,25 @@ def needed_libraries(lib_path):
 class VulkanLinuxWiringTests(unittest.TestCase):
     def test_vulkan_layer_resolves_present_callback_from_core_library(self):
         source = (ROOT / "src" / "katzensteg" / "vulkan_layer.c").read_text()
+        posix = (ROOT / "src" / "katzensteg" / "vulkan_layer_posix.c").read_text()
 
         self.assertIn("KATZENSTEG_CORE_LIB", source)
         self.assertIn("libkatzensteg-core.so", source)
         self.assertIn("libkatzensteg-core.dylib", source)
-        self.assertIn("dladdr", source)
-        self.assertIn("dlopen", source)
-        self.assertIn("dlsym(g_core_handle", source)
+        self.assertIn("ks_layer_os_own_directory", source)
+        self.assertIn("ks_layer_os_symbol(g_core_handle", source)
+        self.assertNotIn("dlsym", source)
+        self.assertIn("dladdr", posix)
+        self.assertIn("dlopen", posix)
+        self.assertIn("dlsym(RTLD_DEFAULT", posix)
+
+    def test_layer_manifest_points_to_windows_dll(self):
+        manifest = json.loads(WINDOWS_MANIFEST_PATH.read_text())
+
+        self.assertEqual(
+            r"..\..\..\zig-out\bin\katzensteg-vulkan-layer.dll",
+            manifest["layer"]["library_path"],
+        )
 
     def test_layer_manifest_points_to_linux_shared_object_on_linux(self):
         if platform.system() != "Linux":

@@ -486,11 +486,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_input_probe.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/input_probe.c") });
-    if (is_macos) {
-        katzensteg_input_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
-        katzensteg_input_probe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    }
-    katzensteg_input_probe.root_module.linkSystemLibrary("SDL2", .{});
+    if (is_macos) katzensteg_input_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+    linkSdlProbe(b, katzensteg_input_probe.root_module, target, "SDL2", sdl2_prefix);
     b.installArtifact(katzensteg_input_probe);
 
     const katzensteg_input_probe_sdl3 = b.addExecutable(.{
@@ -503,11 +500,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_input_probe_sdl3.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/input_probe.c") });
-    if (is_macos) {
-        katzensteg_input_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        katzensteg_input_probe_sdl3.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    }
-    katzensteg_input_probe_sdl3.root_module.linkSystemLibrary("SDL3", .{});
+    if (is_macos) katzensteg_input_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    linkSdlProbe(b, katzensteg_input_probe_sdl3.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
     b.installArtifact(katzensteg_input_probe_sdl3);
     const katzensteg_dlopen_probe_sdl3 = b.addExecutable(.{
         .name = "katzensteg-dlopen-probe-sdl3",
@@ -537,16 +531,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_gl_probe.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/gl_probe.c") });
-    if (is_macos) {
-        katzensteg_gl_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
-        katzensteg_gl_probe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    }
-    katzensteg_gl_probe.root_module.linkSystemLibrary("SDL2", .{});
-    if (is_macos) {
-        katzensteg_gl_probe.root_module.linkFramework("OpenGL", .{});
-    } else {
-        katzensteg_gl_probe.root_module.linkSystemLibrary("GL", .{});
-    }
+    if (is_macos) katzensteg_gl_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+    linkSdlProbe(b, katzensteg_gl_probe.root_module, target, "SDL2", sdl2_prefix);
+    linkOpenGl(katzensteg_gl_probe.root_module, target);
     b.installArtifact(katzensteg_gl_probe);
     const katzensteg_gl_probe_sdl3 = b.addExecutable(.{
         .name = "katzensteg-gl-probe-sdl3",
@@ -558,17 +545,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     katzensteg_gl_probe_sdl3.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/gl_probe.c") });
-    if (is_macos) {
-        katzensteg_gl_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        katzensteg_gl_probe_sdl3.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    }
-    katzensteg_gl_probe_sdl3.root_module.linkSystemLibrary("SDL3", .{});
-    if (is_macos) {
-        katzensteg_gl_probe_sdl3.root_module.linkFramework("OpenGL", .{});
-    } else {
-        katzensteg_gl_probe_sdl3.root_module.linkSystemLibrary("GL", .{});
-    }
+    if (is_macos) katzensteg_gl_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    linkSdlProbe(b, katzensteg_gl_probe_sdl3.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
+    linkOpenGl(katzensteg_gl_probe_sdl3.root_module, target);
     b.installArtifact(katzensteg_gl_probe_sdl3);
+    // The probes behind the parity matrix (docs/probe-parity.md). With
+    // `sdl-dynapi`, this is how Windows builds the SDL scenarios.
+    const sdl_probes_step = b.step("sdl-probes", "Build the SDL input, OpenGL and Vulkan probes and the Vulkan capture layer");
+    for ([_]*std.Build.Step.Compile{ katzensteg_input_probe, katzensteg_input_probe_sdl3, katzensteg_gl_probe, katzensteg_gl_probe_sdl3 }) |probe| {
+        sdl_probes_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
+    }
 
     var katzensteg_metal_probe: ?*std.Build.Step.Compile = null;
     var katzensteg_metal_probe_sdl3: ?*std.Build.Step.Compile = null;
@@ -657,9 +643,16 @@ pub fn build(b: *std.Build) void {
             }),
         });
         katzensteg_vulkan_layer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer.c") });
-        katzensteg_vulkan_layer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        if (is_windows) {
+            katzensteg_vulkan_layer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer_windows.c") });
+        } else {
+            katzensteg_vulkan_layer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/vulkan_layer_posix.c") });
+            katzensteg_vulkan_layer.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/env_scrub.c") });
+        }
         if (is_macos) katzensteg_vulkan_layer.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        addWindowsVulkanHeaders(b, katzensteg_vulkan_layer.root_module, target);
         b.installArtifact(katzensteg_vulkan_layer);
+        sdl_probes_step.dependOn(&b.addInstallArtifact(katzensteg_vulkan_layer, .{}).step);
 
         const katzensteg_vulkan_probe = b.addExecutable(.{
             .name = "katzensteg-vulkan-probe",
@@ -676,9 +669,10 @@ pub fn build(b: *std.Build) void {
             katzensteg_vulkan_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
             katzensteg_vulkan_probe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         }
-        katzensteg_vulkan_probe.root_module.linkSystemLibrary("SDL2", .{});
-        katzensteg_vulkan_probe.root_module.linkSystemLibrary("vulkan", .{});
+        linkSdlProbe(b, katzensteg_vulkan_probe.root_module, target, "SDL2", sdl2_prefix);
+        linkVulkanLoader(b, katzensteg_vulkan_probe.root_module, target);
         b.installArtifact(katzensteg_vulkan_probe);
+        sdl_probes_step.dependOn(&b.addInstallArtifact(katzensteg_vulkan_probe, .{}).step);
 
         const katzensteg_vulkan_probe_sdl3 = b.addExecutable(.{
             .name = "katzensteg-vulkan-probe-sdl3",
@@ -694,9 +688,10 @@ pub fn build(b: *std.Build) void {
             katzensteg_vulkan_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
             katzensteg_vulkan_probe_sdl3.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         }
-        katzensteg_vulkan_probe_sdl3.root_module.linkSystemLibrary("SDL3", .{});
-        katzensteg_vulkan_probe_sdl3.root_module.linkSystemLibrary("vulkan", .{});
+        linkSdlProbe(b, katzensteg_vulkan_probe_sdl3.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
+        linkVulkanLoader(b, katzensteg_vulkan_probe_sdl3.root_module, target);
         b.installArtifact(katzensteg_vulkan_probe_sdl3);
+        sdl_probes_step.dependOn(&b.addInstallArtifact(katzensteg_vulkan_probe_sdl3, .{}).step);
 
         const katzensteg_vulkan_layer_build_step = b.step("katzensteg-vulkan-layer", "Build the Vulkan capture layer used by Katzensteg");
         katzensteg_vulkan_layer_build_step.dependOn(&katzensteg_vulkan_layer.step);
@@ -959,6 +954,54 @@ fn linkSdl(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
     }
     if (target.result.os.tag == .macos) module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     module.linkSystemLibrary(name, .{});
+}
+
+/// The C probes include SDL's headers themselves. On Windows those come from
+/// the development package, and the probes keep their own `main` rather than
+/// linking SDLmain.
+fn linkSdlProbe(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, name: []const u8, prefix: ?[]const u8) void {
+    if (target.result.os.tag == .windows) {
+        if (prefix) |root| {
+            module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include" }) });
+            module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include", name }) });
+        }
+        module.addCMacro("SDL_MAIN_HANDLED", "1");
+    }
+    linkSdl(b, module, target, name, prefix);
+}
+
+fn linkOpenGl(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    switch (target.result.os.tag) {
+        .macos => module.linkFramework("OpenGL", .{}),
+        .windows => module.linkSystemLibrary("opengl32", .{}),
+        else => module.linkSystemLibrary("GL", .{}),
+    }
+}
+
+/// Windows has no system Vulkan headers; use the pinned Khronos package.
+fn addWindowsVulkanHeaders(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    const headers = b.lazyDependency("vulkan_headers", .{}) orelse return;
+    module.addIncludePath(headers.path("include"));
+}
+
+/// Without the Vulkan SDK, Windows has no import library for the Vulkan
+/// loader, so build one from its export list.
+fn linkVulkanLoader(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) {
+        module.linkSystemLibrary("vulkan", .{});
+        return;
+    }
+    addWindowsVulkanHeaders(b, module, target);
+    const machine = switch (target.result.cpu.arch) {
+        .x86_64 => "i386:x86-64",
+        .aarch64 => "arm64",
+        else => @panic("unsupported Windows architecture for the Vulkan probes"),
+    };
+    const dlltool = b.addSystemCommand(&.{ b.graph.zig_exe, "dlltool", "-m", machine, "-D", "vulkan-1.dll", "-d" });
+    dlltool.addFileArg(b.path("examples/probes/windows/vulkan-1.def"));
+    dlltool.addArg("-l");
+    module.addObjectFile(dlltool.addOutputFileArg("libvulkan-1.a"));
 }
 
 const UnitTestOptions = struct {
