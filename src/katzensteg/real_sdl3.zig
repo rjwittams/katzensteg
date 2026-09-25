@@ -196,7 +196,14 @@ pub const SDL_HideCursor = if (use_c_real) ks_real_SDL_HideCursor else sdl.SDL_H
 pub const SDL_DestroyCursor = if (use_c_real) ks_real_SDL_DestroyCursor else sdl.SDL_DestroyCursor;
 pub const SDL_GetError = if (use_c_real) ks_real_SDL_GetError else sdl.SDL_GetError;
 
+/// Windows has no dlopen to interpose; the Vulkan loader override is
+/// POSIX-only.
 pub fn realDlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque {
-    if (use_c_real) return ks_real_dlopen(path, mode);
-    return dlopen(path, mode);
+    if (builtin.os.tag == .windows) {
+        return null;
+    } else if (use_c_real) {
+        return ks_real_dlopen(path, mode);
+    } else {
+        return dlopen(path, mode);
+    }
 }

@@ -93,7 +93,29 @@ const ParseProgress = enum {
     done,
 };
 
-pub const WhiskersClient = struct {
+/// The producer API is served over a Unix-domain socket with a socketpair
+/// wake channel; neither is ported to Windows, where registration fails and
+/// the runtime continues without an inspector.
+pub const WhiskersClient = if (@import("builtin").os.tag == .windows) UnsupportedClient else UnixSocketClient;
+
+const UnsupportedClient = struct {
+    capture_enabled: std.atomic.Value(bool) = .init(false),
+    producer_id: []const u8 = "",
+    display_name: []const u8 = "",
+
+    pub fn init(_: std.Io, _: std.mem.Allocator, _: []const u8, _: ProducerHello) !UnsupportedClient {
+        return error.Unsupported;
+    }
+    pub fn start(_: *UnsupportedClient) void {}
+    pub fn deinit(_: *UnsupportedClient) void {}
+    pub fn isCaptureEnabled(_: *const UnsupportedClient) bool {
+        return false;
+    }
+    pub fn updateRuntimeInfo(_: *UnsupportedClient, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: u32) void {}
+    pub fn notePresent(_: *UnsupportedClient, _: inspect_model.FrameRecord, _: []const inspect_model.ResourceRecord) void {}
+};
+
+const UnixSocketClient = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     socket_path: []u8,
@@ -114,7 +136,7 @@ pub const WhiskersClient = struct {
     next_frame_seq: u64 = 1,
     next_resource_seq: u64 = 1,
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, hello: ProducerHello) !WhiskersClient {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, socket_path: []const u8, hello: ProducerHello) !UnixSocketClient {
         const response_body = try postJsonForBody(io, allocator, socket_path, null, "/v0/producers/connect", hello);
         defer allocator.free(response_body);
         const parsed = try std.json.parseFromSlice(ProducerHelloResponse, allocator, response_body, .{});
@@ -139,7 +161,7 @@ pub const WhiskersClient = struct {
         };
     }
 
-    pub fn start(self: *WhiskersClient) void {
+    pub fn start(self: *UnixSocketClient) void {
         if (self.control_thread != null) return;
         self.control_thread = std.Thread.spawn(.{}, controlMain, .{self}) catch |err| {
             log.warn("failed to start whiskers control thread: {any}", .{err});
@@ -147,7 +169,7 @@ pub const WhiskersClient = struct {
         };
     }
 
-    pub fn deinit(self: *WhiskersClient) void {
+    pub fn deinit(self: *UnixSocketClient) void {
         defer self.mutex.deinit();
         self.shutdown.store(true, .release);
         if (self.wake_write_fd >= 0) {
@@ -181,11 +203,11 @@ pub const WhiskersClient = struct {
         self.allocator.free(self.display_name);
     }
 
-    pub fn isCaptureEnabled(self: *const WhiskersClient) bool {
+    pub fn isCaptureEnabled(self: *const UnixSocketClient) bool {
         return self.capture_enabled.load(.monotonic);
     }
 
-    pub fn updateRuntimeInfo(self: *WhiskersClient, terminal_identity: []const u8, composite_mode: []const u8, intercept_mode: []const u8, output_profile: []const u8, present_fps: u32) void {
+    pub fn updateRuntimeInfo(self: *UnixSocketClient, terminal_identity: []const u8, composite_mode: []const u8, intercept_mode: []const u8, output_profile: []const u8, present_fps: u32) void {
         const io = self.io;
         postJsonIgnoreBody(io, self.allocator, self.socket_path, self.bearer_token, "/v0/runtime/info", RuntimeInfoUpdateRequest{
             .terminal_identity = terminal_identity,
@@ -200,7 +222,7 @@ pub const WhiskersClient = struct {
         self.runtime_info_sent = true;
     }
 
-    pub fn notePresent(self: *WhiskersClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
+    pub fn notePresent(self: *UnixSocketClient, frame: inspect_model.FrameRecord, resources: []const inspect_model.ResourceRecord) void {
         const io = self.io;
         self.pollCaptureState() catch |err| {
             log.warn("capture poll failed: {any}", .{err});
@@ -354,7 +376,7 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn stopActiveSegmentNow(self: *WhiskersClient) !void {
+    fn stopActiveSegmentNow(self: *UnixSocketClient) !void {
         const io = self.io;
         var segment_id_owned: ?[]u8 = null;
         self.mutex.lock();
@@ -369,7 +391,7 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn pollCaptureState(self: *WhiskersClient) !void {
+    fn pollCaptureState(self: *UnixSocketClient) !void {
         const io = self.io;
         const now = system_io.time.nanoTimestamp();
         if (now - self.last_capture_poll_ns < std.time.ns_per_s) return;
@@ -391,7 +413,7 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn applyControlEvent(self: *WhiskersClient, event_name: []const u8) void {
+    fn applyControlEvent(self: *UnixSocketClient, event_name: []const u8) void {
         if (std.mem.eql(u8, event_name, "capture_start")) {
             self.capture_enabled.store(true, .release);
             log.info("control capture_start producer={s}", .{self.producer_id});
@@ -404,7 +426,7 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn controlMain(self: *WhiskersClient) void {
+    fn controlMain(self: *UnixSocketClient) void {
         while (!self.shutdown.load(.acquire)) {
             self.controlLoopOnce() catch |err| {
                 if (self.shutdown.load(.acquire)) break;
@@ -419,7 +441,7 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn controlLoopOnce(self: *WhiskersClient) !void {
+    fn controlLoopOnce(self: *UnixSocketClient) !void {
         const io = self.io;
         var stream = try system_io.net.connectUnixSocket(io, self.socket_path);
         defer {
@@ -480,13 +502,13 @@ pub const WhiskersClient = struct {
         }
     }
 
-    fn drainWakeFd(self: *WhiskersClient) void {
+    fn drainWakeFd(self: *UnixSocketClient) void {
         var buf: [64]u8 = undefined;
         _ = system_io.posix.read(self.wake_read_fd, &buf) catch {};
     }
 
     fn processControlBytes(
-        self: *WhiskersClient,
+        self: *UnixSocketClient,
         recv_buf: *std.ArrayList(u8),
         line_buf: *std.ArrayList(u8),
         parse_offset: *usize,
@@ -606,7 +628,7 @@ fn maybeCompactBuffer(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, par
     _ = allocator;
 }
 
-fn processSseData(line_buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, client: *WhiskersClient) !void {
+fn processSseData(line_buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, client: *UnixSocketClient) !void {
     for (data) |byte| {
         if (byte == '\n') {
             const trimmed = std.mem.trimEnd(u8, line_buf.items, "\r");

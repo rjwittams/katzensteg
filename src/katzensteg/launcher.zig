@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const system_io = @import("platform");
 const attach_host = @import("attach_host.zig");
 const launcher_context = @import("launcher/context.zig");
@@ -9,6 +10,11 @@ const launcher_plan = @import("launcher/plan.zig");
 const config_mod = @import("config.zig");
 const profiles_mod = @import("launcher_profiles.zig");
 const render_batch_protocol = @import("render_batch_protocol.zig");
+
+/// Hosted destinations (JSONL hosts, Jackstay publication), the proxy and the
+/// command-quit supervisor use POSIX sockets, pipes and signals; Windows
+/// launches standalone only.
+const hosted_launch_supported = builtin.os.tag != .windows;
 
 const Command = enum {
     help,
@@ -303,6 +309,15 @@ fn showProfiles(io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !destination_mod.Destination {
+    if (!hosted_launch_supported) {
+        if (explicit_stdio) return error.UnsupportedTarget;
+        const value = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_TARGET") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => return .standalone,
+            else => return err,
+        };
+        allocator.free(value);
+        return error.UnsupportedTarget;
+    }
     if (explicit_stdio) return .stdio;
     const value = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_TARGET") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return .standalone,
@@ -312,6 +327,21 @@ fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !desti
     const home = system_io.process.getEnvVarOwned(allocator, "HOME") catch null;
     defer if (home) |path| allocator.free(path);
     return destination_mod.Destination.resolve(allocator, false, value, home);
+}
+
+/// Resolves a profile's launch plan; a profile whose SDL adapter cannot be
+/// loaded here ends the launcher with a message instead of an error trace.
+fn resolvePlanOrExit(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
+    return ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args) catch |err| {
+        const reason = switch (err) {
+            error.PreloadUnavailable => "preload injection is unavailable on this platform; use injection \"dynapi\" or \"auto\"",
+            error.NoAdapterLibrary => "the profile's sdl_adapter names no library for the selected injection on this platform",
+            error.InvalidInjection => "KATZENSTEG_INJECTION must be auto, preload or dynapi",
+            else => return err,
+        };
+        std.debug.print("katzensteg: {s}: cannot load the SDL adapter: {s}\n", .{ profile.name, reason });
+        std.process.exit(66);
+    };
 }
 
 fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !void {
@@ -340,7 +370,7 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
 
     var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
-    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
+    var plan = try resolvePlanOrExit(allocator, profile, expansion, extra_args);
     defer plan.deinit();
     if (embed_jsonl) applyEmbedJsonlRuntime(&plan.runtime, defaultEmbedRuntimeFds());
 
@@ -357,6 +387,7 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
     const line = try commandLineForDisplay(allocator, plan.argv);
     defer allocator.free(line);
     std.debug.print("commandline={s}\n", .{line});
+    if (plan.injection) |mechanism| std.debug.print("injection={s}\n", .{@tagName(mechanism)});
     std.debug.print("env:\n", .{});
     if (plan.env.len == 0) {
         std.debug.print("  <none>\n", .{});
@@ -422,10 +453,10 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
 
     var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
-    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
+    var plan = try resolvePlanOrExit(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
-    const host: ?system_io.fs.File = if (destination == .jsonl)
+    const host: ?system_io.fs.File = if (hosted_launch_supported and destination == .jsonl)
         destination_mod.connectJsonl(io, allocator, destination.jsonl, plan.profile_name) catch |err| {
             std.debug.print("katzensteg: cannot connect to target {s}: {s}\n", .{ destination.jsonl, @errorName(err) });
             return 69;
@@ -435,15 +466,19 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     defer if (host) |file| file.close();
 
     var embed_pipes: ?EmbedPipes = null;
-    if (embed_jsonl) {
+    if (hosted_launch_supported and embed_jsonl) {
         embed_pipes = try EmbedPipes.init(io);
         applyEmbedJsonlRuntime(&plan.runtime, embed_pipes.?.runtimeFds());
     }
     defer if (embed_pipes) |*pipes| pipes.deinit();
 
-    var command_supervisor: ?command_lifetime.Supervisor = if (destination == .standalone) try command_lifetime.Supervisor.init(io) else null;
-    defer if (command_supervisor) |*supervisor| supervisor.deinit();
-    if (command_supervisor) |*supervisor| plan.runtime.command_notify_fd = supervisor.child_fd;
+    var command_supervisor: ?command_lifetime.Supervisor = if (hosted_launch_supported and destination == .standalone) try command_lifetime.Supervisor.init(io) else null;
+    defer if (hosted_launch_supported) {
+        if (command_supervisor) |*supervisor| supervisor.deinit();
+    };
+    if (hosted_launch_supported) {
+        if (command_supervisor) |*supervisor| plan.runtime.command_notify_fd = supervisor.child_fd;
+    }
     if (destination != .standalone) plan.runtime.command_key = null;
     const runtime_config_path = try writeRuntimeConfig(io, allocator, plan.runtime);
     defer allocator.free(runtime_config_path);
@@ -472,7 +507,7 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     child.stdout_behavior = stdioForStdout(plan.stdout);
     child.stderr_behavior = stdioForStderr(plan.stdout, plan.stderr);
 
-    const term = if (embed_jsonl)
+    const term = if (hosted_launch_supported and embed_jsonl)
         spawnAndWaitEmbedTransport(&child, plan.stdout, plan.stderr, &embed_pipes.?, host) catch |err| {
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
@@ -555,7 +590,7 @@ fn runProxy(io: std.Io, allocator: std.mem.Allocator, extra_args: []const []cons
 
     var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
-    var plan = try ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args);
+    var plan = try resolvePlanOrExit(allocator, profile, expansion, extra_args);
     defer plan.deinit();
 
     const runtime_config_path = try writeRuntimeConfig(io, allocator, plan.runtime);
@@ -697,7 +732,9 @@ fn spawnAndWaitWithOutputSupervised(child: *system_io.process.Child, stdout_spec
 
     try child.spawn();
     errdefer _ = child.kill() catch {};
-    if (supervisor) |owner| try owner.started(child.id);
+    if (hosted_launch_supported) {
+        if (supervisor) |owner| try owner.started(child.id);
+    }
     defer if (supervisor) |owner| owner.stop.store(true, .seq_cst);
 
     var drain_stop = std.atomic.Value(bool).init(false);
@@ -1009,6 +1046,8 @@ fn drainPipeToSink(args: DrainArgs) void {
 }
 
 fn setNonBlocking(fd: std.posix.fd_t) void {
+    // Windows anonymous pipes stay blocking; the drain ends at end of file.
+    if (builtin.os.tag == .windows) return;
     const flags = system_io.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return;
     var typed_flags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
     typed_flags.NONBLOCK = true;
@@ -1187,7 +1226,7 @@ fn freeChildArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
 }
 
 fn writeRuntimeConfig(io: std.Io, allocator: std.mem.Allocator, runtime: RuntimeConfig) ![]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-runtime-{d}.json", .{system_io.time.nanoTimestamp()});
+    const path = try std.fmt.allocPrint(allocator, "{s}/katzensteg-runtime-{d}.json", .{ system_io.fs.tempDir(), system_io.time.nanoTimestamp() });
     errdefer allocator.free(path);
     const file = try system_io.fs.createFileAbsolute(io, path, .{ .truncate = true, .read = true });
     defer file.close();
@@ -1240,9 +1279,9 @@ fn writeRuntimeConfigJson(writer: *std.Io.Writer, runtime: RuntimeConfig) !void 
 }
 
 fn resetTerminalBestEffort(io: std.Io) void {
-    const file = system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .write_only }) catch return;
-    defer file.close();
-    var writer = file.writerStreaming(&.{});
+    const tty = system_io.terminal.Tty.open(io) catch return;
+    defer tty.close();
+    var writer = tty.output.writerStreaming(&.{});
     writer.interface.writeAll(terminalResetSequence()) catch return;
     writer.interface.flush() catch return;
 }
@@ -1360,7 +1399,9 @@ test "launcher resolves profile into launch plan with default log and runtime po
     try std.testing.expectEqualStrings("retroarch.sonic", plan.profile_name);
     try std.testing.expectEqualStrings("/Users/test/dev/RetroArch/retroarch", plan.target);
     try std.testing.expectEqualStrings("/Users/test/core.dylib", plan.argv[2]);
-    try std.testing.expectEqualStrings("/tmp/katzensteg-retroarch-sonic.out", plan.stdout.file);
+    const default_log = try std.fmt.allocPrint(std.testing.allocator, "{s}/katzensteg-retroarch-sonic.out", .{system_io.fs.logDir()});
+    defer std.testing.allocator.free(default_log);
+    try std.testing.expectEqualStrings(default_log, plan.stdout.file);
     try std.testing.expectEqual(OutputSpec.stdout, plan.stderr);
     try std.testing.expectEqual(@as(usize, 0), plan.env.len);
     try std.testing.expectEqual(.queued_replay, plan.runtime.intercept_mode);
@@ -1452,6 +1493,8 @@ test "launcher creates seed file parent directories" {
 }
 
 test "launcher output drain does not wait for orphaned descendants" {
+    // Needs /bin/sh; a Windows pipe drain blocks until every writer exits.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const output_path = "/tmp/katzensteg-launcher-orphan-output-test.out";
     system_io.fs.deleteFileAbsolute(io, output_path) catch {};

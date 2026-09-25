@@ -45,9 +45,10 @@ def main():
         profiles = {'bench.capture': {'extends': ['adapter.sdl2_preload', 'runtime.fullscreen_file'],
                     'target': str(binary), 'args': [str(args.frames), str(args.rectangles)],
                     'stdout': str(report), 'stderr': str(folder / 'stderr'),
-                    'env': {
-                        'DYLD_INSERT_LIBRARIES': {'macos': str(prefix / 'lib/libkatzensteg-sdl2.dylib')},
-                        'LD_PRELOAD': {'linux': str(prefix / 'lib/libkatzensteg-sdl2.so')},
+                    'sdl_adapter': {
+                        'api': 'sdl2',
+                        'preload': {'macos': str(prefix / 'lib/libkatzensteg-sdl2.dylib'),
+                                    'linux': str(prefix / 'lib/libkatzensteg-sdl2.so')},
                     }}}
         (folder / 'profiles.json').write_text(json.dumps({'profiles': profiles}))
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software',

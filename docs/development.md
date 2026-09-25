@@ -100,9 +100,38 @@ with both synchronous composition and queued replay.
 
 ## Windows
 
-Only the standalone termscene programs build on Windows so far; the preload
-runtime, launcher and desktop WM still assume POSIX descriptors, sockets and
-signals, and luchs is built on macOS only.
+The launcher, the SDL2 and SDL3 runtime libraries, the basic SDL demos and the
+standalone termscene programs build on Windows. The desktop WM, hosted
+destinations (`--embed-jsonl`, `KATZENSTEG_TARGET`) and luchs do not.
+
+Link against the official SDL development packages (`SDL2-devel-<version>-mingw`
+and `SDL3-devel-<version>-mingw` from the libsdl-org releases) and run with the
+official `SDL2.dll`/`SDL3.dll` from `SDL2-<version>-win32-x64.zip` and
+`SDL3-<version>-win32-x64.zip`. SDL 2.32.10 and 3.4.16 have been tested.
+
+```sh
+zig build sdl-dynapi -Dsdl2-prefix=<SDL2-devel>/x86_64-w64-mingw32 -Dsdl3-prefix=<SDL3-devel>/x86_64-w64-mingw32
+cp SDL2.dll SDL3.dll zig-out/bin/
+zig-out/bin/katzensteg probe.embed.basic_sdl --frames 0
+```
+
+`zig-out/bin` then holds `katzensteg.exe`, `katzensteg-sdl2.dll`,
+`katzensteg-sdl3.dll`, `basic-sdl-demo.exe` and `basic-sdl3-demo.exe`. SDL loads
+the Katzensteg library through its dynamic API; nothing is injected into the
+process (see [Injection](launcher.md#injection)). The runtime draws on the
+console the application is attached to (`CONIN$` and `CONOUT$`). Consoles report
+no pixel size, so it asks the terminal with `CSI 14 t` and `CSI 16 t`. The SDL
+adapter profiles hide the application's own window on Windows, so it cannot
+take keyboard focus from the terminal. `basic-sdl-demo` draws a square for each
+key it receives and quits on Escape or `q`; `--frames 0` keeps it running.
+
+Kitty graphics need a terminal behind a ConPTY that passes APC sequences
+through, such as a Wheelhouse Cleat pane with Cleat's bundled ConPTY; the inbox
+ConPTY drops them. In a Cleat pane the probe finds ghostty and uses whole-file
+(`t=f`) uploads. `t=s` reports unsupported on Windows, because a named file
+mapping gives no consumption signal.
+
+The termscene programs need no SDL:
 
 ```sh
 zig build termscene-examples
@@ -111,19 +140,22 @@ zig build termscene-examples
 This installs `ttytris`, `termscene-demo`, `kitty-placement-repro` and
 `kitty-show-ppm`. `platform.terminal` puts the console into virtual-terminal
 input and output mode, and raw console reads return what is available, like
-termios `VMIN=0`/`VTIME=0`. Kitty graphics need a terminal behind a ConPTY that
-passes APC sequences through, such as a Wheelhouse Cleat pane with Cleat's
-bundled ConPTY; the inbox ConPTY drops them. Uploads use direct (`t=d`)
-transmission: `t=s` reports unsupported on Windows, because a named file
-mapping gives no consumption signal.
+termios `VMIN=0`/`VTIME=0`.
 
-`zig build test` still fails overall on Windows. The suites that build there
-pass, with POSIX-only cases skipped; the rest need POSIX sockets, pipes or
-signals, or SDL development libraries.
+Not yet on Windows: resizing the terminal while an application runs (there is
+no `SIGWINCH`), the launcher's quit supervision after Ctrl-] `q` (the SDL quit
+event is still sent), not waiting for orphaned descendants that hold the
+application's output pipe, GL capture validation, and Whiskers.
+
+`zig build test` still fails overall on Windows. Pass the same `-Dsdl2-prefix`
+and `-Dsdl3-prefix` to build and run the runtime, preload and SDL adapter
+suites. The desktop WM suites do not build; the launcher destination test and
+two gamescope profile tests fail as before. Hosted-presentation and other
+POSIX-only cases are skipped.
 
 ## Logs
 
-Runtime diagnostics go to `/tmp/katzensteg-*`.
+Runtime diagnostics go to `/tmp/katzensteg-*` (`%TEMP%\katzensteg-*` on Windows).
 
 ```sh
 ls /tmp/katzensteg-*.log

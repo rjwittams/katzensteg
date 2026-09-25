@@ -217,6 +217,30 @@ pub const CreateFlags = struct {
         return .{ .read = self.read, .truncate = self.truncate, .exclusive = self.exclusive, .permissions = permissions };
     }
 };
+/// Directory for runtime diagnostics: `/tmp` on POSIX, and the user's
+/// temporary directory (`TEMP`, then `TMP`) on Windows.
+pub fn logDir() []const u8 {
+    if (is_windows) return windowsTempDir();
+    return "/tmp";
+}
+
+/// Directory for transient runtime files such as upload staging: `TMPDIR`
+/// or `/tmp` on POSIX, and `TEMP` or `TMP` on Windows.
+pub fn tempDir() []const u8 {
+    if (is_windows) return windowsTempDir();
+    return if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
+}
+
+fn windowsTempDir() []const u8 {
+    inline for (.{ "TEMP", "TMP" }) |name| {
+        if (std.c.getenv(name)) |value| {
+            const dir = std.mem.span(value);
+            if (dir.len > 0) return std.mem.trimEnd(u8, dir, "\\/");
+        }
+    }
+    return ".";
+}
+
 pub fn cwd(io: Io) Dir {
     return .{ .value = .cwd(), .io = io };
 }

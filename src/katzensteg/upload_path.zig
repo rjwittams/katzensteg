@@ -4,8 +4,7 @@ const system_io = @import("platform");
 pub const rotating_file_count = 256;
 
 pub fn makeUploadPath(allocator: std.mem.Allocator) ![]u8 {
-    const tmpdir = if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
-    return try std.fmt.allocPrint(allocator, "{s}/tty-graphics-protocol-katzensteg-{d}.rgba", .{ tmpdir, std.c.getpid() });
+    return try std.fmt.allocPrint(allocator, "{s}/tty-graphics-protocol-katzensteg-{d}.rgba", .{ system_io.fs.tempDir(), system_io.process.id() });
 }
 
 pub fn makeRotatingFilePath(allocator: std.mem.Allocator, base_path: []const u8, index: usize) ![]u8 {

@@ -131,18 +131,41 @@ class LinuxPreloadExportsTests(unittest.TestCase):
     def test_sdl2_profile_fragment_points_at_sdl2_adapter_library(self):
         retroarch = json.loads((ROOT / "profiles" / "retroarch.json").read_text())
         fragment = retroarch["profiles"]["adapter.sdl2_preload"]
-        env = fragment["env"]
+        adapter = fragment["sdl_adapter"]
 
-        # Preload env vars are now platform-scoped: macos→DYLD_INSERT_LIBRARIES,
-        # linux→LD_PRELOAD. Each platform only sees the relevant variable.
+        # The launcher picks LD_PRELOAD, DYLD_INSERT_LIBRARIES or
+        # SDL_DYNAMIC_API from the injection mechanism; the fragment names the
+        # library for each mechanism and platform.
+        self.assertEqual("sdl2", adapter["api"])
         self.assertEqual(
-            {"macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib"},
-            env["DYLD_INSERT_LIBRARIES"],
+            {
+                "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so",
+                "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib",
+            },
+            adapter["preload"],
         )
-        self.assertEqual(
-            {"linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so"},
-            env["LD_PRELOAD"],
-        )
+        self.assertEqual("{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.so", adapter["dynapi"]["linux"])
+        self.assertNotIn("env", fragment)
+
+    def test_dynapi_libraries_export_only_the_dynamic_api_entry_point(self):
+        if platform.system() != "Linux":
+            self.skipTest("Linux dynamic symbol table check")
+        for name in ("libkatzensteg-sdl2-dynapi.so", "libkatzensteg-sdl3-dynapi.so"):
+            lib_path = ROOT / "zig-out" / "lib" / name
+            if not lib_path.exists():
+                self.skipTest(f"{lib_path} is not built")
+            output = subprocess.check_output(["readelf", "--dyn-syms", "-W", str(lib_path)], text=True)
+            defined = {
+                symbol_name(line)
+                for line in dynsym_lines(output)
+                if " UND " not in line and " GLOBAL " in line
+            }
+            with self.subTest(library=name):
+                self.assertIn("SDL_DYNAPI_entry", defined)
+                # SDL finds Katzensteg only through its entry point; exporting
+                # SDL's own names could shadow the application's SDL.
+                self.assertEqual({"SDL_DYNAPI_entry"}, {s for s in defined if s.startswith("SDL_")})
+                self.assertNotIn("SDL2", " ".join(needed_libraries(lib_path)))
 
     def test_core_exports_are_defined_outside_sdl2_preload_source(self):
         preload_source = ROOT / "src" / "katzensteg" / "preload.zig"

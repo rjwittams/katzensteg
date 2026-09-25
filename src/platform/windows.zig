@@ -72,7 +72,29 @@ const k32 = struct {
     extern "kernel32" fn WriteFile(handle: HANDLE, buffer: [*]const u8, len: DWORD, written: *DWORD, overlapped: ?*Overlapped) callconv(.winapi) BOOL;
     extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+    extern "kernel32" fn CreateFileW(name: [*:0]const u16, access: DWORD, share: DWORD, security: ?*anyopaque, disposition: DWORD, flags: DWORD, template: ?HANDLE) callconv(.winapi) HANDLE;
 };
+
+const GENERIC_READ: DWORD = 0x80000000;
+const GENERIC_WRITE: DWORD = 0x40000000;
+const FILE_SHARE_READ: DWORD = 0x1;
+const FILE_SHARE_WRITE: DWORD = 0x2;
+const OPEN_EXISTING: DWORD = 3;
+
+pub const Console = enum { input, output };
+
+/// Opens the console attached to this process, whatever its standard handles
+/// point at: `CONIN$` for input records, `CONOUT$` for the active screen
+/// buffer. These are the Windows counterparts of opening `/dev/tty`.
+pub fn openConsole(which: Console) error{NoConsole}!HANDLE {
+    const name = switch (which) {
+        .input => std.unicode.utf8ToUtf16LeStringLiteral("CONIN$"),
+        .output => std.unicode.utf8ToUtf16LeStringLiteral("CONOUT$"),
+    };
+    const handle = k32.CreateFileW(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, null, OPEN_EXISTING, 0, null);
+    if (handle == windows.INVALID_HANDLE_VALUE) return error.NoConsole;
+    return handle;
+}
 
 fn ok(result: BOOL) bool {
     return @intFromEnum(result) != 0;

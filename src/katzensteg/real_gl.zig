@@ -1,6 +1,10 @@
 const builtin = @import("builtin");
 
-const use_linux_real = builtin.os.tag == .linux and !builtin.is_test;
+// Linux preloads resolve GL with dlsym(RTLD_NEXT) (real_gl_linux.c); dynamic
+// API builds through the loading SDL (real_gl_sdl.c). macOS links OpenGL.
+// opengl32.dll exports only OpenGL 1.1, so Windows tests resolve through the
+// SDL they link, too.
+const use_linux_real = (builtin.os.tag == .linux and !builtin.is_test) or builtin.os.tag == .windows;
 
 extern fn ks_real_gl_available() c_int;
 extern fn ks_real_glReadBuffer(mode: c_uint) void;

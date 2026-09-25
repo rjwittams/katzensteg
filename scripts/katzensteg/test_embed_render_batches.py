@@ -15,10 +15,11 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
     def test_basic_sdl_emits_frame_batch_after_attach(self):
         for profile in ("probe.embed.basic_sdl", "probe.embed.basic_sdl3"):
             for mode in ("sync_compose", "queued_replay"):
-                with self.subTest(profile=profile, mode=mode):
-                    self.check_frame_batch(profile, mode)
+                for injection in ("preload", "dynapi"):
+                    with self.subTest(profile=profile, mode=mode, injection=injection):
+                        self.check_frame_batch(profile, mode, injection)
 
-    def check_frame_batch(self, profile, mode):
+    def check_frame_batch(self, profile, mode, injection):
         launcher = REPO / "zig-out" / "bin" / "katzensteg"
         demo = REPO / "zig-out" / "bin" / "basic-sdl-demo"
         self.assertTrue(launcher.exists(), f"missing launcher: {launcher}")
@@ -26,7 +27,7 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
 
         env = os.environ.copy()
         env["KATZENSTEG_REPO"] = str(REPO)
-        env.update(SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_INTERCEPT_MODE=mode)
+        env.update(SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_INTERCEPT_MODE=mode, KATZENSTEG_INJECTION=injection)
         upload_base = str(Path(tempfile.gettempdir()) / f"katzensteg-embed-smoke-{os.getpid()}.rgba")
         upload_first = Path(upload_base + ".0")
         try:

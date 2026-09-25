@@ -52,13 +52,14 @@ Artifacts (under `zig-out/`):
 - `bin/katzensteg-{gl,input,vulkan}-probe` — probe binaries.
 - `lib/libkatzensteg-core.*` — core exported entry points.
 - `lib/libkatzensteg-sdl2.*` — SDL2 preload/interposer library.
+- `lib/libkatzensteg-sdl{2,3}-dynapi.*` — SDL_DYNAMIC_API libraries (on Windows, `bin/katzensteg-sdl{2,3}.dll`).
 - `lib/libkatzensteg.*` — fully linked preload.
 - `lib/libkatzensteg-unlinked.*` — preload variant that allows unresolved SDL/GL symbols.
 - `lib/libkatzensteg-vulkan-layer.*` — Vulkan capture layer when Vulkan support is enabled.
 
 ## Running things
 
-**Use the launcher.** It resolves JSON profiles, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` according to the selected profile, and starts the target.
+**Use the launcher.** It resolves JSON profiles, expands `{repo}` / `{home}`, sets `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` or `SDL_DYNAMIC_API` according to the selected profile's injection mechanism (`docs/launcher.md#injection`), and starts the target.
 
 ```bash
 ./zig-out/bin/katzensteg                    # list available profiles

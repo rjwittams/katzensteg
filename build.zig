@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     _ = b.addModule("platform", .{ .root_source_file = b.path("src/platform/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const is_macos = target.result.os.tag == .macos;
+    const is_windows = target.result.os.tag == .windows;
     const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
     const enable_vulkan = b.option(bool, "vulkan", "Build Vulkan capture layer and probe") orelse true;
     const enable_jackstay = b.option(bool, "jackstay", "Build optional CPU Jackstay connectors") orelse false;
@@ -36,10 +37,25 @@ pub fn build(b: *std.Build) void {
     }
     const default_preload_options = b.addOptions();
     default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);
+    default_preload_options.addOption(bool, "dynapi", false);
     const test_preload_options = b.addOptions();
     test_preload_options.addOption(bool, "use_c_real_sdl", false);
+    test_preload_options.addOption(bool, "dynapi", false);
     const rebind_preload_options = b.addOptions();
     rebind_preload_options.addOption(bool, "use_c_real_sdl", true);
+    rebind_preload_options.addOption(bool, "dynapi", false);
+    // SDL_DYNAMIC_API builds take every real SDL function from the jump table
+    // of the SDL that loads them.
+    const dynapi_preload_options = b.addOptions();
+    dynapi_preload_options.addOption(bool, "use_c_real_sdl", true);
+    dynapi_preload_options.addOption(bool, "dynapi", true);
+    // Windows builds of the SDL probes link the official development
+    // package (the x86_64-w64-mingw32 directory of SDL2-devel-*-mingw).
+    const sdl2_prefix = b.option([]const u8, "sdl2-prefix", "SDL2 development prefix with include/ and lib/ (Windows)");
+    windows_sdl_prefixes = .{
+        .sdl2 = sdl2_prefix,
+        .sdl3 = b.option([]const u8, "sdl3-prefix", "SDL3 development prefix with include/ and lib/ (Windows)"),
+    };
 
     const termscene_mod = projectModule(b, .{
         .root_source_file = b.path("src/termscene/mod.zig"),
@@ -229,7 +245,8 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_sdl2_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_sdl2_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
-    katzensteg_sdl2_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
+    // Windows has no preload: its only SDL2 library is the dynamic API one.
+    katzensteg_sdl2_lib.root_module.addImport("katzensteg_build_options", (if (is_windows) dynapi_preload_options else default_preload_options).createModule());
     katzensteg_sdl2_lib.root_module.strip = false;
     katzensteg_sdl2_lib.root_module.omit_frame_pointer = false;
     katzensteg_sdl2_lib.linker_allow_shlib_undefined = true;
@@ -247,9 +264,38 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl2_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
         katzensteg_sdl2_lib.version_script = b.path("src/katzensteg/katzensteg_sdl2_linux.map");
         katzensteg_sdl2_lib.root_module.linkSystemLibrary("yuv", .{});
+    } else if (is_windows) {
+        addDynapiSources(b, katzensteg_sdl2_lib, target, "dynapi_sdl2.c");
     }
     b.installArtifact(katzensteg_sdl2_lib);
     if (dsym_step) |s| installDsym(b, katzensteg_sdl2_lib, s);
+    const sdl_dynapi_step = b.step("sdl-dynapi", "Build the SDL_DYNAMIC_API libraries, the launcher and the basic SDL demos");
+    if (is_windows) {
+        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl2_lib, .{}).step);
+    } else {
+        // Linux and macOS keep their preload libraries and add the dynamic
+        // API one beside them.
+        const katzensteg_sdl2_dynapi_lib = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = "katzensteg-sdl2-dynapi",
+            .use_llvm = use_llvm,
+            .root_module = projectModule(b, .{
+                .root_source_file = b.path("src/katzensteg/preload.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_sdl2_dynapi_lib.root_module.addImport("termscene", termscene_mod);
+        katzensteg_sdl2_dynapi_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
+        katzensteg_sdl2_dynapi_lib.root_module.addImport("katzensteg_build_options", dynapi_preload_options.createModule());
+        katzensteg_sdl2_dynapi_lib.root_module.strip = false;
+        katzensteg_sdl2_dynapi_lib.root_module.omit_frame_pointer = false;
+        addDynapiSources(b, katzensteg_sdl2_dynapi_lib, target, "dynapi_sdl2.c");
+        b.installArtifact(katzensteg_sdl2_dynapi_lib);
+        if (dsym_step) |s| installDsym(b, katzensteg_sdl2_dynapi_lib, s);
+        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl2_dynapi_lib, .{}).step);
+    }
 
     const katzensteg_sdl3_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -264,7 +310,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_sdl3_lib.root_module.addImport("termscene", termscene_mod);
     katzensteg_sdl3_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
-    katzensteg_sdl3_lib.root_module.addImport("katzensteg_build_options", default_preload_options.createModule());
+    katzensteg_sdl3_lib.root_module.addImport("katzensteg_build_options", (if (is_windows) dynapi_preload_options else default_preload_options).createModule());
     katzensteg_sdl3_lib.root_module.strip = false;
     katzensteg_sdl3_lib.root_module.omit_frame_pointer = false;
     katzensteg_sdl3_lib.linker_allow_shlib_undefined = true;
@@ -283,9 +329,35 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl3_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl3_linux.c") });
         katzensteg_sdl3_lib.version_script = b.path("src/katzensteg/katzensteg_sdl3_linux.map");
         katzensteg_sdl3_lib.root_module.linkSystemLibrary("yuv", .{});
+    } else if (is_windows) {
+        addDynapiSources(b, katzensteg_sdl3_lib, target, "dynapi_sdl3.c");
     }
     b.installArtifact(katzensteg_sdl3_lib);
     if (dsym_step) |s| installDsym(b, katzensteg_sdl3_lib, s);
+    if (is_windows) {
+        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl3_lib, .{}).step);
+    } else {
+        const katzensteg_sdl3_dynapi_lib = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = "katzensteg-sdl3-dynapi",
+            .use_llvm = use_llvm,
+            .root_module = projectModule(b, .{
+                .root_source_file = b.path("src/katzensteg/preload_sdl3.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        katzensteg_sdl3_dynapi_lib.root_module.addImport("termscene", termscene_mod);
+        katzensteg_sdl3_dynapi_lib.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
+        katzensteg_sdl3_dynapi_lib.root_module.addImport("katzensteg_build_options", dynapi_preload_options.createModule());
+        katzensteg_sdl3_dynapi_lib.root_module.strip = false;
+        katzensteg_sdl3_dynapi_lib.root_module.omit_frame_pointer = false;
+        addDynapiSources(b, katzensteg_sdl3_dynapi_lib, target, "dynapi_sdl3.c");
+        b.installArtifact(katzensteg_sdl3_dynapi_lib);
+        if (dsym_step) |s| installDsym(b, katzensteg_sdl3_dynapi_lib, s);
+        sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl3_dynapi_lib, .{}).step);
+    }
 
     if (is_macos) {
         const katzensteg_sdl2_rebind_lib = b.addLibrary(.{
@@ -399,9 +471,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     basic_sdl_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl2_mod);
-    if (is_macos) basic_sdl_demo.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    basic_sdl_demo.root_module.linkSystemLibrary("SDL2", .{});
+    // On Windows this links the import library, so the demo loads SDL2.dll
+    // rather than static libSDL2.a.
+    linkSdl(b, basic_sdl_demo.root_module, target, "SDL2", sdl2_prefix);
     b.installArtifact(basic_sdl_demo);
+    sdl_dynapi_step.dependOn(&b.addInstallArtifact(basic_sdl_demo, .{}).step);
     const basic_sdl3_demo = b.addExecutable(.{
         .name = "basic-sdl3-demo",
         .use_llvm = use_llvm,
@@ -413,9 +487,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     basic_sdl3_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
-    if (is_macos) basic_sdl3_demo.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    basic_sdl3_demo.root_module.linkSystemLibrary("SDL3", .{});
+    linkSdl(b, basic_sdl3_demo.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
     b.installArtifact(basic_sdl3_demo);
+    sdl_dynapi_step.dependOn(&b.addInstallArtifact(basic_sdl3_demo, .{}).step);
 
     const katzensteg_input_probe = b.addExecutable(.{
         .name = "katzensteg-input-probe",
@@ -669,6 +743,7 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_launcher.root_module.addImport("termscene", termscene_mod);
     b.installArtifact(katzensteg_launcher);
+    sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_launcher, .{}).step);
     const katzensteg_wm = b.addExecutable(.{
         .name = "katzensteg-wm",
         .use_llvm = use_llvm,
@@ -868,6 +943,8 @@ pub fn build(b: *std.Build) void {
     });
     addUnitTest(b, test_step, "katzensteg-launcher-profiles-test", "src/katzensteg/launcher_profiles.zig", target, optimize, use_llvm, test_library_dir, .{});
     addUnitTest(b, test_step, "katzensteg-launcher-context-test", "src/katzensteg/launcher/context.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-launcher-injection-test", "src/katzensteg/launcher/injection.zig", target, optimize, use_llvm, test_library_dir, .{});
+    addUnitTest(b, test_step, "katzensteg-dynapi-test", "src/katzensteg/dynapi.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     addUnitTest(b, test_step, "katzensteg-launcher-destination-test", "src/katzensteg/launcher/destination.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     addUnitTest(b, test_step, "katzensteg-wm-cli-test", "src/katzensteg/wm/cli.zig", target, optimize, use_llvm, test_library_dir, .{});
     addUnitTest(b, test_step, "katzensteg-wm-client-test", "src/katzensteg/wm/client.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
@@ -884,6 +961,19 @@ pub fn build(b: *std.Build) void {
         .katzensteg_sdl = katzensteg_sdl2_mod,
         .link_sdl2 = true,
     });
+}
+
+/// Windows has no system SDL; tests link the development packages given with
+/// -Dsdl2-prefix / -Dsdl3-prefix and run with their bin/ on PATH.
+var windows_sdl_prefixes: struct { sdl2: ?[]const u8 = null, sdl3: ?[]const u8 = null } = .{};
+
+fn linkSdl(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, name: []const u8, prefix: ?[]const u8) void {
+    if (target.result.os.tag == .windows and prefix != null) {
+        module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix.?, "lib", b.fmt("lib{s}.dll.a", .{name}) }) });
+        return;
+    }
+    if (target.result.os.tag == .macos) module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    module.linkSystemLibrary(name, .{});
 }
 
 const UnitTestOptions = struct {
@@ -924,22 +1014,22 @@ fn addUnitTest(
     if (options.xev) |mod| unit_test.root_module.addImport("xev", mod);
     if (options.katzensteg_sdl) |mod| unit_test.root_module.addImport("katzensteg_sdl", mod);
     if (options.katzensteg_build_options) |mod| unit_test.root_module.addImport("katzensteg_build_options", mod);
-    if (options.link_sdl2) {
-        if (target.result.os.tag == .macos) unit_test.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        unit_test.root_module.linkSystemLibrary("SDL2", .{});
-    }
-    if (options.link_sdl3) {
-        if (target.result.os.tag == .macos) unit_test.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        unit_test.root_module.linkSystemLibrary("SDL3", .{});
-    }
+    if (options.link_sdl2) linkSdl(b, unit_test.root_module, target, "SDL2", windows_sdl_prefixes.sdl2);
+    if (options.link_sdl3) linkSdl(b, unit_test.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
     if (options.link_opengl) {
         if (target.result.os.tag == .macos) {
             unit_test.root_module.linkFramework("OpenGL", .{});
         } else if (target.result.os.tag == .linux) {
             unit_test.root_module.linkSystemLibrary("GL", .{});
+        } else if (target.result.os.tag == .windows) {
+            unit_test.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_sdl.c"), .flags = &.{"-DKS_GL_VIA_LINKED_SDL"} });
         }
     }
     const run_unit_test = b.addRunArtifact(unit_test);
+    if (target.result.os.tag == .windows) {
+        if (options.link_sdl2) if (windows_sdl_prefixes.sdl2) |prefix| run_unit_test.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
+        if (options.link_sdl3) if (windows_sdl_prefixes.sdl3) |prefix| run_unit_test.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
+    }
     test_step.dependOn(&run_unit_test.step);
 }
 
@@ -957,6 +1047,27 @@ fn installDsym(b: *std.Build, lib: *std.Build.Step.Compile, dsym_step: *std.Buil
     });
     b.getInstallStep().dependOn(&install_dsym.step);
     dsym_step.dependOn(&install_dsym.step);
+}
+
+/// The dynamic API entry point and jump-table backend for one SDL major
+/// version, GL resolution through the loading SDL, and the platform's image
+/// fast paths.
+fn addDynapiSources(b: *std.Build, lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, glue: []const u8) void {
+    const module = lib.root_module;
+    module.addCSourceFile(.{ .file = b.path(b.fmt("src/katzensteg/{s}", .{glue})) });
+    switch (target.result.os.tag) {
+        .macos => {
+            module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_macos.c") });
+            module.linkFramework("Accelerate", .{});
+            module.linkFramework("OpenGL", .{});
+        },
+        .linux => {
+            module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_sdl.c") });
+            module.addCSourceFile(.{ .file = b.path("src/katzensteg/image_fastpath_portable.c") });
+            module.linkSystemLibrary("yuv", .{});
+        },
+        else => module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_gl_sdl.c") }),
+    }
 }
 
 fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Build.Module {

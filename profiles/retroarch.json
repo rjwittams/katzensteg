@@ -67,23 +67,41 @@
     },
     "adapter.sdl2_preload": {
       "hidden": true,
-      "env": {
-        "DYLD_INSERT_LIBRARIES": {
+      "sdl_adapter": {
+        "api": "sdl2",
+        "preload": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so",
           "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib"
         },
-        "LD_PRELOAD": {
-          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so"
+        "dynapi": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.so",
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.dylib",
+          "windows": "{repo}/zig-out/bin/katzensteg-sdl2.dll"
+        }
+      },
+      "runtime": {
+        "real_window": {
+          "windows": "hide"
         }
       }
     },
     "adapter.sdl3_preload": {
       "hidden": true,
-      "env": {
-        "DYLD_INSERT_LIBRARIES": {
+      "sdl_adapter": {
+        "api": "sdl3",
+        "preload": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl3.so",
           "macos": "{repo}/zig-out/lib/libkatzensteg-sdl3.dylib"
         },
-        "LD_PRELOAD": {
-          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl3.so"
+        "dynapi": {
+          "linux": "{repo}/zig-out/lib/libkatzensteg-sdl3-dynapi.so",
+          "macos": "{repo}/zig-out/lib/libkatzensteg-sdl3-dynapi.dylib",
+          "windows": "{repo}/zig-out/bin/katzensteg-sdl3.dll"
+        }
+      },
+      "runtime": {
+        "real_window": {
+          "windows": "hide"
         }
       }
     },

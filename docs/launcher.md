@@ -45,6 +45,43 @@ A profile may:
 
 Hidden profiles are fragments such as adapter/runtime defaults. Visible profiles are intended to be run directly.
 
+## Injection
+
+The SDL adapter fragments (`adapter.sdl2_preload`, `adapter.sdl3_preload`) name
+Katzensteg's SDL library for each injection mechanism and platform:
+
+```json
+"sdl_adapter": {
+  "api": "sdl2",
+  "preload": { "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2.so", "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2.dylib" },
+  "dynapi": { "linux": "{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.so", "macos": "{repo}/zig-out/lib/libkatzensteg-sdl2-dynapi.dylib", "windows": "{repo}/zig-out/bin/katzensteg-sdl2.dll" }
+}
+```
+
+The profile field `injection` selects the mechanism, and the launcher sets the
+matching variable:
+
+| `injection` | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `preload` | `LD_PRELOAD` | `DYLD_INSERT_LIBRARIES` | unavailable |
+| `dynapi` | `SDL_DYNAMIC_API` / `SDL3_DYNAMIC_API` | same | same |
+| `auto` (default) | `preload` | `preload` | `dynapi` |
+
+With `dynapi`, SDL loads the library on its first call and hands it SDL's jump
+table. Katzensteg asks the loading SDL to fill the table and keeps that copy as
+the real functions, then substitutes its wrappers. It exports only
+`SDL_DYNAPI_entry` and removes the variable, so child processes start without
+it. The application needs an SDL built with its dynamic API, which is the
+default, and must export `SDL_DYNAPI_entry` from the module that holds the
+table: `SDL2.dll`/`SDL3.dll` and shared libraries do; applications that link SDL
+statically on Windows do not. Only calls that go through SDL are covered,
+including SDL's GL swap; applications that render through GL, Vulkan or Metal
+directly still need platform hooks.
+
+`KATZENSTEG_INJECTION=auto|preload|dynapi` overrides the profile for one launch,
+and `--dry-run` prints the selected mechanism. A variable set explicitly in a
+profile's `env` takes precedence over the adapter's library.
+
 ## Search Paths
 
 By default, the launcher reads:
