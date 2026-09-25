@@ -55,7 +55,7 @@ Artifacts (under `zig-out/`):
 - `lib/libkatzensteg-sdl{2,3}-dynapi.*` — SDL_DYNAMIC_API libraries (on Windows, `bin/katzensteg-sdl{2,3}.dll`).
 - `lib/libkatzensteg.*` — fully linked preload.
 - `lib/libkatzensteg-unlinked.*` — preload variant that allows unresolved SDL/GL symbols.
-- `lib/libkatzensteg-vulkan-layer.*` — Vulkan capture layer when Vulkan support is enabled.
+- `lib/libkatzensteg-vulkan-layer.*` — Vulkan capture layer when Vulkan support is enabled (on Windows, `bin/katzensteg-vulkan-layer.dll`).
 
 ## Running things
 
