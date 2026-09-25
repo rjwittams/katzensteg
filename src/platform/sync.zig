@@ -78,3 +78,26 @@ const PosixCondition = struct {
         std.debug.assert(std.c.pthread_cond_broadcast(&self.native) == .SUCCESS);
     }
 };
+
+/// Stack size for `runOnLargeStack`, the same as Zig's default for
+/// executables and the threads it spawns.
+pub const large_stack_size: usize = 16 * 1024 * 1024;
+
+/// Runs `func(args...)` on a stack of at least `large_stack_size` bytes and
+/// returns when it has finished.
+///
+/// Katzensteg runs on the application's own threads. Windows applications
+/// built with MSVC reserve 1 MiB for their main thread by default, which
+/// Katzensteg's initialization can exceed in Debug builds, so on Windows
+/// `func` runs on a helper thread that the caller joins. POSIX main threads
+/// reserve several MiB and `func` runs inline. If the helper thread cannot be
+/// started, `func` runs inline too.
+pub fn runOnLargeStack(comptime func: anytype, args: anytype) void {
+    if (builtin.os.tag == .windows) {
+        if (std.Thread.spawn(.{ .stack_size = large_stack_size }, func, args)) |thread| {
+            thread.join();
+            return;
+        } else |_| {}
+    }
+    @call(.auto, func, args);
+}

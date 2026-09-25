@@ -147,3 +147,18 @@ test "homeDirOwned prefers HOME and falls back to USERPROFILE only on Windows" {
     try std.testing.expectError(error.EnvironmentVariableNotFound, platform.process.homeDirFrom(a, false, testLookup(null, "C:\\Users\\u")));
     try std.testing.expectError(error.EnvironmentVariableNotFound, platform.process.homeDirFrom(a, true, testLookup(null, null)));
 }
+
+fn recordThread(out: *std.Thread.Id) void {
+    out.* = std.Thread.getCurrentId();
+}
+
+test "runOnLargeStack runs on a helper thread only on Windows and waits for it" {
+    var ran_on: std.Thread.Id = 0;
+    platform.runOnLargeStack(recordThread, .{&ran_on});
+    try std.testing.expect(ran_on != 0);
+    if (is_windows) {
+        try std.testing.expect(ran_on != std.Thread.getCurrentId());
+    } else {
+        try std.testing.expectEqual(std.Thread.getCurrentId(), ran_on);
+    }
+}

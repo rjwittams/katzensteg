@@ -2631,7 +2631,9 @@ noinline fn initGlobalLocked() *Runtime {
         global_runtime_is_stub = true;
         return &global_runtime.?;
     }
-    global_runtime = Runtime.init();
+    // Runtime.init can need more stack than an application thread has (the
+    // MSVC default is 1 MiB), so it runs on a large stack where needed.
+    system_io.runOnLargeStack(initGlobalRuntime, .{});
     global_runtime_is_stub = false;
     if (global_runtime) |*runtime| {
         if (runtime.whiskers_client) |*client| {
@@ -2651,6 +2653,10 @@ noinline fn initGlobalLocked() *Runtime {
         }
     }
     return &global_runtime.?;
+}
+
+fn initGlobalRuntime() void {
+    global_runtime = Runtime.init();
 }
 
 fn avgMicros(bucket: ProducerBucket) f64 {
@@ -2705,11 +2711,17 @@ pub fn shutdownGlobal() callconv(.c) void {
     global_shutdown_started = true;
     if (global_runtime_is_stub) return;
     if (global_runtime) |*runtime| {
-        runtime.active = false;
-        runtime.deinit();
+        // Like initialization, teardown can need more stack than the
+        // application thread calling SDL_Quit has.
+        system_io.runOnLargeStack(deinitRuntime, .{runtime});
         global_runtime = Runtime.initShutdownStub();
         global_runtime_is_stub = true;
     }
+}
+
+fn deinitRuntime(runtime: *Runtime) void {
+    runtime.active = false;
+    runtime.deinit();
 }
 
 fn selectBackendOptions(allocator: std.mem.Allocator, runtime: *Runtime) !ts_kitty.Options {
