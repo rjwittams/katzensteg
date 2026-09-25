@@ -130,10 +130,10 @@ fn posixModuleEntry(table: *const anyopaque, self_marker: *const anyopaque) ?Ent
         return null;
     };
     defer _ = dlclose(handle);
-    return @ptrCast(dlsym(handle, "SDL_DYNAPI_entry") orelse {
+    return @ptrCast(@alignCast(dlsym(handle, "SDL_DYNAPI_entry") orelse {
         log.warn("{s} has no SDL_DYNAPI_entry: {s}", .{ name, if (dlerror()) |e| std.mem.span(e) else "no error" });
         return null;
-    });
+    }));
 }
 
 /// Removes the variable that loaded Katzensteg, so processes the application
