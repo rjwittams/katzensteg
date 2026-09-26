@@ -127,12 +127,22 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
             "zig": "zig",
         }
 
+        expected_winget = {
+            "cl": "Microsoft.VisualStudio.2022.BuildTools",
+            "cmake": "Kitware.CMake",
+            "git": "Git.Git",
+            "msbuild": "Microsoft.VisualStudio.2022.BuildTools",
+            "ninja": "Ninja-build.Ninja",
+            "zig": "zig.zig",
+        }
+
         self.assertIn("arch", package_hints)
         self.assertIn("brew", package_hints)
         self.assertIn("debian", package_hints)
         self.assertEqual(expected_arch, package_hints["arch"])
         self.assertEqual(expected_brew, package_hints["brew"])
         self.assertEqual(expected_debian, package_hints["debian"])
+        self.assertEqual(expected_winget, package_hints["winget"])
 
     def test_detect_distro_family_recognizes_arch(self):
         bootstrap = load_module()
@@ -164,6 +174,54 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         bootstrap = load_module()
 
         self.assertEqual("brew", bootstrap.detect_distro_family(None, platform="darwin"))
+
+    def test_detect_distro_family_recognizes_windows(self):
+        bootstrap = load_module()
+
+        self.assertEqual("winget", bootstrap.detect_distro_family(None, platform="win32"))
+
+    def test_render_install_hint_lines_formats_winget_commands(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        lines = bootstrap.render_install_hint_lines(manifest, ["cmake", "msbuild", "cl"], distro_family="winget")
+
+        self.assertEqual(
+            [
+                "winget install --exact --id Kitware.CMake"
+                " && winget install --exact --id Microsoft.VisualStudio.2022.BuildTools"
+            ],
+            lines,
+        )
+
+    def test_current_platform_names_windows_like_launcher_profiles(self):
+        bootstrap = load_module()
+
+        with mock.patch.object(bootstrap.sys, "platform", "win32"):
+            self.assertEqual("windows", bootstrap.current_platform())
+
+    def test_expand_path_uses_user_profile_for_home_on_windows(self):
+        bootstrap = load_module()
+
+        with mock.patch.object(bootstrap.sys, "platform", "win32"),                 mock.patch.dict(bootstrap.os.environ, {"HOME": ""}),                 mock.patch.object(bootstrap.os.path, "expanduser", side_effect=lambda value: value.replace("~", "C:/Users/u")):
+            self.assertEqual(Path("C:/Users/u/roms/bass"), bootstrap.expand_path("$HOME/roms/bass"))
+
+    def test_windows_builds_link_sdl2_dll_for_simple_apps(self):
+        bootstrap = load_module()
+
+        manifest = bootstrap.load_manifest(MANIFEST_PATH)
+        for name in ["anese", "cannonball", "scummvm"]:
+            project = bootstrap.project_by_name(manifest, name)
+            windows_build = project["build"]["windows"]
+            self.assertTrue(windows_build, name)
+            self.assertTrue(windows_build[-1].startswith(r"copy /y %SDL2%\lib\x64\SDL2.dll "), name)
+            outputs = [
+                entry["path"]
+                for entry in project["doctor"]["paths"]
+                if entry["kind"] == "output" and "windows" in entry.get("platforms", ["windows"])
+            ]
+            self.assertTrue(any(path.endswith(".exe") for path in outputs), name)
+        self.assertEqual("windows-sdl2-build", bootstrap.project_by_name(manifest, "cannonball")["checkout"])
 
     def test_render_install_hint_lines_formats_arch_command(self):
         bootstrap = load_module()
@@ -231,9 +289,15 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         scummvm = bootstrap.project_by_name(manifest, "scummvm")
 
         self.assertIn("zig", repo_doctor["tools"])
-        self.assertIn("pkg-config", repo_doctor["tools"])
+        self.assertIn({"name": "pkg-config", "platforms": ["linux", "macos"]}, repo_doctor["tools"])
         self.assertIn({"name": "gamescope", "platforms": ["linux"]}, repo_doctor["tools"])
-        self.assertIn("sdl2", repo_doctor["pkg_config"])
+        self.assertIn({"name": "sdl2", "platforms": ["linux", "macos"]}, repo_doctor["pkg_config"])
+        self.assertTrue(
+            any(
+                asset.get("platforms") == ["windows"] and asset["path"] == "$SDL2/lib/x64/SDL2.dll"
+                for asset in repo_doctor["assets"]
+            )
+        )
         self.assertIn({"name": "gl", "platforms": ["linux"]}, repo_doctor["pkg_config"])
         self.assertTrue(
             any(

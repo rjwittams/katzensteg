@@ -120,3 +120,45 @@ test "pixel size replies prefer the text area and fall back to cells times the g
     try std.testing.expectEqual(@as(?PixelSize, null), parse("\x1b[4;600", 80, 24));
     try std.testing.expectEqual(@as(?PixelSize, null), parse("\x1b[8;24;80t", 80, 24));
 }
+
+fn testLookup(comptime home: ?[]const u8, comptime profile: ?[]const u8) fn (std.mem.Allocator, []const u8) anyerror![]u8 {
+    return struct {
+        fn get(allocator: std.mem.Allocator, key: []const u8) anyerror![]u8 {
+            const value = if (std.mem.eql(u8, key, "HOME")) home else profile;
+            return allocator.dupe(u8, value orelse return error.EnvironmentVariableNotFound);
+        }
+    }.get;
+}
+
+test "homeDirOwned prefers HOME and falls back to USERPROFILE only on Windows" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "/home/u", "C:\\Users\\u", false, "/home/u" },
+        .{ "/home/u", "C:\\Users\\u", true, "/home/u" },
+        .{ null, "C:\\Users\\u", true, "C:\\Users\\u" },
+        .{ "", "C:\\Users\\u", true, "C:\\Users\\u" },
+        .{ "", "C:\\Users\\u", false, "" },
+    };
+    inline for (cases) |case| {
+        const got = try platform.process.homeDirFrom(a, case[2], testLookup(case[0], case[1]));
+        defer a.free(got);
+        try std.testing.expectEqualStrings(case[3], got);
+    }
+    try std.testing.expectError(error.EnvironmentVariableNotFound, platform.process.homeDirFrom(a, false, testLookup(null, "C:\\Users\\u")));
+    try std.testing.expectError(error.EnvironmentVariableNotFound, platform.process.homeDirFrom(a, true, testLookup(null, null)));
+}
+
+fn recordThread(out: *std.Thread.Id) void {
+    out.* = std.Thread.getCurrentId();
+}
+
+test "runOnLargeStack runs on a helper thread only on Windows and waits for it" {
+    var ran_on: std.Thread.Id = 0;
+    platform.runOnLargeStack(recordThread, .{&ran_on});
+    try std.testing.expect(ran_on != 0);
+    if (is_windows) {
+        try std.testing.expect(ran_on != std.Thread.getCurrentId());
+    } else {
+        try std.testing.expectEqual(std.Thread.getCurrentId(), ran_on);
+    }
+}

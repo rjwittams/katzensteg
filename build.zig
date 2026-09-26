@@ -459,6 +459,7 @@ pub fn build(b: *std.Build) void {
     // On Windows this links the import library, so the demo loads SDL2.dll
     // rather than static libSDL2.a.
     linkSdl(b, basic_sdl_demo.root_module, target, "SDL2", sdl2_prefix);
+    reserveApplicationStack(basic_sdl_demo, target);
     b.installArtifact(basic_sdl_demo);
     sdl_dynapi_step.dependOn(&b.addInstallArtifact(basic_sdl_demo, .{}).step);
     const basic_sdl3_demo = b.addExecutable(.{
@@ -473,6 +474,7 @@ pub fn build(b: *std.Build) void {
     });
     basic_sdl3_demo.root_module.addImport("katzensteg_sdl", katzensteg_sdl3_mod);
     linkSdl(b, basic_sdl3_demo.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
+    reserveApplicationStack(basic_sdl3_demo, target);
     b.installArtifact(basic_sdl3_demo);
     sdl_dynapi_step.dependOn(&b.addInstallArtifact(basic_sdl3_demo, .{}).step);
 
@@ -946,6 +948,13 @@ pub fn build(b: *std.Build) void {
 /// Windows has no system SDL; tests link the development packages given with
 /// -Dsdl2-prefix / -Dsdl3-prefix and run with their bin/ on PATH.
 var windows_sdl_prefixes: struct { sdl2: ?[]const u8 = null, sdl3: ?[]const u8 = null } = .{};
+
+/// Gives a Windows demo the 1 MiB main-thread stack that MSVC reserves for
+/// applications by default, instead of Zig's 16 MiB, so demo runs catch
+/// Katzensteg work that needs more stack than real applications have.
+fn reserveApplicationStack(exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .windows) exe.stack_size = 1024 * 1024;
+}
 
 fn linkSdl(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, name: []const u8, prefix: ?[]const u8) void {
     if (target.result.os.tag == .windows and prefix != null) {

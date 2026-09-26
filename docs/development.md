@@ -138,6 +138,21 @@ adapter profiles hide the application's own window on Windows, so it cannot
 take keyboard focus from the terminal. `basic-sdl-demo` draws a square for each
 key it receives and quits on Escape or `q`; `--frames 0` keeps it running.
 
+Katzensteg runs on the application's threads, and applications built with
+MSVC reserve 1 MiB for their main thread. Katzensteg's initialization,
+teardown and log file opening can need more than that in Debug builds (the
+standard library's Windows path conversion alone takes about 1 MiB of frame
+there), so on Windows they run on a helper thread with a 16 MiB stack
+(`platform.runOnLargeStack`) that the calling thread waits for. The Windows
+builds of `basic-sdl-demo` and `basic-sdl3-demo` reserve 1 MiB like an MSVC
+application, so probe runs catch work that needs more. Launcher profiles use
+`queued_replay`, which composes frames on Katzensteg's worker thread; a direct
+run without the launcher composes on the application thread (`sync_compose`)
+and still overflows a 1 MiB stack in Debug builds.
+
+Real applications are listed with their Windows builds in
+[external-projects.md](external-projects.md#windows).
+
 Kitty graphics need a terminal behind a ConPTY that passes APC sequences
 through, such as a Wheelhouse Cleat pane with Cleat's bundled ConPTY; the inbox
 ConPTY drops them. In a Cleat pane the probe finds ghostty and uses whole-file

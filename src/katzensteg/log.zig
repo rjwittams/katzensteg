@@ -89,12 +89,20 @@ fn releaseLoggerFileUser() void {
 }
 
 fn ensureFileLocked() !*system_io.fs.File {
-    if (file == null) {
-        var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() });
-        file = try system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = false, .read = false });
-    }
-    return &file.?;
+    // Opening a file by path can need more stack than the application thread
+    // that logs first has (see runOnLargeStack).
+    if (file == null) system_io.runOnLargeStack(openFileLocked, .{});
+    if (file) |*f| return f;
+    return error.LogFileUnavailable;
+}
+
+/// Leaves `file` null on failure; `ensureFileLocked` reports that and
+/// logging is then dropped, since the runtime must not write to stdout or
+/// stderr.
+fn openFileLocked() void {
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() }) catch return;
+    file = system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = false, .read = false }) catch return;
 }
 
 pub const Logger = struct {

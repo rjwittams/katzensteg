@@ -5,6 +5,7 @@ pub const posix = @import("posix.zig");
 pub const time = @import("time.zig");
 pub const Mutex = @import("sync.zig").Mutex;
 pub const Condition = @import("sync.zig").Condition;
+pub const runOnLargeStack = @import("sync.zig").runOnLargeStack;
 pub const fs = @import("fs.zig");
 pub const process = @import("process.zig");
 pub const net = @import("net.zig");

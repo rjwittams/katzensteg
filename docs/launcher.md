@@ -98,6 +98,12 @@ KATZENSTEG_REPO=/path/to/katzensteg ./zig-out/bin/katzensteg probe.input
 ```
 
 `KATZENSTEG_PROFILE_DIR` may be used for local/private profile sets without committing machine-specific paths to the repository.
+It lists directories separated by `:`, or by `;` on Windows, and replaces the
+default search, so include `{repo}/profiles` in the list when a private profile
+extends the bundled fragments.
+
+`$HOME` in profiles expands to `HOME`; on Windows, when `HOME` is unset, it
+expands to `USERPROFILE`.
 
 `KATZENSTEG_REPO` explicitly selects the repository for default profile lookup and
 `{repo}` expansion. Otherwise, a launcher in `<repo>/zig-out/bin` prefers its own

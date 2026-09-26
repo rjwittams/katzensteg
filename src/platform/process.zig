@@ -19,6 +19,37 @@ pub fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
     const value = environment().getPosix(key) orelse return error.EnvironmentVariableNotFound;
     return allocator.dupe(u8, value);
 }
+/// The user's home directory: `HOME` when set and non-empty, otherwise, on
+/// Windows, `USERPROFILE`, which is where Windows keeps it.
+pub fn homeDirOwned(allocator: std.mem.Allocator) ![]u8 {
+    return homeDirFrom(allocator, is_windows, envLookup);
+}
+
+fn envLookup(allocator: std.mem.Allocator, key: []const u8) anyerror![]u8 {
+    return getEnvVarOwned(allocator, key);
+}
+
+/// `homeDirOwned` with the platform and the variable lookup supplied.
+pub fn homeDirFrom(
+    allocator: std.mem.Allocator,
+    windows: bool,
+    comptime lookup: fn (std.mem.Allocator, []const u8) anyerror![]u8,
+) ![]u8 {
+    if (lookup(allocator, "HOME")) |home| {
+        if (home.len > 0 or !windows) return home;
+        allocator.free(home);
+    } else |err| if (err != error.EnvironmentVariableNotFound) return err;
+    if (!windows) return error.EnvironmentVariableNotFound;
+    const profile = try lookup(allocator, "USERPROFILE");
+    if (profile.len > 0) return profile;
+    allocator.free(profile);
+    return error.EnvironmentVariableNotFound;
+}
+
+/// Separator between directories in a list-valued variable such as
+/// `KATZENSTEG_PROFILE_DIR`: `;` on Windows, where paths contain `:`.
+pub const path_list_delimiter: u8 = if (is_windows) ';' else ':';
+
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
 
 /// This process's numeric identifier, for naming per-process files.
