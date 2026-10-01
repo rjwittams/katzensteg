@@ -49,7 +49,7 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 | --- | --- | --- | --- | --- | --- | --- |
 | RetroArch | [`rjwittams/RetroArch`](https://github.com/rjwittams/RetroArch) | `macos-sdl2-window-contexts` | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | not yet tried | Uses forked branches for macOS video/input and context-driver behavior. |
 | Flycast | [`rjwittams/flycast`](https://github.com/rjwittams/flycast) | `libretro-hide-symbols` | Dreamcast libretro core used by RetroArch profiles | `jsr` | not yet tried | Needed on Linux to avoid libretro core linking issues. |
-| ScummVM | upstream | `master` | SDL software/surface behavior | `mi2`, `scummvm.launcher`, `bass` | builds; run pending | Currently useful without app-side patches. |
+| ScummVM | upstream | `master` | SDL software/surface behavior | `mi2`, `scummvm.launcher`, `bass` | working (Beneath a Steel Sky) | Currently useful without app-side patches. |
 | Moonlight Qt | [`rjwittams/moonlight-qt`](https://github.com/rjwittams/moonlight-qt) | `macos-sdl-renderer-output` | Streaming/video workload through an SDL renderer path | `moonlight.steam` | not yet tried | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
 | Cannonball | [`rjwittams/cannonball`](https://github.com/rjwittams/cannonball) | `windows-sdl2-build` | Simple SDL app target | `cannonball` | builds; blocked on ROMs | `windows-sdl2-build` is `macos-sdl2-build-fixes` plus a Windows CMake target. |
 | Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | `macos-sdl-client-build` | Stream client prototype | `chiaki.sdl` | not yet tried | Uses an SDL stream-only frontend branch. |
@@ -92,7 +92,11 @@ development package's `SDL2-<version>` directory. Its doctor checks for
   freeware games) and no optional libraries, and links `SDL2.dll`. The
   `bass` profile runs the freeware Beneath a Steel Sky from
   `$HOME/roms/bass`, and `scummvm.launcher` shows the launcher without game
-  data. Neither has been run in a pane yet.
+  data. On 2026-10-01, both rendered in a Wheelhouse Cleat pane on Beaufort.
+  Beneath a Steel Sky reached the game scene; Ctrl+F5 opened its control panel
+  and Escape returned to the scene. See the [Windows ScummVM evidence](windows-scummvm-validation.md)
+  for revisions, configuration and screenshots. This covers the `sky` engine;
+  Monkey Island and the `queen` engine have not been validated on Windows.
 
 Katzensteg changes this needed: `$HOME` in profiles falls back to
 `USERPROFILE`, `KATZENSTEG_PROFILE_DIR` separates directories with `;`,
