@@ -39,4 +39,10 @@ WM's window order (it is either above all producers or below all).
 
 ## Verdict
 
-_To fill in._
+**It holds up.** Tried in Ghostty on 2026-10-02.
+
+- Painting, typing (kitty key reports, arrows), scrollback, move and resize all work. Not too flickery when dragged.
+- Cost at 80x24: one row is about 120 bytes and 20 µs to build; all rows about 2,100 bytes and under 0.5 ms. Cleat coalesces: `seq 1 20000` arrived as 5 updates. Scrolling is always a full replace.
+- The window should not have layering of its own. It should be the same kind of window as a producer's, in the one window order, with the same chrome (no separate resize glyph).
+- Covering a producer's image works by the existing route: the producer splits its image into explicit placements around the rectangle. In Ghostty the result is very slightly off, as it was in zellij (aspect ratio moving the pieces). That is a question of its own.
+- Polling cleat on the 20 ms tick was acceptable to type through.
