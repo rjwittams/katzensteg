@@ -88,6 +88,18 @@ opens when the first panel appears and closes when the last one goes;
 `ctrl+x tab` focuses it and `ctrl+x x` closes it, leaving the games running.
 A pane per group, drawn by the engine as tabs, is the natural next step.
 
+In the pane, panels sit in lanes: columns, each with a width of its own. A
+panel is as wide as its lane and as tall as its source's aspect makes it. One
+lane is a plain stack, which is how the pane starts. A new panel joins the
+shortest lane and nothing already placed moves. Drag a panel's title into
+another lane to move it there, or into the empty space right of the lanes to
+make a new lane; a lane the move empties closes when you let go. Drag a
+panel's side edge to size its whole lane. The pane scrolls up and down only,
+so lanes must fit across: when they do not, the last lane is squeezed, and at
+its minimum its panels join the lane before it. `/katzensteg size` returns
+every lane to the preset's width. The band stays a wrapping row, where a
+panel's edges and corner size that panel alone.
+
 Click a panel to play; Escape returns the keyboard to the prompt. The border
 is the panel's own UI: × at the top-right closes it, dragging the title row
 reorders panels (sideways in the band, up and down in the docked pane), and

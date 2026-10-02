@@ -8,14 +8,18 @@
 export type Zone = 'close' | 'title' | 'right' | 'bottom' | 'corner' | 'grid' | 'frame'
 export type DragKind = 'move' | 'resize-x' | 'resize-y' | 'resize-xy'
 
-/** The part of the panel at region cell (x, y). */
-export function zoneAt(x: number, y: number, cols: number, rows: number): Zone {
+/**
+ * The part of the panel at region cell (x, y). With `sideOnly`, as in a lane
+ * where a panel's height follows from its lane's width, the bottom edge is no
+ * handle and the corner is just the end of the side edge.
+ */
+export function zoneAt(x: number, y: number, cols: number, rows: number, sideOnly = false): Zone {
   const onRight = x === cols + 1
   const onBottom = y === rows + 1
   if (y === 0 && x === cols) return 'close'
-  if (onRight && onBottom) return 'corner'
+  if (onRight && onBottom) return sideOnly ? 'right' : 'corner'
   if (onRight) return 'right'
-  if (onBottom) return 'bottom'
+  if (onBottom) return sideOnly ? 'frame' : 'bottom'
   if (y === 0) return 'title'
   if (x >= 1 && x <= cols && y >= 1 && y <= rows) return 'grid'
   return 'frame'

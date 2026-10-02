@@ -6,6 +6,7 @@ import {
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
 import { dragReport, ordered, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
+import { dropEmptyLanes, fitLanes, flowOrder, laneStart, lanesWidth, LANE_GAP, MIN_LANE, moveInLanes, placeLanes, resizeLane, resolveAuto, syncLanes, type Lane, type Sizer } from './masonry.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -114,7 +115,12 @@ let pointerSite: { col: number; row: number } | undefined
 const lastWidths = new Map<string, number>()
 const lastHeights = new Map<string, number>()
 // Stacked (docked pane), panels reorder by vertical drag against heights.
-let lastStacked = false
+// The pane lays panels out in lanes (masonry.ts); the band is a wrapping row.
+// One lane is a plain stack, so a pane with one lane is what it always was.
+let lanes: Lane[] = []
+let nextLaneId = 1
+let lastMasonry = false
+let lastRowsBudget = 40
 // Where each panel sits in the band body, as the last render laid it out:
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
 const placed = new Map<string, PanelPlace>()
@@ -502,9 +508,26 @@ const describe = (s: Session) =>
   `${s.id}: ${s.title}${s.input_supported ? '' : ' · observation only'} · ${s.state}${s.source_px ? ` · ${s.source_px.w}x${s.source_px.h} px` : ''}${s.grid ? ` · grid ${s.grid.cols}x${s.grid.rows}` : ''}`
 
 // One tree for both sites. `columns` is the site's body width, `rowsBudget`
-// the rows a panel may take, `stacked` lays panels in a column (the dock)
-// rather than a wrapping row (the band, or a pane seated inline).
-async function panelsTree($: $, els: Elements['terminal'], site: string, columns: number, rowsBudget: number, stacked: boolean, tail: RenderChildren): Promise<RenderElement> {
+// the rows a panel may take. `masonry` lays panels in lanes, as the pane
+// does; otherwise they are a wrapping row, as in the band.
+// A panel's grid in a lane: as wide as the lane allows at the source's
+// aspect. Without a source size yet, the preset's height.
+function gridIn(id: string, laneWidth: number): Grid {
+  const source = sessions.find(s => s.id === id)?.source_px ?? null
+  return fitGrid(source, Math.max(1, laneWidth - 2), source ? lastRowsBudget : Math.min(SIZES[size], lastRowsBudget), cellAspect)
+}
+const tileSize: Sizer = (id, laneWidth) => {
+  const grid = gridIn(id, laneWidth)
+  return { cols: grid.cols + 2, rows: grid.rows + 2 }
+}
+// The width a lane has until it is dragged: what its first panel takes at
+// the size preset, which is the width a stacked panel always had.
+function autoLaneWidth(id: string): number {
+  const source = sessions.find(s => s.id === id)?.source_px ?? null
+  return fitGrid(source, lastColumns - 2, Math.min(SIZES[size], lastRowsBudget), cellAspect).cols + 2
+}
+
+async function panelsTree($: $, els: Elements['terminal'], site: string, columns: number, rowsBudget: number, masonry: boolean, tail: RenderChildren): Promise<RenderElement> {
   const { Box, Client, Image, Text } = els
   // An older application has no image element; then only cell routes remain.
   canImages = (els as { Image?: unknown }).Image !== undefined
@@ -512,20 +535,35 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
   const route = chooseRoute(host, routeWish, canImages)
   drawnRoute = route
   imageSite = site
-  const shown = ordered(order, visible())
-  order = shown.map(s => s.id)
-  if (drawnCount !== shown.length) { drawnCount = shown.length; log($, `drawing ${shown.length} panel(s) in ${stacked ? 'a docked pane' : 'a row'} at ${columns} columns, ${rowsBudget} rows`) }
-  // Side by side, panels share the width; stacked, each has the full width.
-  const share = stacked ? columns - 2 : Math.floor((columns - shown.length) / shown.length) - 2
-  const rowsMax = Math.min(SIZES[size], rowsBudget)
   band = { columns, rows: rowsBudget }
   siteMeasured = true
-  lastStacked = stacked
-  const panels = shown.map(s => {
-    const own = sizeOverride.get(s.id)
-    const grid = own
-      ? fitGrid(s.source_px, Math.min(own.cols, columns - 2), Math.min(own.rows, rowsBudget), cellAspect)
-      : fitGrid(s.source_px, share, rowsMax, cellAspect)
+  lastMasonry = masonry
+  lastColumns = columns
+  lastRowsBudget = rowsBudget
+  const grids = new Map<string, Grid>()
+  let shown: Session[]
+  if (masonry) {
+    shown = visible()
+    // During a move the lane a panel left is kept as a slot; it goes at the release.
+    lanes = fitLanes(resolveAuto(syncLanes(lanes, shown.map(s => s.id), tileSize, autoLaneWidth, () => nextLaneId++, moving !== undefined), autoLaneWidth), columns)
+    for (const lane of lanes) for (const id of lane.items) grids.set(id, gridIn(id, lane.width))
+    order = lanes.flatMap(lane => lane.items)
+  } else {
+    shown = ordered(order, visible())
+    order = shown.map(s => s.id)
+    // Side by side, panels share the width.
+    const share = Math.floor((columns - shown.length) / shown.length) - 2
+    const rowsMax = Math.min(SIZES[size], rowsBudget)
+    for (const s of shown) {
+      const own = sizeOverride.get(s.id)
+      grids.set(s.id, own ? fitGrid(s.source_px, Math.min(own.cols, columns - 2), Math.min(own.rows, rowsBudget), cellAspect) : fitGrid(s.source_px, share, rowsMax, cellAspect))
+    }
+  }
+  if (drawnCount !== shown.length) { drawnCount = shown.length; log($, `drawing ${shown.length} panel(s) in ${masonry ? `${lanes.length} lane(s)` : 'a row'} at ${columns} columns, ${rowsBudget} rows`) }
+  const panels = shown.flatMap(s => {
+    const own = masonry ? undefined : sizeOverride.get(s.id)
+    const grid = grids.get(s.id)
+    if (!grid) return []
     lastWidths.set(s.id, grid.cols + 2)
     lastHeights.set(s.id, grid.rows + 2)
     const sent = sentGrid.get(s.id)
@@ -551,76 +589,116 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
     // Repainting placeholder cells does not need another image upload.
     // Live producers restore themselves on their next frame; the WM's idle
     // refresh covers stationary producers after a terminal clear.
-    return { s, grid }
+    return [{ s, grid }]
   })
-  // Replicate the layout below so scroll events can be mapped to a panel:
-  // header on row 0, then panels left to right with a one-cell gap, wrapping
-  // when the site is too narrow; stacked, one per row block.
-  lastColumns = columns
-  setLayout(placePanels(panels.map(({ s, grid }) => ({ id: s.id, cols: grid.cols + 2, rows: grid.rows + 2 })), stacked, columns))
+  // The layout the tree below draws, kept so a pointer or a scroll can be
+  // mapped to a panel: header on row 0, then lanes, or a row with a one-cell
+  // gap that wraps when the site is too narrow.
+  setLayout(masonry ? placeLanes(lanes, tileSize) : placePanels(panels.map(({ s, grid }) => ({ id: s.id, cols: grid.cols + 2, rows: grid.rows + 2 })), false, columns))
+  // What is drawn besides the panels while one is being moved: the slot of a
+  // lane it emptied, and where to drop it for a new lane.
+  const hints: { key: string; place: PanelPlace; text: string[] }[] = []
+  if (masonry && moving !== undefined) {
+    lanes.forEach((lane, index) => {
+      if (lane.items.length === 0) hints.push({ key: `empty:${lane.id}`, place: { col: laneStart(lanes, index), row: 1, cols: lane.width, rows: 1 }, text: ['┆ empty lane'] })
+    })
+    const room = columns - lanesWidth(lanes) - LANE_GAP
+    if (room >= MIN_LANE) hints.push({ key: 'lane:new', place: { col: lanesWidth(lanes) + LANE_GAP, row: 1, cols: Math.min(room, 30), rows: 2 }, text: ['┆ drop here', '┆ for a new lane'] })
+  }
+  // One panel: a keyed slot holding the panel, and on the image routes the
+  // picture beneath it. `margin` puts it at its lane position.
+  const slot = (s: Session, grid: Grid, margin: { marginTop?: number; marginLeft?: number } = {}): RenderElement => {
+    const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(masonry && { sideOnly: true }), ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
+    // On the blit route the host hands frames to this client; on every
+    // other it writes them to the terminal itself.
+    if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
+    if (route === 'blit') pump($, s.id)
+    if (route === 'blit' || (route === 'claim' && s.claim)) {
+      // The application draws the picture; the panel sits over it for
+      // the border and input and paints nothing inside. On a claim the
+      // host learns the image id from the application's transmission of
+      // the claim file. On blit the frame loop swaps sources in; a
+      // redraw names the last one swapped, which sends nothing.
+      const key = `image:${s.id}:${grid.cols}x${grid.rows}`
+      imageKey.set(s.id, key)
+      // A newly mounted image starts blank: the last frame went to the
+      // one it replaces, and a shared-memory frame can be read only once.
+      const swapped = lastSource.get(s.id)
+      const source = route === 'claim' && s.claim
+        ? { file: s.claim.path, format: 'rgba' as const, width: s.claim.w, height: s.claim.h }
+        : swapped?.key === key ? swapped.source : ONE_PIXEL
+      // Both stay in the flow, the panel pulled up over the image by a
+      // negative margin. Absolutely positioned boxes are not clipped
+      // when a pane scrolls their parent past its top edge: they are
+      // held at the edge, so a scrolled-off panel stayed drawn there
+      // beneath the next one.
+      // The wrapper carries a key. Without one, reordering panels
+      // rebinds each wrapper to a different panel, and a panel being
+      // dragged stops receiving the pointer it holds: no more moves and
+      // no release.
+      return (
+        <Box key={`slot:${s.id}`} flexDirection="column" width={grid.cols + 2} height={grid.rows + 2} {...margin}>
+          <Box marginTop={1} marginLeft={1} height={grid.rows}>
+            <Image
+              key={key}
+              source={source}
+              columns={grid.cols}
+              rows={grid.rows}
+              alt={s.title.slice(0, Math.max(1, grid.cols))}
+            />
+          </Box>
+          <Box marginTop={-(grid.rows + 1)}>
+            <Client key={`panel:${s.id}`} module="./panel.tsx" width={grid.cols + 2} height={grid.rows + 2} props={{ ...base, hollow: true }} />
+          </Box>
+        </Box>
+      )
+    }
+    return (
+      <Box key={`slot:${s.id}`} flexDirection="column" width={grid.cols + 2} height={grid.rows + 2} {...margin}>
+        <Client
+          key={`panel:${s.id}`}
+          module="./panel.tsx"
+          width={grid.cols + 2}
+          height={grid.rows + 2}
+          // A session with no claim file on the claim route still needs
+          // cells the application accepts: the stand-in, when there is one.
+          props={{ ...base, ...(route !== 'direct' && host?.placeholder && { placeholder: host.placeholder }) }}
+        />
+      </Box>
+    )
+  }
+  // In lanes every panel is a direct child of one column, put at its place by
+  // margins and drawn in order of its bottom edge (see flowOrder): a panel
+  // that changes parent while it is dragged loses the pointer.
+  const placedItems = masonry
+    ? flowOrder([
+        ...panels.flatMap(({ s, grid }) => {
+          const place = placed.get(s.id)
+          // Every panel shown is in a lane and so has a place; one without would not be drawn.
+          if (!place) { log($, `no place for ${s.id} in the lanes; not drawn`); return [] }
+          return [{ key: `slot:${s.id}`, place, s: s as Session | undefined, grid: grid as Grid | undefined, text: [] as string[] }]
+        }),
+        ...hints.map(hint => ({ ...hint, s: undefined as Session | undefined, grid: undefined as Grid | undefined })),
+      ])
+    : []
   return (
     <Box flexDirection="column">
-      <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
-      <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
-        {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
-          // On the blit route the host hands frames to this client; on every
-          // other it writes them to the terminal itself.
-          if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
-          if (route === 'blit') pump($, s.id)
-          if (route === 'blit' || (route === 'claim' && s.claim)) {
-            // The application draws the picture; the panel sits over it for
-            // the border and input and paints nothing inside. On a claim the
-            // host learns the image id from the application's transmission of
-            // the claim file. On blit the frame loop swaps sources in; a
-            // redraw names the last one swapped, which sends nothing.
-            const key = `image:${s.id}:${grid.cols}x${grid.rows}`
-            imageKey.set(s.id, key)
-            // A newly mounted image starts blank: the last frame went to the
-            // one it replaces, and a shared-memory frame can be read only once.
-            const swapped = lastSource.get(s.id)
-            const source = route === 'claim' && s.claim
-              ? { file: s.claim.path, format: 'rgba' as const, width: s.claim.w, height: s.claim.h }
-              : swapped?.key === key ? swapped.source : ONE_PIXEL
-            // Both stay in the flow, the panel pulled up over the image by a
-            // negative margin. Absolutely positioned boxes are not clipped
-            // when a pane scrolls their parent past its top edge: they are
-            // held at the edge, so a scrolled-off panel stayed drawn there
-            // beneath the next one.
-            // The wrapper carries a key. Without one, reordering panels
-            // rebinds each wrapper to a different panel, and a panel being
-            // dragged stops receiving the pointer it holds: no more moves and
-            // no release.
-            return (
-              <Box key={`slot:${s.id}`} flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
-                <Box marginTop={1} marginLeft={1} height={grid.rows}>
-                  <Image
-                    key={key}
-                    source={source}
-                    columns={grid.cols}
-                    rows={grid.rows}
-                    alt={s.title.slice(0, Math.max(1, grid.cols))}
-                  />
-                </Box>
-                <Box marginTop={-(grid.rows + 1)}>
-                  <Client key={`panel:${s.id}`} module="./panel.tsx" width={grid.cols + 2} height={grid.rows + 2} props={{ ...base, hollow: true }} />
-                </Box>
+      <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag a title to move${masonry ? ', a side edge to size its lane' : ', a corner to resize'}, × closes`}</Text>
+      {masonry ? (
+        <Box flexDirection="column" alignItems="flex-start">
+          {placedItems.map(item => item.s && item.grid
+            ? slot(item.s, item.grid, { marginTop: item.marginTop, marginLeft: item.marginLeft })
+            : (
+              <Box key={item.key} flexDirection="column" width={item.place.cols} height={item.place.rows} marginTop={item.marginTop} marginLeft={item.marginLeft}>
+                {item.text.map(line => <Text dimColor>{line}</Text>)}
               </Box>
-            )
-          }
-          return (
-            <Client
-              key={`panel:${s.id}`}
-              module="./panel.tsx"
-              width={grid.cols + 2}
-              height={grid.rows + 2}
-              // A session with no claim file on the claim route still needs
-              // cells the application accepts: the stand-in, when there is one.
-              props={{ ...base, ...(route !== 'direct' && host?.placeholder && { placeholder: host.placeholder }) }}
-            />
-          )
-        })}
-      </Box>
+            ))}
+        </Box>
+      ) : (
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+          {panels.map(({ s, grid }) => slot(s, grid))}
+        </Box>
+      )}
       {tail}
       {pointerSite && pointerSite.col >= 0 && pointerSite.row >= 0 && (
         <Box position="absolute" top={pointerSite.row} left={pointerSite.col}>
@@ -709,6 +787,8 @@ export const register: Register = on => {
       if (pick !== 'small' && pick !== 'medium' && pick !== 'large') return { text: `katzensteg size small|medium|large (now ${size})` }
       size = pick
       sizeOverride.clear()
+      // Lanes go back to the preset's width.
+      lanes = lanes.map(lane => ({ ...lane, auto: true }))
       await $.store.set('size', size).catch(err => log($, `store write failed: ${err}`))
       $.ui.invalidate('ui.render')
       return { text: `katzensteg: panels ${size} (${SIZES[size]} rows at most)` }
@@ -935,28 +1015,40 @@ export const register: Register = on => {
     for (const ev of events) {
       if (ev.type === 'close') void closeSession($, id)
       else if (ev.type === 'resize') {
-        const big = 9999
-        sizeOverride.set(id, ev.axis === 'resize-y' ? { cols: big, rows: ev.rows } : { cols: ev.cols, rows: ev.axis === 'resize-x' ? big : ev.rows })
-        resizing.add(id)
         trace($, `${id} resize event ${ev.axis} ${ev.cols}x${ev.rows}`)
-        const stamp = (resizeStamp.get(id) ?? 0) + 1
-        resizeStamp.set(id, stamp)
-        $.clock.after(RESIZE_SETTLE_MS, () => {
-          // Still the latest change, so the size has settled: tell the host.
-          if (resizeStamp.get(id) !== stamp || !resizing.has(id)) return
-          trace($, `${id} resize settled`)
-          resizing.delete(id)
-          $.ui.invalidate('ui.render')
-        })
+        // In lanes a side edge sizes the whole lane, so every panel in it
+        // changes; in the band it sizes the one panel.
+        let held = [id]
+        if (lastMasonry) {
+          lanes = resizeLane(lanes, id, ev.cols + 2, lastColumns)
+          held = lanes.find(lane => lane.items.includes(id))?.items ?? held
+        } else {
+          const big = 9999
+          sizeOverride.set(id, ev.axis === 'resize-y' ? { cols: big, rows: ev.rows } : { cols: ev.cols, rows: ev.axis === 'resize-x' ? big : ev.rows })
+        }
+        for (const key of held) {
+          resizing.add(key)
+          const stamp = (resizeStamp.get(key) ?? 0) + 1
+          resizeStamp.set(key, stamp)
+          $.clock.after(RESIZE_SETTLE_MS, () => {
+            // Still the latest change, so the size has settled: tell the host.
+            if (resizeStamp.get(key) !== stamp || !resizing.has(key)) return
+            trace($, `${key} resize settled`)
+            resizing.delete(key)
+            $.ui.invalidate('ui.render')
+          })
+        }
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'resizeend') {
         trace($, `${id} resize ended by the panel`)
-        resizing.delete(id)
+        for (const key of lastMasonry ? lanes.find(lane => lane.items.includes(id))?.items ?? [id] : [id]) resizing.delete(key)
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'dragstart') {
         moving = id
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'dragend') {
+        // A lane the move emptied was kept as a slot until now.
+        if (lastMasonry) lanes = dropEmptyLanes(lanes)
         pointerSite = undefined
         if (moving === id) moving = undefined
         $.ui.invalidate('ui.render')
@@ -966,13 +1058,26 @@ export const register: Register = on => {
         // layout before this one. See dragReport.
         const origin = ((ev.gen !== undefined ? layouts.get(ev.gen) : undefined) ?? placed).get(id)
         if (origin && ev.x !== undefined && ev.y !== undefined) {
-          const report = dragReport(order, id, origin, ev.x, ev.y, placed, lastStacked)
-          const swapped = report.order.some((v, i) => v !== order[i])
-          trace($, `${id} drag pointer ${ev.x},${ev.y} in layout ${ev.gen ?? '?'} (now ${layoutGen}) = site ${report.col},${report.row} order ${order.join(' ')}${swapped ? ` -> ${report.order.join(' ')}` : ''}`)
-          if (swapped) {
-            order = report.order
-            // The new places are known now; the redraw only has to catch up.
-            setLayout(placePanels(order.flatMap(key => { const p = placed.get(key); return p ? [{ id: key, cols: p.cols, rows: p.rows }] : [] }), lastStacked, lastColumns))
+          // The pointer in the site's own cells, whichever layout it was measured in.
+          const report = { col: origin.col + ev.x, row: origin.row + ev.y }
+          let swapped = false
+          if (lastMasonry) {
+            const moved = moveInLanes(lanes, id, report.col, report.row, tileSize, lastColumns, () => nextLaneId++)
+            swapped = moved.changed
+            trace($, `${id} drag pointer ${ev.x},${ev.y} in layout ${ev.gen ?? '?'} (now ${layoutGen}) = site ${report.col},${report.row}${swapped ? ` -> lanes ${moved.lanes.map(lane => `${lane.width}:${lane.items.join(',')}`).join(' | ')}` : ''}`)
+            if (swapped) {
+              lanes = moved.lanes
+              // The new places are known now; the redraw only has to catch up.
+              setLayout(placeLanes(lanes, tileSize))
+            }
+          } else {
+            const reordered = dragReport(order, id, origin, ev.x, ev.y, placed, false).order
+            swapped = reordered.some((v, i) => v !== order[i])
+            trace($, `${id} drag pointer ${ev.x},${ev.y} in layout ${ev.gen ?? '?'} (now ${layoutGen}) = site ${report.col},${report.row} order ${order.join(' ')}${swapped ? ` -> ${reordered.join(' ')}` : ''}`)
+            if (swapped) {
+              order = reordered
+              setLayout(placePanels(order.flatMap(key => { const p = placed.get(key); return p ? [{ id: key, cols: p.cols, rows: p.rows }] : [] }), false, lastColumns))
+            }
           }
           const markMoved = pointerSite?.col !== report.col || pointerSite?.row !== report.row
           pointerSite = { col: report.col, row: report.row }
@@ -1010,7 +1115,7 @@ export const register: Register = on => {
       log($, `pane ${e.props.placement}: ${e.props.bodyColumns} columns, ${e.props.scroll.bodyRows} body rows`)
     }
     const rowsBudget = stacked ? SIZES.large : Math.max(1, e.props.scroll.bodyRows - 1)
-    return panelsTree($, els, PANE_ID, e.props.bodyColumns, rowsBudget, stacked, null)
+    return panelsTree($, els, PANE_ID, e.props.bodyColumns, rowsBudget, true, null)
   })
 
 }

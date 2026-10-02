@@ -21,6 +21,14 @@ test('zoneAt names every part of the border and the grid inside it', () => {
   assert.equal(zoneAt(0, 2, 20, 4), 'frame')
 })
 
+test('in a lane only the side edge is a handle', () => {
+  assert.equal(zoneAt(21, 2, 20, 4, true), 'right')
+  assert.equal(zoneAt(21, 5, 20, 4, true), 'right')
+  assert.equal(zoneAt(7, 5, 20, 4, true), 'frame')
+  assert.equal(zoneAt(5, 0, 20, 4, true), 'title')
+  assert.equal(zoneAt(20, 0, 20, 4, true), 'close')
+})
+
 test('a press starts a drag only on a handle', () => {
   assert.equal(dragFor('title'), 'move')
   assert.equal(dragFor('right'), 'resize-x')
