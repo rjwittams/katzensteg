@@ -87,7 +87,16 @@ is the panel's own UI: × at the top-right closes it, dragging the title row
 reorders panels (sideways in the band, up and down in the docked pane), and
 dragging the right edge, bottom edge or the corner resizes it, keeping the
 source aspect. A dragged size replaces the
-preset for that panel until `/katzensteg size` is used again. The title shows
+preset for that panel until `/katzensteg size` is used again.
+
+The border shows what it is doing. Where the terminal reports pointer motion,
+the handle under the pointer lights up: the title row gains a grip mark, an
+edge or corner turns heavy, and the close mark inverts. While a panel is held
+by its title its border is heavy, dashes travel round it, and the other
+panels dim. While an edge is dragged only that edge is heavy and the title
+shows the size in cells. A drag also ends on the next press, or the next
+pointer move with no button held: Claude Code does not deliver the release
+after a redraw that reorders panels. The title shows
 how many input events the panel has captured. The plugin
 also exports `KATZENSTEG_TARGET=jsonl:<host socket>` and
 `KATZENSTEG_OBSERVE=1` to the model's Bash tool, so a plain

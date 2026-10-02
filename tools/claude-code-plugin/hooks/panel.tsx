@@ -1,6 +1,7 @@
 /* @jsx h */
 import type { ClientPointerEvent, ClientSurface } from 'claude-code'
 import { fgHex, rowText } from './placeholders.ts'
+import { dragFor, dragStep, panelFrame, zoneAt, type DragKind, type Seg, type Zone } from './frame.ts'
 
 // One game panel: a border, a title row and the placeholder grid the terminal
 // composes the producer's image into. Runs on the drawing thread. Keys arrive
@@ -26,13 +27,21 @@ export type PanelProps = {
    * an image the application draws beneath this panel.
    */
   hollow?: boolean
+  /** Another panel is being moved: draw this one's frame dim. */
+  dimmed?: boolean
 }
 
 type Ev = Record<string, unknown> & { n: number }
-type State = { count: number; latest: { props: PanelProps } }
-type Drag = { kind: 'move' | 'resize-x' | 'resize-y' | 'resize-xy'; x0: number; y0: number; cols0: number; rows0: number }
+// What the frame is drawn from: a drag in progress, the handle under the
+// pointer, and the phase of the marching dashes while a panel is held.
+type State = { count: number; latest: { props: PanelProps }; drag?: DragKind; hover?: Zone; phase: number }
+type Drag = { kind: DragKind; x0: number; y0: number; cols0: number; rows0: number }
 
 const KEEP = 64
+// How often the dashes on a held panel move one cell.
+const MARCH_MS = 120
+const ACCENT = 'cyan'
+const HANDLES: readonly Zone[] = ['close', 'title', 'right', 'bottom', 'corner']
 
 export default function Panel(props: PanelProps, surface: ClientSurface<State>) {
   const { Box, Text } = surface.elements
@@ -40,8 +49,13 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
     // Handlers are registered once; `latest` lets them see the grid size of
     // the current render, not the first one.
     const latest = { props }
-    surface.setState({ count: 0, latest })
     let n = 0
+    let drag: Drag | undefined
+    let hover: Zone | undefined
+    let phase = 0
+    let stopMarch: (() => void) | undefined
+    const sync = () => surface.setState({ count: n, latest, ...(drag && { drag: drag.kind }), ...(hover && { hover }), phase })
+    sync()
     // Numbering restarts with each instance (a route or site change mounts a
     // new one); the token lets the hooks module tell, and start counting anew.
     const inst = Math.floor(Math.random() * 0x7fffffff)
@@ -51,46 +65,71 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
       recent.push({ ...ev, n })
       if (recent.length > KEEP) recent.splice(0, recent.length - KEEP)
       surface.post({ id: props.id, inst, events: recent as never })
-      surface.setState({ count: n, latest })
+      sync()
     }
     surface.onKey(({ key, ctrl, shift, meta }) => {
       push({ type: 'key', key, ...(ctrl && { ctrl }), ...(shift && { shift }), ...(meta && { meta }) })
     })
-    let drag: Drag | undefined
     surface.onPointer((ev: ClientPointerEvent) => {
-      if (ev.type === 'enter' || ev.type === 'leave') return
+      if (ev.type === 'enter') return
+      if (ev.type === 'leave') {
+        // A drag holds the pointer past the edge; only a hover ends here.
+        if (!drag && hover) { hover = undefined; sync() }
+        return
+      }
       const { cols, rows } = latest.props
       // A drag in progress: pointer capture delivers every move and the
       // release, past the edges too.
       if (drag) {
-        if (ev.type === 'move') {
+        const endDrag = () => {
+          const kind = drag!.kind
+          drag = undefined
+          stopMarch?.()
+          stopMarch = undefined
+          hover = undefined
+          push({ type: kind === 'move' ? 'dragend' : 'resizeend' })
+        }
+        const step = dragStep(ev.type, ev.button !== undefined)
+        if (step === 'release') {
+          endDrag()
+          return
+        }
+        if (step === 'continue') {
           if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0 })
           else {
             const c = drag.kind === 'resize-y' ? drag.cols0 : Math.max(4, drag.cols0 + ev.x - drag.x0)
             const r = drag.kind === 'resize-x' ? drag.rows0 : Math.max(2, drag.rows0 + ev.y - drag.y0)
             push({ type: 'resize', cols: c, rows: r, axis: drag.kind })
           }
-        } else if (ev.type === 'up') {
-          push({ type: drag.kind === 'move' ? 'dragend' : 'resizeend' })
-          drag = undefined
+          return
         }
-        return
+        // The release never arrived (see dragStep). End the drag here and
+        // handle this event as an ordinary one, or the panel would stay held
+        // and every later move would count as dragging it.
+        endDrag()
       }
+      const zone = zoneAt(ev.x, ev.y, cols, rows)
       if (ev.type === 'down') {
-        if (ev.y === 0 && ev.x === cols) {
+        if (zone === 'close') {
           push({ type: 'close' })
           return
         }
-        const onRight = ev.x === cols + 1
-        const onBottom = ev.y === rows + 1
-        if (onRight || onBottom) {
-          drag = { kind: onRight && onBottom ? 'resize-xy' : onRight ? 'resize-x' : 'resize-y', x0: ev.x, y0: ev.y, cols0: cols, rows0: rows }
+        const kind = dragFor(zone)
+        if (kind) {
+          drag = { kind, x0: ev.x, y0: kind === 'move' ? 0 : ev.y, cols0: cols, rows0: rows }
+          if (kind === 'move') {
+            // Held: the dashes march until the release, on the panel's own
+            // clock, and the plugin dims the other panels.
+            phase = 0
+            stopMarch = surface.every(MARCH_MS, () => { phase += 1; sync() })
+            push({ type: 'dragstart' })
+          } else sync()
           return
         }
-        if (ev.y === 0) {
-          drag = { kind: 'move', x0: ev.x, y0: 0, cols0: cols, rows0: rows }
-          return
-        }
+      } else if (ev.type === 'move' && !ev.button) {
+        // The handle under the pointer lights up before any press.
+        const next = HANDLES.includes(zone) ? zone : undefined
+        if (next !== hover) { hover = next; sync() }
       }
       // Grid coordinates: the border is one cell. The host refuses anything
       // outside the grid and drops the whole batch with it, so a press on the
@@ -110,46 +149,63 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   }
   if (surface.state) surface.state.latest.props = props
 
-  const { cols, rows, imageId, title, state, placeholder, hollow } = props
+  const { cols, rows, imageId, title, state, placeholder, hollow, dimmed } = props
   const color = fgHex(imageId)
   const border = state === 'ready' ? 'green' : state === 'starting' ? 'yellow' : 'red'
   // Title, then the count of input events this panel has captured (a quick
   // check that clicks and keys reach it), then the close mark in the corner.
+  // The title row is the move handle, the right and bottom edges and their
+  // corner the resize handles; frame.ts decides how each looks just now.
   const seen = surface.state?.count ?? 0
-  const label = ` ${title} · ${state} · in:${seen} `.slice(0, Math.max(0, cols - 1))
-  const top = `┌${label}${'─'.repeat(Math.max(0, cols - 1 - label.length))}×┐`
-  // The corner and edges are the resize handles; the title row is the move
-  // handle. Plain box drawing: the handles need no marker.
-  const bottom = `└${'─'.repeat(cols)}┘`
+  const frame = panelFrame({
+    cols,
+    rows,
+    title,
+    status: `${state} · in:${seen}`,
+    phase: surface.state?.phase ?? 0,
+    ...(surface.state?.drag && { drag: surface.state.drag }),
+    ...(surface.state?.hover && { hover: surface.state.hover }),
+  })
+  // While another panel is being moved this one steps back.
+  const draw = (seg: Seg) => (
+    <Text
+      color={seg.tone === 'accent' ? ACCENT : seg.tone === 'danger' ? 'red' : border}
+      bold={seg.bold === true}
+      inverse={seg.inverse === true}
+      dimColor={dimmed === true && seg.tone === 'base'}
+    >
+      {seg.text}
+    </Text>
+  )
   const lines = []
   for (let r = 0; r < rows; r++) lines.push(hollow ? '' : rowText(r, cols, placeholder))
   if (hollow) {
     // Nothing is painted inside the border, so the image beneath shows through.
     return (
       <Box flexDirection="column">
-        <Text color={border}>{top}</Text>
-        {lines.map(() => (
+        <Text>{frame.top.map(draw)}</Text>
+        {lines.map((_, r) => (
           <Box>
-            <Text color={border}>│</Text>
+            {draw(frame.left[r]!)}
             <Box width={cols} />
-            <Text color={border}>│</Text>
+            {draw(frame.right[r]!)}
           </Box>
         ))}
-        <Text color={border}>{bottom}</Text>
+        <Text>{frame.bottom.map(draw)}</Text>
       </Box>
     )
   }
   return (
     <Box flexDirection="column">
-      <Text color={border}>{top}</Text>
-      {lines.map(line => (
+      <Text>{frame.top.map(draw)}</Text>
+      {lines.map((line, r) => (
         <Text>
-          <Text color={border}>│</Text>
+          {draw(frame.left[r]!)}
           <Text color={color}>{line}</Text>
-          <Text color={border}>│</Text>
+          {draw(frame.right[r]!)}
         </Text>
       ))}
-      <Text color={border}>{bottom}</Text>
+      <Text>{frame.bottom.map(draw)}</Text>
     </Box>
   )
 }

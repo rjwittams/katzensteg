@@ -247,6 +247,7 @@ export type InputEvent =
   | { n: number; type: 'close' }
   | { n: number; type: 'resize'; cols: number; rows: number; axis: 'resize-x' | 'resize-y' | 'resize-xy' }
   | { n: number; type: 'resizeend' }
+  | { n: number; type: 'dragstart' }
   | { n: number; type: 'drag'; dx: number; dy: number }
   | { n: number; type: 'dragend' }
 
@@ -264,7 +265,7 @@ export function newInputEvents(posted: unknown, lastN: number): { events: InputE
   for (const item of posted) {
     const v = item as InputEvent
     if (!Number.isInteger(v?.n) || v.n <= lastN) continue
-    if (!['key', 'pointer', 'close', 'resize', 'resizeend', 'drag', 'dragend'].includes(v.type)) continue
+    if (!['key', 'pointer', 'close', 'resize', 'resizeend', 'dragstart', 'drag', 'dragend'].includes(v.type)) continue
     events.push(v)
     if (v.n > max) max = v.n
   }

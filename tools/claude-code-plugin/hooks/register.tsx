@@ -87,6 +87,9 @@ const lastTypes = new Map<string, string[]>()
 let order: string[] = []
 const sizeOverride = new Map<string, { cols: number; rows: number }>()
 const resizing = new Set<string>()
+// The panel being moved by its title, from its press to its release: the
+// others draw dim meanwhile so the held one stands out.
+let moving: string | undefined
 const lastWidths = new Map<string, number>()
 const lastHeights = new Map<string, number>()
 // Stacked (docked pane), panels reorder by vertical drag against heights.
@@ -280,7 +283,7 @@ async function refresh($: $): Promise<boolean> {
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -298,7 +301,7 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
@@ -486,7 +489,7 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
           // On the blit route the host hands frames to this client; on every
           // other it writes them to the terminal itself.
           if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
@@ -831,6 +834,9 @@ export const register: Register = on => {
     const data = e.data as { id?: unknown; inst?: unknown; events?: unknown } | null
     if (typeof data?.id !== 'string') return next(e)
     const id = data.id
+    // A panel that remounted mid-move cannot report its release: let the
+    // others out of the dim.
+    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; $.ui.invalidate('ui.render') }
     const { events, lastN: n } = newInputEvents(data.events, inputSince(lastInst.get(id), data.inst, lastN.get(id) ?? 0))
     if (data.inst !== undefined) lastInst.set(id, data.inst)
     lastN.set(id, n)
@@ -845,6 +851,11 @@ export const register: Register = on => {
       } else if (ev.type === 'resizeend') {
         resizing.delete(id)
         $.ui.invalidate('ui.render')
+      } else if (ev.type === 'dragstart') {
+        moving = id
+        $.ui.invalidate('ui.render')
+      } else if (ev.type === 'dragend') {
+        if (moving === id) { moving = undefined; $.ui.invalidate('ui.render') }
       } else if (ev.type === 'drag') {
         // Side by side the gap is one column; stacked, the blocks touch.
         const reordered = lastStacked ? swapOnDrag(order, id, ev.dy, lastHeights, 0) : swapOnDrag(order, id, ev.dx, lastWidths)
