@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chooseRoute, inputSince, newInputEvents, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
+import { chooseRoute, frameSource, inputSince, newInputEvents, parseFrame, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
 
 test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.deepEqual(parseHostFile('{"pid":12,"port":4567,"token":"abc","tty":"ttys007","socket":"/tmp/k.sock"}'),
@@ -41,18 +41,53 @@ test('the route follows the wish only where the host can serve it', () => {
   const background = parseHostFile('{"pid":1,"port":2,"token":"t"}') ?? undefined
   assert.equal(wrapping?.imageClaim, true)
   assert.equal(background?.imageClaim, undefined)
-  assert.equal(chooseRoute(wrapping, 'auto'), 'claim')
-  assert.equal(chooseRoute(wrapping, 'claim'), 'claim')
+  assert.equal(chooseRoute(wrapping, 'auto', true), 'claim')
+  assert.equal(chooseRoute(wrapping, 'claim', true), 'claim')
   // A host that only rewrites: the stand-in is the best it offers.
   const rewriting = parseHostFile('{"pid":1,"port":2,"token":"t","placeholder_standin":"10EEED"}') ?? undefined
-  assert.equal(chooseRoute(rewriting, 'auto'), 'standin')
-  assert.equal(chooseRoute(rewriting, 'claim'), 'standin')
-  assert.equal(chooseRoute(wrapping, 'standin'), 'standin')
-  assert.equal(chooseRoute(wrapping, 'direct'), 'direct')
-  assert.equal(chooseRoute(background, 'auto'), 'direct')
-  assert.equal(chooseRoute(background, 'claim'), 'direct')
-  assert.equal(chooseRoute(background, 'standin'), 'direct')
-  assert.equal(chooseRoute(undefined, 'claim'), 'direct')
+  assert.equal(chooseRoute(rewriting, 'auto', true), 'standin')
+  assert.equal(chooseRoute(rewriting, 'claim', true), 'standin')
+  assert.equal(chooseRoute(wrapping, 'standin', true), 'standin')
+  assert.equal(chooseRoute(wrapping, 'direct', true), 'direct')
+  assert.equal(chooseRoute(background, 'auto', true), 'direct')
+  assert.equal(chooseRoute(background, 'claim', true), 'direct')
+  assert.equal(chooseRoute(background, 'standin', true), 'direct')
+  assert.equal(chooseRoute(undefined, 'claim', true), 'direct')
+  // An application with no image element cannot take a claim.
+  assert.equal(chooseRoute(wrapping, 'auto', false), 'standin')
+  assert.equal(chooseRoute(wrapping, 'claim', false), 'standin')
+})
+
+test('frames are swapped in by name where there is no wrapper to claim through', () => {
+  const delivering = parseHostFile('{"pid":1,"port":2,"token":"t","frame_delivery":true}') ?? undefined
+  const wrapping = parseHostFile('{"pid":1,"port":2,"token":"t","placeholder_standin":"10EEED","image_claim":true,"frame_delivery":true}') ?? undefined
+  assert.equal(delivering?.frameDelivery, true)
+  // No wrapper: the only route an application that refuses the placeholder accepts.
+  assert.equal(chooseRoute(delivering, 'auto', true), 'blit')
+  assert.equal(chooseRoute(delivering, 'claim', true), 'blit')
+  // An application without images keeps the placeholder, as before.
+  assert.equal(chooseRoute(delivering, 'auto', false), 'direct')
+  assert.equal(chooseRoute(delivering, 'blit', false), 'direct')
+  assert.equal(chooseRoute(delivering, 'direct', true), 'direct')
+  // Under the wrapper a claim wins unless blit is asked for by name.
+  assert.equal(chooseRoute(wrapping, 'auto', true), 'claim')
+  assert.equal(chooseRoute(wrapping, 'blit', true), 'blit')
+  assert.equal(chooseRoute(wrapping, 'standin', true), 'standin')
+})
+
+test('a frame reply becomes an image source, or nothing', () => {
+  const file = parseFrame('{"seq":107,"medium":"file","name":"/tmp/k/s2/frame.rgba.3","format":"rgba","width":640,"height":480}')
+  assert.deepEqual(file, { seq: 107, medium: 'file', name: '/tmp/k/s2/frame.rgba.3', width: 640, height: 480 })
+  assert.deepEqual(frameSource(file!), { file: '/tmp/k/s2/frame.rgba.3', format: 'rgba', width: 640, height: 480, generation: 107 })
+  const shm = parseFrame('{"seq":8,"medium":"shm","name":"/ks1f2a-9","format":"rgba","width":64,"height":32}')
+  assert.deepEqual(frameSource(shm!), { shm: '/ks1f2a-9', format: 'rgba', width: 64, height: 32 })
+  // No newer frame yet, and replies that would make a bad source.
+  assert.equal(parseFrame('{"seq":null}'), null)
+  assert.equal(parseFrame('nope'), null)
+  assert.equal(parseFrame('{"seq":1,"medium":"file","name":"relative","width":1,"height":1}'), null)
+  assert.equal(parseFrame('{"seq":1,"medium":"shm","name":"/bad name","width":1,"height":1}'), null)
+  assert.equal(parseFrame('{"seq":1,"medium":"file","name":"/x","width":5000,"height":1}'), null)
+  assert.equal(parseFrame('{"seq":1,"medium":"pipe","name":"/x","width":1,"height":1}'), null)
 })
 
 test('a session carries its claim file only when well formed', () => {

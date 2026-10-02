@@ -19,6 +19,8 @@ export type HostFile = {
    * be an image the application draws over the session's claim file.
    */
   imageClaim?: true
+  /** The host can hand a session's frames to this client by name instead of writing them. */
+  frameDelivery?: true
 }
 
 /**
@@ -27,23 +29,62 @@ export type HostFile = {
  * - `standin`: the plugin writes the host's stand-in and the host rewrites it.
  * - `claim`: the application draws an image over the session's claim file and
  *   the host uploads frames to the id the application chose.
+ * - `blit`: the application draws an image and the plugin swaps each frame
+ *   into it by name. Needs no wrapper; costs the application a call a frame.
  */
-export type Route = 'direct' | 'standin' | 'claim'
+export type Route = 'direct' | 'standin' | 'claim' | 'blit'
 export type RouteWish = Route | 'auto'
-export const isRouteWish = (v: unknown): v is RouteWish => v === 'auto' || v === 'direct' || v === 'standin' || v === 'claim'
+export const isRouteWish = (v: unknown): v is RouteWish => v === 'auto' || v === 'direct' || v === 'standin' || v === 'claim' || v === 'blit'
 
 /**
- * The route to draw with: the wish when this host can serve it, else the best
- * the host offers. A host that takes image claims is preferred, since the
- * application then owns the image id and ours cannot clash with its own;
- * next the stand-in, when the host rewrites one; else the placeholder itself.
+ * The route to draw with: the wish when this host and application can serve
+ * it, else the best they offer. `images` says whether the application has an
+ * image element at all. An image claim is preferred: the application owns
+ * the image id, so ours cannot clash with its own, and no frame wakes it.
+ * Next, swapping frames in by name, which needs no wrapper. Then the
+ * stand-in, when the host rewrites one; else the placeholder itself.
  */
-export function chooseRoute(host: Pick<HostFile, 'placeholder' | 'imageClaim'> | undefined, wish: RouteWish): Route {
+export function chooseRoute(host: Pick<HostFile, 'placeholder' | 'imageClaim' | 'frameDelivery'> | undefined, wish: RouteWish, images: boolean): Route {
   if (wish === 'direct') return 'direct'
   if (wish === 'standin' && host?.placeholder) return 'standin'
-  if (host?.imageClaim) return 'claim'
+  if (wish === 'blit' && host?.frameDelivery && images) return 'blit'
+  if (host?.imageClaim && images) return 'claim'
+  if (host?.frameDelivery && images) return wish === 'auto' || wish === 'blit' || !host.placeholder ? 'blit' : 'standin'
   return host?.placeholder ? 'standin' : 'direct'
 }
+
+/** A session frame the host hands over by name (see `frame` in docs/launcher.md). */
+export type Frame = { seq: number; medium: 'file' | 'shm'; name: string; width: number; height: number }
+
+/** The `/frame` reply: a frame, or null when none is newer yet or the reply is malformed. */
+export function parseFrame(text: string): Frame | null {
+  let v: Record<string, unknown> | null
+  try {
+    v = JSON.parse(text) as Record<string, unknown> | null
+  } catch {
+    return null
+  }
+  if (!v || !Number.isInteger(v.seq) || (v.medium !== 'file' && v.medium !== 'shm') || typeof v.name !== 'string') return null
+  if (!Number.isInteger(v.width) || !Number.isInteger(v.height)) return null
+  const [w, h] = [v.width as number, v.height as number]
+  if (w < 1 || h < 1 || w > 4096 || h > 4096) return null
+  // What an image source accepts: an absolute path, or a POSIX object name.
+  const ok = v.medium === 'file' ? v.name.startsWith('/') && v.name.length <= 3072 : /^\/[A-Za-z0-9._-]{1,254}$/.test(v.name)
+  return ok ? { seq: v.seq as number, medium: v.medium, name: v.name, width: w, height: h } : null
+}
+
+export type FrameSource =
+  | { file: string; format: 'rgba'; width: number; height: number; generation: number }
+  | { shm: string; format: 'rgba'; width: number; height: number }
+
+/**
+ * The image source for a frame. A file is reused by the producer, so the
+ * sequence number is its generation; a shared-memory object is read once.
+ */
+export const frameSource = (f: Frame): FrameSource =>
+  f.medium === 'file'
+    ? { file: f.name, format: 'rgba', width: f.width, height: f.height, generation: f.seq }
+    : { shm: f.name, format: 'rgba', width: f.width, height: f.height }
 
 /**
  * The discovery record names the stand-in as a hex codepoint. Only a
@@ -74,6 +115,7 @@ export function parseHostFile(text: string): HostFile | null {
     ...(typeof v.socket === 'string' ? { socket: v.socket } : {}),
     ...(parseStandin(v.placeholder_standin) !== undefined ? { placeholder: parseStandin(v.placeholder_standin) } : {}),
     ...(v.image_claim === true ? { imageClaim: true as const } : {}),
+    ...(v.frame_delivery === true ? { frameDelivery: true as const } : {}),
   }
 }
 

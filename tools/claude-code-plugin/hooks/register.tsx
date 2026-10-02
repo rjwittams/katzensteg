@@ -2,8 +2,8 @@
 import type { Elements, EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 import { fitGrid, type Grid } from './placeholders.ts'
 import {
-  chooseRoute, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
-  type HostClient, type HostFile, type RouteWish, type Session,
+  chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
+  type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
 import { ordered, swapOnDrag } from './layout.ts'
 
@@ -46,6 +46,26 @@ let lastPlacement: string | undefined
 // image claim when the host offers one, else its stand-in, else the
 // placeholder itself.
 let routeWish: RouteWish = 'auto'
+// Whether this application has an image element; known once a site renders.
+let canImages = false
+let imagesKnown = false
+// The route the last render drew with, and the site it drew in: a frame swap
+// names the site, and the frame loops stop when the route moves off `blit`.
+let drawnRoute: Route = 'direct'
+let imageSite = ''
+// The blit route, per session: who the host delivers frames to as last told,
+// the last frame taken, the source last swapped in (a redraw must name the
+// same one or the application draws the old picture again), and whether a
+// loop is taking frames.
+const sentDelivery = new Map<string, 'terminal' | 'client'>()
+const lastSeq = new Map<string, number>()
+const lastSource = new Map<string, FrameSource>()
+const pumping = new Set<string>()
+let blitOk = 0
+let blitDenied = 0
+let lastDeny = ''
+// What an image shows before its first frame: one transparent pixel.
+const ONE_PIXEL = { rgba: 'AAAAAA==', width: 1, height: 1 } as const
 let drawnCount = -1
 // Panel height presets in rows; the band's own limit still applies.
 const SIZES = { small: 10, medium: 16, large: 40 } as const
@@ -91,6 +111,62 @@ async function api($: $, path: string, body?: unknown): Promise<Reply> {
     ...(body !== undefined && { body: JSON.stringify(body) }),
   })
   return { ok: r.ok, status: r.status, text: r.text }
+}
+
+// Tells the host who gets a session's frames, once per change.
+function setDelivery($: $, id: string, mode: 'terminal' | 'client'): void {
+  if (sentDelivery.get(id) === mode) return
+  sentDelivery.set(id, mode)
+  $.clock.after(0, () => {
+    api($, `/sessions/${encodeURIComponent(id)}/delivery`, { mode })
+      .then(r => { if (!r.ok) { sentDelivery.delete(id); log($, `delivery ${mode} for ${id} refused ${r.status}: ${r.text.slice(0, 120)}`) } })
+      .catch(err => { sentDelivery.delete(id); log($, `delivery ${mode} for ${id} failed: ${err}`) })
+  })
+}
+
+// The blit route's loop for one session: wait for the host's next frame, swap
+// it into the session's image by name, repeat. The host holds each request
+// until a frame is ready, so an idle producer costs a request a second. It
+// ends when the route moves on or the session is gone or hidden; the next
+// render that draws the session on this route starts it again.
+function pump($: $, id: string): void {
+  if (pumping.has(id)) return
+  pumping.add(id)
+  const step = async () => {
+    if (!host || drawnRoute !== 'blit' || hidden.has(id) || !sessions.some(s => s.id === id)) { pumping.delete(id); return }
+    let delay = 0
+    try {
+      const path = `/sessions/${encodeURIComponent(id)}`
+      const after = lastSeq.get(id)
+      const r = await api($, `${path}/frame`, after === undefined ? {} : { after })
+      const frame = r.ok ? parseFrame(r.text) : null
+      if (frame) {
+        lastSeq.set(id, frame.seq)
+        const source = frameSource(frame)
+        const out = await $.ui.blit({ requestId: imageSite, key: `image:${id}`, source })
+        if (out.deny) {
+          // Not mounted or not painting just now. A shared-memory frame has
+          // no reader left, so the host must release it.
+          blitDenied += 1
+          lastDeny = out.deny
+          if (frame.medium === 'shm') await api($, `${path}/release`, { seq: frame.seq }).catch(() => undefined)
+          // A terminal that draws no images will refuse every frame: ask
+          // rarely, in case the panel moves to one that does.
+          delay = out.deny.includes('alt') ? 2000 : 100
+        } else {
+          blitOk += 1
+          lastSource.set(id, source)
+        }
+      } else if (!r.ok) {
+        // 409 until the host has switched this session to client delivery.
+        delay = r.status === 409 ? 150 : 500
+      }
+    } catch {
+      delay = 500
+    }
+    $.clock.after(delay, () => { void step() })
+  }
+  $.clock.after(0, () => { void step() })
 }
 
 const failure = (r: Reply | undefined, what: string) => (r ? `${what} ${r.status}: ${r.text.slice(0, 120)}` : `${what} failed`)
@@ -196,7 +272,7 @@ async function refresh($: $): Promise<boolean> {
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -214,7 +290,7 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
@@ -334,9 +410,14 @@ const describe = (s: Session) =>
 // One tree for both sites. `columns` is the site's body width, `rowsBudget`
 // the rows a panel may take, `stacked` lays panels in a column (the dock)
 // rather than a wrapping row (the band, or a pane seated inline).
-async function panelsTree($: $, els: Elements['terminal'], columns: number, rowsBudget: number, stacked: boolean, tail: RenderChildren): Promise<RenderElement> {
+async function panelsTree($: $, els: Elements['terminal'], site: string, columns: number, rowsBudget: number, stacked: boolean, tail: RenderChildren): Promise<RenderElement> {
   const { Box, Client, Image, Text } = els
-  const route = chooseRoute(host, routeWish)
+  // An older application has no image element; then only cell routes remain.
+  canImages = (els as { Image?: unknown }).Image !== undefined
+  imagesKnown = true
+  const route = chooseRoute(host, routeWish, canImages)
+  drawnRoute = route
+  imageSite = site
   const shown = ordered(order, visible())
   order = shown.map(s => s.id)
   if (drawnCount !== shown.length) { drawnCount = shown.length; log($, `drawing ${shown.length} panel(s) in ${stacked ? 'a docked pane' : 'a row'} at ${columns} columns, ${rowsBudget} rows`) }
@@ -393,16 +474,25 @@ async function panelsTree($: $, els: Elements['terminal'], columns: number, rows
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
           const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }
-          if (route === 'claim' && s.claim) {
+          // On the blit route the host hands frames to this client; on every
+          // other it writes them to the terminal itself.
+          if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
+          if (route === 'blit') pump($, s.id)
+          if (route === 'blit' || (route === 'claim' && s.claim)) {
             // The application draws the picture; the panel sits over it for
-            // the border and input and paints nothing inside. The host learns
-            // the image id from the application's transmission of the claim file.
+            // the border and input and paints nothing inside. On a claim the
+            // host learns the image id from the application's transmission of
+            // the claim file. On blit the frame loop swaps sources in; a
+            // redraw names the last one swapped, which sends nothing.
+            const source = route === 'claim' && s.claim
+              ? { file: s.claim.path, format: 'rgba' as const, width: s.claim.w, height: s.claim.h }
+              : lastSource.get(s.id) ?? ONE_PIXEL
             return (
               <Box width={grid.cols + 2} height={grid.rows + 2}>
                 <Box position="absolute" top={1} left={1}>
                   <Image
                     key={`image:${s.id}`}
-                    source={{ file: s.claim.path, format: 'rgba', width: s.claim.w, height: s.claim.h }}
+                    source={source}
                     columns={grid.cols}
                     rows={grid.rows}
                     alt={s.title.slice(0, Math.max(1, grid.cols))}
@@ -445,7 +535,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'katzensteg',
       description: 'Game panels above the prompt via a headless katzensteg-wm: open, close, list, host',
-      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim | pane | list | host | stop',
+      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim|blit | pane | list | host | stop',
       immediate: true,
     }).catch(err => log($, `/katzensteg not registered: ${err}`))
     await registerTools($)
@@ -475,7 +565,7 @@ export const register: Register = on => {
       })
       return {
         text: host && client
-          ? [`katzensteg host: pid ${host.pid} on 127.0.0.1:${host.port} · client ${client.id} · ${visible().length} panel(s) · ${forwarded} input events forwarded`, ...detail].join('\n')
+          ? [`katzensteg host: pid ${host.pid} on 127.0.0.1:${host.port} · client ${client.id} · ${visible().length} panel(s) · ${forwarded} input events forwarded`, `  route ${drawnRoute} (asked ${routeWish})${blitOk + blitDenied > 0 ? ` · frames swapped ${blitOk}, refused ${blitDenied}${lastDeny ? ` (last: ${lastDeny.slice(0, 80)})` : ''}` : ''}`, ...detail].join('\n')
           : `katzensteg: no host (${hostError ?? 'not connected'}) · binary ${hostBin}`,
       }
     }
@@ -521,13 +611,14 @@ export const register: Register = on => {
     }
     if (verb === 'route') {
       const pick = rest[0]
-      const now = chooseRoute(host, routeWish)
-      if (!isRouteWish(pick)) return { text: `katzensteg route auto|direct|standin|claim (asked ${routeWish}, drawing ${now}; this host ${host?.placeholder ? 'rewrites a stand-in' : 'rewrites nothing'}${host?.imageClaim ? ' and takes image claims' : ''})` }
+      const now = chooseRoute(host, routeWish, canImages)
+      if (!isRouteWish(pick)) return { text: `katzensteg route auto|direct|standin|claim|blit (asked ${routeWish}, drawing ${now}; this host ${host?.placeholder ? 'rewrites a stand-in' : 'rewrites nothing'}${host?.imageClaim ? ', takes image claims' : ''}${host?.frameDelivery ? ', hands frames over by name' : ''})` }
       routeWish = pick
       await $.store.set('route', routeWish).catch(err => log($, `store write failed: ${err}`))
       $.ui.invalidate('ui.render')
-      const got = chooseRoute(host, routeWish)
-      return { text: `katzensteg: route ${routeWish}${got === routeWish || routeWish === 'auto' ? `, drawing ${got}` : `, but this host cannot serve it: drawing ${got}`}` }
+      const got = chooseRoute(host, routeWish, canImages)
+      if (!imagesKnown) return { text: `katzensteg: route ${routeWish}; what it draws with is settled when the first panel is drawn` }
+      return { text: `katzensteg: route ${routeWish}${got === routeWish || routeWish === 'auto' ? `, drawing ${got}` : `, but it cannot be served here: drawing ${got}`}` }
     }
     if (verb === 'pane') {
       // Reopen the pane the person closed, keeping the panels that were in it.
@@ -541,7 +632,7 @@ export const register: Register = on => {
       const rows = sessions.map(s => `${s.id.padEnd(4)} ${s.state.padEnd(8)} image ${s.image_id} ${s.source_px ? `${s.source_px.w}x${s.source_px.h}` : ''} ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'no grid'} ${hidden.has(s.id) ? '(hidden)' : ''} ${s.title}${s.input_supported ? '' : ' (observation only)'}`)
       return { text: rows.join('\n') || 'katzensteg: no sessions' }
     }
-    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim | pane | list | host | stop' }
+    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim|blit | pane | list | host | stop' }
   })
 
   // A standing note in the system prompt while a host is connected, so the
@@ -756,7 +847,7 @@ export const register: Register = on => {
     if (place !== 'band' || visible().length === 0 || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
     const els = await $.ui.resolve(e)
     // One header row plus each panel's border: the grid gets the rows less three.
-    return panelsTree($, els, e.props.bodyColumns, Math.max(1, e.props.maxRows - 3), false, await next(e))
+    return panelsTree($, els, e.requestId, e.props.bodyColumns, Math.max(1, e.props.maxRows - 3), false, await next(e))
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e, next) => {
@@ -772,7 +863,7 @@ export const register: Register = on => {
       log($, `pane ${e.props.placement}: ${e.props.bodyColumns} columns, ${e.props.scroll.bodyRows} body rows`)
     }
     const rowsBudget = stacked ? SIZES.large : Math.max(1, e.props.scroll.bodyRows - 1)
-    return panelsTree($, els, e.props.bodyColumns, rowsBudget, stacked, null)
+    return panelsTree($, els, PANE_ID, e.props.bodyColumns, rowsBudget, stacked, null)
   })
 
 }

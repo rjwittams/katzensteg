@@ -147,6 +147,14 @@ claim file: frames for that session are renamed to the application's image id
 in `wm/graphics_output.zig` as they leave. Producers keep their attached id,
 so image ownership still changes only through attach.
 
+A headless host can also hand a session's frames to its client instead of the
+terminal. `wm/frame_delivery.zig` reads the file path or shared-memory name
+out of the producer's upload command; the host keeps the latest reference per
+session, answers a waiting `frame` request with it, and releases any
+shared-memory frame that no client took. The client passes the name to an
+application that draws the image, so pixels still go from producer to
+terminal and the host writes nothing for that session.
+
 Structured keyboard requests join terminal bytes and pointer requests at the
 canonical input model. Every source hands it a native key in the Jackstay
 vocabulary (`src/katzensteg/native_key.zig`): a DOM code or logical key name,
