@@ -219,8 +219,9 @@ already sends; producers do not change.
 
 - **Kitty's rule.** Kitty lets a cell cover only if its background differs in
   value from the terminal's default. Cells that would be the default are painted
-  with the outer terminal's default colour changed by one step in one channel.
-  This is done on every terminal, so there is one code path.
+  with the outer terminal's default colour changed by one step in one channel:
+  the blue channel plus 1 in 8-bit, or minus 1 when blue is already 255. This is
+  done on every terminal, so there is one code path.
 - **Transparent pixels** in a higher image show a lower image through them.
 - **Fallback.** Splitting an image into explicit placements around occlusion
   rectangles stays in the code for a terminal that does not honour the band.
