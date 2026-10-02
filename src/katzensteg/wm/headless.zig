@@ -371,14 +371,13 @@ const Host = struct {
     }
 
     fn attach(_: *Host, session: *Session) !void {
-        if (std.c.getenv("KATZENSTEG_OUTPUT_PROFILE")) |value| {
-            if (std.mem.eql(u8, std.mem.span(value), "shm")) session.upload_profile = .shm;
-        }
+        session.upload_profile = hostedUploadProfile(if (std.c.getenv("KATZENSTEG_OUTPUT_PROFILE")) |value| std.mem.span(value) else null, @import("builtin").os.tag == .macos);
         try control.writeInitialControl(session.producer.channel.writer(), .{
             .rect_cells = .{ .row = 1, .col = 1, .cols = 1, .rows = 1 },
             .placeholder = .{ .image_id = session.image_id, .cols = 1, .rows = 1 },
             // This host does not own terminal input and must not consume probe
-            // replies intended for the wrapped application. SHM is explicit here.
+            // replies intended for the wrapped application, so the transport
+            // is chosen without a probe: see hostedUploadProfile.
             .upload = .{ .profile = session.upload_profile, .path = session.upload_path },
         });
     }
@@ -935,6 +934,30 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
         return if (signal != 0) 128 + signal else value.exit_code orelse 128;
     }
     return 0;
+}
+
+/// The upload transport for a session of this host, which cannot probe the
+/// terminal. On macOS a regular file reaches storage on every frame, and the
+/// terminals there that draw placeholder images (kitty, Ghostty) also read
+/// shared memory, so that is the default. Elsewhere it stays whole files.
+/// `KATZENSTEG_OUTPUT_PROFILE=shm` or `file_whole` in the host's environment
+/// chooses outright; other values leave the default.
+fn hostedUploadProfile(setting: ?[]const u8, macos: bool) protocol.UploadProfile {
+    if (setting) |value| {
+        if (std.mem.eql(u8, value, "shm")) return .shm;
+        if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
+    }
+    return if (macos) .shm else .file_whole;
+}
+
+test "the hosted upload transport defaults by platform and yields to an explicit setting" {
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile(null, true));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile(null, false));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile("file_whole", true));
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile("shm", false));
+    // Settings this host cannot honour without a probe leave the default.
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile("auto", true));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile("direct_apc", false));
 }
 
 /// Records a producer batch as the session's latest client frame. Returns the

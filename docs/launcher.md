@@ -400,8 +400,9 @@ pixels. A file belongs to the producer's rotating upload pool, so use the
 sequence number to tell new content under an old path. A shared-memory object
 is read once: a client that could not hand it on calls `release` with its
 sequence number, and the host releases frames no client was given. Switching
-back to `terminal` restores the latest frame there. Under `KATZENSTEG_OUTPUT_PROFILE=shm`
-frames are shared-memory objects; otherwise they are whole files.
+back to `terminal` restores the latest frame there. Frames are shared-memory
+objects or whole files according to the host's transport (see Terminal image
+transport).
 
 A producer starts with a temporary 1×1 virtual grid so it can report source
 pixels. Its graphics are withheld until the client supplies the grid it drew.
@@ -474,13 +475,19 @@ legacy direct-output behavior of forcing inline APC, including disabling SHM.
 
 The desktop WM probes and chooses on behalf of its producers. Its JSONL path
 still substitutes whole-file uploads for inline output. The headless WM and pi
-extension do not own terminal input, so they keep whole-file output by default.
-Set `KATZENSTEG_OUTPUT_PROFILE=shm` in the environment of the **host** to use SHM
-there. Restart an existing background headless host for the setting to take
-effect. These two hosts currently recognize only the SHM override; their other
-settings continue to select whole-file output. They do not consume terminal
-probe replies from Claude or pi. Hosted automatic negotiation remains follow-up
-work.
+extension do not own terminal input and do not consume terminal probe replies
+from Claude or pi, so they choose without a probe.
+
+The headless WM uses SHM on macOS and whole files elsewhere. A regular file
+reaches storage on every frame on macOS, and the terminals there that draw
+placeholder images, kitty and Ghostty, also read shared memory. Set
+`KATZENSTEG_OUTPUT_PROFILE=file_whole` or `shm` in the environment of the
+**host** to choose outright; it recognizes only those two values and other
+settings leave its default. Restart an existing background headless host for
+the setting to take effect.
+
+The pi extension keeps whole-file output by default and recognizes only the
+SHM override. Hosted automatic negotiation remains follow-up work.
 
 For example, from the repository root:
 
