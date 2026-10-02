@@ -87,6 +87,12 @@ const lastTypes = new Map<string, string[]>()
 let order: string[] = []
 const sizeOverride = new Map<string, { cols: number; rows: number }>()
 const resizing = new Set<string>()
+// A resize holds the grid post only while the size is still changing: the
+// hold lifts this long after the last change. It must not wait for the
+// release, which the surface does not always deliver; a producer left on the
+// old grid keeps rendering at the old size under a frame of the new one.
+const RESIZE_SETTLE_MS = 250
+const resizeStamp = new Map<string, number>()
 // The panel being moved by its title, from its press to its release: the
 // others draw dim meanwhile so the held one stands out.
 let moving: string | undefined
@@ -283,7 +289,7 @@ async function refresh($: $): Promise<boolean> {
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -301,7 +307,7 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
@@ -455,10 +461,16 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
     // source size rather than commit a full-width grid it would refit.
     if (s.source_px && !resizing.has(s.id) && (!sent || sent.cols !== grid.cols || sent.rows !== grid.rows)) {
       sentGrid.set(s.id, grid)
+      // A post that did not land is forgotten and tried again at a later
+      // draw: recorded as sent, the host would keep the old grid for good.
+      const retry = () => {
+        if (sentGrid.get(s.id) === grid) sentGrid.delete(s.id)
+        $.clock.after(500, () => $.ui.invalidate('ui.render'))
+      }
       $.clock.after(0, () => {
         api($, `/sessions/${encodeURIComponent(s.id)}/grid`, grid)
-          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`) })
-          .catch(err => log($, `grid for ${s.id} failed: ${err}`))
+          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else { log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`); retry() } })
+          .catch(err => { log($, `grid for ${s.id} failed: ${err}`); retry() })
       })
     }
     // Repainting placeholder cells does not need another image upload.
@@ -847,6 +859,14 @@ export const register: Register = on => {
         const big = 9999
         sizeOverride.set(id, ev.axis === 'resize-y' ? { cols: big, rows: ev.rows } : { cols: ev.cols, rows: ev.axis === 'resize-x' ? big : ev.rows })
         resizing.add(id)
+        const stamp = (resizeStamp.get(id) ?? 0) + 1
+        resizeStamp.set(id, stamp)
+        $.clock.after(RESIZE_SETTLE_MS, () => {
+          // Still the latest change, so the size has settled: tell the host.
+          if (resizeStamp.get(id) !== stamp || !resizing.has(id)) return
+          resizing.delete(id)
+          $.ui.invalidate('ui.render')
+        })
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'resizeend') {
         resizing.delete(id)
