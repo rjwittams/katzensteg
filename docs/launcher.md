@@ -310,6 +310,19 @@ so the rewrite is in place and survives a split across reads. Background and
 desktop hosts neither advertise nor rewrite it; their clients draw the real
 placeholder as before.
 
+A wrapping host also reads the kitty graphics commands the child itself writes,
+without changing them, and adds `"image_claim":true` to its discovery JSON. An
+application that draws images of its own chooses the image id and writes the
+placeholder cells, so a plugin cannot use the session's `image_id`. Instead
+each session in `GET /v1/sessions` carries `claim:{path,w,h}`, a one-pixel raw
+RGBA file. The plugin has the application draw an image from that file at the
+session's grid size. The application's file transmission names the path and
+its own image id; the host then uploads that session's frames to that id. The
+producer is not told: it keeps the id it attached with and the host renames
+each batch on the way out. If the application transmits to the id again the
+host restores its latest frame, and when the application deletes the image the
+session returns to its own id. No frame passes through the application.
+
 Terminal clears (`CSI 2 J` / `CSI 3 J`) request retained frames. Periodic idle
 refresh defaults to off in wrap mode; pass `--idle-refresh-ms <ms>` before
 `--wrap` to enable a fallback. This serialization covers the child stream and

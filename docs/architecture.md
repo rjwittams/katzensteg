@@ -140,7 +140,12 @@ the wrapping host instead of starting a second host for the inner PTY. Child
 output is otherwise forwarded as written, with one exception owned by
 `wm/placeholder_rewrite.zig`: the stand-in codepoint the descriptor names
 becomes the kitty placeholder, for applications that refuse the placeholder in
-plugin-drawn text.
+plugin-drawn text. The relay also reports each complete kitty command the child
+writes to an observer. `wm/image_claim.zig` classifies them and the headless
+host uses the result to adopt an image the application drew over a session's
+claim file: frames for that session are renamed to the application's image id
+in `wm/graphics_output.zig` as they leave. Producers keep their attached id,
+so image ownership still changes only through attach.
 
 Structured keyboard requests join terminal bytes and pointer requests at the
 canonical input model. Every source hands it a native key in the Jackstay

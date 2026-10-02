@@ -8,6 +8,7 @@ const protocol = @import("../render_batch_protocol.zig");
 const peer_protocol = @import("../attach_protocol.zig");
 const Listener = @import("listener.zig").Listener;
 const graphics = @import("graphics_output.zig");
+const image_claim = @import("image_claim.zig");
 const terminal_mod = @import("host_terminal.zig");
 const Logger = @import("../log.zig").Logger;
 
@@ -38,6 +39,8 @@ const Client = struct {
     parent_checked_at: i64 = 0,
 };
 const Grid = struct { cols: i32, rows: i32 };
+/// How a session names its claim file to a client: a raw RGBA file and its size.
+const Claim = struct { path: []const u8, w: u32 = 1, h: u32 = 1 };
 const Session = struct {
     io: std.Io,
     id: u32,
@@ -48,6 +51,12 @@ const Session = struct {
     upload_path: []const u8,
     upload_profile: protocol.UploadProfile = .file_whole,
     image_id: u32,
+    /// A one-pixel file a wrapped application's own image can point at. The
+    /// application's transmission of it names the id it drew the cells with.
+    claim_path: []const u8,
+    /// That id, while the application owns the image on screen. The producer
+    /// keeps `image_id`; its batches are renamed on the way to the terminal.
+    terminal_image_id: ?u32 = null,
     observation_path: []const u8,
     grid: ?Grid = null,
     last_target_px: ?protocol.SourcePixels = null,
@@ -75,6 +84,7 @@ const Session = struct {
         system_io.fs.cwd(io).deleteTree(self.directory) catch {};
         allocator.free(self.directory);
         allocator.free(self.upload_path);
+        allocator.free(self.claim_path);
         allocator.free(self.observation_path);
         allocator.free(self.title);
     }
@@ -131,6 +141,16 @@ const Host = struct {
         self.pending_deletes.deinit(self.allocator);
         self.server.deinit();
         self.logger.deinit();
+    }
+
+    // Called by the relay for each kitty command the wrapped application
+    // writes. Only session state changes here; output waits for the loop.
+    fn observeKitty(context: *anyopaque, command: @import("output_boundary.zig").KittyCommand) void {
+        const self: *Host = @ptrCast(@alignCast(context));
+        var path: [image_claim.max_path]u8 = undefined;
+        const unused = applyClaim(self.sessions.items, image_claim.classify(command.header, command.payload, command.payload_truncated, &path)) orelse return;
+        // The host's own image has no cells left to show it.
+        self.deleteImage(unused) catch {};
     }
 
     fn deleteImage(self: *Host, id: u32) !void {
@@ -304,6 +324,14 @@ const Host = struct {
         errdefer self.allocator.free(path);
         const observation_path = try std.fmt.allocPrint(self.allocator, "{s}/obs-{d}.png", .{ directory, id });
         errdefer self.allocator.free(observation_path);
+        const claim_path = try std.fmt.allocPrint(self.allocator, "{s}/claim.rgba", .{directory});
+        errdefer self.allocator.free(claim_path);
+        {
+            // One transparent RGBA pixel: what shows until the first frame.
+            const claim = try system_io.fs.createFileAbsolute(io, claim_path, .{ .mode = 0o600, .exclusive = true });
+            defer claim.close();
+            try claim.writeAll(&[_]u8{ 0, 0, 0, 0 });
+        }
         const owned_title = try self.allocator.dupe(u8, title);
         errdefer self.allocator.free(owned_title);
         const image_id = 100000 + id;
@@ -318,7 +346,7 @@ const Host = struct {
             if (self.terminal.relay != null) return err;
             self.logger.writeFmtScoped(.warn, .wm, "session {d} stale graphics cleanup failed: {s}", .{ id, @errorName(err) });
         };
-        try self.sessions.append(self.allocator, .{ .io = io, .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .observation_path = observation_path });
+        try self.sessions.append(self.allocator, .{ .io = io, .id = id, .owner = owner, .title = owned_title, .producer = producer.*, .directory = directory, .upload_path = path, .image_id = image_id, .claim_path = claim_path, .observation_path = observation_path });
         producer.* = .{};
         return &self.sessions.items[self.sessions.items.len - 1];
     }
@@ -397,7 +425,7 @@ const Host = struct {
                     if (self.terminal.relay) |relay| {
                         var output_writer = std.Io.Writer.Allocating.init(self.allocator);
                         defer output_writer.deinit();
-                        try graphics.apply(self.allocator, &output_writer.writer, session.image_id, groups);
+                        try graphics.applyAs(self.allocator, &output_writer.writer, session.image_id, session.terminal_image_id orelse session.image_id, groups);
                         try relay.graphics(output_writer.written());
                     } else {
                         var output_writer = self.terminal.file.writerStreaming(&.{});
@@ -447,7 +475,7 @@ const Host = struct {
                 for (self.sessions.items) |session| {
                     if (!std.mem.eql(u8, &session.owner, &owner)) continue;
                     const state: []const u8 = if (session.exited_at != null) "exited" else if (session.closing_at != null) "closing" else if (session.ready and session.grid != null) "ready" else "starting";
-                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid }, .{}), .{});
+                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid, .claim = if (self.terminal.relay != null) Claim{ .path = session.claim_path } else null }, .{ .emit_null_optional_fields = false }), .{});
                     try list.append(allocator, value.value);
                 }
                 return json(allocator, list.items);
@@ -785,7 +813,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     // A wrapping host rewrites the stand-in placeholder in the child's output;
     // naming it here tells a plugin to draw with it. Other hosts leave it out.
     const placeholder_standin: ?[]const u8 = if (options.wrap_command.len != 0) @import("placeholder_rewrite.zig").standin_hex else null;
-    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1, .placeholder_standin = placeholder_standin }, .{ .emit_null_optional_fields = false });
+    // It also sees the child's own graphics commands, so a plugin may let the
+    // application draw an image over a session's claim file instead.
+    const image_claims: ?bool = if (options.wrap_command.len != 0) true else null;
+    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1, .placeholder_standin = placeholder_standin, .image_claim = image_claims }, .{ .emit_null_optional_fields = false });
     defer allocator.free(descriptor);
     // Publish only after HTTP is listening. The lock file is never unlinked.
     const temporary = try std.fmt.allocPrint(allocator, "{s}.{s}.tmp", .{ discovery, token[0..8] });
@@ -807,6 +838,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     if (options.wrap_command.len != 0) {
         relay = try @import("wrap.zig").Relay.init(allocator, terminal.path, options.wrap_command, descriptor);
         terminal.relay = &relay.?;
+        relay.?.boundary.observer = .{ .context = &host, .kitty = Host.observeKitty };
     }
     try host.loop();
     if (relay) |value| {
@@ -816,8 +848,90 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     return 0;
 }
 
+/// Applies what the wrapped application did to one of its own images.
+/// Returns the host image id that a new claim left without cells, if any.
+fn applyClaim(sessions: []Session, event: image_claim.Event) ?u32 {
+    switch (event) {
+        .none => return null,
+        .file => |file| {
+            var unused: ?u32 = null;
+            var claimed = false;
+            for (sessions) |*session| {
+                if (std.mem.eql(u8, session.claim_path, file.path)) {
+                    if (session.terminal_image_id == null) unused = session.image_id;
+                    session.terminal_image_id = file.id;
+                    session.restore_pending = true;
+                    claimed = true;
+                } else if (session.terminal_image_id == file.id) {
+                    // The application reused the id for something else.
+                    session.terminal_image_id = null;
+                    session.restore_pending = true;
+                }
+            }
+            // A file that is no claim, sent to a claimed id, replaced our frame.
+            if (!claimed) return applyClaim(sessions, .{ .transmit = file.id });
+            return unused;
+        },
+        .transmit => |id| for (sessions) |*session| {
+            if (session.terminal_image_id == id) session.restore_pending = true;
+        },
+        .delete => |id| for (sessions) |*session| {
+            if (session.terminal_image_id != id) continue;
+            session.terminal_image_id = null;
+            session.restore_pending = true;
+        },
+        .delete_all => for (sessions) |*session| {
+            session.restore_pending = true;
+        },
+    }
+    return null;
+}
+
+test "an application's file transmission claims a session, and its later commands restore or release it" {
+    var sessions: [2]Session = undefined;
+    for (&sessions, 0..) |*session, i| {
+        session.image_id = 100001 + @as(u32, @intCast(i));
+        session.terminal_image_id = null;
+        session.restore_pending = false;
+    }
+    sessions[0].claim_path = "/h/s1/claim.rgba";
+    sessions[1].claim_path = "/h/s2/claim.rgba";
+
+    // The claim names the session by path; the host image is now unused.
+    try std.testing.expectEqual(@as(?u32, 100002), applyClaim(&sessions, .{ .file = .{ .id = 9939225, .path = "/h/s2/claim.rgba" } }));
+    try std.testing.expectEqual(@as(?u32, 9939225), sessions[1].terminal_image_id);
+    try std.testing.expect(sessions[1].restore_pending and !sessions[0].restore_pending);
+
+    // The application sending that image again replaced our frame: restore.
+    sessions[1].restore_pending = false;
+    try std.testing.expectEqual(@as(?u32, null), applyClaim(&sessions, .{ .file = .{ .id = 9939225, .path = "/h/s2/claim.rgba" } }));
+    try std.testing.expect(sessions[1].restore_pending);
+    sessions[1].restore_pending = false;
+    try std.testing.expectEqual(@as(?u32, null), applyClaim(&sessions, .{ .transmit = 9939225 }));
+    try std.testing.expect(sessions[1].restore_pending);
+
+    // Unrelated images change nothing.
+    sessions[1].restore_pending = false;
+    _ = applyClaim(&sessions, .{ .transmit = 5 });
+    _ = applyClaim(&sessions, .{ .file = .{ .id = 6, .path = "/elsewhere.rgba" } });
+    _ = applyClaim(&sessions, .{ .delete = 5 });
+    try std.testing.expect(!sessions[0].restore_pending and !sessions[1].restore_pending);
+    try std.testing.expectEqual(@as(?u32, 9939225), sessions[1].terminal_image_id);
+
+    // Deleting the image releases the session back to its own id.
+    _ = applyClaim(&sessions, .{ .delete = 9939225 });
+    try std.testing.expectEqual(@as(?u32, null), sessions[1].terminal_image_id);
+    try std.testing.expect(sessions[1].restore_pending);
+
+    // A delete naming no id may have cleared anything.
+    sessions[1].restore_pending = false;
+    _ = applyClaim(&sessions, .{ .delete_all = {} });
+    try std.testing.expect(sessions[0].restore_pending and sessions[1].restore_pending);
+}
+
 test {
     _ = @import("wrap.zig");
+    _ = @import("image_claim.zig");
     _ = @import("http.zig");
     _ = @import("graphics_output.zig");
     _ = @import("producer.zig");

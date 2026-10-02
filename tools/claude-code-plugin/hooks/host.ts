@@ -14,6 +14,32 @@ export type HostFile = {
    * Absent, the host leaves this client's output alone.
    */
   placeholder?: string
+  /**
+   * The host watches this application's own graphics commands, so a panel may
+   * be an image the application draws over the session's claim file.
+   */
+  imageClaim?: true
+}
+
+/**
+ * How a panel's cells reach the terminal.
+ * - `direct`: the plugin writes the kitty placeholder itself.
+ * - `standin`: the plugin writes the host's stand-in and the host rewrites it.
+ * - `claim`: the application draws an image over the session's claim file and
+ *   the host uploads frames to the id the application chose.
+ */
+export type Route = 'direct' | 'standin' | 'claim'
+export type RouteWish = Route | 'auto'
+export const isRouteWish = (v: unknown): v is RouteWish => v === 'auto' || v === 'direct' || v === 'standin' || v === 'claim'
+
+/**
+ * The route to draw with: the wish when this host can serve it, else the
+ * stand-in when the host rewrites one, else the placeholder itself.
+ */
+export function chooseRoute(host: Pick<HostFile, 'placeholder' | 'imageClaim'> | undefined, wish: RouteWish): Route {
+  if (wish === 'direct') return 'direct'
+  if (wish === 'claim' && host?.imageClaim) return 'claim'
+  return host?.placeholder ? 'standin' : 'direct'
 }
 
 /**
@@ -44,6 +70,7 @@ export function parseHostFile(text: string): HostFile | null {
     ...(typeof v.tty === 'string' ? { tty: v.tty } : {}),
     ...(typeof v.socket === 'string' ? { socket: v.socket } : {}),
     ...(parseStandin(v.placeholder_standin) !== undefined ? { placeholder: parseStandin(v.placeholder_standin) } : {}),
+    ...(v.image_claim === true ? { imageClaim: true as const } : {}),
   }
 }
 
@@ -56,6 +83,15 @@ export type Session = {
   state: SessionState
   source_px: { w: number; h: number } | null
   grid: { cols: number; rows: number } | null
+  /** A raw RGBA file an application-drawn image points at to claim this session. */
+  claim?: { path: string; w: number; h: number }
+}
+
+const parseClaim = (value: unknown): Session['claim'] => {
+  const c = value as Record<string, unknown> | null | undefined
+  if (!c || typeof c.path !== 'string' || !c.path.startsWith('/') || c.path.length > 3072) return undefined
+  if (!Number.isInteger(c.w) || !Number.isInteger(c.h) || (c.w as number) < 1 || (c.h as number) < 1 || (c.w as number) > 4096 || (c.h as number) > 4096) return undefined
+  return { path: c.path, w: c.w as number, h: c.h as number }
 }
 
 const isState = (s: unknown): s is SessionState => s === 'starting' || s === 'ready' || s === 'closing' || s === 'exited'
@@ -86,6 +122,7 @@ export function parseSessions(text: string): Session[] {
       input_supported: v.input_supported !== false,
       source_px: px && Number.isFinite(px.w) && Number.isFinite(px.h) ? { w: px.w as number, h: px.h as number } : null,
       grid: grid && Number.isInteger(grid.cols) && Number.isInteger(grid.rows) ? { cols: grid.cols as number, rows: grid.rows as number } : null,
+      ...(parseClaim(v.claim) ? { claim: parseClaim(v.claim) } : {}),
     })
   }
   return out
@@ -172,6 +209,14 @@ export function newInputEvents(posted: unknown, lastN: number): { events: InputE
   events.sort((a, b) => a.n - b.n)
   return { events, lastN: max }
 }
+
+/**
+ * The number to forward after, for a batch from panel instance `inst`: the
+ * last one sent while it is the same instance, zero for a new one, whose
+ * numbering started over.
+ */
+export const inputSince = (previousInst: unknown, inst: unknown, lastN: number): number =>
+  inst !== undefined && inst !== previousInst ? 0 : lastN
 
 /** The wire form of input events: the numbering is the panel's, not the wm's. */
 export const stripNumbers = (events: InputEvent[]): Omit<InputEvent, 'n'>[] =>

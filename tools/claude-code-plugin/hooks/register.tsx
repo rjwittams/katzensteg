@@ -2,8 +2,8 @@
 import type { Elements, EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 import { fitGrid, type Grid } from './placeholders.ts'
 import {
-  isPanelEvent, newInputEvents, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
-  type HostClient, type HostFile, type Session,
+  chooseRoute, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
+  type HostClient, type HostFile, type RouteWish, type Session,
 } from './host.ts'
 import { ordered, swapOnDrag } from './layout.ts'
 
@@ -42,6 +42,10 @@ type Place = 'band' | 'pane'
 let place: Place = 'pane'
 let paneOpen = false
 let lastPlacement: string | undefined
+// How panel cells reach the terminal (see Route in host.ts). `auto` takes the
+// host's stand-in when it rewrites one, else the placeholder itself; `claim`
+// is opt-in while it proves itself.
+let routeWish: RouteWish = 'auto'
 let drawnCount = -1
 // Panel height presets in rows; the band's own limit still applies.
 const SIZES = { small: 10, medium: 16, large: 40 } as const
@@ -66,6 +70,8 @@ let lastStacked = false
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
 const placed = new Map<string, { col: number; row: number; cols: number; rows: number }>()
 const lastN = new Map<string, number>()
+// The panel instance those numbers came from; a new instance counts from one.
+const lastInst = new Map<string, unknown>()
 let forwarded = 0
 let shown = 0
 
@@ -190,7 +196,7 @@ async function refresh($: $): Promise<boolean> {
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -208,7 +214,7 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
@@ -329,7 +335,8 @@ const describe = (s: Session) =>
 // the rows a panel may take, `stacked` lays panels in a column (the dock)
 // rather than a wrapping row (the band, or a pane seated inline).
 async function panelsTree($: $, els: Elements['terminal'], columns: number, rowsBudget: number, stacked: boolean, tail: RenderChildren): Promise<RenderElement> {
-  const { Box, Client, Text } = els
+  const { Box, Client, Image, Text } = els
+  const route = chooseRoute(host, routeWish)
   const shown = ordered(order, visible())
   order = shown.map(s => s.id)
   if (drawnCount !== shown.length) { drawnCount = shown.length; log($, `drawing ${shown.length} panel(s) in ${stacked ? 'a docked pane' : 'a row'} at ${columns} columns, ${rowsBudget} rows`) }
@@ -384,15 +391,39 @@ async function panelsTree($: $, els: Elements['terminal'], columns: number, rows
     <Box flexDirection="column">
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
-        {panels.map(({ s, grid }) => (
-          <Client
-            key={`panel:${s.id}`}
-            module="./panel.tsx"
-            width={grid.cols + 2}
-            height={grid.rows + 2}
-            props={{ id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(host?.placeholder && { placeholder: host.placeholder }) }}
-          />
-        ))}
+        {panels.map(({ s, grid }) => {
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }
+          if (route === 'claim' && s.claim) {
+            // The application draws the picture; the panel sits over it for
+            // the border and input and paints nothing inside. The host learns
+            // the image id from the application's transmission of the claim file.
+            return (
+              <Box width={grid.cols + 2} height={grid.rows + 2}>
+                <Box position="absolute" top={1} left={1}>
+                  <Image
+                    key={`image:${s.id}`}
+                    source={{ file: s.claim.path, format: 'rgba', width: s.claim.w, height: s.claim.h }}
+                    columns={grid.cols}
+                    rows={grid.rows}
+                    alt={s.title.slice(0, Math.max(1, grid.cols))}
+                  />
+                </Box>
+                <Box position="absolute" top={0} left={0}>
+                  <Client key={`panel:${s.id}`} module="./panel.tsx" width={grid.cols + 2} height={grid.rows + 2} props={{ ...base, hollow: true }} />
+                </Box>
+              </Box>
+            )
+          }
+          return (
+            <Client
+              key={`panel:${s.id}`}
+              module="./panel.tsx"
+              width={grid.cols + 2}
+              height={grid.rows + 2}
+              props={{ ...base, ...(route === 'standin' && host?.placeholder && { placeholder: host.placeholder }) }}
+            />
+          )
+        })}
       </Box>
       {tail}
     </Box>
@@ -412,7 +443,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'katzensteg',
       description: 'Game panels above the prompt via a headless katzensteg-wm: open, close, list, host',
-      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | pane | list | host | stop',
+      argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim | pane | list | host | stop',
       immediate: true,
     }).catch(err => log($, `/katzensteg not registered: ${err}`))
     await registerTools($)
@@ -422,6 +453,8 @@ export const register: Register = on => {
     if (saved === 'small' || saved === 'medium' || saved === 'large') size = saved
     const savedPlace = await $.store.get('place').catch(() => undefined)
     if (savedPlace === 'band' || savedPlace === 'pane') place = savedPlace
+    const savedRoute = await $.store.get('route').catch(() => undefined)
+    if (isRouteWish(savedRoute)) routeWish = savedRoute
     // Connect off the session.start path so a slow host start never holds it;
     // the poll loop keeps retrying while no host answers.
     $.clock.after(0, () => { connect($).catch(err => log($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
@@ -484,6 +517,16 @@ export const register: Register = on => {
       await ensureContainer($)
       return { text: `katzensteg: panels in the ${place}${place === 'pane' ? ' (docked beside the transcript in fullscreen from 110 columns, else above the prompt; ctrl+x tab focuses it, ctrl+x x closes it)' : ''}` }
     }
+    if (verb === 'route') {
+      const pick = rest[0]
+      const now = chooseRoute(host, routeWish)
+      if (!isRouteWish(pick)) return { text: `katzensteg route auto|direct|standin|claim (asked ${routeWish}, drawing ${now}; this host ${host?.placeholder ? 'rewrites a stand-in' : 'rewrites nothing'}${host?.imageClaim ? ' and takes image claims' : ''})` }
+      routeWish = pick
+      await $.store.set('route', routeWish).catch(err => log($, `store write failed: ${err}`))
+      $.ui.invalidate('ui.render')
+      const got = chooseRoute(host, routeWish)
+      return { text: `katzensteg: route ${routeWish}${got === routeWish || routeWish === 'auto' ? `, drawing ${got}` : `, but this host cannot serve it: drawing ${got}`}` }
+    }
     if (verb === 'pane') {
       // Reopen the pane the person closed, keeping the panels that were in it.
       paneOpen = false
@@ -496,7 +539,7 @@ export const register: Register = on => {
       const rows = sessions.map(s => `${s.id.padEnd(4)} ${s.state.padEnd(8)} image ${s.image_id} ${s.source_px ? `${s.source_px.w}x${s.source_px.h}` : ''} ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'no grid'} ${hidden.has(s.id) ? '(hidden)' : ''} ${s.title}${s.input_supported ? '' : ' (observation only)'}`)
       return { text: rows.join('\n') || 'katzensteg: no sessions' }
     }
-    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | place band|pane | pane | list | host | stop' }
+    return { text: 'katzensteg: open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim | pane | list | host | stop' }
   })
 
   // A standing note in the system prompt while a host is connected, so the
@@ -674,10 +717,11 @@ export const register: Register = on => {
 
   // A panel's input: forward what it has not sent before, numbered by the panel.
   on('ui.message', async ($, e, next) => {
-    const data = e.data as { id?: unknown; events?: unknown } | null
+    const data = e.data as { id?: unknown; inst?: unknown; events?: unknown } | null
     if (typeof data?.id !== 'string') return next(e)
     const id = data.id
-    const { events, lastN: n } = newInputEvents(data.events, lastN.get(id) ?? 0)
+    const { events, lastN: n } = newInputEvents(data.events, inputSince(lastInst.get(id), data.inst, lastN.get(id) ?? 0))
+    if (data.inst !== undefined) lastInst.set(id, data.inst)
     lastN.set(id, n)
     if (events.length > 0) lastTypes.set(id, [...(lastTypes.get(id) ?? []), ...events.map(ev => ev.type)].slice(-10))
     for (const ev of events) {
