@@ -75,6 +75,8 @@ const Pen = struct {
 /// Build a complete synchronized update before exposing bytes. Never consumes
 /// mirror dirty rows: clear them only after the caller successfully writes the
 /// result. Empty damage returns no bytes. The returned slice is allocator-owned.
+/// Nonempty output hides the outer cursor and leaves it hidden, as the session
+/// window design requires. The host restores visibility when leaving the WM.
 pub fn paint(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Options) std.mem.Allocator.Error![]u8 {
     // The allocating writer reports allocation failure as WriteFailed.
     return build(allocator, mirror, options) catch |err| switch (err) {
@@ -120,11 +122,12 @@ fn build(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Opt
             var text = if (cell.text.len == 0) " " else cell.text;
             const wide = cell.width == .wide and col + 1 < end_col and options.visible(row, col + 1);
             if (wide and cell.text.len == 0) text = "  ";
-            if (cell.width == .wide and !wide or cell.width == .spacer_head or cell.width == .spacer_tail) text = " ";
+            if ((cell.width == .wide and !wide) or cell.width == .spacer_head or cell.width == .spacer_tail) text = " ";
             // A cursor reported on the continuation column inverts the whole glyph.
             if (options.focused and !mirror.scrolled_back and mirror.cursor.visible and
                 r < mirror.size.rows and mirror.cursor.row == r and mirror.cursor.col < mirror.size.cols and
                 (mirror.cursor.col == c or (wide and mirror.cursor.col == c + 1))) cell.style_flags ^= Style.inverse;
+            // Normalize the style-cache key: default foreground RGB hints are not emitted.
             if (cell.foreground.is_default) cell.foreground.rgb = .{ 0, 0, 0 };
             if (cell.background.is_default) cell.background = .{ .rgb = options.default_background, .is_default = false };
             try pen.at(out, row, col);
