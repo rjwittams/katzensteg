@@ -2,7 +2,7 @@
 
 Katzensteg is currently an injected runtime plus a launcher.
 
-The launcher starts a target application from a JSON profile. The runtime is injected into that process with `LD_PRELOAD` on Linux or `DYLD_INSERT_LIBRARIES` on macOS. Once inside the process, Katzensteg captures tested SDL2/SDL3 and graphics presentation paths, sends frames to a terminal or host, and routes input back into SDL where supported.
+The launcher starts a target application from a JSON profile. The runtime gets into that process with `LD_PRELOAD` on Linux or `DYLD_INSERT_LIBRARIES` on macOS, or through SDL's own dynamic API (`SDL_DYNAMIC_API`/`SDL3_DYNAMIC_API`), which is the only mechanism on Windows. Once inside the process, Katzensteg captures tested SDL2/SDL3 and graphics presentation paths, sends frames to a terminal or host, and routes input back into SDL where supported.
 
 ## Current Support Boundary
 
@@ -44,6 +44,15 @@ The runtime lives under `src/katzensteg/`. It owns:
 - platform interposer glue
 
 The runtime must not write diagnostics to stdout or stderr during a captured run, because those streams may be part of the terminal presentation.
+
+The SDL wrappers are shared by every way in. The runtime calls SDL through one
+interface, the `ks_real_*` functions listed in `real_sdl2_functions.h` and
+`real_sdl3_functions.h`, and each build supplies one backend for it: preload
+builds look the functions up with `dlsym` (`real_sdl_linux.c`; macOS adds its
+rebinder), and dynamic API builds read the copy of the loading SDL's jump table
+that `dynapi.zig` saved before substituting the wrappers. Jump-table slot
+numbers are generated from SDL's `SDL_dynapi_procs.h` by
+`scripts/katzensteg/gen_dynapi_slots.py`.
 
 #### Producer Threading
 

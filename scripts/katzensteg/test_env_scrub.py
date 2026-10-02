@@ -11,6 +11,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 ENV_SCRUB_SOURCE = ROOT / "src" / "katzensteg" / "env_scrub.c"
 VULKAN_LAYER_SOURCE = ROOT / "src" / "katzensteg" / "vulkan_layer.c"
+VULKAN_LAYER_POSIX_SOURCE = ROOT / "src" / "katzensteg" / "vulkan_layer_posix.c"
 
 
 def system_libm_path():
@@ -83,6 +84,7 @@ class EnvScrubTests(unittest.TestCase):
                 "-DKS_VULKAN_LAYER_TESTING",
                 *vulkan_includes,
                 str(VULKAN_LAYER_SOURCE),
+                str(VULKAN_LAYER_POSIX_SOURCE),
                 str(ENV_SCRUB_SOURCE),
                 "-o",
                 str(cls.vulkan_lib_path),

@@ -2244,7 +2244,7 @@ pub const FrameBuilder = struct {
         var buf: [1024]u8 = undefined;
         var b64_buf: [2048]u8 = undefined;
         while (true) {
-            const n = tty.file.read(&buf) catch |err| switch (err) {
+            const n = tty.input.read(&buf) catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => {
                     logger.writeFmtScoped(.info, .frame_builder, "failed reading kitty reply: {any}", .{err});
@@ -6017,6 +6017,7 @@ test "retained observation preserves fills and cursor pixels" {
 }
 
 test "SHM pressure skips a framebuffer before changing active placement and retries after consumption" {
+    if (!system_io.shm.supported) return error.SkipZigTest;
     const io = std.testing.io;
     var builder = FrameBuilder.init(io, std.testing.allocator, false, .fullscreen, false, false);
     defer builder.deinit();

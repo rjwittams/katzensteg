@@ -23,16 +23,19 @@ pub const Address = extern union {
         return std.mem.bigToNative(u16, self.in.port);
     }
 };
+// Windows sockets are not inherited unless a handle is made inheritable.
+const cloexec: u32 = if (@import("builtin").os.tag == .windows) 0 else p.SOCK.CLOEXEC;
+
 pub fn connectUnixSocket(io: std.Io, path: []const u8) !@import("fs.zig").File {
     const address = try Address.initUnix(path);
-    const fd = try raw.socket(p.AF.UNIX, p.SOCK.STREAM | p.SOCK.CLOEXEC, 0);
+    const fd = try raw.socket(p.AF.UNIX, p.SOCK.STREAM | cloexec, 0);
     errdefer raw.close(fd);
     try raw.connect(fd, &address.any, address.getOsSockLen());
     return .{ .handle = fd, .io = io };
 }
 
 pub fn tcpConnectToAddress(io: std.Io, address: Address) !@import("fs.zig").File {
-    const fd = try raw.socket(address.any.family, p.SOCK.STREAM | p.SOCK.CLOEXEC, p.IPPROTO.TCP);
+    const fd = try raw.socket(address.any.family, p.SOCK.STREAM | cloexec, p.IPPROTO.TCP);
     errdefer raw.close(fd);
     try raw.connect(fd, &address.any, address.getOsSockLen());
     return .{ .handle = fd, .io = io };

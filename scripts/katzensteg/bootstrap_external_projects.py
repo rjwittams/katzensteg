@@ -122,6 +122,8 @@ def detect_distro_family(os_release_text: str | None = None, platform: str | Non
 
     if normalized_platform == "darwin":
         return "brew"
+    if normalized_platform == "win32":
+        return "winget"
     if not normalized_platform.startswith("linux"):
         return "unknown"
     if os_release_text is None:
@@ -173,6 +175,8 @@ def format_install_command(distro_family: str, package_names: Iterable[str]) -> 
         return "sudo apt install " + " ".join(packages)
     if distro_family == "brew":
         return "brew install " + " ".join(packages)
+    if distro_family == "winget":
+        return " && ".join(f"winget install --exact --id {package}" for package in packages)
     return None
 
 
@@ -217,6 +221,11 @@ def select_projects(manifest: dict, names: Iterable[str] | None = None, include_
 
 
 def expand_path(path: str) -> Path:
+    # Profiles and the manifest write $HOME; Windows keeps it in USERPROFILE,
+    # as the launcher does when HOME is unset.
+    if sys.platform == "win32" and not os.environ.get("HOME"):
+        home = os.path.expanduser("~")
+        path = path.replace("${HOME}", home).replace("$HOME", home)
     return Path(os.path.expandvars(os.path.expanduser(path)))
 
 
@@ -502,6 +511,8 @@ def current_platform() -> str:
         return "macos"
     if sys.platform.startswith("linux"):
         return "linux"
+    if sys.platform == "win32":
+        return "windows"
     return sys.platform
 
 

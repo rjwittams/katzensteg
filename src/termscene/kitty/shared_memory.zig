@@ -1,7 +1,7 @@
 //! One-shot Kitty upload objects. The terminal unlinks each name after mapping.
 //! A pipe write is not consumption: never age out or overwrite a live object.
 const std = @import("std");
-const shm_open = std.c.shm_open;
+const shm = @import("platform").shm;
 
 var sequence = std.atomic.Value(u64).init(0);
 
@@ -19,39 +19,23 @@ pub const Object = struct {
         if (bytes.len == 0) return error.EmptySharedMemory;
         var object = Object{ .name_len = 0, .bytes = bytes.len };
         for (0..16) |_| {
-            const name_z = try std.fmt.bufPrintZ(&object.name_buf, "/ks{x}-{x}", .{ @as(u32, @intCast(std.c.getpid())), sequence.fetchAdd(1, .monotonic) });
+            const name_z = try std.fmt.bufPrintZ(&object.name_buf, "/ks{x}-{x}", .{ shm.processId(), sequence.fetchAdd(1, .monotonic) });
             object.name_len = name_z.len;
-            const flags: std.c.O = .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true };
-            const fd = shm_open(name_z, @bitCast(flags), @as(c_uint, 0o600));
-            if (fd < 0) {
-                if (std.c.errno(fd) == .EXIST) continue;
-                return error.SharedMemoryOpenFailed;
-            }
-            defer _ = std.c.close(fd);
-            errdefer object.unlink();
-            if (std.c.ftruncate(fd, @intCast(bytes.len)) != 0) return error.SharedMemoryResizeFailed;
-            const mapping = std.c.mmap(null, bytes.len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
-            if (mapping == std.c.MAP_FAILED) return error.SharedMemoryMapFailed;
-            defer _ = std.c.munmap(@alignCast(mapping), bytes.len);
-            @memcpy(@as([*]u8, @ptrCast(mapping))[0..bytes.len], bytes);
+            shm.create(name_z, bytes) catch |err| switch (err) {
+                error.NameExists => continue,
+                else => return err,
+            };
             return object;
         }
         return error.SharedMemoryNameExhausted;
     }
 
     pub fn unlink(self: *const Object) void {
-        _ = std.c.shm_unlink(self.name());
+        shm.unlink(self.name());
     }
 
     pub fn consumed(self: *const Object) bool {
-        const flags: std.c.O = .{ .ACCMODE = .RDONLY };
-        const fd = shm_open(self.name(), @bitCast(flags), @as(c_uint, 0));
-        if (fd >= 0) {
-            _ = std.c.close(fd);
-            return false;
-        }
-        // Other errors (e.g. descriptor exhaustion) are not proof of consumption.
-        return std.c.errno(fd) == .NOENT;
+        return shm.removed(self.name());
     }
 };
 
@@ -130,11 +114,12 @@ pub const Pool = struct {
 };
 
 test "shared memory pixels survive terminal unlink through its mapping" {
+    if (!shm.supported) return error.SkipZigTest;
     const pixels = [_]u8{ 12, 34, 56, 255 };
     const object = try Object.create(&pixels);
     defer object.unlink();
     const flags: std.c.O = .{ .ACCMODE = .RDONLY };
-    const fd = shm_open(object.name(), @bitCast(flags), @as(c_uint, 0));
+    const fd = std.c.shm_open(object.name(), @bitCast(flags), @as(c_uint, 0));
     try std.testing.expect(fd >= 0);
     defer _ = std.c.close(fd);
     const mapping = std.c.mmap(null, pixels.len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
@@ -146,6 +131,7 @@ test "shared memory pixels survive terminal unlink through its mapping" {
 }
 
 test "pool bounds outstanding uploads and reclaims only consumed or discarded batches" {
+    if (!shm.supported) return error.SkipZigTest;
     var pool: Pool = .{ .allocator = std.testing.allocator };
     defer pool.deinit();
     for (0..Pool.max_objects) |i| _ = try pool.create(&.{ 0, 0, 0, 255 }, i + 1);
@@ -163,6 +149,7 @@ test "pool bounds outstanding uploads and reclaims only consumed or discarded ba
 }
 
 test "whole-frame admission rejects pressure before allocation and permits one oversized scene" {
+    if (!shm.supported) return error.SkipZigTest;
     var pool: Pool = .{ .allocator = std.testing.allocator };
     defer pool.deinit();
     const old = (try pool.create(&.{ 1, 2, 3, 255 }, 1)).*;

@@ -1,6 +1,7 @@
 //! Private producer-to-launcher quit notification. The launcher owns deadlines;
 //! the injected runtime only queues SDL quit and sends one byte.
 const std = @import("std");
+const builtin = @import("builtin");
 const os = @import("platform");
 
 pub const Supervisor = struct {
@@ -81,7 +82,26 @@ pub fn terminateAfterGrace(target: std.posix.pid_t, stop: ?*std.atomic.Value(boo
     std.posix.kill(target, std.posix.SIG.KILL) catch {};
 }
 
-pub fn notify(fd: std.posix.fd_t) bool {
+/// The inherited descriptor number the launcher passes in the runtime config.
+pub const NotifyFd = i32;
+
+/// Takes ownership of the configured notification descriptor. The launcher
+/// supervises commands only on POSIX so far; Windows runtimes ignore it and
+/// command quit relies on the SDL quit event alone.
+pub fn adoptNotifier(configured: ?NotifyFd) ?NotifyFd {
+    if (builtin.os.tag == .windows) return null;
+    const fd = configured orelse return null;
+    _ = os.posix.fcntl(fd, std.posix.F.SETFD, @as(u32, std.posix.FD_CLOEXEC)) catch {};
+    return fd;
+}
+
+pub fn releaseNotifier(fd: NotifyFd) void {
+    if (builtin.os.tag == .windows) return;
+    os.posix.close(fd);
+}
+
+pub fn notify(fd: NotifyFd) bool {
+    if (builtin.os.tag == .windows) return false;
     // Never block an input pump or change the injected app's SIGPIPE handler.
     while (true) {
         const sent = std.c.send(fd, "q", 1, std.c.MSG.NOSIGNAL | std.c.MSG.DONTWAIT);
@@ -91,6 +111,8 @@ pub fn notify(fd: std.posix.fd_t) bool {
 }
 
 test "quit notification is one byte and a closed launcher cannot raise SIGPIPE" {
+    // The launcher supervises commands through a socketpair on POSIX only.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     defer os.posix.close(fds[1]);

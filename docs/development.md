@@ -87,17 +87,103 @@ runtime still uses its existing OS threads; the desktop WM still uses libxev.
 `src/platform/` keeps file and directory operations attached to an explicit I/O
 capability. Raw descriptor operations preserve `WouldBlock` so the existing
 transport queues retain control of backpressure. Mutexes and conditions use
-pthread primitives, including timed condition waits. Owners destroy these
-objects after their users have stopped.
+pthread primitives (SRWLOCK and condition variables on Windows), including
+timed condition waits. Owners destroy these objects after their users have
+stopped. `platform.terminal` owns raw terminal mode and window size, and
+`platform.shm` owns Kitty `t=s` shared-memory objects; programs call these
+rather than termios, `ioctl` or `shm_open` directly.
 
 `test_injected_io.py` loads the core library into an ordinary C process and
 checks that startup, threaded logging, and shutdown preserve the application's
 SIGIO and SIGPIPE handlers. `test_embed_render_batches.py` covers SDL2 and SDL3
 with both synchronous composition and queued replay.
 
+## Windows
+
+The launcher, the SDL2 and SDL3 runtime libraries, the SDL probes, the Vulkan
+capture layer and the standalone termscene programs build on Windows. The
+desktop WM, hosted destinations (`--embed-jsonl`, `KATZENSTEG_TARGET`) and luchs
+do not.
+
+Link against the official SDL development packages (`SDL2-devel-<version>-mingw`
+and `SDL3-devel-<version>-mingw` from the libsdl-org releases) and run with the
+official `SDL2.dll`/`SDL3.dll` from `SDL2-<version>-win32-x64.zip` and
+`SDL3-<version>-win32-x64.zip`. SDL 2.32.10 and 3.4.16 have been tested.
+
+```sh
+zig build sdl-dynapi sdl-probes -Dsdl2-prefix=<SDL2-devel>/x86_64-w64-mingw32 -Dsdl3-prefix=<SDL3-devel>/x86_64-w64-mingw32
+cp SDL2.dll SDL3.dll zig-out/bin/
+zig-out/bin/katzensteg probe.embed.basic_sdl --frames 0
+```
+
+`sdl-probes` builds the input, OpenGL and Vulkan probes and the Vulkan capture
+layer, so every scenario in [probe-parity.md](probe-parity.md) runs from its
+launcher profile (`probe.input`, `probe.gl.sdl3`, `probe.vulkan`, ...). Windows
+has no system Vulkan headers or loader import library without the Vulkan SDK:
+the build fetches the pinned Khronos `Vulkan-Headers` package and makes an
+import library for `vulkan-1.dll` from `examples/probes/windows/vulkan-1.def`.
+Running the Vulkan probes needs only the Vulkan runtime a GPU driver installs.
+The `capture.vulkan` profile fragment points `VK_LAYER_PATH` at
+`profiles/vulkan/windows`, whose manifest loads
+`zig-out/bin/katzensteg-vulkan-layer.dll`. The layer finds the runtime in the
+SDL adapter library already loaded in the process.
+
+`zig-out/bin` then holds `katzensteg.exe`, `katzensteg-sdl2.dll`,
+`katzensteg-sdl3.dll`, `basic-sdl-demo.exe` and `basic-sdl3-demo.exe`. SDL loads
+the Katzensteg library through its dynamic API; nothing is injected into the
+process (see [Injection](launcher.md#injection)). The runtime draws on the
+console the application is attached to (`CONIN$` and `CONOUT$`). Consoles report
+no pixel size, so it asks the terminal with `CSI 14 t` and `CSI 16 t`. The SDL
+adapter profiles hide the application's own window on Windows, so it cannot
+take keyboard focus from the terminal. `basic-sdl-demo` draws a square for each
+key it receives and quits on Escape or `q`; `--frames 0` keeps it running.
+
+Katzensteg runs on the application's threads, and applications built with
+MSVC reserve 1 MiB for their main thread. Katzensteg's initialization,
+teardown and log file opening can need more than that in Debug builds (the
+standard library's Windows path conversion alone takes about 1 MiB of frame
+there), so on Windows they run on a helper thread with a 16 MiB stack
+(`platform.runOnLargeStack`) that the calling thread waits for. The Windows
+builds of `basic-sdl-demo` and `basic-sdl3-demo` reserve 1 MiB like an MSVC
+application, so probe runs catch work that needs more. Launcher profiles use
+`queued_replay`, which composes frames on Katzensteg's worker thread; a direct
+run without the launcher composes on the application thread (`sync_compose`)
+and still overflows a 1 MiB stack in Debug builds.
+
+Real applications are listed with their Windows builds in
+[external-projects.md](external-projects.md#windows).
+
+Kitty graphics need a terminal behind a ConPTY that passes APC sequences
+through, such as a Wheelhouse Cleat pane with Cleat's bundled ConPTY; the inbox
+ConPTY drops them. In a Cleat pane the probe finds ghostty and uses whole-file
+(`t=f`) uploads. `t=s` reports unsupported on Windows, because a named file
+mapping gives no consumption signal.
+
+The termscene programs need no SDL:
+
+```sh
+zig build termscene-examples
+```
+
+This installs `ttytris`, `termscene-demo`, `kitty-placement-repro` and
+`kitty-show-ppm`. `platform.terminal` puts the console into virtual-terminal
+input and output mode, and raw console reads return what is available, like
+termios `VMIN=0`/`VTIME=0`.
+
+Not yet on Windows: resizing the terminal while an application runs (there is
+no `SIGWINCH`), the launcher's quit supervision after Ctrl-] `q` (the SDL quit
+event is still sent), not waiting for orphaned descendants that hold the
+application's output pipe, and Whiskers.
+
+`zig build test` still fails overall on Windows. Pass the same `-Dsdl2-prefix`
+and `-Dsdl3-prefix` to build and run the runtime, preload and SDL adapter
+suites. The desktop WM suites do not build; the launcher destination test and
+two gamescope profile tests fail as before. Hosted-presentation and other
+POSIX-only cases are skipped.
+
 ## Logs
 
-Runtime diagnostics go to `/tmp/katzensteg-*`.
+Runtime diagnostics go to `/tmp/katzensteg-*` (`%TEMP%\katzensteg-*` on Windows).
 
 ```sh
 ls /tmp/katzensteg-*.log

@@ -20,10 +20,7 @@ pub fn popInputEvent(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event) bool {
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
-            if (input_event == .focus) {
-                var ids = rt.sdl_window_ids.keyIterator();
-                if (ids.next()) |id| out.window.windowID = id.*;
-            }
+            setEventWindowId(rt, out, input_event);
             cursor_event = out.*;
         }
         break :blk true;
@@ -44,10 +41,7 @@ pub fn popInputEventInRange(rt: *runtime_mod.Runtime, event: ?*sdl.SDL_Event, mi
         if (inputEventIsMouse(input_event)) rt.mouse_ownership.claimTerminal();
         if (event) |out| {
             fillSdlEvent(out, input_event);
-            if (input_event == .focus) {
-                var ids = rt.sdl_window_ids.keyIterator();
-                if (ids.next()) |id| out.window.windowID = id.*;
-            }
+            setEventWindowId(rt, out, input_event);
             cursor_event = out.*;
         }
         break :blk true;
@@ -166,6 +160,20 @@ fn noteCursorPositionFromSdlEvent(rt: *runtime_mod.Runtime, event: *const sdl.SD
         => rt.dispatchCursorPosition(null),
         else => {},
     }
+}
+
+/// Addresses a projected event to the application's SDL window, as SDL does
+/// for its keyboard and mouse focus window. Applications with several
+/// windows route input by `windowID`; 0 matches none of them.
+///
+/// Katzensteg presents one application window, so every event goes to the
+/// first tracked window. An application that shows several windows needs a
+/// focus window chosen by the input model instead.
+fn setEventWindowId(rt: *runtime_mod.Runtime, out: *sdl.SDL_Event, input_event: input.InputEvent) void {
+    if (input_event == .quit) return;
+    var ids = rt.sdl_window_ids.keyIterator();
+    // Keyboard, text, mouse and window events share the windowID offset.
+    if (ids.next()) |id| out.window.windowID = id.*;
 }
 
 fn fillSdlEvent(event: *sdl.SDL_Event, input_event: input.InputEvent) void {
@@ -455,4 +463,29 @@ fn eventType(event: input.InputEvent) u32 {
         .focus => |focused| if (focused) sdl.SDL_WINDOWEVENT_FOCUS_GAINED else sdl.SDL_WINDOWEVENT_FOCUS_LOST,
         else => input.inputEventSdlType(event),
     };
+}
+
+test "projected input events are addressed to the application's SDL window" {
+    var rt = runtime_mod.Runtime.initShutdownStub();
+    defer rt.deinit();
+    rt.input_enabled = true;
+    rt.input_parser = input.InputModel.init(rt.allocator);
+    var event: sdl.SDL_Event = undefined;
+
+    // Without a tracked window the ID stays 0.
+    try rt.input_parser.?.feed("a");
+    try std.testing.expect(popInputEvent(&rt, &event));
+    try std.testing.expectEqual(@as(u32, sdl.SDL_KEYDOWN), event.type);
+    try std.testing.expectEqual(@as(u32, 0), event.key.windowID);
+    while (popInputEvent(&rt, &event)) {}
+
+    try rt.sdl_window_ids.put(7, 0x1000);
+    try rt.input_parser.?.feed("a");
+    const expected = [_]u32{ sdl.SDL_KEYDOWN, sdl.SDL_TEXTINPUT, sdl.SDL_KEYUP };
+    for (expected) |event_type| {
+        try std.testing.expect(popInputEvent(&rt, &event));
+        try std.testing.expectEqual(event_type, event.type);
+        try std.testing.expectEqual(@as(u32, 7), event.key.windowID);
+    }
+    try std.testing.expect(!popInputEvent(&rt, &event));
 }

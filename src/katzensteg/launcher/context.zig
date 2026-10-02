@@ -10,7 +10,7 @@ pub const ExpansionContext = struct {
     owns_path: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator) !ExpansionContext {
-        const home = system_io.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+        const home = system_io.process.homeDirOwned(allocator) catch |err| switch (err) {
             error.EnvironmentVariableNotFound => try allocator.dupe(u8, ""),
             else => return err,
         };
@@ -40,7 +40,7 @@ pub fn resolveProfileDirs(io: std.Io, allocator: std.mem.Allocator) !std.ArrayLi
 
     if (system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_PROFILE_DIR")) |raw| {
         defer allocator.free(raw);
-        var it = std.mem.splitScalar(u8, raw, ':');
+        var it = std.mem.splitScalar(u8, raw, system_io.process.path_list_delimiter);
         while (it.next()) |segment| {
             const trimmed = std.mem.trim(u8, segment, " \t");
             if (trimmed.len == 0) continue;
@@ -70,7 +70,7 @@ fn userConfigProfilesDir(allocator: std.mem.Allocator) !?[]const u8 {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
-    if (system_io.process.getEnvVarOwned(allocator, "HOME")) |home| {
+    if (system_io.process.homeDirOwned(allocator)) |home| {
         defer allocator.free(home);
         if (home.len > 0) return try std.fs.path.join(allocator, &.{ home, ".config", "katzensteg", "profiles" });
     } else |err| switch (err) {

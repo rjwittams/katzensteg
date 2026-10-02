@@ -1,6 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
-const raw = @import("posix.zig");
+// Descriptor operations: read/write/close/pread/pwrite on the native handle.
+const is_windows = @import("builtin").os.tag == .windows;
+const raw = if (is_windows) @import("windows.zig") else @import("posix.zig");
 pub const File = struct {
     handle: std.posix.fd_t,
     io: Io,
@@ -24,6 +26,16 @@ pub const File = struct {
         raw.close(self.handle);
     }
     pub fn read(self: File, bytes: []u8) !usize {
+        return raw.read(self.handle, bytes);
+    }
+    /// Reads buffered bytes without waiting for a pipe writer. Returns
+    /// WouldBlock for an open, empty pipe and 0 at EOF. The caller must be
+    /// the pipe's only reader, including through duplicated handles.
+    pub fn readPipeAvailable(self: File, bytes: []u8) !usize {
+        if (is_windows) return raw.readPipeAvailable(self.handle, bytes);
+        if (bytes.len == 0) return 0;
+        var fds = [_]std.posix.pollfd{.{ .fd = self.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try raw.poll(&fds, 0) == 0) return error.WouldBlock;
         return raw.read(self.handle, bytes);
     }
     pub fn write(self: File, bytes: []const u8) !usize {
@@ -84,10 +96,10 @@ pub const File = struct {
         return self.native().setLength(self.io, size);
     }
     pub fn seekTo(self: File, offset: u64) !void {
-        if (std.c.lseek(self.handle, @intCast(offset), std.c.SEEK.SET) < 0) return error.Unseekable;
+        return raw.seek(self.handle, @intCast(offset), .set);
     }
     pub fn seekFromEnd(self: File, offset: i64) !void {
-        if (std.c.lseek(self.handle, offset, std.c.SEEK.END) < 0) return error.Unseekable;
+        return raw.seek(self.handle, offset, .end);
     }
     pub fn sync(self: File) !void {
         return self.native().sync(self.io);
@@ -210,9 +222,35 @@ pub const CreateFlags = struct {
     exclusive: bool = false,
     mode: std.c.mode_t = 0o666,
     fn native(self: CreateFlags) Io.Dir.CreateFileOptions {
-        return .{ .read = self.read, .truncate = self.truncate, .exclusive = self.exclusive, .permissions = .fromMode(self.mode) };
+        // Windows files carry attributes, not a mode; the mode applies on POSIX only.
+        const permissions: Io.File.Permissions = if (is_windows) .default_file else .fromMode(self.mode);
+        return .{ .read = self.read, .truncate = self.truncate, .exclusive = self.exclusive, .permissions = permissions };
     }
 };
+/// Directory for runtime diagnostics: `/tmp` on POSIX, and the user's
+/// temporary directory (`TEMP`, then `TMP`) on Windows.
+pub fn logDir() []const u8 {
+    if (is_windows) return windowsTempDir();
+    return "/tmp";
+}
+
+/// Directory for transient runtime files such as upload staging: `TMPDIR`
+/// or `/tmp` on POSIX, and `TEMP` or `TMP` on Windows.
+pub fn tempDir() []const u8 {
+    if (is_windows) return windowsTempDir();
+    return if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
+}
+
+fn windowsTempDir() []const u8 {
+    inline for (.{ "TEMP", "TMP" }) |name| {
+        if (std.c.getenv(name)) |value| {
+            const dir = std.mem.span(value);
+            if (dir.len > 0) return std.mem.trimEnd(u8, dir, "\\/");
+        }
+    }
+    return ".";
+}
+
 pub fn cwd(io: Io) Dir {
     return .{ .value = .cwd(), .io = io };
 }

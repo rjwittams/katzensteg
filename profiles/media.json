@@ -44,6 +44,16 @@
         "$HOME/dev/ANESE/roms/tests/cpu/instr_misc/rom_singles/01-abs_x_wrap.nes"
       ]
     },
+    "anese.2048": {
+      "extends": [
+        "app.anese",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "$HOME/dev/ANESE/roms/demos/2048/2048.nes"
+      ]
+    },
     "app.cannonball": {
       "hidden": true,
       "target": "$HOME/dev/cannonball/build/cannonball",

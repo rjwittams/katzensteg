@@ -5,8 +5,12 @@ const system_io = @import("platform");
 pub const DirectTty = struct {
     const Size = struct { rows: u16, cols: u16, pixel_width: u16, pixel_height: u16 };
 
+    /// Output: graphics, text and terminal queries go here.
     file: system_io.fs.File,
-    original_termios: std.posix.termios,
+    /// Input: key and mouse reports and query replies. The same descriptor as
+    /// `file` for POSIX `/dev/tty`; the console input buffer on Windows.
+    input: system_io.fs.File,
+    raw_mode: system_io.terminal.RawMode,
     rows: u16,
     cols: u16,
     pixel_width: u16,
@@ -20,40 +24,46 @@ pub const DirectTty = struct {
     mouse_units: terminal_keys.MouseUnits = .cell,
 
     pub fn init(io: std.Io) !DirectTty {
-        const file = try system_io.fs.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
-        const original_termios = try system_io.posix.tcgetattr(file.handle);
+        const tty = try system_io.terminal.Tty.open(io);
+        errdefer tty.close();
+        const raw_mode = try system_io.terminal.RawMode.enter(tty.input, tty.output);
+        errdefer raw_mode.restore();
 
-        var raw = original_termios;
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.ISIG = false;
-        raw.iflag.IXON = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-        try system_io.posix.tcsetattr(file.handle, .FLUSH, raw);
-
-        var writer = file.writerStreaming(&.{});
+        var writer = tty.output.writerStreaming(&.{});
         try writer.interface.writeAll("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l");
         try writer.interface.flush();
 
-        const size = querySize(file.handle);
-        return .{ .file = file, .original_termios = original_termios, .rows = size.rows, .cols = size.cols, .pixel_width = size.pixel_width, .pixel_height = size.pixel_height };
+        var size = querySize(tty.output);
+        // Windows consoles report cells only; without pixels the layout
+        // would treat cells as square and distort the image.
+        if (!system_io.terminal.size_reports_pixels and size.pixel_width == 0) {
+            if (system_io.terminal.queryPixelSize(tty, size.cols, size.rows, 250)) |pixels| {
+                size.pixel_width = pixels.width;
+                size.pixel_height = pixels.height;
+            }
+        }
+        return .{ .file = tty.output, .input = tty.input, .raw_mode = raw_mode, .rows = size.rows, .cols = size.cols, .pixel_width = size.pixel_width, .pixel_height = size.pixel_height };
+    }
+
+    /// Both directions, for the terminal capability probes.
+    pub fn terminal(self: *const DirectTty) system_io.terminal.Tty {
+        return .{ .input = self.input, .output = self.file };
     }
 
     pub fn refreshSize(self: *DirectTty) bool {
-        return self.applySize(querySize(self.file.handle));
+        return self.applySize(querySize(self.file));
     }
 
     pub fn deinit(self: *DirectTty) void {
         self.disableInputCapture() catch {};
         self.drainInput();
         self.clearGraphics() catch {};
-        system_io.posix.tcsetattr(self.file.handle, .FLUSH, self.original_termios) catch {};
+        self.raw_mode.restore();
         var writer = self.file.writerStreaming(&.{});
         writer.interface.writeAll("\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
         writer.interface.writeAll(kittyGraphicsClearSequence()) catch {};
         writer.interface.flush() catch {};
-        self.file.close();
+        self.terminal().close();
     }
 
     pub fn enableInputCapture(self: *DirectTty) !void {
@@ -92,7 +102,7 @@ pub const DirectTty = struct {
     fn drainInput(self: *DirectTty) void {
         var buf: [256]u8 = undefined;
         while (true) {
-            const n = system_io.posix.read(self.file.handle, &buf) catch |err| switch (err) {
+            const n = self.input.read(&buf) catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => return,
             };
@@ -109,13 +119,9 @@ pub const DirectTty = struct {
         return changed;
     }
 
-    fn querySize(fd: std.posix.fd_t) Size {
-        var wsz: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
-        const rc = std.posix.system.ioctl(fd, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
-        if (rc == 0 and wsz.row > 0 and wsz.col > 0) {
-            return .{ .rows = wsz.row, .cols = wsz.col, .pixel_width = wsz.xpixel, .pixel_height = wsz.ypixel };
-        }
-        return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
+    fn querySize(output: system_io.fs.File) Size {
+        const size = system_io.terminal.size(output) orelse return .{ .rows = 24, .cols = 80, .pixel_width = 0, .pixel_height = 0 };
+        return .{ .rows = size.rows, .cols = size.cols, .pixel_width = size.xpixel, .pixel_height = size.ypixel };
     }
 };
 

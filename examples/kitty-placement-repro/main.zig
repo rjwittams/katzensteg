@@ -13,13 +13,6 @@ const ActivePlacement = struct {
     placement_id: u32,
 };
 
-fn querySize(fd: std.posix.fd_t) struct { rows: u16, cols: u16 } {
-    var wsz: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
-    const rc = std.posix.system.ioctl(fd, std.posix.T.IOCGWINSZ, @intFromPtr(&wsz));
-    if (rc == 0 and wsz.row > 0 and wsz.col > 0) return .{ .rows = wsz.row, .cols = wsz.col };
-    return .{ .rows = 24, .cols = 80 };
-}
-
 fn writeStatus(out: *std.Io.Writer, frame: usize, active: ActivePlacement, rows: u16, cols: u16) !void {
     try out.writeAll("\x1b[0m");
     try protocol.moveCursor(out, 1, 1);
@@ -37,18 +30,8 @@ pub fn main(process_init: std.process.Init) !void {
     const stdout_file = system_io.fs.File.stdout(io);
     var writer_state = stdout_file.writerStreaming(&.{});
     const writer = &writer_state.interface;
-    const stdin_fd = system_io.fs.File.stdin(io).handle;
-    const original_termios = try system_io.posix.tcgetattr(stdin_fd);
-    defer system_io.posix.tcsetattr(stdin_fd, .FLUSH, original_termios) catch {};
-
-    var raw = original_termios;
-    raw.lflag.ECHO = false;
-    raw.lflag.ICANON = false;
-    raw.lflag.ISIG = false;
-    raw.iflag.IXON = false;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try system_io.posix.tcsetattr(stdin_fd, .FLUSH, raw);
+    const raw_mode = try system_io.terminal.RawMode.enter(system_io.fs.File.stdin(io), stdout_file);
+    defer raw_mode.restore();
 
     if (!try kitty.detectGraphicsSupport(io, allocator, writer)) {
         std.debug.print("kitty-placement-repro: kitty graphics protocol not detected.\n", .{});
@@ -63,7 +46,7 @@ pub fn main(process_init: std.process.Init) !void {
     try protocol.writeTransmitRgba(writer, red_image_id, &red, 1, 1);
     try protocol.writeTransmitRgba(writer, blue_image_id, &blue, 1, 1);
 
-    const size = querySize(stdout_file.handle);
+    const size = system_io.terminal.size(stdout_file) orelse system_io.terminal.Size{ .rows = 24, .cols = 80 };
     var placement_counter: u32 = 1;
     var active: ?ActivePlacement = null;
     var frame: usize = 0;

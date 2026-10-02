@@ -6,7 +6,8 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
-#include <dlfcn.h>
+#include "vulkan_layer_os.h"
+
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -15,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #define KS_LAYER_NAME "VK_LAYER_KATZENSTEG_capture"
 #define KS_MAX_INSTANCES 8
@@ -26,7 +26,9 @@
 #define KS_MAX_SWAPCHAIN_IMAGES 16
 #define KS_MAX_PRESENT_WAITS 16
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#define KS_CORE_LIB_BASENAME "katzensteg-core.dll"
+#elif defined(__APPLE__)
 #define KS_CORE_LIB_BASENAME "libkatzensteg-core.dylib"
 #else
 #define KS_CORE_LIB_BASENAME "libkatzensteg-core.so"
@@ -146,8 +148,6 @@ static ks_log_c_fn g_log_c;
 static bool g_capture_enabled;
 static bool g_trace_enabled;
 
-extern void ks_scrub_colon_env_entry(const char *name, const char *entry);
-
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetInstanceProcAddr(VkInstance instance, const char *name);
 static PFN_vkVoidFunction VKAPI_CALL ks_vkGetDeviceProcAddr(VkDevice device, const char *name);
 static VkResult VKAPI_CALL ks_vkCreateInstance(const VkInstanceCreateInfo *create_info, const VkAllocationCallbacks *allocator, VkInstance *instance);
@@ -166,7 +166,7 @@ static bool env_enabled(const char *name)
 {
     const char *value = getenv(name);
     if (!value || !*value) return false;
-    return strcmp(value, "0") != 0 && strcasecmp(value, "false") != 0 && strcasecmp(value, "no") != 0 && strcasecmp(value, "off") != 0;
+    return strcmp(value, "0") != 0 && ks_layer_os_strcasecmp(value, "false") != 0 && ks_layer_os_strcasecmp(value, "no") != 0 && ks_layer_os_strcasecmp(value, "off") != 0;
 }
 
 static bool capture_enabled(void)
@@ -186,9 +186,9 @@ static void katzensteg_vulkan_layer_constructor(void)
     g_trace_enabled = env_enabled("KATZENSTEG_TRACE_VULKAN");
     /* Capture this process only. Children get a scrubbed environment unless
        their launcher/profile explicitly opts them back into Katzensteg. */
-    ks_scrub_colon_env_entry("VK_INSTANCE_LAYERS", KS_LAYER_NAME);
-    unsetenv("KATZENSTEG_VULKAN_CAPTURE");
-    unsetenv("KATZENSTEG_TRACE_VULKAN");
+    ks_layer_os_scrub_list_env("VK_INSTANCE_LAYERS", KS_LAYER_NAME);
+    ks_layer_os_unsetenv("KATZENSTEG_VULKAN_CAPTURE");
+    ks_layer_os_unsetenv("KATZENSTEG_TRACE_VULKAN");
 }
 
 static void tracef(const char *fmt, ...)
@@ -201,7 +201,7 @@ static void tracef(const char *fmt, ...)
     va_end(args);
 
     if (!g_log_c)
-        g_log_c = (ks_log_c_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_log_c");
+        g_log_c = (ks_log_c_fn)ks_layer_os_global_symbol("ks_katzensteg_log_c");
     if (g_log_c) {
         g_log_c("vulkan", message);
         return;
@@ -210,33 +210,30 @@ static void tracef(const char *fmt, ...)
 
 static void *open_core_library_from_layer_dir(void)
 {
-    Dl_info info;
-    if (dladdr((const void *)&open_core_library_from_layer_dir, &info) == 0 || !info.dli_fname) return NULL;
-
-    const char *slash = strrchr(info.dli_fname, '/');
-    if (!slash) return dlopen(KS_CORE_LIB_BASENAME, RTLD_NOW | RTLD_LOCAL);
+    char dir[PATH_MAX];
+    if (!ks_layer_os_own_directory(dir, sizeof(dir))) return ks_layer_os_open(KS_CORE_LIB_BASENAME);
 
     char path[PATH_MAX];
-    const size_t dir_len = (size_t)(slash - info.dli_fname);
-    const int written = snprintf(path, sizeof(path), "%.*s/%s", (int)dir_len, info.dli_fname, KS_CORE_LIB_BASENAME);
+    const int written = snprintf(path, sizeof(path), "%s%c%s", dir, KS_LAYER_OS_PATH_SEPARATOR, KS_CORE_LIB_BASENAME);
     if (written <= 0 || (size_t)written >= sizeof(path)) return NULL;
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    return ks_layer_os_open(path);
 }
 
 static void *open_core_library(void)
 {
+    char error[256];
     const char *override = getenv("KATZENSTEG_CORE_LIB");
     if (override && *override) {
-        void *handle = dlopen(override, RTLD_NOW | RTLD_LOCAL);
+        void *handle = ks_layer_os_open(override);
         if (handle) return handle;
-        tracef("failed to load KATZENSTEG_CORE_LIB=%s: %s", override, dlerror());
+        tracef("failed to load KATZENSTEG_CORE_LIB=%s: %s", override, ks_layer_os_error(error, sizeof(error)));
     }
 
     void *handle = open_core_library_from_layer_dir();
     if (handle) return handle;
 
-    handle = dlopen(KS_CORE_LIB_BASENAME, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) tracef("failed to load " KS_CORE_LIB_BASENAME ": %s", dlerror());
+    handle = ks_layer_os_open(KS_CORE_LIB_BASENAME);
+    if (!handle) tracef("failed to load " KS_CORE_LIB_BASENAME ": %s", ks_layer_os_error(error, sizeof(error)));
     return handle;
 }
 
@@ -246,14 +243,14 @@ static ks_present_external_framebuffer_fn present_fn(void)
     if (g_core_lookup_attempted) return NULL;
     g_core_lookup_attempted = true;
 
-    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_present_external_framebuffer");
+    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol("ks_katzensteg_present_external_framebuffer");
     if (g_present_external_framebuffer) return g_present_external_framebuffer;
 
     g_core_handle = open_core_library();
     if (g_core_handle)
-        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(g_core_handle, "ks_katzensteg_present_external_framebuffer");
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_symbol(g_core_handle, "ks_katzensteg_present_external_framebuffer");
     if (!g_present_external_framebuffer)
-        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_present_external_framebuffer");
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol("ks_katzensteg_present_external_framebuffer");
     return g_present_external_framebuffer;
 }
 
@@ -741,7 +738,7 @@ static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, Swapc
     return true;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *version)
+KS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *version)
 {
     if (!version) return VK_ERROR_INITIALIZATION_FAILED;
     if (version->loaderLayerInterfaceVersion > 2)
@@ -752,17 +749,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiat
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name)
+KS_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name)
 {
     return ks_vkGetInstanceProcAddr(instance, name);
 }
 
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *name)
+KS_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *name)
 {
     return ks_vkGetDeviceProcAddr(device, name);
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *properties)
+KS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *properties)
 {
     if (!properties) {
         *count = 1;
@@ -778,7 +775,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *coun
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer_name, uint32_t *count, VkExtensionProperties *properties)
+KS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer_name, uint32_t *count, VkExtensionProperties *properties)
 {
     if (layer_name && strcmp(layer_name, KS_LAYER_NAME) == 0) {
         *count = 0;

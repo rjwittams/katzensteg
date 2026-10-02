@@ -783,7 +783,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     // Capability probes read terminal replies directly. Finish them before
     // enabling input, then reuse the terminal's profile for every producer.
     const output_profile = blk: {
-        var probe_upload = try selectUploadPolicy(allocator, tty.file);
+        var probe_upload = try selectUploadPolicy(allocator, tty.terminal());
         defer deinitUploadPolicy(io, allocator, &probe_upload);
         break :blk probe_upload.profile;
     };
@@ -2182,8 +2182,8 @@ fn closeSessionControl(session: *WmProducerSession) void {
     session.producer.channel.closeControl();
 }
 
-fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.fs.File) !render_batch_protocol.UploadPolicy {
-    const io = tty.io;
+fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.terminal.Tty) !render_batch_protocol.UploadPolicy {
+    const io = tty.output.io;
     const path = try upload_path_mod.makeUploadPath(allocator);
     errdefer allocator.free(path);
     {

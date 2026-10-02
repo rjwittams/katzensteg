@@ -47,12 +47,26 @@
       "SDL2_ttf": "sdl2_ttf",
       "uv": "uv",
       "zig": "zig"
+    },
+    "winget": {
+      "cl": "Microsoft.VisualStudio.2022.BuildTools",
+      "cmake": "Kitware.CMake",
+      "git": "Git.Git",
+      "msbuild": "Microsoft.VisualStudio.2022.BuildTools",
+      "ninja": "Ninja-build.Ninja",
+      "zig": "zig.zig"
     }
   },
   "doctor": {
     "tools": [
       "zig",
-      "pkg-config",
+      {
+        "name": "pkg-config",
+        "platforms": [
+          "linux",
+          "macos"
+        ]
+      },
       {
         "name": "gamescope",
         "platforms": [
@@ -61,7 +75,13 @@
       }
     ],
     "pkg_config": [
-      "sdl2",
+      {
+        "name": "sdl2",
+        "platforms": [
+          "linux",
+          "macos"
+        ]
+      },
       {
         "name": "gl",
         "platforms": [
@@ -76,7 +96,15 @@
       }
     ],
     "paths": [],
-    "assets": []
+    "assets": [
+      {
+        "label": "SDL2 Visual C++ development package; set SDL2 to its SDL2-<version> directory (from SDL2-devel-<version>-VC.zip)",
+        "platforms": [
+          "windows"
+        ],
+        "path": "$SDL2/lib/x64/SDL2.dll"
+      }
+    ]
   },
   "projects": [
     {
@@ -272,7 +300,9 @@
         "rjwittams": "https://github.com/rjwittams/scummvm.git"
       },
       "profiles": [
-        "mi2"
+        "mi2",
+        "scummvm.launcher",
+        "bass"
       ],
       "build": {
         "macos": [
@@ -282,29 +312,84 @@
         "linux": [
           "./configure",
           "make -j$(nproc)"
+        ],
+        "windows": [
+          "cmake -S devtools/create_project/cmake -B dists/msvc/create_project-build -G Ninja -DCMAKE_BUILD_TYPE=Release",
+          "cmake --build dists/msvc/create_project-build",
+          "cd dists\\msvc && create_project-build\\create_project.exe ..\\.. --msvc --msvc-version 17 --sdl2 --libs-path %SDL2% --disable-all-engines --enable-engine=sky,queen --disable-detection-full --disable-zlib --disable-mad --disable-fribidi --disable-ogg --disable-vorbis --disable-flac --disable-png --disable-mpeg2 --disable-theoradec --disable-freetype2 --disable-jpeg --disable-fluidsynth --disable-libcurl --disable-sdlnet --disable-nasm --disable-http --disable-basic-net --disable-cloud --disable-enet --disable-tts --disable-printing --disable-bink --disable-3d --disable-opengl --disable-opengl_game_classic --disable-opengl_game_shaders --disable-tinygl --disable-mt32emu --disable-translation --disable-taskbar",
+          "msbuild dists\\msvc\\scummvm.sln /m /p:Configuration=Release /p:Platform=x64",
+          "copy /y %SDL2%\\lib\\x64\\SDL2.dll dists\\msvc\\Releasex64\\"
         ]
       },
       "doctor": {
         "tools": [
-          "make"
+          {
+            "name": "make",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          },
+          {
+            "name": "msbuild",
+            "platforms": [
+              "windows"
+            ]
+          },
+          {
+            "name": "cmake",
+            "platforms": [
+              "windows"
+            ]
+          }
         ],
         "pkg_config": [
-          "sdl2"
+          {
+            "name": "sdl2",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          }
         ],
         "paths": [
           {
             "kind": "output",
-            "path": "scummvm"
+            "path": "scummvm",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          },
+          {
+            "kind": "output",
+            "path": "dists/msvc/Releasex64/scummvm.exe",
+            "platforms": [
+              "windows"
+            ]
+          },
+          {
+            "kind": "output",
+            "path": "dists/msvc/Releasex64/SDL2.dll",
+            "platforms": [
+              "windows"
+            ]
           }
         ],
         "assets": [
           {
             "path": "$HOME/roms/mi2"
+          },
+          {
+            "label": "Beneath a Steel Sky (freeware from scummvm.org/games)",
+            "path": "$HOME/roms/bass/sky.dsk"
           }
         ]
       },
       "notes": [
-        "No app-side Katzensteg patch is currently required."
+        "No app-side Katzensteg patch is currently required.",
+        "Windows: build from an x64 Visual Studio developer prompt with SDL2 set to the SDL2 Visual C++ development package. create_project generates the MSBuild solution in dists/msvc; the listed options build only the freeware-game engines (sky, queen) without optional libraries. Windows builds link the official SDL2.dll through the Visual C++ development package's import library and copy SDL2.dll beside the executable; SDL_DYNAMIC_API cannot reach a statically linked SDL.",
+        "The bass profile runs the freeware Beneath a Steel Sky from $HOME/roms/bass; scummvm.launcher shows the launcher without game data."
       ]
     },
     {
@@ -312,7 +397,7 @@
       "display_name": "Cannonball",
       "directory": "cannonball",
       "primary_remote": "rjwittams",
-      "checkout": "macos-sdl2-build-fixes",
+      "checkout": "windows-sdl2-build",
       "remotes": {
         "origin": "https://github.com/djyt/cannonball.git",
         "rjwittams": "https://github.com/rjwittams/cannonball.git"
@@ -328,19 +413,47 @@
         "linux": [
           "cmake -S cmake -B build -DTARGET=linux.cmake",
           "cmake --build build"
+        ],
+        "windows": [
+          "cmake -S cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTARGET=win64-sdl2.cmake -Dboost_dir=%BOOST_ROOT% -Dsdl2_dir=%SDL2%/cmake",
+          "cmake --build build",
+          "copy /y %SDL2%\\lib\\x64\\SDL2.dll build\\"
         ]
       },
       "doctor": {
         "tools": [
-          "cmake"
+          "cmake",
+          {
+            "name": "ninja",
+            "platforms": [
+              "windows"
+            ]
+          }
         ],
         "pkg_config": [
-          "sdl2"
+          {
+            "name": "sdl2",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          }
         ],
         "paths": [
           {
             "kind": "output",
-            "path": "build/cannonball"
+            "path": "build/cannonball",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          },
+          {
+            "kind": "output",
+            "path": "build/cannonball.exe",
+            "platforms": [
+              "windows"
+            ]
           },
           {
             "kind": "config",
@@ -444,8 +557,11 @@
         ]
       },
       "notes": [
-        "Pushed branch contains macOS CMake and static-assert portability fixes.",
-        "The launcher uses the config.xml generated into the CMake build directory."
+        "Branch windows-sdl2-build is macos-sdl2-build-fixes plus a Windows CMake target (cmake/win64-sdl2.cmake).",
+        "It contains the macOS CMake and static-assert portability fixes.",
+        "The launcher uses the config.xml generated into the CMake build directory.",
+        "Windows: build from an x64 Visual Studio developer prompt with SDL2 set to the SDL2 Visual C++ development package and BOOST_ROOT to extracted Boost headers (header-only; no Boost build). win64-sdl2.cmake renders through SDL's surface path and takes DirectInput from the Windows SDK, so the DirectX 8.1 SDK is not needed. Windows builds link the official SDL2.dll through the Visual C++ development package's import library and copy SDL2.dll beside the executable; SDL_DYNAMIC_API cannot reach a statically linked SDL.",
+        "Cannonball needs the OutRun revision B ROMs in roms/ and exits before its first SDL call without them."
       ]
     },
     {
@@ -551,7 +667,8 @@
         "rjwittams": "https://github.com/rjwittams/ANESE.git"
       },
       "profiles": [
-        "anese.test"
+        "anese.test",
+        "anese.2048"
       ],
       "build": {
         "macos": [
@@ -561,25 +678,55 @@
         "linux": [
           "cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
           "cmake --build build"
+        ],
+        "windows": [
+          "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+          "cmake --build build",
+          "copy /y %SDL2%\\lib\\x64\\SDL2.dll build\\"
         ]
       },
       "doctor": {
         "tools": [
-          "cmake"
+          "cmake",
+          {
+            "name": "ninja",
+            "platforms": [
+              "windows"
+            ]
+          }
         ],
         "pkg_config": [
-          "sdl2"
+          {
+            "name": "sdl2",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          }
         ],
         "paths": [
           {
             "kind": "output",
-            "path": "build/anese"
+            "path": "build/anese",
+            "platforms": [
+              "linux",
+              "macos"
+            ]
+          },
+          {
+            "kind": "output",
+            "path": "build/anese.exe",
+            "platforms": [
+              "windows"
+            ]
           }
         ],
         "assets": []
       },
       "notes": [
-        "No app-side Katzensteg patch is currently required."
+        "No app-side Katzensteg patch is currently required.",
+        "Windows: build from an x64 Visual Studio developer prompt with SDL2 set to the SDL2 Visual C++ development package (ANESE's FindSDL2 reads it). Windows builds link the official SDL2.dll through the Visual C++ development package's import library and copy SDL2.dll beside the executable; SDL_DYNAMIC_API cannot reach a statically linked SDL.",
+        "anese.2048 runs the homebrew 2048 demo shipped in roms/demos; anese.test runs a CPU test ROM."
       ]
     }
   ]

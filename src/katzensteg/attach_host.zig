@@ -52,7 +52,7 @@ pub fn writeInitialControl(writer: anytype, options: AttachOptions) !void {
 pub fn runExec(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, options: RunExecOptions) !u8 {
     var tty = try DirectTty.init(io);
     defer tty.deinit();
-    var upload = try selectUploadPolicy(allocator, tty.file);
+    var upload = try selectUploadPolicy(allocator, tty.terminal());
     defer deinitUploadPolicy(io, allocator, &upload);
 
     var output_writer = tty.file.writerStreaming(&.{});
@@ -132,8 +132,8 @@ fn childTermExitCode(term: system_io.process.Child.Term) u8 {
     };
 }
 
-fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.fs.File) !render_batch_protocol.UploadPolicy {
-    const io = tty.io;
+fn selectUploadPolicy(allocator: std.mem.Allocator, tty: system_io.terminal.Tty) !render_batch_protocol.UploadPolicy {
+    const io = tty.output.io;
     const path = try upload_path_mod.makeUploadPath(allocator);
     errdefer allocator.free(path);
     {
@@ -252,7 +252,9 @@ test "attach host exec loop applies fake peer frame batch" {
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
 
-    const code = try runExecWithWriter(io, std.testing.allocator, &.{ "python3", script_path }, &out.writer, .{
+    // On Windows `python3` is usually the Store installer alias.
+    const python = if (@import("builtin").os.tag == .windows) "python" else "python3";
+    const code = try runExecWithWriter(io, std.testing.allocator, &.{ python, script_path }, &out.writer, .{
         .rect_cells = .{ .row = 1, .col = 1, .rows = 24, .cols = 80 },
     });
 

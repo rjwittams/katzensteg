@@ -2,7 +2,12 @@
   "profiles": {
     "app.scummvm": {
       "hidden": true,
-      "target": "$HOME/dev/scummvm/scummvm",
+      "target": {
+        "linux": "$HOME/dev/scummvm/scummvm",
+        "macos": "$HOME/dev/scummvm/scummvm",
+        "windows": "$HOME/dev/scummvm/dists/msvc/Releasex64/scummvm",
+        "other": "$HOME/dev/scummvm/scummvm"
+      },
       "env": {
         "SDL_RENDER_DRIVER": "software",
         "KATZENSTEG_COMPOSITE_DEBUG": "1",
@@ -21,6 +26,30 @@
         "--renderer=software",
         "--path=$HOME/roms/mi2",
         "monkey2"
+      ]
+    },
+    "scummvm.launcher": {
+      "extends": [
+        "app.scummvm",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--no-fullscreen",
+        "--gfx-mode=surfacesdl"
+      ]
+    },
+    "bass": {
+      "extends": [
+        "app.scummvm",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--no-fullscreen",
+        "--gfx-mode=surfacesdl",
+        "--path=$HOME/roms/bass",
+        "sky"
       ]
     }
   }

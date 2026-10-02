@@ -7,6 +7,13 @@
             .url = "https://github.com/rjwittams/libxev/archive/6871dcb89dbf59a391d38dd6e827f14290fbc990.tar.gz",
             .hash = "libxev-0.0.0-86vtc2wbFABEWQR4CfGZ2ec9lJqzvG1IwIFes2tKhOxz",
         },
+        // Vulkan headers for Windows, which has no system copy. Fetched only
+        // when a Windows build compiles the Vulkan layer or probes.
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.309.tar.gz",
+            .hash = "N-V-__8AAPzz4AHlh4uxSRPYF16YYiktAY5ZbN3H69vXPDIC",
+            .lazy = true,
+        },
     },
     .paths = .{""},
     .fingerprint = 0x7e82e13be4d2d340,

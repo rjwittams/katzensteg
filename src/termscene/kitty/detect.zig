@@ -33,50 +33,53 @@ pub fn detectGraphicsSupport(io: std.Io, allocator: std.mem.Allocator, writer: a
     return std.mem.indexOf(u8, reply, "OK") != null;
 }
 
-pub fn detectGraphicsSupportOnTty(allocator: std.mem.Allocator, tty: system_io.fs.File) !bool {
-    var writer_state = tty.writerStreaming(&.{});
+/// The terminal the probes below write queries to and read replies from.
+pub const Tty = system_io.terminal.Tty;
+
+pub fn detectGraphicsSupportOnTty(allocator: std.mem.Allocator, tty: Tty) !bool {
+    var writer_state = tty.output.writerStreaming(&.{});
     const writer = &writer_state.interface;
     try writer.writeAll("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
-    const reply = try readRepliesFromFile(allocator, tty, 300);
+    const reply = try readRepliesFromFile(allocator, tty.input, 300);
     defer allocator.free(reply);
     return std.mem.indexOf(u8, reply, "OK") != null;
 }
 
-pub fn detectSharedMemorySupport(allocator: std.mem.Allocator, tty: system_io.fs.File) !bool {
+pub fn detectSharedMemorySupport(allocator: std.mem.Allocator, tty: Tty) !bool {
     const object = @import("shared_memory.zig").Object.create(&.{ 0, 0, 0, 255 }) catch return false;
     defer object.unlink();
-    var output = tty.writerStreaming(&.{});
+    var output = tty.output.writerStreaming(&.{});
     try protocol.writeQueryShmRgba(&output.interface, object.name());
-    const reply = try readRepliesFromFile(allocator, tty, 300);
+    const reply = try readRepliesFromFile(allocator, tty.input, 300);
     defer allocator.free(reply);
     return std.mem.indexOf(u8, reply, "\x1b_Gi=33;OK\x1b\\") != null;
 }
 
-pub fn detectFileTransmissionSupport(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8) !bool {
+pub fn detectFileTransmissionSupport(allocator: std.mem.Allocator, tty: Tty, path: []const u8) !bool {
     return detectFileTransmissionSupportOffset(allocator, tty, path);
 }
 
-pub fn detectFileTransmissionSupportWhole(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8) !bool {
-    var writer_state = tty.writerStreaming(&.{});
+pub fn detectFileTransmissionSupportWhole(allocator: std.mem.Allocator, tty: Tty, path: []const u8) !bool {
+    var writer_state = tty.output.writerStreaming(&.{});
     const writer = &writer_state.interface;
     try protocol.writeQueryFileRgbaWhole(writer, path, 1, 1);
-    const reply = try readRepliesFromFile(allocator, tty, 300);
+    const reply = try readRepliesFromFile(allocator, tty.input, 300);
     defer allocator.free(reply);
     return std.mem.indexOf(u8, reply, "OK") != null;
 }
 
-pub fn detectFileTransmissionSupportOffset(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8) !bool {
-    const io = tty.io;
+pub fn detectFileTransmissionSupportOffset(allocator: std.mem.Allocator, tty: Tty, path: []const u8) !bool {
+    const io = tty.output.io;
     try prepareFileOffsetProbeData(io, path);
     if (!try detectFileTransmissionSupportOffsetAt(allocator, tty, path, 0)) return false;
     return detectFileTransmissionSupportOffsetAt(allocator, tty, path, 1);
 }
 
-fn detectFileTransmissionSupportOffsetAt(allocator: std.mem.Allocator, tty: system_io.fs.File, path: []const u8, offset: u64) !bool {
-    var writer_state = tty.writerStreaming(&.{});
+fn detectFileTransmissionSupportOffsetAt(allocator: std.mem.Allocator, tty: Tty, path: []const u8, offset: u64) !bool {
+    var writer_state = tty.output.writerStreaming(&.{});
     const writer = &writer_state.interface;
     try protocol.writeQueryFileRgbaRegion(writer, path, offset, 4, 1, 1);
-    const reply = try readRepliesFromFile(allocator, tty, 300);
+    const reply = try readRepliesFromFile(allocator, tty.input, 300);
     defer allocator.free(reply);
     return std.mem.indexOf(u8, reply, "OK") != null;
 }

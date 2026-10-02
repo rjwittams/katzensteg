@@ -17,6 +17,9 @@ const core_exports = @import("core_exports.zig");
 
 comptime {
     _ = core_exports;
+    // SDL3_DYNAMIC_API builds export SDL_DYNAPI_entry (dynapi_sdl3.c), which
+    // installs wrappers through dynapi.zig.
+    if (@import("katzensteg_build_options").dynapi) _ = @import("dynapi.zig");
 }
 
 pub const std_options: std.Options = .{
@@ -407,6 +410,8 @@ fn copySurfaceToRgba(allocator: std.mem.Allocator, surface: ?*sdl.SDL_Surface) ?
 }
 
 fn callerSummary(return_addr: usize) struct { image: []const u8, symbol: []const u8, offset: usize } {
+    // Trace detail only; Windows has no dladdr.
+    if (@import("builtin").os.tag == .windows) return .{ .image = "unknown", .symbol = "unknown", .offset = 0 };
     var info: DlInfo = .{ .dli_fname = null, .dli_fbase = null, .dli_sname = null, .dli_saddr = null };
     if (dladdr(@ptrFromInt(return_addr), &info) == 0) return .{ .image = "unknown", .symbol = "unknown", .offset = 0 };
     const symbol_addr = if (info.dli_saddr) |p| @intFromPtr(p) else return_addr;

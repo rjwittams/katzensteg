@@ -1,6 +1,8 @@
 const std = @import("std");
 const context = @import("context.zig");
 const profiles = @import("../launcher_profiles.zig");
+const system_io = @import("platform");
+pub const injection = @import("injection.zig");
 pub const RuntimeConfig = @TypeOf(@as(profiles.LaunchProfile, .{ .allocator = undefined, .name = "" }).runtime);
 pub const PresentationSink = @TypeOf(@as(RuntimeConfig, .{}).presentation_sink);
 
@@ -29,8 +31,20 @@ pub const ResolvedLaunchPlan = struct {
     env: []profiles.EnvVar,
     seed_files: []profiles.SeedFile,
     runtime: RuntimeConfig,
+    /// The mechanism that loads the SDL adapter, when the profile has one.
+    injection: ?injection.Mechanism = null,
+
+    pub const Options = struct {
+        /// Replaces the profile's `injection` (from `KATZENSTEG_INJECTION`).
+        injection_override: ?injection.Injection = null,
+        os: injection.Os = injection.Os.current(),
+    };
 
     pub fn fromProfile(allocator: std.mem.Allocator, profile: *const profiles.LaunchProfile, expansion: context.ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
+        return fromProfileWithOptions(allocator, profile, expansion, extra_args, .{ .injection_override = try injectionOverride(allocator) });
+    }
+
+    pub fn fromProfileWithOptions(allocator: std.mem.Allocator, profile: *const profiles.LaunchProfile, expansion: context.ExpansionContext, extra_args: []const []const u8, options: Options) !ResolvedLaunchPlan {
         var plan = ResolvedLaunchPlan{
             .allocator = allocator,
             .profile_name = try allocator.dupe(u8, profile.name),
@@ -50,8 +64,31 @@ pub const ResolvedLaunchPlan = struct {
         plan.stdout = try resolveProfileStdout(allocator, profile, expansion);
         plan.stderr = try resolveProfileStderr(allocator, profile, expansion);
         plan.env = try expandProfileEnv(allocator, profile.env, expansion);
+        if (profile.sdl_adapter) |adapter| {
+            const requested = options.injection_override orelse profile.injection orelse .auto;
+            const setting = try injection.resolve(adapter, requested, options.os);
+            try plan.addEnvUnlessSet(setting.name, try context.expandString(allocator, setting.library, expansion));
+            plan.injection = setting.mechanism;
+        }
         plan.seed_files = try expandProfileSeedFiles(allocator, profile.seed_files, expansion);
         return plan;
+    }
+
+    /// Adds `name`, taking ownership of `value`, unless the profile's `env`
+    /// already sets it: an explicit variable keeps precedence over the
+    /// adapter library the mechanism selects.
+    fn addEnvUnlessSet(self: *ResolvedLaunchPlan, name: []const u8, value: []const u8) !void {
+        errdefer self.allocator.free(value);
+        for (self.env) |entry| {
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            self.allocator.free(value);
+            return;
+        }
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const env = try self.allocator.realloc(self.env, self.env.len + 1);
+        env[env.len - 1] = .{ .name = owned_name, .value = value };
+        self.env = env;
     }
 
     pub fn deinit(self: *ResolvedLaunchPlan) void {
@@ -74,6 +111,16 @@ pub const ResolvedLaunchPlan = struct {
         self.allocator.free(self.seed_files);
     }
 };
+
+/// `KATZENSTEG_INJECTION=auto|preload|dynapi`, when set.
+pub fn injectionOverride(allocator: std.mem.Allocator) !?injection.Injection {
+    const value = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_INJECTION") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(value);
+    return injection.Injection.parse(value) orelse error.InvalidInjection;
+}
 
 pub fn buildChildArgv(allocator: std.mem.Allocator, profile: *const profiles.LaunchProfile, expansion: context.ExpansionContext, extra_args: []const []const u8) ![][]const u8 {
     var argv = std.ArrayList([]const u8).empty;
@@ -170,7 +217,7 @@ fn resolveProfileStdout(allocator: std.mem.Allocator, profile: *const profiles.L
     if (profile.stdout) |value| return resolveOutputSpec(allocator, value, expansion);
     const log_name = try sanitizedProfileName(allocator, profile.name);
     defer allocator.free(log_name);
-    return .{ .file = try std.fmt.allocPrint(allocator, "/tmp/katzensteg-{s}.out", .{log_name}) };
+    return .{ .file = try std.fmt.allocPrint(allocator, "{s}/katzensteg-{s}.out", .{ system_io.fs.logDir(), log_name }) };
 }
 
 fn resolveProfileStderr(allocator: std.mem.Allocator, profile: *const profiles.LaunchProfile, expansion: context.ExpansionContext) !OutputSpec {
@@ -218,4 +265,55 @@ test "launch plan appends extra args after profile args" {
     try std.testing.expectEqualStrings("/Users/test/bin/demo", plan.argv[0]);
     try std.testing.expectEqualStrings("--profile-default", plan.argv[1]);
     try std.testing.expectEqualStrings("--extra", plan.argv[2]);
+}
+
+fn testAdapterProfile(injection_value: ?injection.Injection) profiles.LaunchProfile {
+    return .{
+        .allocator = std.testing.allocator,
+        .name = "probe",
+        .target = "{repo}/bin/probe",
+        .injection = injection_value,
+        .sdl_adapter = .{ .api = .sdl2, .preload = "{repo}/lib/libks.so", .dynapi = "{repo}/bin/ks.dll" },
+    };
+}
+
+test "launch plan loads the SDL adapter with the platform's automatic mechanism" {
+    const expansion = context.ExpansionContext{ .home = "/home/test", .repo = "/repo" };
+    var profile = testAdapterProfile(null);
+    var linux = try ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .linux });
+    defer linux.deinit();
+    try std.testing.expectEqual(injection.Mechanism.preload, linux.injection.?);
+    try std.testing.expectEqualStrings("LD_PRELOAD", linux.env[0].name);
+    try std.testing.expectEqualStrings("/repo/lib/libks.so", linux.env[0].value);
+
+    var windows = try ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .windows });
+    defer windows.deinit();
+    try std.testing.expectEqual(injection.Mechanism.dynapi, windows.injection.?);
+    try std.testing.expectEqualStrings("SDL_DYNAMIC_API", windows.env[0].name);
+    try std.testing.expectEqualStrings("/repo/bin/ks.dll", windows.env[0].value);
+}
+
+test "launch plan honours the profile's mechanism and a launch override" {
+    const expansion = context.ExpansionContext{ .home = "/home/test", .repo = "/repo" };
+    var profile = testAdapterProfile(.dynapi);
+    var from_profile = try ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .linux });
+    defer from_profile.deinit();
+    try std.testing.expectEqualStrings("SDL_DYNAMIC_API", from_profile.env[0].name);
+
+    var overridden = try ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .linux, .injection_override = .preload });
+    defer overridden.deinit();
+    try std.testing.expectEqualStrings("LD_PRELOAD", overridden.env[0].name);
+    try std.testing.expectEqual(@as(usize, 1), overridden.env.len);
+
+    try std.testing.expectError(error.PreloadUnavailable, ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .windows, .injection_override = .preload }));
+}
+
+test "an explicit loader variable in the profile's env wins over the adapter library" {
+    const expansion = context.ExpansionContext{ .home = "/home/test", .repo = "/repo" };
+    var profile = testAdapterProfile(null);
+    profile.env = &.{.{ .name = "LD_PRELOAD", .value = "/build/libks.so" }};
+    var plan = try ResolvedLaunchPlan.fromProfileWithOptions(std.testing.allocator, &profile, expansion, &.{}, .{ .os = .linux });
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.env.len);
+    try std.testing.expectEqualStrings("/build/libks.so", plan.env[0].value);
 }
