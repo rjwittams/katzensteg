@@ -48,7 +48,10 @@ export function dragSwap(order: readonly string[], id: string, at: number, sizes
     if (before !== undefined) {
       const size = sizes.get(before) ?? 0
       // The neighbour ends before -gap; swapped, this panel spans from
-      // -(size + gap) for its own extent.
+      // -(size + gap) for its own extent. So the pointer must be before
+      // both -gap and self - size - gap: the first is the nearer when this
+      // panel is at least the neighbour's size (swap on entering it), the
+      // second when the neighbour is larger (wait for the landing place).
       if (rel < Math.min(0, self - size) - gap) {
         next[i] = before
         next[i - 1] = id

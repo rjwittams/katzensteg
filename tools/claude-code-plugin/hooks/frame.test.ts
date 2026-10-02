@@ -39,6 +39,8 @@ test('a drag ends on its release, and also when the release was plainly missed',
   assert.equal(dragStep('move', false), 'lost')
   // A new press cannot happen while the old one is still down.
   assert.equal(dragStep('down', true), 'lost')
+  // Whatever it reports as held, a press during a drag means the release was missed.
+  assert.equal(dragStep('down', false), 'lost')
 })
 
 test('every row of the frame is as wide as the panel, in every state', () => {

@@ -340,13 +340,28 @@ async function connectOnce($: $): Promise<void> {
   }
 }
 
+// Drop what is kept for sessions no longer in the list. A panel that goes
+// while it is being moved sends no dragend, so the move ends here: the dim
+// on the other panels and the pointer mark with it.
+function forgetGone(): void {
+  for (const id of [...sentGrid.keys()]) {
+    if (sessions.some(s => s.id === id)) continue
+    sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id)
+    if (moving === id) { moving = undefined; pointerSite = undefined }
+    resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id)
+    imageKey.delete(id); tracedFrame.delete(id); tracedGrid.delete(id)
+    hidden.delete(id); sizeOverride.delete(id); resizing.delete(id)
+    lastWidths.delete(id); lastHeights.delete(id); placed.delete(id)
+  }
+}
+
 async function refresh($: $): Promise<boolean> {
   const r = await api($, '/sessions').catch(() => undefined)
   if (!r?.ok) return false
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); imageKey.delete(id); tracedFrame.delete(id); tracedGrid.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  forgetGone()
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -364,7 +379,7 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); if (moving === id) moving = undefined; resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); imageKey.delete(id); tracedFrame.delete(id); tracedGrid.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          forgetGone()
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
