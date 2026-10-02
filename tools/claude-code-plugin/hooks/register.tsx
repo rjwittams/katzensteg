@@ -42,9 +42,9 @@ type Place = 'band' | 'pane'
 let place: Place = 'pane'
 let paneOpen = false
 let lastPlacement: string | undefined
-// How panel cells reach the terminal (see Route in host.ts). `auto` takes the
-// host's stand-in when it rewrites one, else the placeholder itself; `claim`
-// is opt-in while it proves itself.
+// How panel cells reach the terminal (see Route in host.ts). `auto` takes an
+// image claim when the host offers one, else its stand-in, else the
+// placeholder itself.
 let routeWish: RouteWish = 'auto'
 let drawnCount = -1
 // Panel height presets in rows; the band's own limit still applies.
@@ -420,7 +420,9 @@ async function panelsTree($: $, els: Elements['terminal'], columns: number, rows
               module="./panel.tsx"
               width={grid.cols + 2}
               height={grid.rows + 2}
-              props={{ ...base, ...(route === 'standin' && host?.placeholder && { placeholder: host.placeholder }) }}
+              // A session with no claim file on the claim route still needs
+              // cells the application accepts: the stand-in, when there is one.
+              props={{ ...base, ...(route !== 'direct' && host?.placeholder && { placeholder: host.placeholder }) }}
             />
           )
         })}

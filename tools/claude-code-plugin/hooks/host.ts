@@ -33,12 +33,15 @@ export type RouteWish = Route | 'auto'
 export const isRouteWish = (v: unknown): v is RouteWish => v === 'auto' || v === 'direct' || v === 'standin' || v === 'claim'
 
 /**
- * The route to draw with: the wish when this host can serve it, else the
- * stand-in when the host rewrites one, else the placeholder itself.
+ * The route to draw with: the wish when this host can serve it, else the best
+ * the host offers. A host that takes image claims is preferred, since the
+ * application then owns the image id and ours cannot clash with its own;
+ * next the stand-in, when the host rewrites one; else the placeholder itself.
  */
 export function chooseRoute(host: Pick<HostFile, 'placeholder' | 'imageClaim'> | undefined, wish: RouteWish): Route {
   if (wish === 'direct') return 'direct'
-  if (wish === 'claim' && host?.imageClaim) return 'claim'
+  if (wish === 'standin' && host?.placeholder) return 'standin'
+  if (host?.imageClaim) return 'claim'
   return host?.placeholder ? 'standin' : 'direct'
 }
 

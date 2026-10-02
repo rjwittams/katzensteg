@@ -38,11 +38,12 @@ draws the real placeholder, which older builds accept.
 
 There are three routes for a panel's cells, and `/katzensteg route` picks one.
 `direct` writes the kitty placeholder itself and needs no wrapper. `standin`
-is the rewrite above and is what `auto` uses under the wrapper. `claim` has
-Claude draw an `Image` over the session's claim file with the panel laid over
-it for the border and input; the wrapper reads the image id Claude chose from
-its output and uploads frames to it, so Claude is not involved per frame.
-`claim` is opt-in for now. A route the host cannot serve falls back to `auto`.
+is the rewrite above. `claim` has Claude draw an `Image` over the session's
+claim file with the panel laid over it for the border and input; the wrapper
+reads the image id Claude chose from its output and uploads frames to it, so
+Claude is not involved per frame and our image ids cannot clash with its own.
+`auto` uses `claim` under the wrapper and `direct` without it. A route the
+host cannot serve falls back to what `auto` would pick.
 
 The wrapper runs Claude on an inner PTY and forwards input unchanged, including
 Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin

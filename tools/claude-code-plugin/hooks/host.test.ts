@@ -41,8 +41,12 @@ test('the route follows the wish only where the host can serve it', () => {
   const background = parseHostFile('{"pid":1,"port":2,"token":"t"}') ?? undefined
   assert.equal(wrapping?.imageClaim, true)
   assert.equal(background?.imageClaim, undefined)
-  assert.equal(chooseRoute(wrapping, 'auto'), 'standin')
+  assert.equal(chooseRoute(wrapping, 'auto'), 'claim')
   assert.equal(chooseRoute(wrapping, 'claim'), 'claim')
+  // A host that only rewrites: the stand-in is the best it offers.
+  const rewriting = parseHostFile('{"pid":1,"port":2,"token":"t","placeholder_standin":"10EEED"}') ?? undefined
+  assert.equal(chooseRoute(rewriting, 'auto'), 'standin')
+  assert.equal(chooseRoute(rewriting, 'claim'), 'standin')
   assert.equal(chooseRoute(wrapping, 'standin'), 'standin')
   assert.equal(chooseRoute(wrapping, 'direct'), 'direct')
   assert.equal(chooseRoute(background, 'auto'), 'direct')
