@@ -41,7 +41,11 @@ class EmbedRenderBatchSmoke(unittest.TestCase):
         env = os.environ.copy()
         env["KATZENSTEG_REPO"] = str(REPO)
         env.update(SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_INTERCEPT_MODE=mode, KATZENSTEG_INJECTION=injection)
-        upload_base = str(Path(tempfile.gettempdir()) / f"katzensteg-embed-smoke-{os.getpid()}.rgba")
+        # Each producer owns its upload files. Give each subcase a separate
+        # directory so delayed cleanup cannot remove the next producer's files.
+        upload_dir = tempfile.TemporaryDirectory(prefix="katzensteg-embed-smoke-")
+        self.addCleanup(upload_dir.cleanup)
+        upload_base = str(Path(upload_dir.name) / "frame.rgba")
         upload_first = Path(upload_base + ".0")
         try:
             upload_first.unlink()

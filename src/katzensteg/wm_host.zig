@@ -18,6 +18,7 @@ const DirectTty = @import("direct_tty.zig").DirectTty;
 const Logger = @import("log.zig").Logger;
 const config_mod = @import("config.zig");
 const upload_path_mod = @import("upload_path.zig");
+const cover = @import("wm/cover.zig");
 const ts_kitty = @import("termscene").kitty;
 
 const wm_peer_line_queue_max_entries: usize = 256;
@@ -233,6 +234,8 @@ pub const WmMouseInputState = struct {
 };
 
 pub const ChromeOptions = struct {
+    // Desktop covering supplies its colour explicitly; exec keeps the terminal default.
+    background: ?cover.Color = null,
     outer: Rect,
     title: []const u8,
     focused: bool = true,
@@ -242,6 +245,7 @@ pub const ChromeOptions = struct {
 };
 
 pub const StatusBandOptions = struct {
+    background: ?cover.Color = null,
     terminal: TerminalSize,
     window: WmWindowState,
     upload_profile: render_batch_protocol.UploadProfile,
@@ -264,6 +268,7 @@ const WmChromeSnapshot = struct {
 };
 
 pub const WmDesktopRedrawState = struct {
+    cover_policy: cover.Policy = .{},
     menu: command_menu.Snapshot = .{},
     previous_chrome: [default_wm_session_capacity]WmChromeSnapshot = undefined,
     previous_count: usize = 0,
@@ -459,6 +464,7 @@ pub fn runSessionSpecsWithOptions(io: std.Io, allocator: std.mem.Allocator, prod
 }
 
 const WmProducerSession = struct {
+    cover_mode: cover.Mode = .split,
     placeholder_image_id: ?u32 = null,
     /// Whether the producer has been told the terminal's kitty keyboard
     /// flags, so its parser reads forwarded reports as real presses.
@@ -787,11 +793,18 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         defer deinitUploadPolicy(io, allocator, &probe_upload);
         break :blk probe_upload.profile;
     };
+    const split_env = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_WM_SPLIT_IMAGES") catch null;
+    defer if (split_env) |value| allocator.free(value);
+    const cover_policy = if (options.presentation == .positioned)
+        cover.Policy.choose(split_env != null and !std.mem.eql(u8, split_env.?, "0"), cover.queryBackground(tty.terminal(), 250))
+    else
+        cover.Policy{};
+    logger.writeFmtScoped(.info, .wm, "desktop cover mode={s}", .{@tagName(cover_policy.mode)});
     try tty.enableInputCapture();
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
-        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, output_profile, &event_log) catch |err| {
+        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
             continue;
@@ -803,7 +816,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     }
 
     var focused_index: usize = 0;
-    var redraw_state = WmDesktopRedrawState{};
+    var redraw_state = WmDesktopRedrawState{ .cover_policy = cover_policy };
     var writer_state = tty.file.writerStreaming(&.{});
     const writer = &writer_state.interface;
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -884,7 +897,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 const session_id = next_session_id;
                 next_session_id += 1;
                 channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
-                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, output_profile, &event_log) catch |err| {
+                var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -944,7 +957,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                                     try event_log.record(.parse_error, "session limit reached");
                                 } else launch: {
                                     const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
-                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, output_profile, &event_log) catch |err| {
+                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
                                         try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
                                         break :launch;
                                     };
@@ -1175,18 +1188,18 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
     var producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
     errdefer producer.deinit();
-    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, output_profile, events);
+    var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, cover_mode, output_profile, events);
     session.producer.child = producer.child;
     return session;
 }
 
 // Takes ownership of the channel only on success. Both owned and external
 // producers use the same presentation allocation and initial attach.
-fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
     const io = tty_file.io;
     var upload = try uploadPolicyForSession(allocator, output_profile, session_index);
     errdefer deinitUploadPolicy(io, allocator, &upload);
@@ -1194,6 +1207,7 @@ fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.Fi
     errdefer allocator.free(owned_title);
 
     var session = WmProducerSession{
+        .cover_mode = cover_mode,
         .profile_name = owned_title,
         .window = WmWindowState.init("main", cascadedOuterRect(terminal, session_index)),
         .upload = upload,
@@ -1208,7 +1222,7 @@ fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.Fi
         .rect_cells = session_rect,
         .placeholder = placeholder,
         .aspect = .fit,
-        .z_base = zBaseForSlot(session_index),
+        .z_base = zBaseForSlot(session_index, cover_mode),
         .terminal = terminal,
         .clip_cells = computeClipForRect(session_rect, terminal),
         .image_ids = ranges.image,
@@ -1585,6 +1599,7 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
 
     try writer.writeAll(if (options.focused) "\x1b[1;36m" else "\x1b[2m");
     defer writer.writeAll("\x1b[0m") catch {};
+    if (options.background) |background| try cover.writeBackground(writer, background);
 
     const horizontal_len: usize = @intCast(@max(0, options.outer.cols - 2));
     var emitter = ChromeEmitter{ .terminal = options.terminal };
@@ -1709,7 +1724,11 @@ pub fn renderStatusBand(writer: anytype, options: StatusBandOptions) !void {
     if (options.terminal.rows < 1 or options.terminal.cols < 1) return;
 
     try moveCursor(writer, options.terminal.rows, 1);
-    try writer.writeAll("\x1b[2K\x1b[7m");
+    try writer.writeAll("\x1b[0m\x1b[2K");
+    if (options.background) |background| {
+        try writer.writeAll("\x1b[37m");
+        try cover.writeBackground(writer, background);
+    } else try writer.writeAll("\x1b[7m");
 
     var remaining: usize = @intCast(options.terminal.cols);
     try writeStatusPart(writer, &remaining, " wm");
@@ -2051,23 +2070,24 @@ fn idRangesForSession(index: usize) SessionIdRanges {
     };
 }
 
-fn zBaseForSlot(slot: usize) i32 {
+fn zBaseForSlot(slot: usize, mode: cover.Mode) i32 {
     const max_z_slots: usize = 1000;
     const z_stride_per_slot: i32 = 1000;
-    return @as(i32, @intCast(@min(slot, max_z_slots))) * z_stride_per_slot;
+    const base = @as(i32, @intCast(@min(slot, max_z_slots))) * z_stride_per_slot;
+    return base + @as(i32, if (mode == .band) -1_610_612_736 else 0);
 }
 
-fn zBaseForSessionIndex(z_order: []const usize, session_index: usize) i32 {
+fn zBaseForSessionIndex(z_order: []const usize, session_index: usize, mode: cover.Mode) i32 {
     const slot = std.mem.indexOfScalar(usize, z_order, session_index) orelse 0;
-    return zBaseForSlot(slot);
+    return zBaseForSlot(slot, mode);
 }
 
 fn sendViewportZOrderForSessions(sessions: []WmProducerSession, z_order: []const usize, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, events: *ProtocolEventLog, logger: *Logger) !void {
     for (sessions, 0..) |*session, session_index| {
         if (!sessionIsVisible(session)) continue;
         var occlusion_scratch: [default_wm_session_capacity]render_batch_protocol.PresentationRectCells = undefined;
-        const occlusion_rects = occlusionRectsForSession(sessions, z_order, session_index, occlusion_scratch[0..]);
-        try sendViewportForSession(session, terminal, aspect, zBaseForSessionIndex(z_order, session_index), occlusion_rects, events, logger);
+        const occlusion_rects = if (session.cover_mode == .band) &.{} else occlusionRectsForSession(sessions, z_order, session_index, occlusion_scratch[0..]);
+        try sendViewportForSession(session, terminal, aspect, zBaseForSessionIndex(z_order, session_index, session.cover_mode), occlusion_rects, events, logger);
     }
 }
 
@@ -2507,7 +2527,7 @@ fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal
 fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     for (redraw_state.previous_chrome[0..redraw_state.previous_count]) |previous| {
         if (!chromeSnapshotStillCurrent(previous, sessions)) {
-            if (previous.placeholder) try clearWindowArea(writer, previous.outer, terminal) else try clearChrome(writer, previous.outer, terminal);
+            if (previous.placeholder or redraw_state.cover_policy.mode == .band) try clearWindowArea(writer, previous.outer, terminal) else try clearChrome(writer, previous.outer, terminal);
         }
     }
     for (z_order) |session_index| {
@@ -2518,7 +2538,11 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
             try clearWindowArea(writer, session.window.outer, terminal);
             try renderPlaceholderGrid(writer, session, terminal);
         }
+        if (redraw_state.cover_policy.mode == .band and session.placeholder_image_id == null) {
+            try renderContentBackground(writer, session, terminal, redraw_state.cover_policy.paintedBackground().?);
+        }
         try renderChrome(writer, .{
+            .background = if (session.placeholder_image_id != null) null else redraw_state.cover_policy.paintedBackground() orelse cover.Color{ 0, 0, 0 },
             .outer = session.window.outer,
             .title = session.profile_name,
             .focused = session_index == focused_index,
@@ -2527,18 +2551,23 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
     }
     if (visibleStatusSessionIndex(sessions, focused_index)) |status_index| {
         const focused = sessions[status_index];
-        try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, focused.presentation_status, events);
+        try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, focused.presentation_status, events, redraw_state.cover_policy.paintedBackground());
     } else {
-        try renderEmptyStatusAndReturn(writer, terminal, events);
+        try renderEmptyStatusAndReturn(writer, terminal, events, redraw_state.cover_policy.paintedBackground());
     }
     if (events.last()) |event| {
         if (event.kind == .launch_prompt and std.mem.startsWith(u8, event.detail, "launch:")) {
             try moveCursor(writer, terminal.rows, 1);
-            try writer.writeAll("\x1b[2K\x1b[7m");
+            try writer.writeAll("\x1b[0m\x1b[2K");
+            if (redraw_state.cover_policy.paintedBackground()) |color| {
+                try writer.writeAll("\x1b[37m");
+                try cover.writeBackground(writer, color);
+            } else try writer.writeAll("\x1b[7m");
             var remaining: usize = @intCast(@max(0, terminal.cols));
             try writeStatusPart(writer, &remaining, " ");
             try writeStatusPart(writer, &remaining, event.detail);
             try writeStatusPart(writer, &remaining, "  [Enter launch, Esc cancel]");
+            if (remaining > 0) try writer.splatByteAll(' ', remaining);
             try writer.writeAll("\x1b[0m");
         }
     }
@@ -2551,6 +2580,55 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
         if (command_overlay.textNode(snapshot, text)) |node| try ts_kitty.Backend.writeText(writer, node);
     }
     redraw_state.capture(sessions, z_order);
+}
+
+// Use the producer's cell fit and pixel rounding, including its 10x20
+// fallback when the outer terminal does not report physical dimensions.
+fn positionedImageRect(session: *const WmProducerSession, terminal: TerminalSize) Rect {
+    const content = session.focusedContent();
+    const source = session.presentation_status.source_px orelse return content;
+    const cols = std.math.clamp(content.cols, 1, std.math.maxInt(u16));
+    const rows = std.math.clamp(content.rows, 1, std.math.maxInt(u16));
+    const grid = @import("presentation_fit.zig").Grid{
+        .cols = cols,
+        .rows = rows,
+        .pixel_width = if (terminal.pixelGridKnown())
+            @intCast(std.math.clamp(@divTrunc(@as(i64, content.cols) * terminal.pixel_width + @divTrunc(terminal.cols, 2), terminal.cols), 1, std.math.maxInt(u16)))
+        else
+            std.math.clamp(cols * 10, 1, std.math.maxInt(u16)),
+        .pixel_height = if (terminal.pixelGridKnown())
+            @intCast(std.math.clamp(@divTrunc(@as(i64, content.rows) * terminal.pixel_height + @divTrunc(terminal.rows, 2), terminal.rows), 1, std.math.maxInt(u16)))
+        else
+            std.math.clamp(rows * 20, 1, std.math.maxInt(u16)),
+    };
+    const fit = @import("presentation_fit.zig").containedCellRect(source.w, source.h, grid);
+    return .{ .row = content.row + fit.row - 1, .col = content.col + fit.col - 1, .rows = fit.h, .cols = fit.w };
+}
+
+fn renderContentBackground(writer: anytype, session: *const WmProducerSession, terminal: TerminalSize, background: cover.Color) !void {
+    const content = session.focusedContent();
+    const image = positionedImageRect(session, terminal);
+    const area = windowAreaForTerminal(terminal);
+    const first_col = @max(1, content.col);
+    const last_col = @min(area.cols, content.col + content.cols - 1);
+    if (first_col > last_col) return;
+    var row = @max(1, content.row);
+    while (row < @min(area.rows + 1, content.row + content.rows)) : (row += 1) {
+        try moveCursor(writer, row, first_col);
+        var painted: ?bool = null;
+        var col = first_col;
+        while (col <= last_col) : (col += 1) {
+            const paint = !rectContainsCell(image, row, col);
+            if (painted == null or painted.? != paint) {
+                try writer.writeAll("\x1b[0m");
+                if (paint) try cover.writeBackground(writer, background);
+                painted = paint;
+            }
+            // Default-background spaces remove lower chrome under this image.
+            try writer.writeByte(' ');
+        }
+    }
+    try writer.writeAll("\x1b[0m");
 }
 
 fn chromeSnapshotStillCurrent(previous: WmChromeSnapshot, sessions: []const WmProducerSession) bool {
@@ -2575,6 +2653,7 @@ fn clearChrome(writer: anytype, outer: Rect, terminal: TerminalSize) !void {
 }
 
 fn clearCellSpan(writer: anytype, row: i32, col: i32, cols: i32, terminal: TerminalSize) !void {
+    try writer.writeAll("\x1b[0m");
     if (row < 1 or row > terminal.rows or cols <= 0) return;
     const start_col = @max(1, col);
     if (start_col > terminal.cols) return;
@@ -2595,8 +2674,9 @@ fn visibleStatusSessionIndex(sessions: []const WmProducerSession, focused_index:
     return null;
 }
 
-fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWindowState, upload_profile: render_batch_protocol.UploadProfile, presentation_status: WmPresentationStatus, events: *const ProtocolEventLog) !void {
+fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWindowState, upload_profile: render_batch_protocol.UploadProfile, presentation_status: WmPresentationStatus, events: *const ProtocolEventLog, background: ?cover.Color) !void {
     try renderStatusBand(writer, .{
+        .background = background,
         .terminal = terminal,
         .window = window,
         .upload_profile = upload_profile,
@@ -2611,10 +2691,14 @@ fn renderStatusAndReturn(writer: anytype, terminal: TerminalSize, window: WmWind
     try moveCursor(writer, safe_row, safe_col);
 }
 
-fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *const ProtocolEventLog) !void {
+fn renderEmptyStatusAndReturn(writer: anytype, terminal: TerminalSize, events: *const ProtocolEventLog, background: ?cover.Color) !void {
     if (terminal.rows < 1 or terminal.cols < 1) return;
     try moveCursor(writer, terminal.rows, 1);
-    try writer.writeAll("\x1b[2K\x1b[7m");
+    try writer.writeAll("\x1b[0m\x1b[2K");
+    if (background) |color| {
+        try writer.writeAll("\x1b[37m");
+        try cover.writeBackground(writer, color);
+    } else try writer.writeAll("\x1b[7m");
 
     var remaining: usize = @intCast(terminal.cols);
     try writeStatusPart(writer, &remaining, " wm windows=0");
@@ -4252,4 +4336,229 @@ test "WM clipped placeholder text retains its source row and column indices" {
 
 test {
     _ = @import("wm/headless.zig");
+}
+
+// In-memory terminal boundary: interprets the CSI cursor/SGR/erase subset the
+// desktop writes so tests assert final cells, including overwrites and cleanup.
+const CoverTestScreen = struct {
+    const PaintedCell = struct { glyph: u8 = ' ', background: ?cover.Color = null };
+    cells: [40][100]PaintedCell = @splat(@splat(.{})),
+    row: usize = 0,
+    col: usize = 0,
+    background: ?cover.Color = null,
+
+    fn apply(self: *CoverTestScreen, bytes: []const u8) !void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            if (bytes[i] == '\x1b' and i + 1 < bytes.len and bytes[i + 1] == '[') {
+                var end = i + 2;
+                while (end < bytes.len and !(bytes[end] >= 0x40 and bytes[end] <= 0x7e)) : (end += 1) {}
+                if (end == bytes.len) return error.PartialCsi;
+                var fields = std.mem.splitScalar(u8, bytes[i + 2 .. end], ';');
+                switch (bytes[end]) {
+                    'H' => {
+                        self.row = (try std.fmt.parseInt(usize, fields.next().?, 10)) - 1;
+                        self.col = (try std.fmt.parseInt(usize, fields.next().?, 10)) - 1;
+                    },
+                    'm' => while (fields.next()) |field| {
+                        const value = try std.fmt.parseInt(u16, field, 10);
+                        if (value == 0 or value == 49) self.background = null;
+                        if (value == 48) {
+                            if (!std.mem.eql(u8, fields.next().?, "2")) return error.UnexpectedColor;
+                            var color: cover.Color = undefined;
+                            for (&color) |*channel| channel.* = try std.fmt.parseInt(u8, fields.next().?, 10);
+                            self.background = color;
+                        }
+                    },
+                    'K' => {
+                        for (&self.cells[self.row]) |*cell| cell.* = .{ .background = self.background };
+                    },
+                    else => return error.UnexpectedCsi,
+                }
+                i = end + 1;
+            } else {
+                if (self.row >= self.cells.len or self.col >= self.cells[0].len) return error.OutOfBounds;
+                self.cells[self.row][self.col] = .{ .glyph = bytes[i], .background = self.background };
+                self.col += 1;
+                i += try std.unicode.utf8ByteSequenceLength(bytes[i]);
+            }
+        }
+    }
+
+    fn at(self: *const CoverTestScreen, row: i32, col: i32) PaintedCell {
+        return self.cells[@intCast(row - 1)][@intCast(col - 1)];
+    }
+};
+
+test "WM z bases retain window and producer layer order in both cover modes" {
+    // #113: the WM adds the band offset, preserving slot stride and producer layers.
+    // Generator spans every supported slot and layer boundaries of each slot.
+    for ([_]cover.Mode{ .split, .band }) |mode| {
+        for (0..1001) |slot| {
+            const base = zBaseForSlot(slot, mode);
+            try std.testing.expectEqual(@as(i32, @intCast(slot * 1000)) + @as(i32, if (mode == .band) -1_610_612_736 else 0), base);
+            for ([_]i32{ 0, 1, 998, 999 }) |layer| {
+                if (mode == .band) try std.testing.expect(base + layer < @divTrunc(std.math.minInt(i32), 2));
+                if (slot < 1000) try std.testing.expect(base + layer < zBaseForSlot(slot + 1, mode));
+            }
+        }
+        const order = [_]usize{ 2, 0, 1 };
+        try std.testing.expectEqual(zBaseForSlot(1, mode), zBaseForSessionIndex(&order, 0, mode));
+        try std.testing.expectEqual(zBaseForSlot(1000, mode), zBaseForSlot(1001, mode));
+    }
+}
+
+test "WM positioned cell fitting agrees with producer placement across geometry boundaries" {
+    // #113: bars must occupy only cells outside the producer's aspect fit.
+    // Differential generator covers missing pixels, non-divisible pixel extents,
+    // square/wide/tall source aspect ratios, tiny grids and off-screen origins.
+    const fit = @import("presentation_fit.zig");
+    const Sink = @import("render_batch_sink.zig").RenderBatchSink;
+    var sink = Sink.init(std.testing.io, std.testing.allocator, "main");
+    defer sink.deinit();
+    for ([_]TerminalSize{ .{ .rows = 40, .cols = 100 }, .{ .rows = 40, .cols = 100, .pixel_width = 1003, .pixel_height = 797 } }) |terminal| {
+        for ([_]i32{ 1, 2, 17, 38 }) |cols| {
+            for ([_]i32{ 1, 2, 13, 25 }) |rows| {
+                for ([_]render_batch_protocol.SourcePixels{ .{ .w = 1, .h = 1 }, .{ .w = 640, .h = 480 }, .{ .w = 1000, .h = 17 }, .{ .w = 17, .h = 1000 } }) |source| {
+                    const session = WmProducerSession{
+                        .profile_name = "fit",
+                        .window = WmWindowState.init("main", .{ .row = -2, .col = -3, .rows = rows + 4, .cols = cols + 2 }),
+                        .upload = .{ .profile = .direct_apc },
+                        .presentation_status = .{ .source_px = source },
+                    };
+                    const content = session.focusedContent();
+                    sink.rect_cells = content.toPresentationRectCells();
+                    sink.terminal = .{ .cells = .{ .rows = terminal.rows, .cols = terminal.cols }, .pixels = if (terminal.pixelGridKnown()) .{ .w = terminal.pixel_width, .h = terminal.pixel_height } else null };
+                    const tty = sink.presentationTty();
+                    const relative = fit.containedCellRect(source.w, source.h, .{ .cols = tty.cols, .rows = tty.rows, .pixel_width = tty.pixel_width, .pixel_height = tty.pixel_height });
+                    try std.testing.expectEqual(Rect{ .row = content.row + relative.row - 1, .col = content.col + relative.col - 1, .rows = relative.h, .cols = relative.w }, positionedImageRect(&session, terminal));
+                }
+            }
+        }
+    }
+}
+
+test "WM desktop paints chrome and bars while higher image cells erase covered text" {
+    // #113: chrome and bars cover images, while text under a higher image is
+    // blank at the default background. Exercise redraw/focus/move/resize/close
+    // transitions in both modes and check final terminal cells after each step.
+    const terminal = TerminalSize{ .rows = 30, .cols = 80, .pixel_width = 800, .pixel_height = 600 };
+    for ([_]cover.Mode{ .split, .band }) |mode| {
+        const policy = cover.Policy{ .mode = mode, .background = .{ 18, 52, 254 } };
+        const painted = policy.paintedBackground().?;
+        var sessions = [_]WmProducerSession{
+            .{ .profile_name = "lower", .window = WmWindowState.init("main", .{ .row = 6, .col = 4, .rows = 10, .cols = 26 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) }, .state = .running, .presentation_status = .{ .ready_to_show = true, .source_px = .{ .w = 240, .h = 120 } } },
+            .{ .profile_name = "upper", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 10, .cols = 20 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) }, .state = .running, .presentation_status = .{ .ready_to_show = true, .source_px = .{ .w = 180, .h = 40 } } },
+        };
+        var order = [_]usize{ 0, 1 };
+        var log = try ProtocolEventLog.init(std.testing.allocator, 1);
+        defer log.deinit();
+        var state = WmDesktopRedrawState{ .cover_policy = policy };
+        var screen = CoverTestScreen{};
+        for (0..6) |step| {
+            switch (step) {
+                0 => {},
+                1 => sessions[1].window.outer.col += 30,
+                2 => sessions[1].window.outer.col -= 30,
+                3 => bringWindowToFront(&order, 0),
+                4 => {
+                    bringWindowToFront(&order, 1);
+                    sessions[1].presentation_status.source_px = .{ .w = 180, .h = 120 };
+                },
+                5 => sessions[1].state = .exited,
+                else => unreachable,
+            }
+            var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer bytes.deinit();
+            try renderDesktopMany(&bytes.writer, terminal, &sessions, &order, 0, &log, &state);
+            try screen.apply(bytes.written());
+            try std.testing.expectEqual(@as(?cover.Color, painted), screen.at(30, 80).background);
+            if (step == 0 or step == 2) {
+                try std.testing.expectEqual(@as(?cover.Color, painted), screen.at(1, 1).background);
+                if (mode == .band) {
+                    try std.testing.expectEqual(@as(u8, ' '), screen.at(7, 5).glyph);
+                    try std.testing.expectEqual(@as(?cover.Color, null), screen.at(7, 5).background);
+                    try std.testing.expectEqual(@as(?cover.Color, painted), screen.at(4, 5).background);
+                    try std.testing.expectEqual(@as(?cover.Color, painted), screen.at(8, 5).background);
+                }
+            } else if (step == 1 or step == 3 or step == 5) {
+                try std.testing.expectEqual(@as(?cover.Color, painted), screen.at(7, 5).background);
+                try std.testing.expect(screen.at(7, 5).glyph != ' ');
+                if (mode == .band and (step == 1 or step == 5)) try std.testing.expectEqual(@as(?cover.Color, null), screen.at(4, 5).background);
+            } else if (step == 4 and mode == .band) {
+                try std.testing.expectEqual(@as(?cover.Color, null), screen.at(4, 5).background);
+                try std.testing.expectEqual(@as(u8, ' '), screen.at(7, 5).glyph);
+            }
+        }
+    }
+}
+
+test "WM chrome backgrounds cover every emitted cell" {
+    // #113: foreground/focus style may not leave any chrome cell with default background.
+    // Generator covers both focus styles, all blue boundaries and edge clipping.
+    for ([_]bool{ false, true }) |focused| {
+        for ([_]u8{ 0, 254, 255 }) |blue| {
+            const background = cover.nudge(.{ 17, 91, blue });
+            var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer bytes.deinit();
+            try renderChrome(&bytes.writer, .{ .outer = .{ .row = -1, .col = -2, .rows = 10, .cols = 20 }, .title = "test", .focused = focused, .background = background, .terminal = .{ .rows = 30, .cols = 80 } });
+            var screen = CoverTestScreen{};
+            try screen.apply(bytes.written());
+            for (screen.cells) |row| for (row) |cell| {
+                if (cell.glyph != ' ') try std.testing.expectEqual(@as(?cover.Color, background), cell.background);
+            };
+            try std.testing.expectEqual(@as(?cover.Color, background), screen.at(1, 1).background);
+        }
+    }
+}
+
+test "WM band attach and viewport omit occlusions and fallback keeps splitting" {
+    // #113: actual producer control messages carry the mode's z base; band
+    // viewports omit occlusion rectangles even when another window overlaps.
+    for ([_]cover.Mode{ .split, .band }) |mode| {
+        const pipe = try system_io.posix.pipe();
+        var input = system_io.fs.File{ .io = std.testing.io, .handle = pipe[0] };
+        defer input.close();
+        var channel = ClientChannel{ .stdio = .{ .control = .{ .io = std.testing.io, .handle = pipe[1] }, .allocator = std.testing.allocator } };
+        var log = try ProtocolEventLog.init(std.testing.allocator, 4);
+        defer log.deinit();
+        var logger = Logger.init(std.testing.allocator);
+        defer logger.deinit();
+        var bottom = try attachProducerSession(std.testing.allocator, input, .{ .rows = 30, .cols = 80 }, "bottom", 0, &channel, .positioned, mode, .direct_apc, &log);
+        defer bottom.producer.channel.deinit();
+        defer std.testing.allocator.free(bottom.profile_name);
+        defer deinitUploadPolicy(std.testing.io, std.testing.allocator, &bottom.upload);
+        try bottom.producer.channel.flushControl();
+        var buf: [4096]u8 = undefined;
+        const attached = buf[0..try input.read(&buf)];
+        const first_line = std.mem.indexOfScalar(u8, attached, '\n').?;
+        var attach = try render_batch_protocol.parseAttachMessage(std.testing.allocator, attached[first_line + 1 ..]);
+        defer render_batch_protocol.deinitAttachMessage(std.testing.allocator, &attach);
+        try std.testing.expectEqual(zBaseForSlot(0, mode), attach.z_base);
+        bottom.producer.child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator);
+        bottom.presentation_status = .{ .ready_to_show = true };
+        var sessions = [_]WmProducerSession{ bottom, .{
+            .profile_name = "top",
+            .window = WmWindowState.init("main", .{ .row = 4, .col = 5, .rows = 10, .cols = 20 }),
+            .upload = .{ .profile = .direct_apc },
+            .state = .running,
+            .presentation_status = .{ .ready_to_show = true },
+            .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) },
+        } };
+        // The live channel stays in this array until its buffered writes finish.
+        bottom.producer.channel = .{ .stdio = .{} };
+        defer sessions[0].producer.channel.deinit();
+        for ([_][2]usize{ .{ 0, 1 }, .{ 1, 0 } }) |order| {
+            try sendViewportZOrderForSessions(&sessions, &order, .{ .rows = 30, .cols = 80 }, .fit, &log, &logger);
+            try sessions[0].producer.channel.flushControl();
+            const bytes = buf[0..try input.read(&buf)];
+            var control = try render_batch_protocol.parseControlMessage(std.testing.allocator, bytes);
+            defer render_batch_protocol.deinitControlMessage(std.testing.allocator, &control);
+            const viewport = control.viewport;
+            try std.testing.expectEqual(zBaseForSessionIndex(&order, 0, mode), viewport.z_base);
+            const expected_count: usize = if (mode == .split and order[0] == 0) 1 else 0;
+            try std.testing.expectEqual(expected_count, viewport.occlusion_rects.len);
+            if (mode == .band) try std.testing.expect(std.mem.indexOf(u8, bytes, "occlusion_rects") == null);
+        }
+    }
 }
