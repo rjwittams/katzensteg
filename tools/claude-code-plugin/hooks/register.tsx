@@ -500,9 +500,14 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
             const source = route === 'claim' && s.claim
               ? { file: s.claim.path, format: 'rgba' as const, width: s.claim.w, height: s.claim.h }
               : lastSource.get(s.id) ?? ONE_PIXEL
+            // Both stay in the flow, the panel pulled up over the image by a
+            // negative margin. Absolutely positioned boxes are not clipped
+            // when a pane scrolls their parent past its top edge: they are
+            // held at the edge, so a scrolled-off panel stayed drawn there
+            // beneath the next one.
             return (
-              <Box width={grid.cols + 2} height={grid.rows + 2}>
-                <Box position="absolute" top={1} left={1}>
+              <Box flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
+                <Box marginTop={1} marginLeft={1} height={grid.rows}>
                   <Image
                     key={`image:${s.id}`}
                     source={source}
@@ -511,7 +516,7 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
                     alt={s.title.slice(0, Math.max(1, grid.cols))}
                   />
                 </Box>
-                <Box position="absolute" top={0} left={0}>
+                <Box marginTop={-(grid.rows + 1)}>
                   <Client key={`panel:${s.id}`} module="./panel.tsx" width={grid.cols + 2} height={grid.rows + 2} props={{ ...base, hollow: true }} />
                 </Box>
               </Box>
