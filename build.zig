@@ -962,6 +962,7 @@ pub fn build(b: *std.Build) void {
     addUnitTest(b, test_step, "katzensteg-wm-cli-test", "src/katzensteg/wm/cli.zig", target, optimize, use_llvm, test_library_dir, .{});
     addUnitTest(b, test_step, "katzensteg-wm-client-test", "src/katzensteg/wm/client.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     addUnitTest(b, test_step, "katzensteg-wm-listener-test", "src/katzensteg/wm/listener.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
+    addUnitTest(b, test_step, "katzensteg-wm-session-mirror-test", "src/katzensteg/wm/session_mirror.zig", target, optimize, use_llvm, test_library_dir, .{});
     addUnitTest(b, test_step, "katzensteg-wm-event-test", "src/katzensteg/wm/event.zig", target, optimize, use_llvm, test_library_dir, .{});
     addUnitTest(b, test_step, "katzensteg-attach-host-test", "src/katzensteg/attach_host.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
