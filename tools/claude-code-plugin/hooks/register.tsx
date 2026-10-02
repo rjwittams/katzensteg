@@ -5,7 +5,7 @@ import {
   chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
-import { ordered, swapOnDrag } from './layout.ts'
+import { ordered, swapOnPointer } from './layout.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -924,7 +924,8 @@ export const register: Register = on => {
         if (moving === id) { moving = undefined; $.ui.invalidate('ui.render') }
       } else if (ev.type === 'drag') {
         // Side by side the gap is one column; stacked, the blocks touch.
-        const reordered = lastStacked ? swapOnDrag(order, id, ev.dy, lastHeights, 0) : swapOnDrag(order, id, ev.dx, lastWidths)
+        // Where the pointer is from the dragged panel's own top or left edge.
+        const reordered = lastStacked ? swapOnPointer(order, id, ev.y ?? ev.dy, lastHeights, 0) : swapOnPointer(order, id, ev.x ?? ev.dx, lastWidths)
         if (reordered.some((v, i) => v !== order[i])) { order = reordered; $.ui.invalidate('ui.render') }
       }
     }

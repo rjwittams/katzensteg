@@ -95,7 +95,9 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
           return
         }
         if (step === 'continue') {
-          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0 })
+          // Travel since the press, and where the pointer is in the panel's own
+          // region, which is what decides a swap.
+          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0, x: ev.x, y: ev.y })
           else {
             const c = drag.kind === 'resize-y' ? drag.cols0 : Math.max(4, drag.cols0 + ev.x - drag.x0)
             const r = drag.kind === 'resize-x' ? drag.rows0 : Math.max(2, drag.rows0 + ev.y - drag.y0)
