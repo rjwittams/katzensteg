@@ -66,13 +66,14 @@ export function parseHostFile(text: string): HostFile | null {
   if (typeof value !== 'object' || value === null) return null
   const v = value as Record<string, unknown>
   if (!Number.isInteger(v.pid) || !Number.isInteger(v.port) || typeof v.token !== 'string' || v.token === '') return null
+  const placeholder = parseStandin(v.placeholder_standin)
   return {
     pid: v.pid as number,
     port: v.port as number,
     token: v.token,
     ...(typeof v.tty === 'string' ? { tty: v.tty } : {}),
     ...(typeof v.socket === 'string' ? { socket: v.socket } : {}),
-    ...(parseStandin(v.placeholder_standin) !== undefined ? { placeholder: parseStandin(v.placeholder_standin) } : {}),
+    ...(placeholder !== undefined ? { placeholder } : {}),
     ...(v.image_claim === true ? { imageClaim: true as const } : {}),
   }
 }
@@ -117,6 +118,7 @@ export function parseSessions(text: string): Session[] {
     if (id === undefined || !Number.isInteger(v.image_id) || !isState(v.state)) continue
     const px = v.source_px as Record<string, unknown> | null | undefined
     const grid = v.grid as Record<string, unknown> | null | undefined
+    const claim = parseClaim(v.claim)
     out.push({
       id,
       title: typeof v.title === 'string' ? v.title : id,
@@ -125,7 +127,7 @@ export function parseSessions(text: string): Session[] {
       input_supported: v.input_supported !== false,
       source_px: px && Number.isFinite(px.w) && Number.isFinite(px.h) ? { w: px.w as number, h: px.h as number } : null,
       grid: grid && Number.isInteger(grid.cols) && Number.isInteger(grid.rows) ? { cols: grid.cols as number, rows: grid.rows as number } : null,
-      ...(parseClaim(v.claim) ? { claim: parseClaim(v.claim) } : {}),
+      ...(claim ? { claim } : {}),
     })
   }
   return out

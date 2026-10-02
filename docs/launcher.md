@@ -315,7 +315,7 @@ without changing them, and adds `"image_claim":true` to its discovery JSON. An
 application that draws images of its own chooses the image id and writes the
 placeholder cells, so a plugin cannot use the session's `image_id`. Instead
 each session in `GET /v1/sessions` carries `claim:{path,w,h}`, a one-pixel raw
-RGBA file. The plugin has the application draw an image from that file at the
+RGBA file (`claim` is null on a host that does not wrap). The plugin has the application draw an image from that file at the
 session's grid size. The application's file transmission names the path and
 its own image id; the host then uploads that session's frames to that id. The
 producer is not told: it keeps the id it attached with and the host renames
