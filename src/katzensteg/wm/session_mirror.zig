@@ -12,6 +12,9 @@ pub const Cell = struct {
     style_flags: u32 = 0,
     width: Width = .narrow,
 };
+/// Provider coordinates are retained verbatim, including across size changes.
+/// Presenters must check row/col against the current size before indexing; a
+/// resize can arrive before the provider supplies its updated cursor.
 pub const Cursor = struct {
     row: usize = 0,
     col: usize = 0,
@@ -30,6 +33,8 @@ pub const ScrollCopy = struct { src_row: usize, dst_row: usize, row_count: usize
 /// Zero-based coordinates. Short rows are padded with empty default cells;
 /// full replacement clears omitted rows. Scroll copies only destinations;
 /// exposed rows arrive separately. Changed size discards the old grid.
+/// Modes are metadata and do not dirty cell rows. If mode-dependent rendering
+/// affects those rows, the consumer should call markAllDirty().
 pub const Update = union(enum) {
     full_replace: []const Row,
     row_replace: Row,
@@ -86,7 +91,6 @@ pub const Mirror = struct {
                 self.* = next;
             },
             .full_replace => |rows| {
-                for (rows) |r| try self.validateRow(r);
                 var next = try self.emptyGrid(self.size);
                 errdefer next.deinit();
                 for (rows) |r| try next.replaceRow(r);
@@ -159,7 +163,10 @@ pub const Mirror = struct {
         return cells;
     }
     fn freeRow(self: *Mirror, cells: []Cell) void {
-        for (cells) |cell| self.allocator.free(cell.text);
+        for (cells) |cell| {
+            // Padded cells use the empty literal rather than allocated text.
+            if (cell.text.len != 0) self.allocator.free(cell.text);
+        }
         self.allocator.free(cells);
     }
     fn emptyGrid(self: *const Mirror, size: Size) !Mirror {
@@ -275,6 +282,8 @@ test "invalid updates leave state unchanged" {
     mirror.clearDirty();
     try testing.expectError(error.InvalidRow, mirror.apply(.{ .row_replace = .{ .row = 1, .cells = &.{} } }));
     try testing.expectError(error.TooManyCells, mirror.apply(.{ .full_replace = &.{.{ .row = 0, .cells = &.{ .{}, .{} } }} }));
+    // A later invalid descriptor must not commit earlier staged replacements.
+    try testing.expectError(error.InvalidRow, mirror.apply(.{ .full_replace = &.{ .{ .row = 0, .cells = &.{.{ .text = "staged" }} }, .{ .row = 1, .cells = &.{} } } }));
     try testing.expectError(error.InvalidScroll, mirror.apply(.{ .scroll_copy = .{ .src_row = 0, .dst_row = 1, .row_count = 1 } }));
     try testing.expectError(error.InvalidSize, mirror.apply(.{ .size = .{ .cols = std.math.maxInt(usize), .rows = 2 } }));
     try testing.expectEqualStrings("kept", mirror.row(0)[0].text);
