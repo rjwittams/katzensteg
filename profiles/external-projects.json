@@ -302,7 +302,8 @@
       "profiles": [
         "mi2",
         "scummvm.launcher",
-        "bass"
+        "bass",
+        "queen"
       ],
       "build": {
         "macos": [
@@ -383,13 +384,17 @@
           {
             "label": "Beneath a Steel Sky (freeware from scummvm.org/games)",
             "path": "$HOME/roms/bass/sky.dsk"
+          },
+          {
+            "label": "Flight of the Amazon Queen (freeware floppy version from scummvm.org/games)",
+            "path": "$HOME/roms/queen/queen.1"
           }
         ]
       },
       "notes": [
         "No app-side Katzensteg patch is currently required.",
         "Windows: build from an x64 Visual Studio developer prompt with SDL2 set to the SDL2 Visual C++ development package. create_project generates the MSBuild solution in dists/msvc; the listed options build only the freeware-game engines (sky, queen) without optional libraries. Windows builds link the official SDL2.dll through the Visual C++ development package's import library and copy SDL2.dll beside the executable; SDL_DYNAMIC_API cannot reach a statically linked SDL.",
-        "The bass profile runs the freeware Beneath a Steel Sky from $HOME/roms/bass; scummvm.launcher shows the launcher without game data."
+        "The bass profile runs the freeware Beneath a Steel Sky from $HOME/roms/bass; queen runs the freeware floppy Flight of the Amazon Queen from $HOME/roms/queen; scummvm.launcher shows the launcher without game data."
       ]
     },
     {
