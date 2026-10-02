@@ -60,6 +60,11 @@ let imageSite = ''
 const sentDelivery = new Map<string, 'terminal' | 'client'>()
 const lastSeq = new Map<string, number>()
 const lastSource = new Map<string, FrameSource>()
+// An id is in `pumping` exactly while its loop is alive, and only the loop
+// removes it, on its way out. A live loop looks the session up each step, so
+// it serves an id that left and came back; clearing the entry elsewhere would
+// let a second loop start beside it and the two would contend for one frame
+// request.
 const pumping = new Set<string>()
 let blitOk = 0
 let blitDenied = 0
@@ -143,6 +148,9 @@ function pump($: $, id: string): void {
       if (frame) {
         lastSeq.set(id, frame.seq)
         const source = frameSource(frame)
+        // The site as it is now, not as it was when the frame was asked
+        // for: a redraw in between may have moved the panels to the other
+        // site, and that is where the image is mounted.
         const out = await $.ui.blit({ requestId: imageSite, key: `image:${id}`, source })
         if (out.deny) {
           // Not mounted or not painting just now. A shared-memory frame has
@@ -299,6 +307,11 @@ function poll($: $): void {
         hostError = `host lost: ${err}`
         host = undefined
         client = undefined
+        // A restarted host numbers sessions and frames from the start again,
+        // and knows nothing of the delivery this client asked for.
+        sentDelivery.clear()
+        lastSeq.clear()
+        lastSource.clear()
         $.ui.invalidate('prompt.section')
         if (sessions.length > 0) { sessions = []; listing = ''; $.ui.invalidate('ui.render') }
       }

@@ -48,6 +48,8 @@ pub fn applyAs(allocator: std.mem.Allocator, writer: anytype, image_id: u32, ter
 // One validated command with its `i=` field replaced. Every command in a
 // batch names the producer's id exactly once; `sequenceLength` checked that.
 fn appendRenamed(allocator: std.mem.Allocator, out: *std.ArrayList(u8), sequence: []const u8, terminal_id: u32) !void {
+    // `sequenceLength` refuses a command with no `;` (InvalidGraphics), and
+    // `applyAs` validates the whole batch before renaming any of it.
     const separator = std.mem.indexOfScalar(u8, sequence, ';').?;
     try out.appendSlice(allocator, "\x1b_G");
     var fields = std.mem.splitScalar(u8, sequence[3..separator], ',');

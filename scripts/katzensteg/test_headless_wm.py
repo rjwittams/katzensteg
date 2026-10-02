@@ -326,7 +326,9 @@ class HeadlessHostTest(unittest.TestCase):
                 self.assertFalse(host_file.exists())
                 sequences = re.findall(rb"\x1b_G[^\x1b]*\x1b\\", raw)
                 self.assertEqual(b"".join(sequences), raw, "headless host must emit only graphics APCs")
-                self.assertTrue(any(b"a=t" in sequence and b"t=f" in sequence for sequence in sequences))
+                # An external upload either way: shared memory on macOS, a whole
+                # file elsewhere (hostedUploadProfile in wm/headless.zig).
+                self.assertTrue(any(b"a=t" in sequence and (b"t=f" in sequence or b"t=s" in sequence) for sequence in sequences))
                 self.assertTrue(any(b"a=d,d=I" in sequence for sequence in sequences))
                 self.assertTrue(all(len(sequence) <= 512 and b"q=2" in sequence for sequence in sequences))
             finally:

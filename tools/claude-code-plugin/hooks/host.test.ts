@@ -88,6 +88,9 @@ test('a frame reply becomes an image source, or nothing', () => {
   assert.equal(parseFrame('{"seq":1,"medium":"shm","name":"/bad name","width":1,"height":1}'), null)
   assert.equal(parseFrame('{"seq":1,"medium":"file","name":"/x","width":5000,"height":1}'), null)
   assert.equal(parseFrame('{"seq":1,"medium":"pipe","name":"/x","width":1,"height":1}'), null)
+  // The host never hands over a name longer than its own bound.
+  assert.equal(parseFrame(JSON.stringify({ seq: 1, medium: 'file', name: '/' + 'a'.repeat(256), width: 1, height: 1 })), null)
+  assert.notEqual(parseFrame(JSON.stringify({ seq: 1, medium: 'file', name: '/' + 'a'.repeat(255), width: 1, height: 1 })), null)
 })
 
 test('a session names its transport as shared memory or files', () => {

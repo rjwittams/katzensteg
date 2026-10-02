@@ -56,6 +56,9 @@ export function chooseRoute(host: Pick<HostFile, 'placeholder' | 'imageClaim' | 
 /** A session frame the host hands over by name (see `frame` in docs/launcher.md). */
 export type Frame = { seq: number; medium: 'file' | 'shm'; name: string; width: number; height: number }
 
+/** The longest frame name the host hands over (`max_name` in wm/frame_delivery.zig). */
+const MAX_FRAME_NAME = 256
+
 /** The `/frame` reply: a frame, or null when none is newer yet or the reply is malformed. */
 export function parseFrame(text: string): Frame | null {
   let v: Record<string, unknown> | null
@@ -69,7 +72,7 @@ export function parseFrame(text: string): Frame | null {
   const [w, h] = [v.width as number, v.height as number]
   if (w < 1 || h < 1 || w > 4096 || h > 4096) return null
   // What an image source accepts: an absolute path, or a POSIX object name.
-  const ok = v.medium === 'file' ? v.name.startsWith('/') && v.name.length <= 3072 : /^\/[A-Za-z0-9._-]{1,254}$/.test(v.name)
+  const ok = v.medium === 'file' ? v.name.startsWith('/') && v.name.length <= MAX_FRAME_NAME : /^\/[A-Za-z0-9._-]{1,254}$/.test(v.name)
   return ok ? { seq: v.seq as number, medium: v.medium, name: v.name, width: w, height: h } : null
 }
 
@@ -107,13 +110,14 @@ export function parseHostFile(text: string): HostFile | null {
   if (typeof value !== 'object' || value === null) return null
   const v = value as Record<string, unknown>
   if (!Number.isInteger(v.pid) || !Number.isInteger(v.port) || typeof v.token !== 'string' || v.token === '') return null
+  const placeholder = parseStandin(v.placeholder_standin)
   return {
     pid: v.pid as number,
     port: v.port as number,
     token: v.token,
     ...(typeof v.tty === 'string' ? { tty: v.tty } : {}),
     ...(typeof v.socket === 'string' ? { socket: v.socket } : {}),
-    ...(parseStandin(v.placeholder_standin) !== undefined ? { placeholder: parseStandin(v.placeholder_standin) } : {}),
+    ...(placeholder !== undefined ? { placeholder } : {}),
     ...(v.image_claim === true ? { imageClaim: true as const } : {}),
     ...(v.frame_delivery === true ? { frameDelivery: true as const } : {}),
   }
@@ -169,6 +173,8 @@ export function parseSessions(text: string): Session[] {
     if (id === undefined || !Number.isInteger(v.image_id) || !isState(v.state)) continue
     const px = v.source_px as Record<string, unknown> | null | undefined
     const grid = v.grid as Record<string, unknown> | null | undefined
+    const claim = parseClaim(v.claim)
+    const upload = parseUpload(v.upload)
     out.push({
       id,
       title: typeof v.title === 'string' ? v.title : id,
@@ -177,8 +183,8 @@ export function parseSessions(text: string): Session[] {
       input_supported: v.input_supported !== false,
       source_px: px && Number.isFinite(px.w) && Number.isFinite(px.h) ? { w: px.w as number, h: px.h as number } : null,
       grid: grid && Number.isInteger(grid.cols) && Number.isInteger(grid.rows) ? { cols: grid.cols as number, rows: grid.rows as number } : null,
-      ...(parseClaim(v.claim) ? { claim: parseClaim(v.claim) } : {}),
-      ...(parseUpload(v.upload) ? { upload: parseUpload(v.upload) } : {}),
+      ...(claim ? { claim } : {}),
+      ...(upload ? { upload } : {}),
     })
   }
   return out
