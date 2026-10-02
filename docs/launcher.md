@@ -368,7 +368,7 @@ client's session list, using the same producer interface as HTTP launches.
 
 | Request | Body | Response |
 | --- | --- | --- |
-| `GET /v1/sessions` | — | Array of `{id,title,image_id,state,source_px,grid}` |
+| `GET /v1/sessions` | — | Array of `{id,title,image_id,state,source_px,grid,upload}` |
 | `POST /v1/sessions` | `{profile,args?:[]}` | `{id}` |
 | `POST /v1/sessions/{id}/grid` | `{cols,rows}` | `{}` |
 | `POST /v1/sessions/{id}/observe` | `{after_frame?:N}` | `{path,width,height,frame_id,timestamp_ms,newer}` |
@@ -379,6 +379,7 @@ client's session list, using the same producer interface as HTTP launches.
 | `POST /v1/sessions/{id}/input` | `{events:[...]}` | `{}` |
 | `POST /v1/sessions/{id}/close` | `{}` | `{}` |
 
+`upload` names the session's image transport, `shm` or `file_whole`.
 Session IDs are numbers, monotonically allocated during the host lifetime.
 State is `starting`, `ready`, `closing` or `exited`. The list is authoritative;
 exited records remain for 30 seconds. Clients should remove cells for closing,

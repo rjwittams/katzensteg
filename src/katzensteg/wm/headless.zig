@@ -505,7 +505,7 @@ const Host = struct {
                 for (self.sessions.items) |session| {
                     if (!std.mem.eql(u8, &session.owner, &owner)) continue;
                     const state: []const u8 = if (session.exited_at != null) "exited" else if (session.closing_at != null) "closing" else if (session.ready and session.grid != null) "ready" else "starting";
-                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid, .claim = if (self.terminal.relay != null) Claim{ .path = session.claim_path } else null }, .{ .emit_null_optional_fields = false }), .{});
+                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid, .upload = @tagName(session.upload_profile), .claim = if (self.terminal.relay != null) Claim{ .path = session.claim_path } else null }, .{ .emit_null_optional_fields = false }), .{});
                     try list.append(allocator, value.value);
                 }
                 return json(allocator, list.items);

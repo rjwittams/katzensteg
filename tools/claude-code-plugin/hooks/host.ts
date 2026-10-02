@@ -130,7 +130,17 @@ export type Session = {
   grid: { cols: number; rows: number } | null
   /** A raw RGBA file an application-drawn image points at to claim this session. */
   claim?: { path: string; w: number; h: number }
+  /** How the session's pixels reach the terminal, when the host says. */
+  upload?: 'shm' | 'file'
 }
+
+/** The host's transport name as the two kinds a person cares about. */
+const parseUpload = (value: unknown): Session['upload'] =>
+  value === 'shm' ? 'shm' : typeof value === 'string' && value.startsWith('file') ? 'file' : undefined
+
+/** For status lines: where a session's pixels are written on the way to the terminal. */
+export const uploadLabel = (upload: Session['upload']): string =>
+  upload === 'shm' ? 'shared memory' : upload === 'file' ? 'files' : 'transport unknown'
 
 const parseClaim = (value: unknown): Session['claim'] => {
   const c = value as Record<string, unknown> | null | undefined
@@ -168,6 +178,7 @@ export function parseSessions(text: string): Session[] {
       source_px: px && Number.isFinite(px.w) && Number.isFinite(px.h) ? { w: px.w as number, h: px.h as number } : null,
       grid: grid && Number.isInteger(grid.cols) && Number.isInteger(grid.rows) ? { cols: grid.cols as number, rows: grid.rows as number } : null,
       ...(parseClaim(v.claim) ? { claim: parseClaim(v.claim) } : {}),
+      ...(parseUpload(v.upload) ? { upload: parseUpload(v.upload) } : {}),
     })
   }
   return out

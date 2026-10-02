@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chooseRoute, frameSource, inputSince, newInputEvents, parseFrame, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
+import { chooseRoute, frameSource, inputSince, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
 
 test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.deepEqual(parseHostFile('{"pid":12,"port":4567,"token":"abc","tty":"ttys007","socket":"/tmp/k.sock"}'),
@@ -88,6 +88,16 @@ test('a frame reply becomes an image source, or nothing', () => {
   assert.equal(parseFrame('{"seq":1,"medium":"shm","name":"/bad name","width":1,"height":1}'), null)
   assert.equal(parseFrame('{"seq":1,"medium":"file","name":"/x","width":5000,"height":1}'), null)
   assert.equal(parseFrame('{"seq":1,"medium":"pipe","name":"/x","width":1,"height":1}'), null)
+})
+
+test('a session names its transport as shared memory or files', () => {
+  const one = (upload: unknown) => parseSessions(JSON.stringify([{ id: 1, image_id: 100001, state: 'ready', upload }]))[0]
+  assert.equal(uploadLabel(one('shm')?.upload), 'shared memory')
+  assert.equal(uploadLabel(one('file_whole')?.upload), 'files')
+  assert.equal(uploadLabel(one('file_offset_ring')?.upload), 'files')
+  // An older host says nothing.
+  assert.equal(uploadLabel(one(undefined)?.upload), 'transport unknown')
+  assert.equal(uploadLabel(one('direct_apc')?.upload), 'transport unknown')
 })
 
 test('a session carries its claim file only when well formed', () => {

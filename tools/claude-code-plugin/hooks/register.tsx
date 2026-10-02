@@ -2,7 +2,7 @@
 import type { Elements, EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 import { fitGrid, type Grid } from './placeholders.ts'
 import {
-  chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
+  chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
 import { ordered, swapOnDrag } from './layout.ts'
@@ -561,7 +561,7 @@ export const register: Register = on => {
       const detail = sessions.map(s => {
         const sent = sentGrid.get(s.id)
         const own = sizeOverride.get(s.id)
-        return `  ${s.id}: ${s.state} · host grid ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'none'} · sent ${sent ? `${sent.cols}x${sent.rows}` : 'none'}${gridReady.has(s.id) ? ' (acked)' : ''} · override ${own ? `${own.cols}x${own.rows}` : 'none'}${resizing.has(s.id) ? ' · resizing' : ''} · last events: ${(lastTypes.get(s.id) ?? []).join(',') || 'none'}`
+        return `  ${s.id}: ${s.state} · ${uploadLabel(s.upload)} · host grid ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'none'} · sent ${sent ? `${sent.cols}x${sent.rows}` : 'none'}${gridReady.has(s.id) ? ' (acked)' : ''} · override ${own ? `${own.cols}x${own.rows}` : 'none'}${resizing.has(s.id) ? ' · resizing' : ''} · last events: ${(lastTypes.get(s.id) ?? []).join(',') || 'none'}`
       })
       return {
         text: host && client
