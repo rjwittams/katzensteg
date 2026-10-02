@@ -31,6 +31,8 @@ export type PanelProps = {
   dimmed?: boolean
   /** The number of the layout this panel is drawn in; drag reports name it. */
   gen?: number
+  /** In a lane: the side edge sizes the lane, and the bottom is no handle. */
+  sideOnly?: boolean
 }
 
 type Ev = Record<string, unknown> & { n: number }
@@ -112,7 +114,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
         // and every later move would count as dragging it.
         endDrag()
       }
-      const zone = zoneAt(ev.x, ev.y, cols, rows)
+      const zone = zoneAt(ev.x, ev.y, cols, rows, latest.props.sideOnly === true)
       if (ev.type === 'down') {
         if (zone === 'close') {
           push({ type: 'close' })
