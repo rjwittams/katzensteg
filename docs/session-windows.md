@@ -94,14 +94,18 @@ Through the existing launch prompt and the command line
 
 The prompt accepts only profile-name characters today, so it has to accept
 spaces and the two sigils. A profile named exactly `term` or `attach` is
-shadowed. Cleat allocates a new session's id.
+shadowed by the word form: typing that name in the prompt opens a session, not
+the profile. No profile in this repo has either name. Cleat allocates a new
+session's id.
 
 ### Attaching
 
 The WM attaches as a controller without taking exclusive control, and asks for
 the window's content size in cells
 ([#94](https://github.com/rjwittams/katzensteg/issues/94)). Cleat sets the
-session's size to the smallest any controller asks for.
+session's size to the smallest any controller asks for, in each dimension. So
+attaching a window smaller than the session's other controllers shrinks the
+session for all of them, until the window grows or detaches.
 
 - If the grid is smaller than the window, it is shown top-left and the rest of
   the content area is blank.
@@ -140,8 +144,10 @@ engine holds and accepts cleat's answers to the program as they are
   when it attaches and whenever the terminal's size changes. If the outer
   terminal reports no pixel size, the WM reports nothing.
 - **Default colours.** When the WM starts a session it asks the outer terminal
-  for its default foreground and background once, and passes them at creation.
-  A session the WM attaches to keeps what it had.
+  for its default foreground and background once, and passes them at creation,
+  so a program choosing a light or dark theme matches what the user sees. A
+  session the WM attaches to keeps what it had, which may not match the outer
+  terminal.
 
 ## Input
 
