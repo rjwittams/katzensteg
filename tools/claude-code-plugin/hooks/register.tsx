@@ -5,7 +5,8 @@ import {
   chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
-import { ordered, swapOnPointer } from './layout.ts'
+import { dragSwap, ordered } from './layout.ts'
+import { pointerOver } from './frame.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -105,6 +106,9 @@ const resizeStamp = new Map<string, number>()
 // The panel being moved by its title, from its press to its release: the
 // others draw dim meanwhile so the held one stands out.
 let moving: string | undefined
+// While a panel is being moved, the panel and cell the pointer is over: that
+// panel draws the cell marked, so the pointer can be seen to be followed.
+let pointerMark: { id: string; x: number; y: number } | undefined
 const lastWidths = new Map<string, number>()
 const lastHeights = new Map<string, number>()
 // Stacked (docked pane), panels reorder by vertical drag against heights.
@@ -118,7 +122,12 @@ const lastInst = new Map<string, unknown>()
 let forwarded = 0
 let shown = 0
 
-const log = ($: $, text: string) => $.ui.log(`katzensteg: ${text}`)
+// Two kinds of message. `tell` is for the person: something they asked for is
+// not working and they can act on it; it goes into the conversation. `log` is
+// the plugin's own diagnostics (sizes, redraws, a request the plugin retries);
+// it goes to the trace file and the debug log, never the conversation.
+const tell = ($: $, text: string) => { trace($, text); $.ui.log(`katzensteg: ${text}`) }
+const log = ($: $, text: string) => { trace($, text); $.ui.log(`katzensteg: ${text}`, { to: 'debug' }) }
 
 // A timeline of what sizes the plugin drew, posted and received, kept in a
 // file because the transcript shows only the latest state. The last few
@@ -344,7 +353,7 @@ function poll($: $): void {
           void ensureContainer($)
         }
       } catch (err) {
-        log($, `host lost: ${err}`)
+        tell($, `host lost: ${err}`)
         hostError = `host lost: ${err}`
         host = undefined
         client = undefined
@@ -375,7 +384,7 @@ async function ensureContainer($: $): Promise<void> {
   const any = visible().length > 0
   if (place === 'pane' && any && !paneOpen) {
     paneOpen = true
-    await $.ui.open({ id: PANE_ID, title: 'katzensteg', rows: SIZES[size] + 3 }).catch(err => { paneOpen = false; log($, `pane did not open: ${err}`) })
+    await $.ui.open({ id: PANE_ID, title: 'katzensteg', rows: SIZES[size] + 3 }).catch(err => { paneOpen = false; tell($, `pane did not open: ${err}`) })
   } else if (paneOpen && (place !== 'pane' || !any)) {
     paneOpen = false
     await $.ui.close({ id: PANE_ID }).catch(() => undefined)
@@ -443,7 +452,7 @@ async function registerTools($: $): Promise<void> {
     },
   ]
   for (const spec of specs) {
-    await $.tool.register(spec).catch(err => log($, `tool ${spec.name} not registered: ${err}`))
+    await $.tool.register(spec).catch(err => tell($, `tool ${spec.name} not registered: ${err}`))
   }
 }
 
@@ -504,8 +513,8 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
       }
       $.clock.after(0, () => {
         api($, `/sessions/${encodeURIComponent(s.id)}/grid`, grid)
-          .then(r => { trace($, `${s.id} grid ${grid.cols}x${grid.rows} answered ${r.status}`); if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else { log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`); retry() } })
-          .catch(err => { trace($, `${s.id} grid ${grid.cols}x${grid.rows} failed: ${err}`); log($, `grid for ${s.id} failed: ${err}`); retry() })
+          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else { log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`); retry() } })
+          .catch(err => { log($, `grid for ${s.id} failed: ${err}`); retry() })
       })
     }
     // Repainting placeholder cells does not need another image upload.
@@ -536,7 +545,7 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(moving !== undefined && moving !== s.id && { dimmed: true }), ...(pointerMark?.id === s.id && { pointer: { x: pointerMark.x, y: pointerMark.y } }) }
           // On the blit route the host hands frames to this client; on every
           // other it writes them to the terminal itself.
           if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
@@ -614,7 +623,7 @@ export const register: Register = on => {
       description: 'Game panels above the prompt via a headless katzensteg-wm: open, close, list, host',
       argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim|blit | pane | list | host | stop',
       immediate: true,
-    }).catch(err => log($, `/katzensteg not registered: ${err}`))
+    }).catch(err => tell($, `/katzensteg not registered: ${err}`))
     await registerTools($)
     const repo = (await $.env.get('KATZENSTEG_REPO')) ?? `${(await $.env.get('HOME')) ?? ''}/dev/katzensteg`
     hostBin = (await $.env.get('KATZENSTEG_HOST_BIN')) ?? `${repo}/zig-out/bin/katzensteg-wm`
@@ -629,7 +638,7 @@ export const register: Register = on => {
     if (isRouteWish(savedRoute)) routeWish = savedRoute
     // Connect off the session.start path so a slow host start never holds it;
     // the poll loop keeps retrying while no host answers.
-    $.clock.after(0, () => { connect($).catch(err => log($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
+    $.clock.after(0, () => { connect($).catch(err => tell($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
     return r
   })
 
@@ -895,7 +904,7 @@ export const register: Register = on => {
     const id = data.id
     // A panel that remounted mid-move cannot report its release: let the
     // others out of the dim.
-    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; $.ui.invalidate('ui.render') }
+    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; pointerMark = undefined; $.ui.invalidate('ui.render') }
     const { events, lastN: n } = newInputEvents(data.events, inputSince(lastInst.get(id), data.inst, lastN.get(id) ?? 0))
     if (data.inst !== undefined) lastInst.set(id, data.inst)
     lastN.set(id, n)
@@ -925,14 +934,29 @@ export const register: Register = on => {
         moving = id
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'dragend') {
-        if (moving === id) { moving = undefined; $.ui.invalidate('ui.render') }
+        pointerMark = undefined
+        if (moving === id) moving = undefined
+        $.ui.invalidate('ui.render')
       } else if (ev.type === 'drag') {
         // Side by side the gap is one column; stacked, the blocks touch.
         // Where the pointer is from the dragged panel's own top or left edge.
-        const reordered = lastStacked ? swapOnPointer(order, id, ev.y ?? ev.dy, lastHeights, 0) : swapOnPointer(order, id, ev.x ?? ev.dx, lastWidths)
+        const swap = lastStacked ? dragSwap(order, id, ev.y ?? ev.dy, lastHeights, 0) : dragSwap(order, id, ev.x ?? ev.dx, lastWidths)
+        const reordered = swap.order
         const swapped = reordered.some((v, i) => v !== order[i])
         trace($, `${id} drag pointer ${ev.x ?? '?'},${ev.y ?? '?'} in its panel (${lastWidths.get(id) ?? '?'}x${lastHeights.get(id) ?? '?'}) order ${order.join(' ')}${swapped ? ` -> ${reordered.join(' ')}` : ''}`)
-        if (swapped) { order = reordered; $.ui.invalidate('ui.render') }
+        // The panels' places are those of the last draw; a swap redraws and
+        // the next report is relative to the panel's new place.
+        // A swap puts the pointer on the dragged panel itself, at the place
+        // `dragSwap` carried through; the panels' recorded places are stale
+        // until the redraw.
+        const from = placed.get(id)
+        const over = ev.x === undefined || ev.y === undefined ? undefined
+          : swapped ? { id, x: lastStacked ? ev.x : swap.at, y: lastStacked ? swap.at : ev.y }
+          : from ? pointerOver(from, ev.x, ev.y, placed) : undefined
+        const markMoved = over?.id !== pointerMark?.id || over?.x !== pointerMark?.x || over?.y !== pointerMark?.y
+        pointerMark = over
+        if (swapped) order = reordered
+        if (swapped || markMoved) $.ui.invalidate('ui.render')
       }
     }
     const input = events.filter(ev => !isPanelEvent(ev))

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dragFor, dragStep, panelFrame, zoneAt, type Seg } from './frame.ts'
+import { dragFor, dragStep, markAt, panelFrame, pointerOver, POINTER_MARK, zoneAt, type Seg } from './frame.ts'
 
 const text = (segs: Seg[]) => segs.map(s => s.text).join('')
 const base = { cols: 20, rows: 4, title: 'mi2', status: 'ready · in:0', phase: 0 }
@@ -39,6 +39,41 @@ test('a drag ends on its release, and also when the release was plainly missed',
   assert.equal(dragStep('move', false), 'lost')
   // A new press cannot happen while the old one is still down.
   assert.equal(dragStep('down', true), 'lost')
+})
+
+test('the pointer mark replaces exactly one cell of a row', () => {
+  const top = panelFrame({ ...base, cols: 24 }).top
+  for (const x of [0, 1, 7, 24, 25]) {
+    const marked = markAt(top, x)
+    const cells = [...text(marked)]
+    assert.equal(cells.length, 26, `width at ${x}`)
+    assert.equal(cells[x], '+')
+    assert.equal(cells.filter(c => c === '+').length, 1)
+    // Every other cell is untouched.
+    assert.deepEqual(cells.filter((_, i) => i !== x), [...text(top)].filter((_, i) => i !== x))
+    assert.ok(marked.includes(POINTER_MARK))
+  }
+  // Outside the row nothing changes.
+  assert.deepEqual(markAt(top, -1), top)
+  assert.deepEqual(markAt(top, 26), top)
+})
+
+test('a held pointer is placed on whichever panel it is over', () => {
+  // Two stacked panels, 45 wide and 18 tall, below a header row.
+  const panels = new Map([
+    ['a', { col: 0, row: 1, cols: 45, rows: 18 }],
+    ['b', { col: 0, row: 19, cols: 45, rows: 18 }],
+  ])
+  const b = panels.get('b')!
+  // On b's own title row.
+  assert.deepEqual(pointerOver(b, 14, 0, panels), { id: 'b', x: 14, y: 0 })
+  // One row up: a's bottom border.
+  assert.deepEqual(pointerOver(b, 14, -1, panels), { id: 'a', x: 14, y: 17 })
+  // Well up into a.
+  assert.deepEqual(pointerOver(b, 14, -10, panels), { id: 'a', x: 14, y: 8 })
+  // The header row, and past the panels' right side: over no panel.
+  assert.equal(pointerOver(b, 14, -19, panels), undefined)
+  assert.equal(pointerOver(b, 60, 3, panels), undefined)
 })
 
 test('every row of the frame is as wide as the panel, in every state', () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ordered, swapOnPointer } from './layout.ts'
+import { dragSwap, ordered, swapOnPointer } from './layout.ts'
 
 const sizes = new Map([['a', 20], ['b', 20], ['big', 30], ['small', 10]])
 
@@ -56,6 +56,17 @@ test('a pointer that crossed several panels crosses them all, and unknown ids ch
   // At either end there is nothing further to trade with.
   assert.deepEqual(swapOnPointer(['b', 'a'], 'a', 500, sizes), ['b', 'a'])
   assert.deepEqual(swapOnPointer(['a', 'b'], 'a', -500, sizes), ['a', 'b'])
+})
+
+test('after a swap the pointer is reported from the panel\'s new place', () => {
+  // b (20) below a (20), stacked. One row above b is a's last row; swapped,
+  // b starts where a did, 20 rows up, so the pointer is on b's own row 19.
+  assert.deepEqual(dragSwap(['a', 'b'], 'b', -1, sizes, 0), { order: ['b', 'a'], at: 19 })
+  assert.deepEqual(dragSwap(['a', 'b'], 'a', 20, sizes, 0), { order: ['b', 'a'], at: 0 })
+  // No swap: the position is unchanged.
+  assert.deepEqual(dragSwap(['a', 'b'], 'a', 7, sizes, 0), { order: ['a', 'b'], at: 7 })
+  // Two panels crossed in one motion.
+  assert.deepEqual(dragSwap(['a', 'b', 'small'], 'a', 40, sizes, 0), { order: ['b', 'small', 'a'], at: 10 })
 })
 
 test('ordered keeps known order and appends newcomers', () => {

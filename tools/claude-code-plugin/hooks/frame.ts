@@ -57,6 +57,52 @@ export type FrameInput = {
 
 const GRIP = '≡'
 
+/** What marks the cell the pointer is on while a panel is being moved. */
+export const POINTER_MARK: Seg = { text: '+', tone: 'accent', bold: true, inverse: true }
+
+/**
+ * A row of segments with the cell at `x` replaced by the pointer mark. A row
+ * is read cell by cell: every frame glyph is one cell wide. Outside the row
+ * nothing changes.
+ */
+export function markAt(segs: readonly Seg[], x: number): Seg[] {
+  const out: Seg[] = []
+  let at = 0
+  for (const seg of segs) {
+    const cells = [...seg.text]
+    if (x < at || x >= at + cells.length) {
+      out.push(seg)
+    } else {
+      const i = x - at
+      if (i > 0) out.push({ ...seg, text: cells.slice(0, i).join('') })
+      out.push(POINTER_MARK)
+      if (i + 1 < cells.length) out.push({ ...seg, text: cells.slice(i + 1).join('') })
+    }
+    at += cells.length
+  }
+  return out
+}
+
+/**
+ * Where a pointer reported inside one panel's region falls among all the
+ * panels: `from` is that panel's place in the site, `x`, `y` the pointer in
+ * its region (negative or past its edges while a drag holds it). Returns the
+ * panel the pointer is over and the cell within that panel's own region.
+ */
+export function pointerOver<T extends { col: number; row: number; cols: number; rows: number }>(
+  from: T,
+  x: number,
+  y: number,
+  panels: ReadonlyMap<string, T>,
+): { id: string; x: number; y: number } | undefined {
+  const col = from.col + x
+  const row = from.row + y
+  for (const [id, p] of panels) {
+    if (col >= p.col && col < p.col + p.cols && row >= p.row && row < p.row + p.rows) return { id, x: col - p.col, y: row - p.row }
+  }
+  return undefined
+}
+
 // Two cells on, two off, travelling clockwise as the phase advances.
 const lit = (i: number, phase: number): boolean => (((i - phase) % 4) + 4) % 4 < 2
 

@@ -18,6 +18,15 @@
  * made so far, and a pointer that crossed several panels crosses them all.
  */
 export function swapOnPointer(order: readonly string[], id: string, at: number, sizes: ReadonlyMap<string, number>, gap = 1): string[] {
+  return dragSwap(order, id, at, sizes, gap).order
+}
+
+/**
+ * `swapOnPointer`, also returning where the pointer is from the dragged
+ * panel's start once the swaps are made: what its next report will say, and
+ * where to draw the pointer before that report arrives.
+ */
+export function dragSwap(order: readonly string[], id: string, at: number, sizes: ReadonlyMap<string, number>, gap = 1): { order: string[]; at: number } {
   const next = [...order]
   const self = sizes.get(id) ?? 0
   let rel = at
@@ -49,7 +58,7 @@ export function swapOnPointer(order: readonly string[], id: string, at: number, 
     }
     break
   }
-  return next
+  return { order: next, at: rel }
 }
 
 /** Sessions in band order: known ids first in their order, new ones after. */

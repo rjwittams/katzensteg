@@ -54,6 +54,12 @@ route that cannot be served falls back to what `auto` would pick.
 `/katzensteg host` shows the route in use and, on `blit`, how many frames were
 swapped or refused.
 
+The plugin writes to the conversation only what you can act on, such as a lost
+host or a pane that would not open. Its own diagnostics (sizes drawn and
+posted, frame sizes, drag positions, requests it retries) go to
+`/tmp/katzensteg-plugin-<pid>.log`, which `/katzensteg host` names, and to
+Claude Code's debug log.
+
 The wrapper runs Claude on an inner PTY and forwards input unchanged, including
 Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin
 from the same checkout: it attaches through `KATZENSTEG_WM_HOST`, supplied by
@@ -95,7 +101,8 @@ edge or corner turns heavy, and the close mark inverts. While a panel is held
 by its title its border is heavy, dashes travel round it, and the other
 panels dim. It trades places with a neighbour when the pointer is over that
 neighbour, or, past a larger one, once the pointer reaches where the panel
-will land. While an edge is dragged only that edge is heavy and the title
+will land. The cell the pointer is on is marked with a `+`, on
+whichever panel it is over, so you can see the pointer being followed. While an edge is dragged only that edge is heavy and the title
 shows the size in cells. A drag also ends on the next press, or the next
 pointer move with no button held: Claude Code does not deliver the release
 after a redraw that reorders panels. The title shows

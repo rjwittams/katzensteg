@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fgHex, fitGrid, MAX_GRID, rowText } from './placeholders.ts'
+import { fgHex, fitGrid, MAX_GRID, rowSpan, rowText } from './placeholders.ts'
 import { DIACRITICS, PLACEHOLDER } from './diacritics.ts'
 
 test('fgHex encodes the id as a 24-bit colour', () => {
@@ -18,6 +18,12 @@ test('rowText carries row and column diacritics on every cell', () => {
     assert.equal(m[2], DIACRITICS[i])
   }
   assert.equal(rowText(0, 0), '')
+})
+
+test('a row can be drawn in spans that keep each cell its own column', () => {
+  assert.equal(rowSpan(2, 0, 3) + rowSpan(2, 3, 7), rowText(2, 7))
+  assert.equal(rowSpan(2, 4, 4), '')
+  assert.equal(rowSpan(2, -3, 2), rowText(2, 2))
 })
 
 test('rowText draws with a stand-in cell when given one', () => {

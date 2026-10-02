@@ -1,7 +1,7 @@
 /* @jsx h */
 import type { ClientPointerEvent, ClientSurface } from 'claude-code'
-import { fgHex, rowText } from './placeholders.ts'
-import { dragFor, dragStep, panelFrame, zoneAt, type DragKind, type Seg, type Zone } from './frame.ts'
+import { fgHex, rowSpan, rowText } from './placeholders.ts'
+import { dragFor, dragStep, markAt, panelFrame, POINTER_MARK, zoneAt, type DragKind, type Seg, type Zone } from './frame.ts'
 
 // One game panel: a border, a title row and the placeholder grid the terminal
 // composes the producer's image into. Runs on the drawing thread. Keys arrive
@@ -29,6 +29,11 @@ export type PanelProps = {
   hollow?: boolean
   /** Another panel is being moved: draw this one's frame dim. */
   dimmed?: boolean
+  /**
+   * While a panel is being moved, the cell of this panel's region the pointer
+   * is on: it is drawn marked, so the pointer can be seen to be followed.
+   */
+  pointer?: { x: number; y: number }
 }
 
 type Ev = Record<string, unknown> & { n: number }
@@ -151,7 +156,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   }
   if (surface.state) surface.state.latest.props = props
 
-  const { cols, rows, imageId, title, state, placeholder, hollow, dimmed } = props
+  const { cols, rows, imageId, title, state, placeholder, hollow, dimmed, pointer } = props
   const color = fgHex(imageId)
   const border = state === 'ready' ? 'green' : state === 'starting' ? 'yellow' : 'red'
   // Title, then the count of input events this panel has captured (a quick
@@ -179,35 +184,55 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
       {seg.text}
     </Text>
   )
-  const lines = []
-  for (let r = 0; r < rows; r++) lines.push(hollow ? '' : rowText(r, cols, placeholder))
+  // The pointer's cell, if it is on this panel: on the top or bottom row, on
+  // an edge, or in the grid at column `markCol` of grid row `markRow`.
+  const top = pointer?.y === 0 ? markAt(frame.top, pointer.x) : frame.top
+  const bottom = pointer?.y === rows + 1 ? markAt(frame.bottom, pointer.x) : frame.bottom
+  const markRow = pointer && pointer.y >= 1 && pointer.y <= rows ? pointer.y - 1 : -1
+  const left = (r: number) => (r === markRow && pointer?.x === 0 ? POINTER_MARK : frame.left[r]!)
+  const right = (r: number) => (r === markRow && pointer?.x === cols + 1 ? POINTER_MARK : frame.right[r]!)
+  const markCol = (r: number) => (r === markRow && pointer && pointer.x >= 1 && pointer.x <= cols ? pointer.x - 1 : -1)
+  const rowsList = Array.from({ length: rows }, (_, r) => r)
   if (hollow) {
-    // Nothing is painted inside the border, so the image beneath shows through.
+    // Nothing is painted inside the border, so the image beneath shows
+    // through; the pointer mark is the one cell drawn over it.
     return (
       <Box flexDirection="column">
-        <Text>{frame.top.map(draw)}</Text>
-        {lines.map((_, r) => (
-          <Box>
-            {draw(frame.left[r]!)}
-            <Box width={cols} />
-            {draw(frame.right[r]!)}
-          </Box>
-        ))}
-        <Text>{frame.bottom.map(draw)}</Text>
+        <Text>{top.map(draw)}</Text>
+        {rowsList.map(r => {
+          const c = markCol(r)
+          return (
+            <Box>
+              {draw(left(r))}
+              {c < 0 && <Box width={cols} />}
+              {c > 0 && <Box width={c} />}
+              {c >= 0 && draw(POINTER_MARK)}
+              {c >= 0 && cols - c - 1 > 0 && <Box width={cols - c - 1} />}
+              {draw(right(r))}
+            </Box>
+          )
+        })}
+        <Text>{bottom.map(draw)}</Text>
       </Box>
     )
   }
   return (
     <Box flexDirection="column">
-      <Text>{frame.top.map(draw)}</Text>
-      {lines.map((line, r) => (
-        <Text>
-          {draw(frame.left[r]!)}
-          <Text color={color}>{line}</Text>
-          {draw(frame.right[r]!)}
-        </Text>
-      ))}
-      <Text>{frame.bottom.map(draw)}</Text>
+      <Text>{top.map(draw)}</Text>
+      {rowsList.map(r => {
+        const c = markCol(r)
+        return (
+          <Text>
+            {draw(left(r))}
+            {c < 0 && <Text color={color}>{rowText(r, cols, placeholder)}</Text>}
+            {c > 0 && <Text color={color}>{rowSpan(r, 0, c, placeholder)}</Text>}
+            {c >= 0 && draw(POINTER_MARK)}
+            {c >= 0 && c + 1 < cols && <Text color={color}>{rowSpan(r, c + 1, cols, placeholder)}</Text>}
+            {draw(right(r))}
+          </Text>
+        )
+      })}
+      <Text>{bottom.map(draw)}</Text>
     </Box>
   )
 }
