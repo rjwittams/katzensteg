@@ -411,14 +411,18 @@ client's session list, using the same producer interface as HTTP launches.
 
 | Request | Body | Response |
 | --- | --- | --- |
-| `GET /v1/sessions` | — | Array of `{id,title,image_id,state,source_px,grid}` |
+| `GET /v1/sessions` | — | Array of `{id,title,image_id,state,source_px,grid,upload}` |
 | `POST /v1/sessions` | `{profile,args?:[]}` | `{id}` |
 | `POST /v1/sessions/{id}/grid` | `{cols,rows}` | `{}` |
 | `POST /v1/sessions/{id}/observe` | `{after_frame?:N}` | `{path,width,height,frame_id,timestamp_ms,newer}` |
 | `POST /v1/sessions/{id}/refresh` | `{}` | `{}` |
+| `POST /v1/sessions/{id}/delivery` | `{mode:"terminal"\|"client"}` | `{}` |
+| `POST /v1/sessions/{id}/frame` | `{after?:N}` | `{seq,medium,name,format,width,height}` or `{seq:null}` |
+| `POST /v1/sessions/{id}/release` | `{seq:N}` | `{}` |
 | `POST /v1/sessions/{id}/input` | `{events:[...]}` | `{}` |
 | `POST /v1/sessions/{id}/close` | `{}` | `{}` |
 
+`upload` names the session's image transport, `shm` or `file_whole`.
 Session IDs are numbers, monotonically allocated during the host lifetime.
 State is `starting`, `ready`, `closing` or `exited`. The list is authoritative;
 exited records remain for 30 seconds. Clients should remove cells for closing,
@@ -426,6 +430,23 @@ exited or absent sessions. Access to another client's session returns 404.
 A launch response acknowledges acceptance: later application startup failures
 appear as exited sessions. Synchronous errors return 400 with an `error` field, except handler memory
 exhaustion, which returns 503 `OutOfMemory`.
+
+Every headless host adds `"frame_delivery":true` to its discovery JSON. A
+session's frames go to the terminal by default. `delivery` with mode `client`
+makes the host hand them to the owning client by name instead and write none
+of them, for an application that draws the image itself with no wrapper in
+between. `frame` then waits up to a second for a frame newer than `after` and
+returns its sequence number, `medium` (`file` or `shm`), `name` (an absolute
+path or a POSIX shared-memory name), `format` (`rgba`) and pixel size, or
+`{seq:null}` when none arrived; one request per session may wait at a time.
+The client gives that name to the application, whose terminal reads the
+pixels. A file belongs to the producer's rotating upload pool, so use the
+sequence number to tell new content under an old path. A shared-memory object
+is read once: a client that could not hand it on calls `release` with its
+sequence number, and the host releases frames no client was given. Switching
+back to `terminal` restores the latest frame there. Frames are shared-memory
+objects or whole files according to the host's transport (see Terminal image
+transport).
 
 A producer starts with a temporary 1×1 virtual grid so it can report source
 pixels. Its graphics are withheld until the client supplies the grid it drew.
@@ -498,13 +519,19 @@ legacy direct-output behavior of forcing inline APC, including disabling SHM.
 
 The desktop WM probes and chooses on behalf of its producers. Its JSONL path
 still substitutes whole-file uploads for inline output. The headless WM and pi
-extension do not own terminal input, so they keep whole-file output by default.
-Set `KATZENSTEG_OUTPUT_PROFILE=shm` in the environment of the **host** to use SHM
-there. Restart an existing background headless host for the setting to take
-effect. These two hosts currently recognize only the SHM override; their other
-settings continue to select whole-file output. They do not consume terminal
-probe replies from Claude or pi. Hosted automatic negotiation remains follow-up
-work.
+extension do not own terminal input and do not consume terminal probe replies
+from Claude or pi, so they choose without a probe.
+
+The headless WM uses SHM on macOS and whole files elsewhere. A regular file
+reaches storage on every frame on macOS, and the terminals there that draw
+placeholder images, kitty and Ghostty, also read shared memory. Set
+`KATZENSTEG_OUTPUT_PROFILE=file_whole` or `shm` in the environment of the
+**host** to choose outright; it recognizes only those two values and other
+settings leave its default. Restart an existing background headless host for
+the setting to take effect.
+
+The pi extension keeps whole-file output by default and recognizes only the
+SHM override. Hosted automatic negotiation remains follow-up work.
 
 For example, from the repository root:
 

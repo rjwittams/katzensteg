@@ -9,6 +9,7 @@ const peer_protocol = @import("../attach_protocol.zig");
 const Listener = @import("listener.zig").Listener;
 const graphics = @import("graphics_output.zig");
 const image_claim = @import("image_claim.zig");
+const frame_delivery = @import("frame_delivery.zig");
 const terminal_mod = @import("host_terminal.zig");
 const Logger = @import("../log.zig").Logger;
 
@@ -57,6 +58,14 @@ const Session = struct {
     /// That id, while the application owns the image on screen. The producer
     /// keeps `image_id`; its batches are renamed on the way to the terminal.
     terminal_image_id: ?u32 = null,
+    /// Who receives this session's frames. `client` hands each frame to the
+    /// owning client by name, for an application that draws the image itself
+    /// with no wrapper in between; the host then writes none of them.
+    delivery: enum { terminal, client } = .terminal,
+    /// The latest frame awaiting, or given to, the client.
+    frame: ?ClientFrame = null,
+    /// Whether the terminal holds an image under `image_id` to delete later.
+    wrote_terminal: bool = false,
     observation_path: []const u8,
     grid: ?Grid = null,
     last_target_px: ?protocol.SourcePixels = null,
@@ -90,10 +99,20 @@ const Session = struct {
     }
 };
 
+const ClientFrame = struct {
+    seq: u64,
+    ref: frame_delivery.FrameRef,
+    /// Given to the client, which now consumes it or releases it.
+    handed: bool = false,
+};
+
 const PendingObservation = struct {
     id: u32,
     session_id: u32,
     owner: [32]u8,
+    /// `frame` waits for the session's next client frame instead of asking
+    /// the producer for an observation.
+    kind: enum { observe, frame } = .observe,
     after_frame: ?u64,
     deadline: i64,
     sent_at: i64 = 0,
@@ -121,7 +140,7 @@ const Host = struct {
 
     fn deinit(self: *Host) void {
         for (self.sessions.items) |*session| {
-            if (session.exited_at == null) {
+            if (session.exited_at == null and session.wrote_terminal) {
                 self.deleteImage(session.image_id) catch {};
             }
             session.deinit(self.allocator);
@@ -272,7 +291,7 @@ const Host = struct {
             if (timed_out or (eof and (session.producer.child == null or term != null))) {
                 session.producer.deinit();
                 session.exited_at = now;
-                self.deleteImage(session.image_id) catch |err| {
+                if (session.wrote_terminal) self.deleteImage(session.image_id) catch |err| {
                     self.logger.writeFmtScoped(.warn, .wm, "producer {d} graphics cleanup failed: {s}", .{ session.id, @errorName(err) });
                 };
                 system_io.fs.cwd(io).deleteTree(session.directory) catch {};
@@ -352,14 +371,13 @@ const Host = struct {
     }
 
     fn attach(_: *Host, session: *Session) !void {
-        if (std.c.getenv("KATZENSTEG_OUTPUT_PROFILE")) |value| {
-            if (std.mem.eql(u8, std.mem.span(value), "shm")) session.upload_profile = .shm;
-        }
+        session.upload_profile = hostedUploadProfile(if (std.c.getenv("KATZENSTEG_OUTPUT_PROFILE")) |value| std.mem.span(value) else null, @import("builtin").os.tag == .macos);
         try control.writeInitialControl(session.producer.channel.writer(), .{
             .rect_cells = .{ .row = 1, .col = 1, .cols = 1, .rows = 1 },
             .placeholder = .{ .image_id = session.image_id, .cols = 1, .rows = 1 },
             // This host does not own terminal input and must not consume probe
-            // replies intended for the wrapped application. SHM is explicit here.
+            // replies intended for the wrapped application, so the transport
+            // is chosen without a probe: see hostedUploadProfile.
             .upload = .{ .profile = session.upload_profile, .path = session.upload_path },
         });
     }
@@ -412,6 +430,15 @@ const Host = struct {
                         try discardBatch(session, batch.seq);
                         continue;
                     }
+                    if (session.delivery == .client) {
+                        // The client hands the frame to the application; the
+                        // host writes nothing, so terminal backpressure and
+                        // the other writer do not come into it.
+                        if (acceptClientFrame(session, batch.seq, batch.groups.uploads)) |superseded| try discardBatch(session, superseded);
+                        session.last_frame_at = system_io.time.milliTimestamp();
+                        if (batch.groups.uploads.len != 0) session.restore_pending = false;
+                        continue;
+                    }
                     // Do not start an APC while the host application's output
                     // is still queued. Drop the whole batch before any bytes are
                     // written; ask the producer for its latest retained scene
@@ -432,7 +459,10 @@ const Host = struct {
                         try graphics.apply(self.allocator, &output_writer.interface, session.image_id, groups);
                     }
                     session.last_frame_at = system_io.time.milliTimestamp();
-                    if (batch.groups.uploads.len != 0) session.restore_pending = false;
+                    if (batch.groups.uploads.len != 0) {
+                        session.restore_pending = false;
+                        session.wrote_terminal = true;
+                    }
                 },
                 .detached => {},
             }
@@ -475,7 +505,7 @@ const Host = struct {
                 for (self.sessions.items) |session| {
                     if (!std.mem.eql(u8, &session.owner, &owner)) continue;
                     const state: []const u8 = if (session.exited_at != null) "exited" else if (session.closing_at != null) "closing" else if (session.ready and session.grid != null) "ready" else "starting";
-                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid, .claim = if (self.terminal.relay != null) Claim{ .path = session.claim_path } else null }, .{}), .{});
+                    const value = try std.json.parseFromSlice(std.json.Value, allocator, try std.json.Stringify.valueAlloc(allocator, .{ .id = session.id, .title = session.title, .image_id = session.image_id, .state = state, .source_px = session.source_px, .input_supported = session.input_supported, .grid = session.grid, .upload = @tagName(session.upload_profile), .claim = if (self.terminal.relay != null) Claim{ .path = session.claim_path } else null }, .{}), .{});
                     try list.append(allocator, value.value);
                 }
                 return json(allocator, list.items);
@@ -511,7 +541,7 @@ const Host = struct {
         if (std.mem.eql(u8, action, "observe")) {
             const parsed = try std.json.parseFromSlice(struct { after_frame: ?u64 = null }, allocator, request.body, .{});
             for (self.observations) |slot| if (slot) |pending| {
-                if (pending.session_id == id) return .{ .status = 409, .body = "{\"error\":\"ObservationPending\"}" };
+                if (pending.session_id == id and pending.kind == .observe) return .{ .status = 409, .body = "{\"error\":\"ObservationPending\"}" };
             };
             const slot = for (&self.observations) |*item| {
                 if (item.* == null) break item;
@@ -521,6 +551,54 @@ const Host = struct {
             self.next_observation += 1;
             slot.* = .{ .id = request_id, .session_id = id, .owner = owner, .after_frame = parsed.value.after_frame, .deadline = system_io.time.milliTimestamp() + 2000 };
             return .{ .pending = request_id };
+        }
+        if (std.mem.eql(u8, action, "delivery")) {
+            const Mode = enum { terminal, client };
+            const parsed = try std.json.parseFromSlice(struct { mode: Mode }, allocator, request.body, .{});
+            const wanted: @TypeOf(session.delivery) = switch (parsed.value.mode) {
+                .terminal => .terminal,
+                .client => .client,
+            };
+            if (session.delivery == wanted) return .{};
+            if (session.frame) |frame| {
+                // A frame nobody was given can only be released here.
+                if (!frame.handed) try discardBatch(session, frame.seq);
+                session.frame = null;
+            }
+            if (wanted == .client and session.wrote_terminal) {
+                // Nothing will draw the cells for the image the host uploaded.
+                self.deleteImage(session.image_id) catch {};
+                session.wrote_terminal = false;
+            }
+            session.delivery = wanted;
+            session.restore_pending = true;
+            return .{};
+        }
+        if (std.mem.eql(u8, action, "frame")) {
+            if (session.delivery != .client) return .{ .status = 409, .body = "{\"error\":\"TerminalDelivery\"}" };
+            const parsed = try std.json.parseFromSlice(struct { after: ?u64 = null }, allocator, request.body, .{});
+            for (self.observations) |slot| if (slot) |pending| {
+                if (pending.session_id == id and pending.kind == .frame) return .{ .status = 409, .body = "{\"error\":\"FramePending\"}" };
+            };
+            const slot = for (&self.observations) |*item| {
+                if (item.* == null) break item;
+            } else return error.ObservationLimit;
+            if (self.next_observation == std.math.maxInt(u32)) return error.ObservationIdsExhausted;
+            const request_id = self.next_observation;
+            self.next_observation += 1;
+            // Shorter than the HTTP layer's patience; the client asks again.
+            slot.* = .{ .id = request_id, .session_id = id, .owner = owner, .kind = .frame, .after_frame = parsed.value.after, .deadline = system_io.time.milliTimestamp() + 1000 };
+            return .{ .pending = request_id };
+        }
+        if (std.mem.eql(u8, action, "release")) {
+            // The client could not hand a frame on (the application refused
+            // it), so nothing will consume its shared-memory object.
+            const parsed = try std.json.parseFromSlice(struct { seq: u64 }, allocator, request.body, .{});
+            if (session.frame) |frame| if (frame.handed and frame.seq == parsed.value.seq) {
+                try discardBatch(session, frame.seq);
+                session.frame = null;
+            };
+            return .{};
         }
         if (std.mem.eql(u8, action, "refresh")) {
             if (session.grid == null) return error.GridRequired;
@@ -588,6 +666,16 @@ const Host = struct {
             if (item.id == pending.session_id) break item;
         } else return http.Response{ .status = 404 };
         if (session.closing_at != null or session.exited_at != null) return http.Response{ .status = 409 };
+        if (pending.kind == .frame) {
+            if (session.delivery != .client) return http.Response{ .status = 409, .body = "{\"error\":\"TerminalDelivery\"}" };
+            if (session.frame) |*frame| if (pending.after_frame == null or frame.seq > pending.after_frame.?) {
+                frame.handed = true;
+                return try json(allocator, .{ .seq = frame.seq, .medium = @tagName(frame.ref.medium), .name = frame.ref.name(), .format = "rgba", .width = frame.ref.width, .height = frame.ref.height });
+            };
+            // No newer frame yet: say so, and let the client ask again.
+            if (now >= pending.deadline) return try json(allocator, .{ .seq = @as(?u64, null) });
+            return null;
+        }
         if (pending.latest) |latest| {
             const newer = if (pending.after_frame) |after| latest.frame_id > after else true;
             if (newer or now >= pending.deadline) return try json(allocator, .{
@@ -816,7 +904,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     // It also sees the child's own graphics commands, so a plugin may let the
     // application draw an image over a session's claim file instead.
     const image_claims: ?bool = if (options.wrap_command.len != 0) true else null;
-    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1, .placeholder_standin = placeholder_standin, .image_claim = image_claims }, .{ .emit_null_optional_fields = false });
+    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1, .placeholder_standin = placeholder_standin, .image_claim = image_claims, .frame_delivery = true }, .{ .emit_null_optional_fields = false });
     defer allocator.free(descriptor);
     // Publish only after HTTP is listening. The lock file is never unlinked.
     const temporary = try std.fmt.allocPrint(allocator, "{s}.{s}.tmp", .{ discovery, token[0..8] });
@@ -846,6 +934,65 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
         return if (signal != 0) 128 + signal else value.exit_code orelse 128;
     }
     return 0;
+}
+
+/// The upload transport for a session of this host, which cannot probe the
+/// terminal. On macOS a regular file reaches storage on every frame, and the
+/// terminals there that draw placeholder images (kitty, Ghostty) also read
+/// shared memory, so that is the default. Elsewhere it stays whole files.
+/// `KATZENSTEG_OUTPUT_PROFILE=shm` or `file_whole` in the host's environment
+/// chooses outright; other values leave the default.
+fn hostedUploadProfile(setting: ?[]const u8, macos: bool) protocol.UploadProfile {
+    if (setting) |value| {
+        if (std.mem.eql(u8, value, "shm")) return .shm;
+        if (std.mem.eql(u8, value, "file_whole")) return .file_whole;
+    }
+    return if (macos) .shm else .file_whole;
+}
+
+test "the hosted upload transport defaults by platform and yields to an explicit setting" {
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile(null, true));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile(null, false));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile("file_whole", true));
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile("shm", false));
+    // Settings this host cannot honour without a probe leave the default.
+    try std.testing.expectEqual(protocol.UploadProfile.shm, hostedUploadProfile("auto", true));
+    try std.testing.expectEqual(protocol.UploadProfile.file_whole, hostedUploadProfile("direct_apc", false));
+}
+
+/// Records a producer batch as the session's latest client frame. Returns the
+/// sequence of a frame it replaced that no client was given: its
+/// shared-memory object has no reader left and must be released.
+fn acceptClientFrame(session: *Session, seq: u64, uploads: []const []const u8) ?u64 {
+    var latest: ?frame_delivery.FrameRef = null;
+    for (uploads) |upload| if (frame_delivery.parseUpload(upload)) |ref| {
+        latest = ref;
+    };
+    const ref = latest orelse return null;
+    const superseded: ?u64 = if (session.frame) |frame| (if (frame.handed) null else frame.seq) else null;
+    session.frame = .{ .seq = seq, .ref = ref };
+    return superseded;
+}
+
+test "a client frame replaces the last one, and only an unhanded one needs releasing" {
+    var session: Session = undefined;
+    session.frame = null;
+    const first = [_][]const u8{"\x1b_Ga=t,t=s,i=100001,q=2,f=32,s=4,v=2;L2tzMS0x\x1b\\"};
+    const second = [_][]const u8{"\x1b_Ga=t,t=s,i=100001,q=2,f=32,s=4,v=2;L2tzMS0y\x1b\\"};
+    try std.testing.expectEqual(@as(?u64, null), acceptClientFrame(&session, 7, &first));
+    try std.testing.expectEqualStrings("/ks1-1", session.frame.?.ref.name());
+    // Nobody took frame 7: its object is released when 8 replaces it.
+    try std.testing.expectEqual(@as(?u64, 7), acceptClientFrame(&session, 8, &second));
+    try std.testing.expectEqualStrings("/ks1-2", session.frame.?.ref.name());
+    // A frame the client took is the client's to consume or release.
+    session.frame.?.handed = true;
+    try std.testing.expectEqual(@as(?u64, null), acceptClientFrame(&session, 9, &first));
+    try std.testing.expectEqual(@as(u64, 9), session.frame.?.seq);
+    try std.testing.expect(!session.frame.?.handed);
+    // A batch with no upload (a placement refresh) leaves the frame alone.
+    const placement = [_][]const u8{};
+    try std.testing.expectEqual(@as(?u64, null), acceptClientFrame(&session, 10, &placement));
+    try std.testing.expectEqual(@as(u64, 9), session.frame.?.seq);
 }
 
 /// Applies what the wrapped application did to one of its own images.
@@ -932,6 +1079,7 @@ test "an application's file transmission claims a session, and its later command
 test {
     _ = @import("wrap.zig");
     _ = @import("image_claim.zig");
+    _ = @import("frame_delivery.zig");
     _ = @import("http.zig");
     _ = @import("graphics_output.zig");
     _ = @import("producer.zig");
