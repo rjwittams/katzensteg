@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dragFor, dragStep, markAt, panelFrame, pointerOver, POINTER_MARK, zoneAt, type Seg } from './frame.ts'
+import { dragFor, dragStep, markAt, panelFrame, POINTER_MARK, zoneAt, type Seg } from './frame.ts'
 
 const text = (segs: Seg[]) => segs.map(s => s.text).join('')
 const base = { cols: 20, rows: 4, title: 'mi2', status: 'ready · in:0', phase: 0 }
@@ -56,24 +56,6 @@ test('the pointer mark replaces exactly one cell of a row', () => {
   // Outside the row nothing changes.
   assert.deepEqual(markAt(top, -1), top)
   assert.deepEqual(markAt(top, 26), top)
-})
-
-test('a held pointer is placed on whichever panel it is over', () => {
-  // Two stacked panels, 45 wide and 18 tall, below a header row.
-  const panels = new Map([
-    ['a', { col: 0, row: 1, cols: 45, rows: 18 }],
-    ['b', { col: 0, row: 19, cols: 45, rows: 18 }],
-  ])
-  const b = panels.get('b')!
-  // On b's own title row.
-  assert.deepEqual(pointerOver(b, 14, 0, panels), { id: 'b', x: 14, y: 0 })
-  // One row up: a's bottom border.
-  assert.deepEqual(pointerOver(b, 14, -1, panels), { id: 'a', x: 14, y: 17 })
-  // Well up into a.
-  assert.deepEqual(pointerOver(b, 14, -10, panels), { id: 'a', x: 14, y: 8 })
-  // The header row, and past the panels' right side: over no panel.
-  assert.equal(pointerOver(b, 14, -19, panels), undefined)
-  assert.equal(pointerOver(b, 60, 3, panels), undefined)
 })
 
 test('every row of the frame is as wide as the panel, in every state', () => {

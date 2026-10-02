@@ -34,6 +34,8 @@ export type PanelProps = {
    * is on: it is drawn marked, so the pointer can be seen to be followed.
    */
   pointer?: { x: number; y: number }
+  /** The number of the layout this panel is drawn in; drag reports name it. */
+  gen?: number
 }
 
 type Ev = Record<string, unknown> & { n: number }
@@ -100,9 +102,9 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
           return
         }
         if (step === 'continue') {
-          // Travel since the press, and where the pointer is in the panel's own
-          // region, which is what decides a swap.
-          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0, x: ev.x, y: ev.y })
+          // Travel since the press, where the pointer is in the panel's own
+          // region, and which layout that region belongs to.
+          if (drag.kind === 'move') push({ type: 'drag', dx: ev.x - drag.x0, dy: ev.y - drag.y0, x: ev.x, y: ev.y, ...(latest.props.gen !== undefined && { gen: latest.props.gen }) })
           else {
             const c = drag.kind === 'resize-y' ? drag.cols0 : Math.max(4, drag.cols0 + ev.x - drag.x0)
             const r = drag.kind === 'resize-x' ? drag.rows0 : Math.max(2, drag.rows0 + ev.y - drag.y0)

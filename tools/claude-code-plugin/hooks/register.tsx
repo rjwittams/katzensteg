@@ -5,8 +5,7 @@ import {
   chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
-import { dragSwap, ordered } from './layout.ts'
-import { pointerOver } from './frame.ts'
+import { dragReport, ordered, panelAt, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -115,7 +114,21 @@ const lastHeights = new Map<string, number>()
 let lastStacked = false
 // Where each panel sits in the band body, as the last render laid it out:
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
-const placed = new Map<string, { col: number; row: number; cols: number; rows: number }>()
+const placed = new Map<string, PanelPlace>()
+// Each distinct layout has a number, which panels are told and name in their
+// drag reports, and the last few are kept: a report may be measured in the
+// layout before the current one.
+let layoutGen = 0
+const layouts = new Map<number, Map<string, PanelPlace>>()
+let lastColumns = 100
+function setLayout(next: Map<string, PanelPlace>): void {
+  if (layouts.size > 0 && samePlaces(placed, next)) return
+  layoutGen += 1
+  placed.clear()
+  for (const [id, place] of next) placed.set(id, place)
+  layouts.set(layoutGen, new Map(next))
+  for (const gen of [...layouts.keys()]) if (gen < layoutGen - 8) layouts.delete(gen)
+}
 const lastN = new Map<string, number>()
 // The panel instance those numbers came from; a new instance counts from one.
 const lastInst = new Map<string, unknown>()
@@ -525,27 +538,14 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
   // Replicate the layout below so scroll events can be mapped to a panel:
   // header on row 0, then panels left to right with a one-cell gap, wrapping
   // when the site is too narrow; stacked, one per row block.
-  placed.clear()
-  {
-    let col = 0
-    let row = 1
-    let tallest = 0
-    for (const { s, grid } of panels) {
-      const w = grid.cols + 2
-      const h = grid.rows + 2
-      if (stacked) { placed.set(s.id, { col: 0, row, cols: w, rows: h }); row += h; continue }
-      if (col > 0 && col + w > columns) { col = 0; row += tallest; tallest = 0 }
-      placed.set(s.id, { col, row, cols: w, rows: h })
-      col += w + 1
-      tallest = Math.max(tallest, h)
-    }
-  }
+  lastColumns = columns
+  setLayout(placePanels(panels.map(({ s, grid }) => ({ id: s.id, cols: grid.cols + 2, rows: grid.rows + 2 })), stacked, columns))
   return (
     <Box flexDirection="column">
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(moving !== undefined && moving !== s.id && { dimmed: true }), ...(pointerMark?.id === s.id && { pointer: { x: pointerMark.x, y: pointerMark.y } }) }
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(moving !== undefined && moving !== s.id && { dimmed: true }), ...(pointerMark?.id === s.id && { pointer: { x: pointerMark.x, y: pointerMark.y } }) }
           // On the blit route the host hands frames to this client; on every
           // other it writes them to the terminal itself.
           if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
@@ -938,25 +938,24 @@ export const register: Register = on => {
         if (moving === id) moving = undefined
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'drag') {
-        // Side by side the gap is one column; stacked, the blocks touch.
-        // Where the pointer is from the dragged panel's own top or left edge.
-        const swap = lastStacked ? dragSwap(order, id, ev.y ?? ev.dy, lastHeights, 0) : dragSwap(order, id, ev.x ?? ev.dx, lastWidths)
-        const reordered = swap.order
-        const swapped = reordered.some((v, i) => v !== order[i])
-        trace($, `${id} drag pointer ${ev.x ?? '?'},${ev.y ?? '?'} in its panel (${lastWidths.get(id) ?? '?'}x${lastHeights.get(id) ?? '?'}) order ${order.join(' ')}${swapped ? ` -> ${reordered.join(' ')}` : ''}`)
-        // The panels' places are those of the last draw; a swap redraws and
-        // the next report is relative to the panel's new place.
-        // A swap puts the pointer on the dragged panel itself, at the place
-        // `dragSwap` carried through; the panels' recorded places are stale
-        // until the redraw.
-        const from = placed.get(id)
-        const over = ev.x === undefined || ev.y === undefined ? undefined
-          : swapped ? { id, x: lastStacked ? ev.x : swap.at, y: lastStacked ? swap.at : ev.y }
-          : from ? pointerOver(from, ev.x, ev.y, placed) : undefined
-        const markMoved = over?.id !== pointerMark?.id || over?.x !== pointerMark?.x || over?.y !== pointerMark?.y
-        pointerMark = over
-        if (swapped) order = reordered
-        if (swapped || markMoved) $.ui.invalidate('ui.render')
+        // The report is measured from the dragged panel's place in the layout
+        // the panel last drew in, which it names; after a swap that can be the
+        // layout before this one. See dragReport.
+        const origin = ((ev.gen !== undefined ? layouts.get(ev.gen) : undefined) ?? placed).get(id)
+        if (origin && ev.x !== undefined && ev.y !== undefined) {
+          const report = dragReport(order, id, origin, ev.x, ev.y, placed, lastStacked)
+          const swapped = report.order.some((v, i) => v !== order[i])
+          trace($, `${id} drag pointer ${ev.x},${ev.y} in layout ${ev.gen ?? '?'} (now ${layoutGen}) = site ${report.col},${report.row} order ${order.join(' ')}${swapped ? ` -> ${report.order.join(' ')}` : ''}`)
+          if (swapped) {
+            order = report.order
+            // The new places are known now; the redraw only has to catch up.
+            setLayout(placePanels(order.flatMap(key => { const p = placed.get(key); return p ? [{ id: key, cols: p.cols, rows: p.rows }] : [] }), lastStacked, lastColumns))
+          }
+          const over = panelAt(report.col, report.row, placed)
+          const markMoved = over?.id !== pointerMark?.id || over?.x !== pointerMark?.x || over?.y !== pointerMark?.y
+          pointerMark = over
+          if (swapped || markMoved) $.ui.invalidate('ui.render')
+        }
       }
     }
     const input = events.filter(ev => !isPanelEvent(ev))
