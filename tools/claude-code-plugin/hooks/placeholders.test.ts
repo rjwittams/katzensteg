@@ -20,6 +20,12 @@ test('rowText carries row and column diacritics on every cell', () => {
   assert.equal(rowText(0, 0), '')
 })
 
+test('rowText draws with a stand-in cell when given one', () => {
+  const row = rowText(1, 2, '\u{10EEED}')
+  assert.equal(row, `\u{10EEED}${DIACRITICS[1]}${DIACRITICS[0]}\u{10EEED}${DIACRITICS[1]}${DIACRITICS[1]}`)
+  assert.ok(!row.includes(PLACEHOLDER))
+})
+
 test('fitGrid keeps the source aspect inside the box', () => {
   // 640x480 at cell aspect 0.5: width in cells is 2 * 4/3 * rows
   assert.deepEqual(fitGrid({ w: 640, h: 480 }, 200, 15), { cols: 40, rows: 15 })

@@ -2,7 +2,30 @@
 // the hooks module reads files and fetches; these functions shape the data.
 
 /** What `katzensteg-wm --headless --background` prints once its HTTP is up. */
-export type HostFile = { pid: number; port: number; token: string; tty?: string; socket?: string }
+export type HostFile = {
+  pid: number
+  port: number
+  token: string
+  tty?: string
+  socket?: string
+  /**
+   * The character to draw placeholder cells with, when the host rewrites it
+   * into the kitty placeholder on the way to the terminal (a wrapping host).
+   * Absent, the host leaves this client's output alone.
+   */
+  placeholder?: string
+}
+
+/**
+ * The discovery record names the stand-in as a hex codepoint. Only a
+ * private-use codepoint is taken: anything else is not a stand-in.
+ */
+export function parseStandin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^[0-9A-Fa-f]{4,6}$/.test(value)) return undefined
+  const cp = Number.parseInt(value, 16)
+  const isPrivate = (cp >= 0xe000 && cp <= 0xf8ff) || (cp >= 0xf0000 && cp <= 0xffffd) || (cp >= 0x100000 && cp <= 0x10fffd)
+  return isPrivate && cp !== 0x10eeee ? String.fromCodePoint(cp) : undefined
+}
 
 export function parseHostFile(text: string): HostFile | null {
   let value: unknown
@@ -20,6 +43,7 @@ export function parseHostFile(text: string): HostFile | null {
     token: v.token,
     ...(typeof v.tty === 'string' ? { tty: v.tty } : {}),
     ...(typeof v.socket === 'string' ? { socket: v.socket } : {}),
+    ...(parseStandin(v.placeholder_standin) !== undefined ? { placeholder: parseStandin(v.placeholder_standin) } : {}),
   }
 }
 

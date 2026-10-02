@@ -299,6 +299,17 @@ are dropped while insertion is unsafe, then the latest retained frame is
 requested. Both uploads and image deletions use the relay. Graphics commands
 use quiet replies (`q=2`) and never move the cursor.
 
+The relay makes one edit to child output. A wrapped application may refuse the
+kitty placeholder U+10EEEE in text its plugins draw, as Claude Code does from
+2.1.287, where the application draws placeholder images of its own. A wrapping
+host therefore adds `"placeholder_standin":"10EEED"` to its discovery JSON. A
+plugin that finds it draws its cells with U+10EEED and the same row and column
+diacritics and foreground colour, and the relay rewrites that codepoint to
+U+10EEEE on the way to the terminal. The two differ in their last UTF-8 byte,
+so the rewrite is in place and survives a split across reads. Background and
+desktop hosts neither advertise nor rewrite it; their clients draw the real
+placeholder as before.
+
 Terminal clears (`CSI 2 J` / `CSI 3 J`) request retained frames. Periodic idle
 refresh defaults to off in wrap mode; pass `--idle-refresh-ms <ms>` before
 `--wrap` to enable a fallback. This serialization covers the child stream and

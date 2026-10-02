@@ -390,7 +390,7 @@ async function panelsTree($: $, els: Elements['terminal'], columns: number, rows
             module="./panel.tsx"
             width={grid.cols + 2}
             height={grid.rows + 2}
-            props={{ id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }}
+            props={{ id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, ...(host?.placeholder && { placeholder: host.placeholder }) }}
           />
         ))}
       </Box>

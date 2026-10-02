@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { newInputEvents, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, stripNumbers } from './host.ts'
+import { newInputEvents, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
 
 test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.deepEqual(parseHostFile('{"pid":12,"port":4567,"token":"abc","tty":"ttys007","socket":"/tmp/k.sock"}'),
@@ -9,6 +9,19 @@ test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.equal(parseHostFile('{"pid":"12","port":4567,"token":"x"}'), null)
   assert.equal(parseHostFile('not json'), null)
   assert.equal(parseHostFile('[]'), null)
+})
+
+test('a wrapping host names the stand-in placeholder', () => {
+  const wrapped = parseHostFile('{"pid":12,"port":4567,"token":"abc","placeholder_standin":"10EEED"}')
+  assert.equal(wrapped?.placeholder, '\u{10EEED}')
+  // No field, the real placeholder, or a codepoint outside private use: none.
+  assert.equal(parseHostFile('{"pid":12,"port":4567,"token":"abc"}')?.placeholder, undefined)
+  assert.equal(parseStandin('10EEEE'), undefined)
+  assert.equal(parseStandin('41'), undefined)
+  assert.equal(parseStandin('0041'), undefined)
+  assert.equal(parseStandin('1b'), undefined)
+  assert.equal(parseStandin(0x10eeed), undefined)
+  assert.equal(parseStandin('E000'), '\u{E000}')
 })
 
 test('parseClient accepts the client record and normalises the target', () => {

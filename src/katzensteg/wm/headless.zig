@@ -782,7 +782,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, opt
     stopping.store(0, .seq_cst);
     const action = std.posix.Sigaction{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
     for ([_]std.posix.SIG{ std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.HUP }) |signal| std.posix.sigaction(signal, &action, null);
-    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1 }, .{});
+    // A wrapping host rewrites the stand-in placeholder in the child's output;
+    // naming it here tells a plugin to draw with it. Other hosts leave it out.
+    const placeholder_standin: ?[]const u8 = if (options.wrap_command.len != 0) @import("placeholder_rewrite.zig").standin_hex else null;
+    const descriptor = try std.json.Stringify.valueAlloc(allocator, .{ .pid = std.c.getpid(), .port = host.server.port, .token = &token, .tty = terminal.path, .host_file = discovery, .version = 1, .placeholder_standin = placeholder_standin }, .{ .emit_null_optional_fields = false });
     defer allocator.free(descriptor);
     // Publish only after HTTP is listening. The lock file is never unlinked.
     const temporary = try std.fmt.allocPrint(allocator, "{s}.{s}.tmp", .{ discovery, token[0..8] });

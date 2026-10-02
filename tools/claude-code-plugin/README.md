@@ -29,6 +29,13 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 ./zig-out/bin/katzensteg-wm --wrap -- \
   claude --plugin-dir tools/claude-code-plugin
 ```
 
+Claude Code 2.1.287 and later refuse the kitty placeholder character in text a
+plugin draws ("a text child holds a control character"), so on those builds
+panels need the wrapper: it names a stand-in character in its discovery
+record, the plugin draws with it, and the wrapper rewrites it to the real
+placeholder on the way to the terminal. Without the wrapper the plugin still
+draws the real placeholder, which older builds accept.
+
 The wrapper runs Claude on an inner PTY and forwards input unchanged, including
 Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin
 from the same checkout: it attaches through `KATZENSTEG_WM_HOST`, supplied by

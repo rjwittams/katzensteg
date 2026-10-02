@@ -19,6 +19,8 @@ export type PanelProps = {
   rows: number
   title: string
   state: 'starting' | 'ready' | 'closing' | 'exited'
+  /** The cell character when the host rewrites a stand-in; absent, the kitty placeholder. */
+  placeholder?: string
 }
 
 type Ev = Record<string, unknown> & { n: number }
@@ -100,7 +102,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   }
   if (surface.state) surface.state.latest.props = props
 
-  const { cols, rows, imageId, title, state } = props
+  const { cols, rows, imageId, title, state, placeholder } = props
   const color = fgHex(imageId)
   const border = state === 'ready' ? 'green' : state === 'starting' ? 'yellow' : 'red'
   // Title, then the count of input events this panel has captured (a quick
@@ -112,7 +114,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   // handle. Plain box drawing: the handles need no marker.
   const bottom = `└${'─'.repeat(cols)}┘`
   const lines = []
-  for (let r = 0; r < rows; r++) lines.push(rowText(r, cols))
+  for (let r = 0; r < rows; r++) lines.push(rowText(r, cols, placeholder))
   return (
     <Box flexDirection="column">
       <Text color={border}>{top}</Text>
