@@ -52,6 +52,9 @@ diagnostic follow-ups remain in the issue tracker.
   producer lifetime, image recovery after terminal clears, and inline alignment
   are recorded in [pi-extension-future.md](pi-extension-future.md). A released
   surface API and transport selection come first.
+- **Terminal sessions as windows:** cleat sessions shown as windows in the
+  desktop WM, painted as cells beside producer windows, are designed in
+  [session-windows.md](session-windows.md). Nothing is implemented.
 - **Native/GPU capture:** broaden Metal formats and real-app coverage only after
   the current BGRA path is validated. Reducing readback and conversion costs
   across capture, Jackstay and terminal output needs measurements from those
