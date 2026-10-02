@@ -35,6 +35,36 @@ pub fn build(b: *std.Build) void {
         const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
         b.getInstallStep().dependOn(&install.step);
     }
+    const enable_cleat = b.option(bool, "cleat", "Build optional cleat daemon provider") orelse false;
+    const cleat_prefix = b.option([]const u8, "cleat-prefix", "Prepared pinned cleat prefix");
+    if (enable_cleat) {
+        if (!is_macos and target.result.os.tag != .linux) @panic("Cleat requires macOS or Linux");
+        const prefix = cleat_prefix orelse @panic("-Dcleat=true requires -Dcleat-prefix; see docs/development.md");
+        const pin = std.json.parseFromSlice(struct { repository: []const u8, revision: []const u8, abi: u32, protocol: u32 }, b.allocator, @embedFile("profiles/cleat-dependency.json"), .{}) catch @panic("invalid cleat pin");
+        const opts = b.addOptions();
+        opts.addOption(u32, "abi", pin.value.abi);
+        opts.addOption(u32, "protocol", pin.value.protocol);
+        const mod = b.addModule("cleat", .{ .root_source_file = b.path("src/cleat/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        mod.addOptions("cleat_options", opts);
+        mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        const library = if (is_macos) "libcleat.dylib" else "libcleat.so";
+        mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) });
+        mod.addRPathSpecial(if (is_macos) "@loader_path/../lib" else "$ORIGIN/../lib");
+        const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
+        b.getInstallStep().dependOn(&install.step);
+        const unit = b.addTest(.{ .name = "cleat-test", .root_module = mod, .use_llvm = use_llvm });
+        unit.root_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        const run = b.addRunArtifact(unit);
+        const step = b.step("test-cleat", "Test optional cleat provider against a private daemon");
+        step.dependOn(&run.step);
+        const fixture_mod = b.createModule(.{ .root_source_file = b.path("src/cleat/integration.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        fixture_mod.addImport("cleat", mod);
+        fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        const fixture = b.addExecutable(.{ .name = "cleat-integration", .root_module = fixture_mod, .use_llvm = use_llvm });
+        const scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });
+        scenario.addArtifactArg(fixture);
+        step.dependOn(&scenario.step);
+    }
     const default_preload_options = b.addOptions();
     default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);
     default_preload_options.addOption(bool, "dynapi", false);
@@ -79,6 +109,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run Katzensteg and termscene unit tests");
+    if (enable_cleat) test_step.dependOn(&b.top_level_steps.get("test-cleat").?.step);
     const test_library_dir = if (enable_jackstay) b.pathJoin(&.{ jackstay_prefix.?, "lib" }) else null;
     addUnitTest(b, test_step, "jackstay-test", "src/jackstay/tests.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     if (enable_jackstay) {
