@@ -560,8 +560,12 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
             // when a pane scrolls their parent past its top edge: they are
             // held at the edge, so a scrolled-off panel stayed drawn there
             // beneath the next one.
+            // The wrapper carries a key. Without one, reordering panels
+            // rebinds each wrapper to a different panel, and a panel being
+            // dragged stops receiving the pointer it holds: no more moves and
+            // no release.
             return (
-              <Box flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
+              <Box key={`slot:${s.id}`} flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
                 <Box marginTop={1} marginLeft={1} height={grid.rows}>
                   <Image
                     key={key}
@@ -926,7 +930,9 @@ export const register: Register = on => {
         // Side by side the gap is one column; stacked, the blocks touch.
         // Where the pointer is from the dragged panel's own top or left edge.
         const reordered = lastStacked ? swapOnPointer(order, id, ev.y ?? ev.dy, lastHeights, 0) : swapOnPointer(order, id, ev.x ?? ev.dx, lastWidths)
-        if (reordered.some((v, i) => v !== order[i])) { order = reordered; $.ui.invalidate('ui.render') }
+        const swapped = reordered.some((v, i) => v !== order[i])
+        trace($, `${id} drag pointer ${ev.x ?? '?'},${ev.y ?? '?'} in its panel (${lastWidths.get(id) ?? '?'}x${lastHeights.get(id) ?? '?'}) order ${order.join(' ')}${swapped ? ` -> ${reordered.join(' ')}` : ''}`)
+        if (swapped) { order = reordered; $.ui.invalidate('ui.render') }
       }
     }
     const input = events.filter(ev => !isPanelEvent(ev))
