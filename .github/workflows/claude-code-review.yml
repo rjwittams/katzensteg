@@ -22,6 +22,7 @@ jobs:
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: 'flotilla-crew'
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
