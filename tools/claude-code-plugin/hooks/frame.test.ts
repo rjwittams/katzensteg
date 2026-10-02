@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dragFor, dragStep, markAt, panelFrame, POINTER_MARK, zoneAt, type Seg } from './frame.ts'
+import { dragFor, dragStep, panelFrame, zoneAt, type Seg } from './frame.ts'
 
 const text = (segs: Seg[]) => segs.map(s => s.text).join('')
 const base = { cols: 20, rows: 4, title: 'mi2', status: 'ready · in:0', phase: 0 }
@@ -39,23 +39,6 @@ test('a drag ends on its release, and also when the release was plainly missed',
   assert.equal(dragStep('move', false), 'lost')
   // A new press cannot happen while the old one is still down.
   assert.equal(dragStep('down', true), 'lost')
-})
-
-test('the pointer mark replaces exactly one cell of a row', () => {
-  const top = panelFrame({ ...base, cols: 24 }).top
-  for (const x of [0, 1, 7, 24, 25]) {
-    const marked = markAt(top, x)
-    const cells = [...text(marked)]
-    assert.equal(cells.length, 26, `width at ${x}`)
-    assert.equal(cells[x], '+')
-    assert.equal(cells.filter(c => c === '+').length, 1)
-    // Every other cell is untouched.
-    assert.deepEqual(cells.filter((_, i) => i !== x), [...text(top)].filter((_, i) => i !== x))
-    assert.ok(marked.includes(POINTER_MARK))
-  }
-  // Outside the row nothing changes.
-  assert.deepEqual(markAt(top, -1), top)
-  assert.deepEqual(markAt(top, 26), top)
 })
 
 test('every row of the frame is as wide as the panel, in every state', () => {

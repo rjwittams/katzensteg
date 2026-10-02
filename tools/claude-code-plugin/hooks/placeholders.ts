@@ -11,14 +11,9 @@ export const fgHex = (id: number): string => `#${(id & 0xffffff).toString(16).pa
  * the kitty placeholder, or the stand-in a rewriting host turns into it.
  */
 export function rowText(row: number, cols: number, cell: string = PLACEHOLDER): string {
-  return rowSpan(row, 0, cols, cell)
-}
-
-/** The cells of one grid row from column `from` up to, not including, `to`. */
-export function rowSpan(row: number, from: number, to: number, cell: string = PLACEHOLDER): string {
   const r = DIACRITICS[row] ?? ''
   let out = ''
-  for (let c = Math.max(0, from); c < to; c++) out += cell + r + (DIACRITICS[c] ?? '')
+  for (let c = 0; c < cols; c++) out += cell + r + (DIACRITICS[c] ?? '')
   return out
 }
 

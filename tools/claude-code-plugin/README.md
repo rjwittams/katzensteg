@@ -101,8 +101,9 @@ edge or corner turns heavy, and the close mark inverts. While a panel is held
 by its title its border is heavy, dashes travel round it, and the other
 panels dim. It trades places with a neighbour when the pointer is over that
 neighbour, or, past a larger one, once the pointer reaches where the panel
-will land. The cell the pointer is on is marked with a `+`, on
-whichever panel it is over, so you can see the pointer being followed. While an edge is dragged only that edge is heavy and the title
+will land. The cell the pointer is on is marked with a `+`, drawn
+by the pane in the same pass as the layout, so you can see the pointer being
+followed. While an edge is dragged only that edge is heavy and the title
 shows the size in cells. A drag also ends on the next press, or the next
 pointer move with no button held: Claude Code does not deliver the release
 after a redraw that reorders panels. The title shows

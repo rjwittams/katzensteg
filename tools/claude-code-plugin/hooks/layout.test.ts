@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dragReport, dragSwap, ordered, panelAt, placePanels, samePlaces, swapOnPointer } from './layout.ts'
+import { dragReport, dragSwap, ordered, placePanels, samePlaces, swapOnPointer } from './layout.ts'
 
 const sizes = new Map([['a', 20], ['b', 20], ['big', 30], ['small', 10]])
 
@@ -81,8 +81,6 @@ test('panels are placed in a stack, or in a row that wraps', () => {
   assert.deepEqual(band.get('c'), { col: 0, row: 19, cols: 30, rows: 10 })
   assert.ok(samePlaces(stack, placePanels(items, true, 84)))
   assert.ok(!samePlaces(stack, band))
-  assert.deepEqual(panelAt(10, 20, stack), { id: 'b', x: 10, y: 1 })
-  assert.equal(panelAt(10, 0, stack), undefined)
 })
 
 test('a report measured in the layout before a swap does not swap again', () => {
@@ -97,7 +95,8 @@ test('a report measured in the layout before a swap does not swap again', () => 
   // place, one row further down. In the site that is row 20: on a's new row 1.
   const stale = dragReport(first.order, 'a', before.get('a')!, 14, 19, after, true)
   assert.deepEqual(stale.order, ['b', 'a', 'c'])
-  assert.deepEqual(panelAt(stale.col, stale.row, after), { id: 'a', x: 14, y: 1 })
+  // a now starts at row 19, so that is a's own row 1.
+  assert.deepEqual([stale.col, stale.row - after.get('a')!.row], [14, 1])
   // Read against the new layout instead, that same report would put the
   // pointer a panel further down and drag a past c as well.
   const misread = dragReport(first.order, 'a', after.get('a')!, 14, 19, after, true)

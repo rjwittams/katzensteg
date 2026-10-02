@@ -57,32 +57,6 @@ export type FrameInput = {
 
 const GRIP = '≡'
 
-/** What marks the cell the pointer is on while a panel is being moved. */
-export const POINTER_MARK: Seg = { text: '+', tone: 'accent', bold: true, inverse: true }
-
-/**
- * A row of segments with the cell at `x` replaced by the pointer mark. A row
- * is read cell by cell: every frame glyph is one cell wide. Outside the row
- * nothing changes.
- */
-export function markAt(segs: readonly Seg[], x: number): Seg[] {
-  const out: Seg[] = []
-  let at = 0
-  for (const seg of segs) {
-    const cells = [...seg.text]
-    if (x < at || x >= at + cells.length) {
-      out.push(seg)
-    } else {
-      const i = x - at
-      if (i > 0) out.push({ ...seg, text: cells.slice(0, i).join('') })
-      out.push(POINTER_MARK)
-      if (i + 1 < cells.length) out.push({ ...seg, text: cells.slice(i + 1).join('') })
-    }
-    at += cells.length
-  }
-  return out
-}
-
 // Two cells on, two off, travelling clockwise as the phase advances.
 const lit = (i: number, phase: number): boolean => (((i - phase) % 4) + 4) % 4 < 2
 

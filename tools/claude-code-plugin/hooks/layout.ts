@@ -132,14 +132,6 @@ export function dragReport(
   return { order: dragSwap(order, id, at, sizes, stacked ? 0 : 1).order, col, row }
 }
 
-/** The panel at a cell of the site, and the cell within that panel. */
-export function panelAt(col: number, row: number, places: ReadonlyMap<string, Place>): { id: string; x: number; y: number } | undefined {
-  for (const [id, p] of places) {
-    if (col >= p.col && col < p.col + p.cols && row >= p.row && row < p.row + p.rows) return { id, x: col - p.col, y: row - p.row }
-  }
-  return undefined
-}
-
 /** Sessions in band order: known ids first in their order, new ones after. */
 export function ordered<T extends { id: string }>(order: readonly string[], sessions: readonly T[]): T[] {
   const rank = new Map(order.map((id, i) => [id, i]))

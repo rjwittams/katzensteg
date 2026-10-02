@@ -5,7 +5,7 @@ import {
   chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
-import { dragReport, ordered, panelAt, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
+import { dragReport, ordered, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -105,9 +105,12 @@ const resizeStamp = new Map<string, number>()
 // The panel being moved by its title, from its press to its release: the
 // others draw dim meanwhile so the held one stands out.
 let moving: string | undefined
-// While a panel is being moved, the panel and cell the pointer is over: that
-// panel draws the cell marked, so the pointer can be seen to be followed.
-let pointerMark: { id: string; x: number; y: number } | undefined
+// While a panel is being moved, the cell of the site the pointer is on. The
+// tree draws it marked, in the same pass as the layout, so the pointer can be
+// seen to be followed. Drawn by the panels from a prop it lagged: a panel's
+// own contents are redrawn a frame after the layout, and showed the mark in
+// the wrong place for that frame after a swap.
+let pointerSite: { col: number; row: number } | undefined
 const lastWidths = new Map<string, number>()
 const lastHeights = new Map<string, number>()
 // Stacked (docked pane), panels reorder by vertical drag against heights.
@@ -545,7 +548,7 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(moving !== undefined && moving !== s.id && { dimmed: true }), ...(pointerMark?.id === s.id && { pointer: { x: pointerMark.x, y: pointerMark.y } }) }
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
           // On the blit route the host hands frames to this client; on every
           // other it writes them to the terminal itself.
           if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
@@ -604,6 +607,11 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
         })}
       </Box>
       {tail}
+      {pointerSite && pointerSite.col >= 0 && pointerSite.row >= 0 && (
+        <Box position="absolute" top={pointerSite.row} left={pointerSite.col}>
+          <Text color="cyan" bold inverse>+</Text>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -628,7 +636,7 @@ export const register: Register = on => {
     const repo = (await $.env.get('KATZENSTEG_REPO')) ?? `${(await $.env.get('HOME')) ?? ''}/dev/katzensteg`
     hostBin = (await $.env.get('KATZENSTEG_HOST_BIN')) ?? `${repo}/zig-out/bin/katzensteg-wm`
     // Beside the runtime's own logs, one file per Claude Code process.
-    tracePath = `/tmp/katzensteg-plugin-${(await $.env.get('CLAUDE_PID')) ?? 'x'}.log`
+    tracePath = `/tmp/katzensteg-plugin-${(await $.env.get('CLAUDE_PID')) ?? `t${Date.now().toString(36)}`}.log`
     trace($, 'plugin started')
     const saved = await $.store.get('size').catch(() => undefined)
     if (saved === 'small' || saved === 'medium' || saved === 'large') size = saved
@@ -904,7 +912,7 @@ export const register: Register = on => {
     const id = data.id
     // A panel that remounted mid-move cannot report its release: let the
     // others out of the dim.
-    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; pointerMark = undefined; $.ui.invalidate('ui.render') }
+    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; pointerSite = undefined; $.ui.invalidate('ui.render') }
     const { events, lastN: n } = newInputEvents(data.events, inputSince(lastInst.get(id), data.inst, lastN.get(id) ?? 0))
     if (data.inst !== undefined) lastInst.set(id, data.inst)
     lastN.set(id, n)
@@ -934,7 +942,7 @@ export const register: Register = on => {
         moving = id
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'dragend') {
-        pointerMark = undefined
+        pointerSite = undefined
         if (moving === id) moving = undefined
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'drag') {
@@ -951,9 +959,8 @@ export const register: Register = on => {
             // The new places are known now; the redraw only has to catch up.
             setLayout(placePanels(order.flatMap(key => { const p = placed.get(key); return p ? [{ id: key, cols: p.cols, rows: p.rows }] : [] }), lastStacked, lastColumns))
           }
-          const over = panelAt(report.col, report.row, placed)
-          const markMoved = over?.id !== pointerMark?.id || over?.x !== pointerMark?.x || over?.y !== pointerMark?.y
-          pointerMark = over
+          const markMoved = pointerSite?.col !== report.col || pointerSite?.row !== report.row
+          pointerSite = { col: report.col, row: report.row }
           if (swapped || markMoved) $.ui.invalidate('ui.render')
         }
       }
