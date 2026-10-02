@@ -758,7 +758,7 @@ class BootstrapExternalProjectsTest(unittest.TestCase):
         self.assertIn("    sdl2", lines)
         self.assertIn("    /tmp/config.xml", lines)
         self.assertIn("    RetroArch bsnes core", lines)
-        self.assertIn("    RetroArch melonDS core requests executable stack: /tmp/melonds_libretro.so", lines)
+        self.assertIn(f"    RetroArch melonDS core requests executable stack: {Path('/tmp/melonds_libretro.so')}", lines)
         self.assertIn("    patchelf --clear-execstack /tmp/melonds_libretro.so", lines)
         self.assertIn("    sudo pacman -S --needed zig sdl2", lines)
 

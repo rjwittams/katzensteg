@@ -49,15 +49,15 @@ scripts/katzensteg/bootstrap_external_projects.py --dry-run --root ~/dev
 | --- | --- | --- | --- | --- | --- | --- |
 | RetroArch | [`rjwittams/RetroArch`](https://github.com/rjwittams/RetroArch) | `macos-sdl2-window-contexts` | Emulator workloads through SDL2, GL-adjacent, and Vulkan-adjacent paths | `sonic`, `smw`, `sm64ds`, `jsr` | not yet tried | Uses forked branches for macOS video/input and context-driver behavior. |
 | Flycast | [`rjwittams/flycast`](https://github.com/rjwittams/flycast) | `libretro-hide-symbols` | Dreamcast libretro core used by RetroArch profiles | `jsr` | not yet tried | Needed on Linux to avoid libretro core linking issues. |
-| ScummVM | upstream | `master` | SDL software/surface behavior | `mi2`, `scummvm.launcher`, `bass` | working (Beneath a Steel Sky) | Currently useful without app-side patches. |
+| ScummVM | upstream | `master` | SDL software/surface behavior | `mi2`, `scummvm.launcher`, `bass`, `queen` | rendering and keyboard smoke passes (Beneath a Steel Sky, Flight of the Amazon Queen); Queen startup caveat [#85](https://github.com/rjwittams/katzensteg/issues/85) | Currently useful without app-side patches. |
 | Moonlight Qt | [`rjwittams/moonlight-qt`](https://github.com/rjwittams/moonlight-qt) | `macos-sdl-renderer-output` | Streaming/video workload through an SDL renderer path | `moonlight.steam` | not yet tried | Uses an SDL renderer-output branch; mouse behavior remains an open investigation. |
 | Cannonball | [`rjwittams/cannonball`](https://github.com/rjwittams/cannonball) | `windows-sdl2-build` | Simple SDL app target | `cannonball` | builds; blocked on ROMs | `windows-sdl2-build` is `macos-sdl2-build-fixes` plus a Windows CMake target. |
 | Chiaki NG | [`rjwittams/chiaki-ng`](https://github.com/rjwittams/chiaki-ng) | `macos-sdl-client-build` | Stream client prototype | `chiaki.sdl` | not yet tried | Uses an SDL stream-only frontend branch. |
-| ANESE | upstream | `master` | Small SDL emulator target | `anese.test`, `anese.2048` | working | Currently useful without app-side patches. |
+| ANESE | upstream | `master` | Small SDL emulator target | `anese.test`, `anese.2048` | 2048 working; CPU-test ROM hits emulator limitation | Currently useful without app-side patches. |
 
 ## Windows
 
-Status observed on Beaufort (Windows 11) on 2026-09-25, running each app
+Status observed on Beaufort (Windows 11), with follow-up runs through 2026-10-02, running each app
 through the launcher with `injection=dynapi` in a Wheelhouse Cleat pane, with
 the official SDL 2.32.10 `SDL2.dll`. See [development.md](development.md#windows)
 for building Katzensteg itself.
@@ -78,9 +78,12 @@ development package's `SDL2-<version>` directory. Its doctor checks for
 - **ANESE** (upstream `master`, unmodified): builds with MSVC, CMake and
   Ninja. The `anese.2048` profile runs the homebrew 2048 demo that ships in
   `roms/demos`. The title screen and the game render in the pane; Enter starts
-  a game and the arrow keys move the tiles. Arrow keys arrive without
-  releases from Wheelhouse (flotilla-org/wheelhouse#85), so a direction
-  registers once until another key is pressed.
+  a game and the arrow keys move the tiles. On 2026-10-02, after
+  flotilla-org/wheelhouse#139 restored arrow releases, three consecutive taps
+  in each direction moved or merged tiles, reaching a score of 32 in the first
+  run. The `anese.test` CPU ROM stops at unimplemented opcode `0xFF` with and
+  without Katzensteg; that profile is not a passing emulator conformance test.
+  See the [simple-app follow-up evidence](windows-simple-apps-validation.md).
 - **Cannonball** (`windows-sdl2-build`): the fork's `win64-sdl2.cmake` target
   builds with MSVC against the SDL2 development package and header-only Boost,
   renders through SDL's surface path, and takes DirectInput from the Windows
@@ -96,7 +99,12 @@ development package's `SDL2-<version>` directory. Its doctor checks for
   Beneath a Steel Sky reached the game scene; Ctrl+F5 opened its control panel
   and Escape returned to the scene. See the [Windows ScummVM evidence](windows-scummvm-validation.md)
   for revisions, configuration and screenshots. This covers the `sky` engine;
-  Monkey Island and the `queen` engine have not been validated on Windows.
+  Monkey Island has not been validated on Windows. On 2026-10-02, the `queen`
+  profile ran the freeware floppy Flight of the Amazon Queen, reached its first
+  game scene, opened its journal with F5 and resumed with Escape. One initial
+  startup failed with an SDL surface error; later runs succeeded. That
+  unresolved observation is tracked in [#85](https://github.com/rjwittams/katzensteg/issues/85).
+  See the [simple-app follow-up evidence](windows-simple-apps-validation.md).
 
 Katzensteg changes this needed: `$HOME` in profiles falls back to
 `USERPROFILE`, `KATZENSTEG_PROFILE_DIR` separates directories with `;`,

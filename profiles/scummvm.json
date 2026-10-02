@@ -39,6 +39,19 @@
         "--gfx-mode=surfacesdl"
       ]
     },
+    "queen": {
+      "extends": [
+        "app.scummvm",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "--no-fullscreen",
+        "--gfx-mode=surfacesdl",
+        "--path=$HOME/roms/queen",
+        "queen"
+      ]
+    },
     "bass": {
       "extends": [
         "app.scummvm",
