@@ -88,6 +88,31 @@ Hidden profiles are reusable fragments. Visible profiles are direct launch targe
 
 Some real workloads need patched application branches to expose paths that are useful to Katzensteg. Those forks are tracked in `docs/external-projects.md`; their code does not live in this repository.
 
+### Desktop window covering
+
+Positioned desktop producer images use z bases starting at `-1610612736`,
+with the existing 1000-step window stride and producer layer offsets retained.
+This is below kitty's `INT32_MIN/2` threshold: a non-default cell background
+covers the images, while images retain their relative order. Band mode sends
+no occlusion rectangles, so producers keep whole placements rather than
+splitting them around covering windows.
+
+Before input capture, the WM asks the outer terminal for its default background
+once using OSC 11, waiting up to 250 ms. Covering cells use that RGB colour with
+blue increased by one 8-bit step (decreased by one when already 255), because
+kitty compares background values with the terminal default. Chrome paints an
+explicit background. Content areas paint backgrounds only in letterbox bars;
+cells under their own fitted image are blank at the true default background.
+Painting windows from back to front erases lower chrome under higher images.
+Vacated window areas reset to blank default-background cells, and the reserved
+status row paints a full background. The producer and WM share cell-fit math.
+
+`KATZENSTEG_WM_SPLIT_IMAGES=1` forces the existing placement-splitting fallback
+(any value other than `0` forces it). Splitting is also selected automatically
+if OSC 11 is unanswered or malformed. It retains the original nonnegative
+window z bases and occlusion rectangles. Placeholder presentation skips this
+query and keeps its existing grid, z-order and cell rendering.
+
 ### Host-drawn placeholder grids
 
 An attached producer can target a Unicode placeholder grid using a host-owned
