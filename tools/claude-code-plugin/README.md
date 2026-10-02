@@ -29,6 +29,22 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 ./zig-out/bin/katzensteg-wm --wrap -- \
   claude --plugin-dir tools/claude-code-plugin
 ```
 
+Claude Code 2.1.287 and later refuse the kitty placeholder character in text a
+plugin draws ("a text child holds a control character"), so on those builds
+panels need the wrapper: it names a stand-in character in its discovery
+record, the plugin draws with it, and the wrapper rewrites it to the real
+placeholder on the way to the terminal. Without the wrapper the plugin still
+draws the real placeholder, which older builds accept.
+
+There are three routes for a panel's cells, and `/katzensteg route` picks one.
+`direct` writes the kitty placeholder itself and needs no wrapper. `standin`
+is the rewrite above. `claim` has Claude draw an `Image` over the session's
+claim file with the panel laid over it for the border and input; the wrapper
+reads the image id Claude chose from its output and uploads frames to it, so
+Claude is not involved per frame and our image ids cannot clash with its own.
+`auto` uses `claim` under the wrapper and `direct` without it. A route the
+host cannot serve falls back to what `auto` would pick.
+
 The wrapper runs Claude on an inner PTY and forwards input unchanged, including
 Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin
 from the same checkout: it attaches through `KATZENSTEG_WM_HOST`, supplied by
@@ -41,6 +57,7 @@ host; the host's per-terminal lock prevents a second host taking ownership.
 /katzensteg close [id]           # close the last or the named panel
 /katzensteg size small|medium|large   # panel height preset (medium by default, remembered)
 /katzensteg place band|pane      # where panels live (pane by default, remembered)
+/katzensteg route auto|direct|standin|claim   # how cells reach the terminal (auto by default, remembered)
 /katzensteg pane                 # reopen the pane after closing it with ctrl+x x
 /katzensteg list                 # sessions the host knows
 /katzensteg host                 # host status; reconnects or starts one

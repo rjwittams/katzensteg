@@ -1,7 +1,9 @@
-//! PTY relay owned by the headless host's event loop. No input interpretation.
+//! PTY relay owned by the headless host's event loop. No input interpretation;
+//! child output is forwarded as written apart from the placeholder stand-in.
 const std = @import("std");
 const os = @import("platform");
 const Boundary = @import("output_boundary.zig").Boundary;
+const PlaceholderRewrite = @import("placeholder_rewrite.zig").Rewrite;
 extern "c" fn forkpty(*c_int, ?[*]u8, ?*const std.posix.termios, ?*const std.posix.winsize) c_int;
 extern "c" fn cfmakeraw(*std.posix.termios) void;
 
@@ -37,6 +39,7 @@ pub const Relay = struct {
     output: Buffer = .{},
     input: Buffer = .{},
     boundary: Boundary = .{},
+    placeholder: PlaceholderRewrite = .{},
     eof: bool = false,
     exit_code: ?u8 = null,
     exited_at: i64 = 0,
@@ -154,6 +157,8 @@ pub const Relay = struct {
             };
             if (n > 0) {
                 self.output.end = n;
+                // The one edit to child output: see placeholder_rewrite.zig.
+                self.placeholder.apply(self.output.bytes[0..n]);
                 self.boundary.feed(self.output.bytes[0..n]);
                 try self.output.flush(self.outer);
             } else {
@@ -184,4 +189,5 @@ pub const Relay = struct {
 
 test {
     _ = @import("output_boundary.zig");
+    _ = @import("placeholder_rewrite.zig");
 }

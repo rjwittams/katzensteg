@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { newInputEvents, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, stripNumbers } from './host.ts'
+import { chooseRoute, inputSince, newInputEvents, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
 
 test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.deepEqual(parseHostFile('{"pid":12,"port":4567,"token":"abc","tty":"ttys007","socket":"/tmp/k.sock"}'),
@@ -9,6 +9,60 @@ test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.equal(parseHostFile('{"pid":"12","port":4567,"token":"x"}'), null)
   assert.equal(parseHostFile('not json'), null)
   assert.equal(parseHostFile('[]'), null)
+})
+
+test('a wrapping host names the stand-in placeholder', () => {
+  const wrapped = parseHostFile('{"pid":12,"port":4567,"token":"abc","placeholder_standin":"10EEED"}')
+  assert.equal(wrapped?.placeholder, '\u{10EEED}')
+  // No field, the real placeholder, or a codepoint outside private use: none.
+  assert.equal(parseHostFile('{"pid":12,"port":4567,"token":"abc"}')?.placeholder, undefined)
+  assert.equal(parseStandin('10EEEE'), undefined)
+  assert.equal(parseStandin('41'), undefined)
+  assert.equal(parseStandin('0041'), undefined)
+  assert.equal(parseStandin('1b'), undefined)
+  assert.equal(parseStandin(0x10eeed), undefined)
+  assert.equal(parseStandin('E000'), '\u{E000}')
+})
+
+test('a new panel instance has its input counted from the start', () => {
+  // Same instance: only events after the last one sent.
+  assert.equal(inputSince(41, 41, 120), 120)
+  // A remounted panel numbers from one again; nothing of it was sent yet.
+  assert.equal(inputSince(41, 77, 120), 0)
+  assert.equal(inputSince(undefined, 77, 0), 0)
+  // A panel that names no instance keeps the old behaviour.
+  assert.equal(inputSince(41, undefined, 120), 120)
+  const fresh = newInputEvents([{ n: 1, type: 'key', key: 'a' }], inputSince(41, 77, 120))
+  assert.deepEqual(fresh.events.map(ev => ev.n), [1])
+})
+
+test('the route follows the wish only where the host can serve it', () => {
+  const wrapping = parseHostFile('{"pid":1,"port":2,"token":"t","placeholder_standin":"10EEED","image_claim":true}') ?? undefined
+  const background = parseHostFile('{"pid":1,"port":2,"token":"t"}') ?? undefined
+  assert.equal(wrapping?.imageClaim, true)
+  assert.equal(background?.imageClaim, undefined)
+  assert.equal(chooseRoute(wrapping, 'auto'), 'claim')
+  assert.equal(chooseRoute(wrapping, 'claim'), 'claim')
+  // A host that only rewrites: the stand-in is the best it offers.
+  const rewriting = parseHostFile('{"pid":1,"port":2,"token":"t","placeholder_standin":"10EEED"}') ?? undefined
+  assert.equal(chooseRoute(rewriting, 'auto'), 'standin')
+  assert.equal(chooseRoute(rewriting, 'claim'), 'standin')
+  assert.equal(chooseRoute(wrapping, 'standin'), 'standin')
+  assert.equal(chooseRoute(wrapping, 'direct'), 'direct')
+  assert.equal(chooseRoute(background, 'auto'), 'direct')
+  assert.equal(chooseRoute(background, 'claim'), 'direct')
+  assert.equal(chooseRoute(background, 'standin'), 'direct')
+  assert.equal(chooseRoute(undefined, 'claim'), 'direct')
+})
+
+test('a session carries its claim file only when well formed', () => {
+  const one = (claim: unknown) => parseSessions(JSON.stringify([{ id: 1, image_id: 100001, state: 'ready', claim }]))[0]
+  assert.deepEqual(one({ path: '/tmp/h/s1/claim.rgba', w: 1, h: 1 })?.claim, { path: '/tmp/h/s1/claim.rgba', w: 1, h: 1 })
+  assert.equal(one(undefined)?.claim, undefined)
+  assert.equal(one(null)?.claim, undefined)
+  assert.equal(one({ path: 'relative.rgba', w: 1, h: 1 })?.claim, undefined)
+  assert.equal(one({ path: '/tmp/x', w: 0, h: 1 })?.claim, undefined)
+  assert.equal(one({ path: '/tmp/x', w: 1, h: 5000 })?.claim, undefined)
 })
 
 test('parseClient accepts the client record and normalises the target', () => {

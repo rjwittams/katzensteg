@@ -6,11 +6,14 @@ export const MAX_GRID = DIACRITICS.length
 /** The 24-bit foreground that names image `id` in a placeholder cell. */
 export const fgHex = (id: number): string => `#${(id & 0xffffff).toString(16).padStart(6, '0')}`
 
-/** One grid row: every cell carries its row and column diacritic. */
-export function rowText(row: number, cols: number): string {
+/**
+ * One grid row: every cell carries its row and column diacritic. `cell` is
+ * the kitty placeholder, or the stand-in a rewriting host turns into it.
+ */
+export function rowText(row: number, cols: number, cell: string = PLACEHOLDER): string {
   const r = DIACRITICS[row] ?? ''
   let out = ''
-  for (let c = 0; c < cols; c++) out += PLACEHOLDER + r + (DIACRITICS[c] ?? '')
+  for (let c = 0; c < cols; c++) out += cell + r + (DIACRITICS[c] ?? '')
   return out
 }
 

@@ -2,6 +2,18 @@
 //! unchanged; incomplete strings and kitty uploads only defer host graphics.
 const std = @import("std");
 
+/// A complete kitty graphics command in the child's output: the control data
+/// after `G`, and the start of its payload. Pixel payloads are cut off;
+/// `payload_truncated` says so. The slices are valid during the call only.
+pub const KittyCommand = struct { header: []const u8, payload: []const u8, payload_truncated: bool };
+
+/// Told of each complete kitty command the child writes. It observes only:
+/// the bytes are forwarded whatever it does.
+pub const Observer = struct {
+    context: *anyopaque,
+    kitty: *const fn (context: *anyopaque, command: KittyCommand) void,
+};
+
 pub const Boundary = struct {
     state: enum { ground, escape, escape_intermediate, csi, string, string_escape } = .ground,
     string_kind: enum { osc, apc, other } = .other,
@@ -12,6 +24,11 @@ pub const Boundary = struct {
     header_done: bool = false,
     kitty_chunks: bool = false,
     cleared: bool = false,
+    // Enough for a file or shared-memory name; never a whole pixel payload.
+    payload: [512]u8 = undefined,
+    payload_len: usize = 0,
+    payload_truncated: bool = false,
+    observer: ?Observer = null,
 
     pub fn safe(self: *const Boundary) bool {
         return self.state == .ground and self.utf8_left == 0 and !self.kitty_chunks;
@@ -33,6 +50,16 @@ pub const Boundary = struct {
         self.header_len = 0;
         self.header_overflow = false;
         self.header_done = false;
+        self.payload_len = 0;
+        self.payload_truncated = false;
+    }
+    fn collectPayload(self: *Boundary, byte: u8) void {
+        if (self.payload_len == self.payload.len) {
+            self.payload_truncated = true;
+        } else {
+            self.payload[self.payload_len] = byte;
+            self.payload_len += 1;
+        }
     }
     fn endString(self: *Boundary) void {
         if (self.string_kind == .apc and self.header_len > 0 and self.header[0] == 'G') {
@@ -46,6 +73,11 @@ pub const Boundary = struct {
                     if (std.mem.eql(u8, field, "m=1")) more = true;
                 }
                 self.kitty_chunks = more;
+                if (self.observer) |observer| observer.kitty(observer.context, .{
+                    .header = self.header[1..self.header_len],
+                    .payload = self.payload[0..self.payload_len],
+                    .payload_truncated = self.payload_truncated,
+                });
             }
         }
         self.state = .ground;
@@ -78,7 +110,7 @@ pub const Boundary = struct {
         }
         if (self.state == .string) {
             if (byte == 0x1b) self.state = .string_escape else if (byte == 0x9c or (byte == 7 and self.string_kind == .osc)) self.endString() else if (self.string_kind == .apc) {
-                if (byte == ';') self.header_done = true else self.collect(byte);
+                if (self.header_done) self.collectPayload(byte) else if (byte == ';') self.header_done = true else self.collect(byte);
             }
             return;
         }
@@ -181,4 +213,56 @@ test "C1 strings can interrupt CSI and still defer injection" {
     try std.testing.expect(!parser.safe());
     parser.feed("\x9c");
     try std.testing.expect(parser.safe());
+}
+
+test "an observer sees each complete kitty command once, across every read split" {
+    const Seen = struct {
+        count: usize = 0,
+        header: [64]u8 = undefined,
+        header_len: usize = 0,
+        payload: [64]u8 = undefined,
+        payload_len: usize = 0,
+        truncated: bool = false,
+        fn kitty(context: *anyopaque, command: KittyCommand) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+            self.header_len = command.header.len;
+            @memcpy(self.header[0..command.header.len], command.header);
+            self.payload_len = command.payload.len;
+            @memcpy(self.payload[0..command.payload.len], command.payload);
+            self.truncated = command.payload_truncated;
+        }
+    };
+    const stream = "text\x1b]title;x\x07\x1b_Ga=T,U=1,i=42,t=f;L3RtcC9j\x1b\\more";
+    for (0..stream.len + 1) |split| {
+        var seen = Seen{};
+        var parser = Boundary{ .observer = .{ .context = &seen, .kitty = Seen.kitty } };
+        parser.feed(stream[0..split]);
+        parser.feed(stream[split..]);
+        try std.testing.expectEqual(@as(usize, 1), seen.count);
+        try std.testing.expectEqualStrings("a=T,U=1,i=42,t=f", seen.header[0..seen.header_len]);
+        try std.testing.expectEqualStrings("L3RtcC9j", seen.payload[0..seen.payload_len]);
+        try std.testing.expect(!seen.truncated);
+    }
+}
+
+test "a pixel payload is reported cut off, and non-kitty strings are not reported" {
+    const Seen = struct {
+        count: usize = 0,
+        truncated: bool = false,
+        fn kitty(context: *anyopaque, command: KittyCommand) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+            self.truncated = command.payload_truncated;
+        }
+    };
+    var seen = Seen{};
+    var parser = Boundary{ .observer = .{ .context = &seen, .kitty = Seen.kitty } };
+    parser.feed("\x1b_Xnot kitty;abc\x1b\\\x1bPdcs;abc\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), seen.count);
+    parser.feed("\x1b_Ga=T,i=9,m=1;");
+    for (0..4096) |_| parser.feed("A");
+    parser.feed("\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), seen.count);
+    try std.testing.expect(seen.truncated);
 }

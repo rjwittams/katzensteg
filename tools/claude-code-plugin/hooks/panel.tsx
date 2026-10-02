@@ -19,6 +19,13 @@ export type PanelProps = {
   rows: number
   title: string
   state: 'starting' | 'ready' | 'closing' | 'exited'
+  /** The cell character when the host rewrites a stand-in; absent, the kitty placeholder. */
+  placeholder?: string
+  /**
+   * Draw the border and take input, but leave the grid empty: the picture is
+   * an image the application draws beneath this panel.
+   */
+  hollow?: boolean
 }
 
 type Ev = Record<string, unknown> & { n: number }
@@ -35,12 +42,15 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
     const latest = { props }
     surface.setState({ count: 0, latest })
     let n = 0
+    // Numbering restarts with each instance (a route or site change mounts a
+    // new one); the token lets the hooks module tell, and start counting anew.
+    const inst = Math.floor(Math.random() * 0x7fffffff)
     const recent: Ev[] = []
     const push = (ev: Record<string, unknown>) => {
       n += 1
       recent.push({ ...ev, n })
       if (recent.length > KEEP) recent.splice(0, recent.length - KEEP)
-      surface.post({ id: props.id, events: recent as never })
+      surface.post({ id: props.id, inst, events: recent as never })
       surface.setState({ count: n, latest })
     }
     surface.onKey(({ key, ctrl, shift, meta }) => {
@@ -100,7 +110,7 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   }
   if (surface.state) surface.state.latest.props = props
 
-  const { cols, rows, imageId, title, state } = props
+  const { cols, rows, imageId, title, state, placeholder, hollow } = props
   const color = fgHex(imageId)
   const border = state === 'ready' ? 'green' : state === 'starting' ? 'yellow' : 'red'
   // Title, then the count of input events this panel has captured (a quick
@@ -112,7 +122,23 @@ export default function Panel(props: PanelProps, surface: ClientSurface<State>) 
   // handle. Plain box drawing: the handles need no marker.
   const bottom = `└${'─'.repeat(cols)}┘`
   const lines = []
-  for (let r = 0; r < rows; r++) lines.push(rowText(r, cols))
+  for (let r = 0; r < rows; r++) lines.push(hollow ? '' : rowText(r, cols, placeholder))
+  if (hollow) {
+    // Nothing is painted inside the border, so the image beneath shows through.
+    return (
+      <Box flexDirection="column">
+        <Text color={border}>{top}</Text>
+        {lines.map(() => (
+          <Box>
+            <Text color={border}>│</Text>
+            <Box width={cols} />
+            <Text color={border}>│</Text>
+          </Box>
+        ))}
+        <Text color={border}>{bottom}</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column">
       <Text color={border}>{top}</Text>
