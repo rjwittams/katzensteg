@@ -233,3 +233,31 @@ commit messages and branch names:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+## Optional cleat provider
+
+Cleat is off by default. The default build and tests need neither Rust nor
+cleat. To build the daemon provider and run its byte/state integration tests:
+
+```bash
+python3 scripts/katzensteg/prepare_cleat.py --prefix /tmp/ks-cleat
+zig build -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+zig build test -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+```
+
+Preparation builds the pinned Ghostty VT engine, cleat library, and cleat binary
+from `profiles/cleat-dependency.json`. It requires Git, Cargo/rustup (the pinned
+cleat toolchain), Bash, curl, and tar; the upstream preparation tool downloads
+its pinned Zig toolchain if needed. `--source <checkout>` uses a clean checkout
+at the exact pinned revision. The prepared prefix contains `include/`, `lib/`,
+and `bin/cleat`. The library must come from the same cleat revision as the
+installed binary. Provider open checks the library's reported ABI and the
+selected binary's `cleat --version` protocol against the pin, returning a
+mismatch with both expected and actual pairs before connecting.
+
+`zig build test-cleat` with the same options runs just the provider tests. The
+integration harness starts its own daemon in a temporary runtime root, passes
+that root explicitly to the provider, and stops only that daemon. Session
+handles and render borrows belong to one caller thread; release each update
+before another pull or session destruction, and destroy sessions before closing
+the provider. No window-manager integration is enabled by this dependency.
