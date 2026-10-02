@@ -234,7 +234,8 @@ pub const WmMouseInputState = struct {
 };
 
 pub const ChromeOptions = struct {
-    background: ?cover.Color = .{ 0, 0, 0 },
+    // Desktop covering supplies its colour explicitly; exec keeps the terminal default.
+    background: ?cover.Color = null,
     outer: Rect,
     title: []const u8,
     focused: bool = true,

@@ -110,7 +110,10 @@ status row paints a full background. The producer and WM share cell-fit math.
 `KATZENSTEG_WM_SPLIT_IMAGES=1` forces the existing placement-splitting fallback
 (any value other than `0` forces it). Splitting is also selected automatically
 if OSC 11 is unanswered or malformed. It retains the original nonnegative
-window z bases and occlusion rectangles. Placeholder presentation skips this
+window z bases and occlusion rectangles. If the colour query is unanswered,
+desktop chrome uses explicit black; a forced split with a valid reply still
+uses the queried colour. Exec-mode chrome keeps the terminal default.
+Placeholder presentation skips this
 query and keeps its existing grid, z-order and cell rendering.
 
 ### Host-drawn placeholder grids

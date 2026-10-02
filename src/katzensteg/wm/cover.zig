@@ -4,6 +4,8 @@ const platform = @import("platform");
 
 pub const Color = [3]u8;
 pub const Mode = enum { split, band };
+/// Band mode requires a known terminal background. Construct runtime policies
+/// with choose(); direct construction must preserve that invariant.
 pub const Policy = struct {
     mode: Mode = .split,
     background: ?Color = null,
