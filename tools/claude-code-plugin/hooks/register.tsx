@@ -5,7 +5,7 @@ import {
   chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
-import { ordered, swapOnDrag } from './layout.ts'
+import { dragReport, ordered, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
 
 // Katzensteg for Claude Code. A headless katzensteg-wm owns the producers,
 // image ids and the graphics writes to this terminal; this module starts or
@@ -59,7 +59,16 @@ let imageSite = ''
 // loop is taking frames.
 const sentDelivery = new Map<string, 'terminal' | 'client'>()
 const lastSeq = new Map<string, number>()
-const lastSource = new Map<string, FrameSource>()
+const lastSource = new Map<string, { key: string; source: FrameSource }>()
+// The key each session's image is mounted under. It names the size: an image
+// that changes size is unmounted and a new one mounted, so the application
+// deletes the old image with every placement it had and places a fresh one.
+// Sent again under the same id at a new size, a terminal may go on resolving
+// the cells against an earlier placement and draw the picture at the old size.
+const imageKey = new Map<string, string>()
+// Per session, the last frame size swapped in and grid drawn, for the trace.
+const tracedFrame = new Map<string, string>()
+const tracedGrid = new Map<string, string>()
 // An id is in `pumping` exactly while its loop is alive, and only the loop
 // removes it, on its way out. A live loop looks the session up each step, so
 // it serves an id that left and came back; clearing the entry elsewhere would
@@ -87,20 +96,73 @@ const lastTypes = new Map<string, string[]>()
 let order: string[] = []
 const sizeOverride = new Map<string, { cols: number; rows: number }>()
 const resizing = new Set<string>()
+// A resize holds the grid post only while the size is still changing: the
+// hold lifts this long after the last change. It must not wait for the
+// release, which the surface does not always deliver; a producer left on the
+// old grid keeps rendering at the old size under a frame of the new one.
+const RESIZE_SETTLE_MS = 250
+const resizeStamp = new Map<string, number>()
+// The panel being moved by its title, from its press to its release: the
+// others draw dim meanwhile so the held one stands out.
+let moving: string | undefined
+// While a panel is being moved, the cell of the site the pointer is on. The
+// tree draws it marked, in the same pass as the layout, so the pointer can be
+// seen to be followed. Drawn by the panels from a prop it lagged: a panel's
+// own contents are redrawn a frame after the layout, and showed the mark in
+// the wrong place for that frame after a swap.
+let pointerSite: { col: number; row: number } | undefined
 const lastWidths = new Map<string, number>()
 const lastHeights = new Map<string, number>()
 // Stacked (docked pane), panels reorder by vertical drag against heights.
 let lastStacked = false
 // Where each panel sits in the band body, as the last render laid it out:
 // the wheel over a panel is forwarded to its game instead of scrolling the band.
-const placed = new Map<string, { col: number; row: number; cols: number; rows: number }>()
+const placed = new Map<string, PanelPlace>()
+// Each distinct layout has a number, which panels are told and name in their
+// drag reports, and the last few are kept: a report may be measured in the
+// layout before the current one.
+let layoutGen = 0
+const layouts = new Map<number, Map<string, PanelPlace>>()
+let lastColumns = 100
+function setLayout(next: Map<string, PanelPlace>): void {
+  if (layouts.size > 0 && samePlaces(placed, next)) return
+  layoutGen += 1
+  placed.clear()
+  for (const [id, place] of next) placed.set(id, place)
+  layouts.set(layoutGen, new Map(next))
+  for (const gen of [...layouts.keys()]) if (gen < layoutGen - 8) layouts.delete(gen)
+}
 const lastN = new Map<string, number>()
 // The panel instance those numbers came from; a new instance counts from one.
 const lastInst = new Map<string, unknown>()
 let forwarded = 0
 let shown = 0
 
-const log = ($: $, text: string) => $.ui.log(`katzensteg: ${text}`)
+// Two kinds of message. `tell` is for the person: something they asked for is
+// not working and they can act on it; it goes into the conversation. `log` is
+// the plugin's own diagnostics (sizes, redraws, a request the plugin retries);
+// it goes to the trace file and the debug log, never the conversation.
+const tell = ($: $, text: string) => { trace($, text); $.ui.log(`katzensteg: ${text}`) }
+const log = ($: $, text: string) => { trace($, text); $.ui.log(`katzensteg: ${text}`, { to: 'debug' }) }
+
+// A timeline of what sizes the plugin drew, posted and received, kept in a
+// file because the transcript shows only the latest state. The last few
+// hundred lines; written a moment after the newest one, not per line.
+const TRACE_KEEP = 400
+const traceLines: string[] = []
+let tracePath = ''
+let traceDue = false
+function trace($: $, text: string): void {
+  const now = new Date()
+  traceLines.push(`${now.toISOString().slice(11, 23)} ${text}`)
+  if (traceLines.length > TRACE_KEEP) traceLines.splice(0, traceLines.length - TRACE_KEEP)
+  if (traceDue || tracePath === '') return
+  traceDue = true
+  $.clock.after(300, () => {
+    traceDue = false
+    void $.fs.write(tracePath, traceLines.join('\n') + '\n').catch(() => undefined)
+  })
+}
 
 type Reply = { ok: boolean; status: number; text: string }
 
@@ -151,11 +213,15 @@ function pump($: $, id: string): void {
         // The site as it is now, not as it was when the frame was asked
         // for: a redraw in between may have moved the panels to the other
         // site, and that is where the image is mounted.
-        const out = await $.ui.blit({ requestId: imageSite, key: `image:${id}`, source })
+        const key = imageKey.get(id) ?? `image:${id}`
+        const size = `${frame.width}x${frame.height} ${frame.medium}`
+        if (tracedFrame.get(id) !== size) { tracedFrame.set(id, size); trace($, `${id} frame ${size} seq ${frame.seq} -> ${key}`) }
+        const out = await $.ui.blit({ requestId: imageSite, key, source })
         if (out.deny) {
           // Not mounted or not painting just now. A shared-memory frame has
           // no reader left, so the host must release it.
           blitDenied += 1
+          if (lastDeny !== out.deny) trace($, `${id} swap refused: ${out.deny.slice(0, 140)}`)
           lastDeny = out.deny
           if (frame.medium === 'shm') await api($, `${path}/release`, { seq: frame.seq }).catch(() => undefined)
           // A terminal that draws no images will refuse every frame: ask
@@ -163,7 +229,7 @@ function pump($: $, id: string): void {
           delay = out.deny.includes('alt') ? 2000 : 100
         } else {
           blitOk += 1
-          lastSource.set(id, source)
+          lastSource.set(id, { key, source })
         }
       } else if (!r.ok) {
         // 409 until the host has switched this session to client delivery.
@@ -274,13 +340,28 @@ async function connectOnce($: $): Promise<void> {
   }
 }
 
+// Drop what is kept for sessions no longer in the list. A panel that goes
+// while it is being moved sends no dragend, so the move ends here: the dim
+// on the other panels and the pointer mark with it.
+function forgetGone(): void {
+  for (const id of [...sentGrid.keys()]) {
+    if (sessions.some(s => s.id === id)) continue
+    sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id)
+    if (moving === id) { moving = undefined; pointerSite = undefined }
+    resizeStamp.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id)
+    imageKey.delete(id); tracedFrame.delete(id); tracedGrid.delete(id)
+    hidden.delete(id); sizeOverride.delete(id); resizing.delete(id)
+    lastWidths.delete(id); lastHeights.delete(id); placed.delete(id)
+  }
+}
+
 async function refresh($: $): Promise<boolean> {
   const r = await api($, '/sessions').catch(() => undefined)
   if (!r?.ok) return false
   if (r.text === listing) return false
   listing = r.text
   sessions = parseSessions(r.text)
-  for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+  forgetGone()
   $.ui.invalidate('ui.render')
   void ensureContainer($)
   return true
@@ -298,12 +379,12 @@ function poll($: $): void {
         if (r.text !== listing) {
           listing = r.text
           sessions = parseSessions(r.text)
-          for (const id of [...sentGrid.keys()]) if (!sessions.some(s => s.id === id)) { sentGrid.delete(id); gridReady.delete(id); lastN.delete(id); lastInst.delete(id); sentDelivery.delete(id); lastSeq.delete(id); lastSource.delete(id); hidden.delete(id); sizeOverride.delete(id); resizing.delete(id); lastWidths.delete(id); lastHeights.delete(id); placed.delete(id) }
+          forgetGone()
           $.ui.invalidate('ui.render')
           void ensureContainer($)
         }
       } catch (err) {
-        log($, `host lost: ${err}`)
+        tell($, `host lost: ${err}`)
         hostError = `host lost: ${err}`
         host = undefined
         client = undefined
@@ -334,7 +415,7 @@ async function ensureContainer($: $): Promise<void> {
   const any = visible().length > 0
   if (place === 'pane' && any && !paneOpen) {
     paneOpen = true
-    await $.ui.open({ id: PANE_ID, title: 'katzensteg', rows: SIZES[size] + 3 }).catch(err => { paneOpen = false; log($, `pane did not open: ${err}`) })
+    await $.ui.open({ id: PANE_ID, title: 'katzensteg', rows: SIZES[size] + 3 }).catch(err => { paneOpen = false; tell($, `pane did not open: ${err}`) })
   } else if (paneOpen && (place !== 'pane' || !any)) {
     paneOpen = false
     await $.ui.close({ id: PANE_ID }).catch(() => undefined)
@@ -402,7 +483,7 @@ async function registerTools($: $): Promise<void> {
     },
   ]
   for (const spec of specs) {
-    await $.tool.register(spec).catch(err => log($, `tool ${spec.name} not registered: ${err}`))
+    await $.tool.register(spec).catch(err => tell($, `tool ${spec.name} not registered: ${err}`))
   }
 }
 
@@ -448,14 +529,23 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
     lastWidths.set(s.id, grid.cols + 2)
     lastHeights.set(s.id, grid.rows + 2)
     const sent = sentGrid.get(s.id)
+    const drawn = `${grid.cols}x${grid.rows}${own ? ` (dragged to ${own.cols}x${own.rows})` : ''}${resizing.has(s.id) ? ' resizing' : ''} host ${s.grid ? `${s.grid.cols}x${s.grid.rows}` : 'none'} sent ${sent ? `${sent.cols}x${sent.rows}` : 'none'}`
+    if (tracedGrid.get(s.id) !== drawn) { tracedGrid.set(s.id, drawn); trace($, `${s.id} draw ${route} grid ${drawn}`) }
     // The host withholds graphics until it has a grid, so wait for the
     // source size rather than commit a full-width grid it would refit.
     if (s.source_px && !resizing.has(s.id) && (!sent || sent.cols !== grid.cols || sent.rows !== grid.rows)) {
       sentGrid.set(s.id, grid)
+      trace($, `${s.id} post grid ${grid.cols}x${grid.rows}`)
+      // A post that did not land is forgotten and tried again at a later
+      // draw: recorded as sent, the host would keep the old grid for good.
+      const retry = () => {
+        if (sentGrid.get(s.id) === grid) sentGrid.delete(s.id)
+        $.clock.after(500, () => $.ui.invalidate('ui.render'))
+      }
       $.clock.after(0, () => {
         api($, `/sessions/${encodeURIComponent(s.id)}/grid`, grid)
-          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`) })
-          .catch(err => log($, `grid for ${s.id} failed: ${err}`))
+          .then(r => { if (r.ok) { gridReady.add(s.id); log($, `grid for ${s.id}: ${grid.cols}x${grid.rows} accepted`) } else { log($, `grid for ${s.id} refused ${r.status}: ${r.text.slice(0, 120)}`); retry() } })
+          .catch(err => { log($, `grid for ${s.id} failed: ${err}`); retry() })
       })
     }
     // Repainting placeholder cells does not need another image upload.
@@ -466,27 +556,14 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
   // Replicate the layout below so scroll events can be mapped to a panel:
   // header on row 0, then panels left to right with a one-cell gap, wrapping
   // when the site is too narrow; stacked, one per row block.
-  placed.clear()
-  {
-    let col = 0
-    let row = 1
-    let tallest = 0
-    for (const { s, grid } of panels) {
-      const w = grid.cols + 2
-      const h = grid.rows + 2
-      if (stacked) { placed.set(s.id, { col: 0, row, cols: w, rows: h }); row += h; continue }
-      if (col > 0 && col + w > columns) { col = 0; row += tallest; tallest = 0 }
-      placed.set(s.id, { col, row, cols: w, rows: h })
-      col += w + 1
-      tallest = Math.max(tallest, h)
-    }
-  }
+  lastColumns = columns
+  setLayout(placePanels(panels.map(({ s, grid }) => ({ id: s.id, cols: grid.cols + 2, rows: grid.rows + 2 })), stacked, columns))
   return (
     <Box flexDirection="column">
       <Text dimColor wrap="truncate-end">{`katzensteg · ${shown.length} panel${shown.length === 1 ? '' : 's'} · click to play, Esc for the prompt · drag title to reorder, corner to resize, × closes`}</Text>
       <Box flexDirection={stacked ? 'column' : 'row'} flexWrap={stacked ? 'nowrap' : 'wrap'} columnGap={1}>
         {panels.map(({ s, grid }) => {
-          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state }
+          const base = { id: s.id, imageId: s.image_id, cols: grid.cols, rows: grid.rows, title: s.title, state: s.state, gen: layoutGen, ...(moving !== undefined && moving !== s.id && { dimmed: true }) }
           // On the blit route the host hands frames to this client; on every
           // other it writes them to the terminal itself.
           if (host?.frameDelivery) setDelivery($, s.id, route === 'blit' ? 'client' : 'terminal')
@@ -497,19 +574,28 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
             // host learns the image id from the application's transmission of
             // the claim file. On blit the frame loop swaps sources in; a
             // redraw names the last one swapped, which sends nothing.
+            const key = `image:${s.id}:${grid.cols}x${grid.rows}`
+            imageKey.set(s.id, key)
+            // A newly mounted image starts blank: the last frame went to the
+            // one it replaces, and a shared-memory frame can be read only once.
+            const swapped = lastSource.get(s.id)
             const source = route === 'claim' && s.claim
               ? { file: s.claim.path, format: 'rgba' as const, width: s.claim.w, height: s.claim.h }
-              : lastSource.get(s.id) ?? ONE_PIXEL
+              : swapped?.key === key ? swapped.source : ONE_PIXEL
             // Both stay in the flow, the panel pulled up over the image by a
             // negative margin. Absolutely positioned boxes are not clipped
             // when a pane scrolls their parent past its top edge: they are
             // held at the edge, so a scrolled-off panel stayed drawn there
             // beneath the next one.
+            // The wrapper carries a key. Without one, reordering panels
+            // rebinds each wrapper to a different panel, and a panel being
+            // dragged stops receiving the pointer it holds: no more moves and
+            // no release.
             return (
-              <Box flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
+              <Box key={`slot:${s.id}`} flexDirection="column" width={grid.cols + 2} height={grid.rows + 2}>
                 <Box marginTop={1} marginLeft={1} height={grid.rows}>
                   <Image
-                    key={`image:${s.id}`}
+                    key={key}
                     source={source}
                     columns={grid.cols}
                     rows={grid.rows}
@@ -536,6 +622,11 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
         })}
       </Box>
       {tail}
+      {pointerSite && pointerSite.col >= 0 && pointerSite.row >= 0 && (
+        <Box position="absolute" top={pointerSite.row} left={pointerSite.col}>
+          <Text color="cyan" bold inverse>+</Text>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -555,10 +646,13 @@ export const register: Register = on => {
       description: 'Game panels above the prompt via a headless katzensteg-wm: open, close, list, host',
       argumentHint: 'open <profile> [args...] | close [id] | size small|medium|large | place band|pane | route auto|direct|standin|claim|blit | pane | list | host | stop',
       immediate: true,
-    }).catch(err => log($, `/katzensteg not registered: ${err}`))
+    }).catch(err => tell($, `/katzensteg not registered: ${err}`))
     await registerTools($)
     const repo = (await $.env.get('KATZENSTEG_REPO')) ?? `${(await $.env.get('HOME')) ?? ''}/dev/katzensteg`
     hostBin = (await $.env.get('KATZENSTEG_HOST_BIN')) ?? `${repo}/zig-out/bin/katzensteg-wm`
+    // Beside the runtime's own logs, one file per Claude Code process.
+    tracePath = `/tmp/katzensteg-plugin-${(await $.env.get('CLAUDE_PID')) ?? `t${Date.now().toString(36)}`}.log`
+    trace($, 'plugin started')
     const saved = await $.store.get('size').catch(() => undefined)
     if (saved === 'small' || saved === 'medium' || saved === 'large') size = saved
     const savedPlace = await $.store.get('place').catch(() => undefined)
@@ -567,7 +661,7 @@ export const register: Register = on => {
     if (isRouteWish(savedRoute)) routeWish = savedRoute
     // Connect off the session.start path so a slow host start never holds it;
     // the poll loop keeps retrying while no host answers.
-    $.clock.after(0, () => { connect($).catch(err => log($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
+    $.clock.after(0, () => { connect($).catch(err => tell($, `connect failed: ${err}`)).finally(() => { if (!polling) { polling = true; poll($) } }) })
     return r
   })
 
@@ -583,7 +677,7 @@ export const register: Register = on => {
       })
       return {
         text: host && client
-          ? [`katzensteg host: pid ${host.pid} on 127.0.0.1:${host.port} · client ${client.id} · ${visible().length} panel(s) · ${forwarded} input events forwarded`, `  route ${drawnRoute} (asked ${routeWish})${blitOk + blitDenied > 0 ? ` · frames swapped ${blitOk}, refused ${blitDenied}${lastDeny ? ` (last: ${lastDeny.slice(0, 80)})` : ''}` : ''}`, ...detail].join('\n')
+          ? [`katzensteg host: pid ${host.pid} on 127.0.0.1:${host.port} · client ${client.id} · ${visible().length} panel(s) · ${forwarded} input events forwarded`, `  route ${drawnRoute} (asked ${routeWish})${blitOk + blitDenied > 0 ? ` · frames swapped ${blitOk}, refused ${blitDenied}${lastDeny ? ` (last: ${lastDeny.slice(0, 80)})` : ''}` : ''}`, `  trace ${tracePath}`, ...detail].join('\n')
           : `katzensteg: no host (${hostError ?? 'not connected'}) · binary ${hostBin}`,
       }
     }
@@ -831,6 +925,9 @@ export const register: Register = on => {
     const data = e.data as { id?: unknown; inst?: unknown; events?: unknown } | null
     if (typeof data?.id !== 'string') return next(e)
     const id = data.id
+    // A panel that remounted mid-move cannot report its release: let the
+    // others out of the dim.
+    if (data.inst !== undefined && lastInst.get(id) !== data.inst && moving === id) { moving = undefined; pointerSite = undefined; $.ui.invalidate('ui.render') }
     const { events, lastN: n } = newInputEvents(data.events, inputSince(lastInst.get(id), data.inst, lastN.get(id) ?? 0))
     if (data.inst !== undefined) lastInst.set(id, data.inst)
     lastN.set(id, n)
@@ -841,14 +938,46 @@ export const register: Register = on => {
         const big = 9999
         sizeOverride.set(id, ev.axis === 'resize-y' ? { cols: big, rows: ev.rows } : { cols: ev.cols, rows: ev.axis === 'resize-x' ? big : ev.rows })
         resizing.add(id)
+        trace($, `${id} resize event ${ev.axis} ${ev.cols}x${ev.rows}`)
+        const stamp = (resizeStamp.get(id) ?? 0) + 1
+        resizeStamp.set(id, stamp)
+        $.clock.after(RESIZE_SETTLE_MS, () => {
+          // Still the latest change, so the size has settled: tell the host.
+          if (resizeStamp.get(id) !== stamp || !resizing.has(id)) return
+          trace($, `${id} resize settled`)
+          resizing.delete(id)
+          $.ui.invalidate('ui.render')
+        })
         $.ui.invalidate('ui.render')
       } else if (ev.type === 'resizeend') {
+        trace($, `${id} resize ended by the panel`)
         resizing.delete(id)
         $.ui.invalidate('ui.render')
+      } else if (ev.type === 'dragstart') {
+        moving = id
+        $.ui.invalidate('ui.render')
+      } else if (ev.type === 'dragend') {
+        pointerSite = undefined
+        if (moving === id) moving = undefined
+        $.ui.invalidate('ui.render')
       } else if (ev.type === 'drag') {
-        // Side by side the gap is one column; stacked, the blocks touch.
-        const reordered = lastStacked ? swapOnDrag(order, id, ev.dy, lastHeights, 0) : swapOnDrag(order, id, ev.dx, lastWidths)
-        if (reordered.some((v, i) => v !== order[i])) { order = reordered; $.ui.invalidate('ui.render') }
+        // The report is measured from the dragged panel's place in the layout
+        // the panel last drew in, which it names; after a swap that can be the
+        // layout before this one. See dragReport.
+        const origin = ((ev.gen !== undefined ? layouts.get(ev.gen) : undefined) ?? placed).get(id)
+        if (origin && ev.x !== undefined && ev.y !== undefined) {
+          const report = dragReport(order, id, origin, ev.x, ev.y, placed, lastStacked)
+          const swapped = report.order.some((v, i) => v !== order[i])
+          trace($, `${id} drag pointer ${ev.x},${ev.y} in layout ${ev.gen ?? '?'} (now ${layoutGen}) = site ${report.col},${report.row} order ${order.join(' ')}${swapped ? ` -> ${report.order.join(' ')}` : ''}`)
+          if (swapped) {
+            order = report.order
+            // The new places are known now; the redraw only has to catch up.
+            setLayout(placePanels(order.flatMap(key => { const p = placed.get(key); return p ? [{ id: key, cols: p.cols, rows: p.rows }] : [] }), lastStacked, lastColumns))
+          }
+          const markMoved = pointerSite?.col !== report.col || pointerSite?.row !== report.row
+          pointerSite = { col: report.col, row: report.row }
+          if (swapped || markMoved) $.ui.invalidate('ui.render')
+        }
       }
     }
     const input = events.filter(ev => !isPanelEvent(ev))

@@ -54,6 +54,12 @@ route that cannot be served falls back to what `auto` would pick.
 `/katzensteg host` shows the route in use and, on `blit`, how many frames were
 swapped or refused.
 
+The plugin writes to the conversation only what you can act on, such as a lost
+host or a pane that would not open. Its own diagnostics (sizes drawn and
+posted, frame sizes, drag positions, requests it retries) go to
+`/tmp/katzensteg-plugin-<pid>.log`, which `/katzensteg host` names, and to
+Claude Code's debug log.
+
 The wrapper runs Claude on an inner PTY and forwards input unchanged, including
 Ctrl-C. Exit Claude normally to stop the wrapper. This mode needs the plugin
 from the same checkout: it attaches through `KATZENSTEG_WM_HOST`, supplied by
@@ -87,7 +93,20 @@ is the panel's own UI: × at the top-right closes it, dragging the title row
 reorders panels (sideways in the band, up and down in the docked pane), and
 dragging the right edge, bottom edge or the corner resizes it, keeping the
 source aspect. A dragged size replaces the
-preset for that panel until `/katzensteg size` is used again. The title shows
+preset for that panel until `/katzensteg size` is used again.
+
+The border shows what it is doing. Where the terminal reports pointer motion,
+the handle under the pointer lights up: the title row gains a grip mark, an
+edge or corner turns heavy, and the close mark inverts. While a panel is held
+by its title its border is heavy, dashes travel round it, and the other
+panels dim. It trades places with a neighbour when the pointer is over that
+neighbour, or, past a larger one, once the pointer reaches where the panel
+will land. The cell the pointer is on is marked with a `+`, drawn
+by the pane in the same pass as the layout, so you can see the pointer being
+followed. While an edge is dragged only that edge is heavy and the title
+shows the size in cells. A drag also ends on the next press, or the next
+pointer move with no button held: Claude Code does not deliver the release
+after a redraw that reorders panels. The title shows
 how many input events the panel has captured. The plugin
 also exports `KATZENSTEG_TARGET=jsonl:<host socket>` and
 `KATZENSTEG_OBSERVE=1` to the model's Bash tool, so a plain
