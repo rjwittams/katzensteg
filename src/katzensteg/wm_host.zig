@@ -24,6 +24,9 @@ const wm_peer_line_queue_max_entries: usize = 256;
 const wm_lifecycle_tick_ms: u64 = 20;
 
 pub const TerminalSize = producer_control.TerminalSize;
+// PROTOTYPE — throwaway (rjwittams/katzensteg#97).
+const proto_cells = @import("proto_cells");
+const proto_cells_input = @import("wm/proto_cells_input.zig");
 
 pub const Rect = struct {
     row: i32,
@@ -788,6 +791,8 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         break :blk probe_upload.profile;
     };
     try tty.enableInputCapture();
+    proto_cells.start(allocator, terminal.rows, terminal.cols, terminal.pixel_width, terminal.pixel_height);
+    defer proto_cells.stop();
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
@@ -826,6 +831,11 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
+        if (proto_cells.pump()) {
+            tty_lock.lock();
+            defer tty_lock.unlock();
+            try proto_cells.paint(writer, false);
+        }
         for (sessions[0..initialized]) |*session| {
             if (!session.stdout_ready) continue;
             session.stdout_ready = false;
@@ -974,8 +984,26 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     .command => |action| .{ .action = desktopCommandAction(action) },
                     .forward, .pointer => |bytes| blk: {
                         var window_pointer = false;
+                        if (proto_cells.active() and event == .forward and proto_cells.focused()) {
+                            proto_cells_input.forward(bytes, tty.keyboard_protocol_flags != 0);
+                            break :blk .{ .action = .consume };
+                        }
                         if (event == .pointer) {
                             const pointer = parseSgrMouseAt(bytes, 0, terminal) orelse break :blk .{ .action = .consume };
+                            switch (proto_cells.pointer(pointer.row, pointer.col, pointer.button, pointer.pressed)) {
+                                .pass => {},
+                                .consumed => break :blk .{ .action = .consume },
+                                .moved => {
+                                    if (proto_cells.takeCleared()) |old| {
+                                        tty_lock.lock();
+                                        defer tty_lock.unlock();
+                                        try clearWindowArea(writer, .{ .row = old.row, .col = old.col, .rows = old.rows, .cols = old.cols }, terminal);
+                                    }
+                                    try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                                    try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                                    break :blk .{ .action = .consume };
+                                },
+                            }
                             const menu = command_menu.Snapshot{ .active = command_input.armed, .rows = @intCast(terminal.rows), .cols = @intCast(terminal.cols) };
                             const cell = Cell{ .row = pointer.row, .col = pointer.col };
                             tty_lock.lock();
@@ -2082,6 +2110,10 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
         scratch[count] = higher.window.outer.toPresentationRectCells();
         count += 1;
     }
+    if (proto_cells.topRect()) |top| if (count < scratch.len) {
+        scratch[count] = .{ .row = top.row, .col = top.col, .rows = top.rows, .cols = top.cols };
+        count += 1;
+    };
     return scratch[0..count];
 }
 
@@ -2501,6 +2533,17 @@ fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal
     var bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer bytes.deinit();
     try renderDesktopMany(&bytes.writer, terminal, sessions, z_order, focused_index, events, redraw_state);
+    if (proto_cells.active()) {
+        var occluders: [default_wm_session_capacity]proto_cells.Rect = undefined;
+        var count: usize = 0;
+        for (sessions) |*session| if (sessionIsDrawable(session) and count < occluders.len) {
+            const outer = session.window.outer;
+            occluders[count] = .{ .row = outer.row, .col = outer.col, .rows = outer.rows, .cols = outer.cols };
+            count += 1;
+        };
+        proto_cells.setOccluders(occluders[0..count]);
+        try proto_cells.paint(&bytes.writer, true);
+    }
     try writer.writeAll(bytes.written());
 }
 

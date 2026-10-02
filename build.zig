@@ -35,6 +35,20 @@ pub fn build(b: *std.Build) void {
         const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
         b.getInstallStep().dependOn(&install.step);
     }
+    // PROTOTYPE — throwaway (rjwittams/katzensteg#97): a cleat session painted
+    // as cells in the desktop WM. Off unless a cleat checkout is named.
+    const proto_cleat = b.option([]const u8, "proto-cleat", "PROTOTYPE: cleat checkout with target/release/libcleat built");
+    const proto_cells_mod = b.addModule("proto_cells", .{
+        .root_source_file = b.path(if (proto_cleat != null) "src/katzensteg/wm/proto_cleat_cells.zig" else "src/katzensteg/wm/proto_cleat_cells_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    if (proto_cleat) |root| {
+        proto_cells_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "crates", "cleat", "include" }) });
+        proto_cells_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ root, "target", "release", if (is_macos) "libcleat.dylib" else "libcleat.so" }) });
+        proto_cells_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ root, "target", "release" }) });
+    }
     const default_preload_options = b.addOptions();
     default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);
     default_preload_options.addOption(bool, "dynapi", false);
@@ -1113,6 +1127,7 @@ fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Bu
     if (options.root_source_file != null) {
         module.addImport("platform", b.modules.get("platform").?);
         module.addImport("jackstay", b.modules.get("jackstay").?);
+        module.addImport("proto_cells", b.modules.get("proto_cells").?);
     }
     // The platform adapters and C interposers use libc and pthread APIs.
     module.link_libc = true;
