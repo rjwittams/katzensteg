@@ -123,6 +123,9 @@ export function placeLanes(lanes: readonly Lane[], size: Sizer, top = 1): Map<st
  * lane, the panel goes after every other panel whose middle is above the
  * pointer; the others are measured as if the moving panel were not there, so
  * the answer does not depend on where it is at the moment and cannot flip.
+ * That count is also the panel's index in the lane once it is taken out, so
+ * in its own lane it compares directly with the index it has now: equal means
+ * the panel is already where the pointer puts it, and nothing changes.
  * The lane it left is kept even if empty: `dropEmptyLanes` at the release.
  */
 export function moveInLanes(
@@ -138,7 +141,12 @@ export function moveInLanes(
   const out = clone(lanes)
   const from = out.findIndex(lane => lane.items.includes(id))
   if (from < 0) return { lanes: out, changed: false }
-  let target = out.findIndex((lane, index) => col >= laneStart(out, index) && col < laneStart(out, index) + lane.width)
+  let start = 0
+  let target = -1
+  for (const [index, lane] of out.entries()) {
+    if (col >= start && col < start + lane.width) { target = index; break }
+    start += lane.width + LANE_GAP
+  }
   let made = false
   if (target < 0) {
     const room = columns - lanesWidth(out) - LANE_GAP
@@ -163,7 +171,7 @@ export function moveInLanes(
   return { lanes: out, changed: true }
 }
 
-/** The lanes without the empty ones; the last lane is kept even if empty. */
+/** The lanes without the empty ones. If every lane is empty the first is kept, so there is always one. */
 export function dropEmptyLanes(lanes: readonly Lane[]): Lane[] {
   const out = clone(lanes).filter(lane => lane.items.length > 0)
   return out.length > 0 ? out : clone(lanes).slice(0, 1)
@@ -178,7 +186,10 @@ export function resizeLane(lanes: readonly Lane[], id: string, width: number, co
   const lane = out.find(candidate => candidate.items.includes(id))
   if (!lane) return out
   const free = Math.max(0, columns - lanesWidth(out))
-  lane.width = Math.max(Math.min(MIN_LANE, lane.width + free), Math.min(width, lane.width + free))
+  // A lane already narrower than the minimum with no free columns (the pane
+  // is that narrow) stays as it is: the widest allowed wins over the minimum.
+  const widest = lane.width + free
+  lane.width = Math.min(Math.max(MIN_LANE, width), widest)
   lane.auto = false
   return out
 }

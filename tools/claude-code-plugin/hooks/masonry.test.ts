@@ -87,6 +87,7 @@ test('dragging right of the last lane makes a lane when there is room', () => {
   assert.equal(brief(only), '30: | 20:c | 30:a')
   assert.equal(brief(dropEmptyLanes(only)), '20:c | 30:a')
   assert.equal(brief(dropEmptyLanes([lane(1, 30, [])])), '30:')
+  assert.equal(brief(dropEmptyLanes([lane(1, 30, []), lane(2, 20, [])])), '30:')
 })
 
 test('a side edge sizes the whole lane, within the minimum and the free columns', () => {
@@ -98,6 +99,9 @@ test('a side edge sizes the whole lane, within the minimum and the free columns'
   assert.equal(brief(resizeLane(lanes, 'b', 200, 100)), '79:a,b | 20:c')
   assert.equal(brief(resizeLane(lanes, 'b', 3, 100)), '12:a,b | 20:c')
   assert.equal(brief(resizeLane(lanes, 'zz', 40, 100)), '30:a,b | 20:c')
+  // A pane narrower than the minimum: the lane keeps the width it has.
+  assert.equal(brief(resizeLane([lane(1, 8, ['a'])], 'a', 20, 8)), '8:a')
+  assert.equal(brief(resizeLane([lane(1, 8, ['a'])], 'a', 3, 8)), '8:a')
 })
 
 test('the places are drawn as one column of children put in position by margins', () => {

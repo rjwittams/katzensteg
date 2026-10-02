@@ -672,7 +672,12 @@ async function panelsTree($: $, els: Elements['terminal'], site: string, columns
   // that changes parent while it is dragged loses the pointer.
   const placedItems = masonry
     ? flowOrder([
-        ...panels.flatMap(({ s, grid }) => { const place = placed.get(s.id); return place ? [{ key: `slot:${s.id}`, place, s: s as Session | undefined, grid: grid as Grid | undefined, text: [] as string[] }] : [] }),
+        ...panels.flatMap(({ s, grid }) => {
+          const place = placed.get(s.id)
+          // Every panel shown is in a lane and so has a place; one without would not be drawn.
+          if (!place) { log($, `no place for ${s.id} in the lanes; not drawn`); return [] }
+          return [{ key: `slot:${s.id}`, place, s: s as Session | undefined, grid: grid as Grid | undefined, text: [] as string[] }]
+        }),
         ...hints.map(hint => ({ ...hint, s: undefined as Session | undefined, grid: undefined as Grid | undefined })),
       ])
     : []
