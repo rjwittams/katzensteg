@@ -114,6 +114,14 @@ jobs:
             python3 scripts/katzensteg/test_jackstay_input.py
           python3 scripts/katzensteg/test_injected_io.py
 
+      - name: Prepare optional cleat dependency
+        run: python3 scripts/katzensteg/prepare_cleat.py --prefix /tmp/ks-cleat
+
+      - name: Build and test cleat provider
+        run: |
+          zig build -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+          zig build test -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+
   claude-plugin:
     name: Claude plugin unit tests
     runs-on: ubuntu-latest
