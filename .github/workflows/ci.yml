@@ -114,6 +114,16 @@ jobs:
             python3 scripts/katzensteg/test_jackstay_input.py
           python3 scripts/katzensteg/test_injected_io.py
 
+      - name: Prepare optional cleat dependency
+        # cleat's own rust-toolchain.toml pins its Rust compiler; rustup selects it.
+        run: python3 scripts/katzensteg/prepare_cleat.py --prefix /tmp/ks-cleat
+
+      - name: Build and test cleat provider
+        # --summary all records in the log that test-cleat and its daemon scenario ran.
+        run: |
+          zig build -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+          zig build test -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat --summary all
+
   claude-plugin:
     name: Claude plugin unit tests
     runs-on: ubuntu-latest
