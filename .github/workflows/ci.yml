@@ -120,7 +120,7 @@ jobs:
       - name: Build and test cleat provider
         run: |
           zig build -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
-          zig build test -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat
+          zig build test -Dcleat=true -Dcleat-prefix=/tmp/ks-cleat --summary all
 
   claude-plugin:
     name: Claude plugin unit tests
