@@ -194,7 +194,7 @@ rules come from.)
 - **Default colours are the outer terminal's.** A cell whose foreground is the
   session's default is painted with the outer terminal's default foreground
   (an SGR reset), and a default background follows the covering rule above, so
-  it too derives from the outer terminal. For sessions the WM starts this
+  default background too derives from the outer terminal. For sessions the WM starts this
   matches, because they are created with the outer defaults
   ([What the program is told](#what-the-program-is-told)). A session the WM
   attaches to whose own defaults differ is shown in the outer terminal's
