@@ -200,7 +200,7 @@ rules come from.)
   attaches to whose own defaults differ is shown in the outer terminal's
   defaults instead of its own. This mismatch is accepted
   ([#127](https://github.com/rjwittams/katzensteg/issues/127)); painting an
-  attached session's own defaults is not designed.
+  attached session's own defaults is left undesigned.
 - A wide character needs both of its columns inside the window and uncovered.
   Otherwise a space is painted in its place.
 - The session's cursor is drawn in the focused window. The outer terminal's own
