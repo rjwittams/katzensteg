@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
     }
     const enable_cleat = b.option(bool, "cleat", "Build optional cleat daemon provider") orelse false;
     const cleat_prefix = b.option([]const u8, "cleat-prefix", "Prepared pinned cleat prefix");
+    features.addOption(bool, "cleat", enable_cleat);
+    _ = b.addModule("features", .{ .root_source_file = features.getOutput(), .target = target, .optimize = optimize });
     if (enable_cleat) {
         if (!is_macos and target.result.os.tag != .linux) @panic("Cleat requires macOS or Linux");
         const prefix = cleat_prefix orelse @panic("-Dcleat=true requires -Dcleat-prefix; see docs/development.md");
@@ -776,8 +778,34 @@ pub fn build(b: *std.Build) void {
     });
     katzensteg_wm_host_mod.addImport("termscene", termscene_mod);
     katzensteg_wm_host_mod.addImport("xev", xev_mod);
+    katzensteg_wm_host_mod.addImport("features", b.modules.get("features").?);
+    if (enable_cleat) katzensteg_wm_host_mod.addImport("cleat", b.modules.get("cleat").?);
     katzensteg_wm.root_module.addImport("wm_host", katzensteg_wm_host_mod);
+    if (enable_cleat) {
+        const prefix = cleat_prefix.?;
+        // PTY scenario uses the real WM and a daemon owned by that test only.
+        const scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_wm_sessions.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--wm" });
+        scenario.addArtifactArg(katzensteg_wm);
+        scenario.setEnvironmentVariable("LD_LIBRARY_PATH", b.pathJoin(&.{ prefix, "lib" }));
+        scenario.setEnvironmentVariable("DYLD_LIBRARY_PATH", b.pathJoin(&.{ prefix, "lib" }));
+        b.top_level_steps.get("test-cleat").?.step.dependOn(&scenario.step);
+        // The default gate also proves covering with an actual SDL producer.
+        // Keep test-cleat independent of SDL for provider-only environments.
+        const graphics_scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_wm_sessions.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--wm", b.getInstallPath(.bin, "katzensteg-wm"), "--real-producer" });
+        for ([_]*std.Build.Step.Compile{ katzensteg_wm, katzensteg_launcher, katzensteg_input_probe, katzensteg_core_lib, katzensteg_sdl2_lib }) |artifact| {
+            graphics_scenario.step.dependOn(&b.addInstallArtifact(artifact, .{}).step);
+        }
+        const library = if (is_macos) "libcleat.dylib" else "libcleat.so";
+        graphics_scenario.step.dependOn(&b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library).step);
+        test_step.dependOn(&graphics_scenario.step);
+    }
     b.installArtifact(katzensteg_wm);
+    const wm_step = b.step("wm", "Build the desktop WM without preload dependencies");
+    wm_step.dependOn(&b.addInstallArtifact(katzensteg_wm, .{}).step);
+    if (enable_cleat) {
+        const library = if (is_macos) "libcleat.dylib" else "libcleat.so";
+        wm_step.dependOn(&b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ cleat_prefix.?, "lib", library }) }, library).step);
+    }
     const katzensteg_proxy = b.addExecutable(.{
         .name = "katzensteg-proxy",
         .use_llvm = use_llvm,
@@ -917,6 +945,7 @@ pub fn build(b: *std.Build) void {
         .termscene = termscene_mod,
         .xev = xev_mod,
         .link_libc = true,
+        .cleat_library_dir = if (enable_cleat) b.pathJoin(&.{ cleat_prefix.?, "lib" }) else null,
     });
     addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
@@ -1054,6 +1083,7 @@ const UnitTestOptions = struct {
     link_libc: bool = false,
     link_sdl2: bool = false,
     link_sdl3: bool = false,
+    cleat_library_dir: ?[]const u8 = null,
     link_opengl: bool = false,
 };
 
@@ -1078,6 +1108,11 @@ fn addUnitTest(
             .link_libc = options.link_libc,
         }),
     });
+    if (std.mem.eql(u8, name, "katzensteg-wm-host-test")) {
+        unit_test.root_module.addImport("features", b.modules.get("features").?);
+        if (b.modules.get("cleat")) |cleat| unit_test.root_module.addImport("cleat", cleat);
+    }
+    if (options.cleat_library_dir) |dir| unit_test.root_module.addRPath(.{ .cwd_relative = dir });
     // Test executables run from Zig's cache, outside the installed bin/lib tree.
     if (test_library_dir) |dir| unit_test.root_module.addRPath(.{ .cwd_relative = dir });
     if (options.termscene) |mod| unit_test.root_module.addImport("termscene", mod);
@@ -1101,6 +1136,9 @@ fn addUnitTest(
         if (options.link_sdl3) if (windows_sdl_prefixes.sdl3) |prefix| run_unit_test.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
     }
     test_step.dependOn(&run_unit_test.step);
+    if (std.mem.eql(u8, name, "katzensteg-wm-host-test")) {
+        b.step("test-wm", "Run standalone desktop WM tests").dependOn(&run_unit_test.step);
+    }
 }
 
 /// Install a UUID-matched `<dylib>.dSYM` next to the dylib for Instruments/lldb; wired into both the default install and the `katzensteg-dsym` step.

@@ -19,6 +19,9 @@ const Logger = @import("log.zig").Logger;
 const config_mod = @import("config.zig");
 const upload_path_mod = @import("upload_path.zig");
 const cover = @import("wm/cover.zig");
+const cleat_enabled = @import("features").cleat;
+const session_content = if (cleat_enabled) @import("wm/session.zig") else @import("wm/session_disabled.zig");
+const session_cells = @import("wm/session_cells.zig");
 const ts_kitty = @import("termscene").kitty;
 
 const wm_peer_line_queue_max_entries: usize = 256;
@@ -265,15 +268,17 @@ const WmChromeSnapshot = struct {
     session_index: usize,
     outer: Rect,
     placeholder: bool = false,
+    session_cells: bool = false,
 };
 
 pub const WmDesktopRedrawState = struct {
     cover_policy: cover.Policy = .{},
     menu: command_menu.Snapshot = .{},
+    session_error: ?[]const u8 = null,
     previous_chrome: [default_wm_session_capacity]WmChromeSnapshot = undefined,
     previous_count: usize = 0,
 
-    fn capture(self: *WmDesktopRedrawState, sessions: []const WmProducerSession, z_order: []const usize) void {
+    fn capture(self: *WmDesktopRedrawState, sessions: []const WmWindow, z_order: []const usize) void {
         self.previous_count = 0;
         for (z_order) |session_index| {
             if (session_index >= sessions.len) continue;
@@ -281,7 +286,7 @@ pub const WmDesktopRedrawState = struct {
             if (!sessionIsDrawable(session)) continue;
             // Only the default interactive capacity gets previous-chrome cleanup tracking.
             if (self.previous_count >= self.previous_chrome.len) break;
-            self.previous_chrome[self.previous_count] = .{ .session_index = session_index, .outer = session.window.outer, .placeholder = session.placeholder_image_id != null };
+            self.previous_chrome[self.previous_count] = .{ .session_index = session_index, .outer = session.window.outer, .placeholder = session.placeholder_image_id != null, .session_cells = session.content == .session };
             self.previous_count += 1;
         }
     }
@@ -376,7 +381,7 @@ fn constrainOuterForPresentation(proposed: Rect, axis: ResizeAxis, terminal: Ter
     return next;
 }
 
-fn resolveInitialReadyPresentations(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+fn resolveInitialReadyPresentations(sessions: []WmWindow, terminal: TerminalSize) bool {
     var changed = false;
     for (sessions) |*session| {
         if (session.initial_presentation_resolved or !sessionIsVisible(session)) continue;
@@ -463,7 +468,13 @@ pub fn runSessionSpecsWithOptions(io: std.Io, allocator: std.mem.Allocator, prod
     return runMultiProfile(io, allocator, producer_exe, specs, options);
 }
 
-const WmProducerSession = struct {
+// The tag selects the content lifecycle and painter. Producer readiness state
+// stays in the fixed window slot because queued events borrow its field addresses.
+const WindowContent = union(enum) { producer, session: *session_content.Content };
+
+const WmWindow = struct {
+    content: WindowContent = .producer,
+    resize_deferred: bool = false,
     cover_mode: cover.Mode = .split,
     placeholder_image_id: ?u32 = null,
     /// Whether the producer has been told the terminal's kitty keyboard
@@ -492,13 +503,13 @@ const WmProducerSession = struct {
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
 
-    fn focusedContent(self: WmProducerSession) Rect {
+    fn focusedContent(self: WmWindow) Rect {
         return contentRectForOuter(self.window.outer);
     }
 };
 
 const WmPeerLineQueueEntry = struct {
-    session: ?*WmProducerSession,
+    session: ?*WmWindow,
     line: []u8,
 };
 
@@ -528,7 +539,7 @@ const WmPeerLineQueue = struct {
         self.blocking_trace_logger = logger;
     }
 
-    fn hasSession(self: *WmPeerLineQueue, session: *WmProducerSession) bool {
+    fn hasSession(self: *WmPeerLineQueue, session: *WmWindow) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.entries.items[self.head..]) |entry| if (entry.session == session) return true;
@@ -553,7 +564,7 @@ const WmPeerLineQueue = struct {
         self.* = undefined;
     }
 
-    fn enqueueCopy(self: *WmPeerLineQueue, session: ?*WmProducerSession, line: []const u8) !void {
+    fn enqueueCopy(self: *WmPeerLineQueue, session: ?*WmWindow, line: []const u8) !void {
         const owned_line = try self.allocator.dupe(u8, line);
         errdefer self.allocator.free(owned_line);
 
@@ -627,6 +638,9 @@ const WmPeerLineQueue = struct {
 const WmEventLoop = struct {
     loop: xev.Loop,
     lifecycle_timer: xev.Timer,
+    session_wake: if (cleat_enabled) xev.Async else void,
+    session_wake_completion: xev.Completion = .{},
+    session_ready: bool = false,
     tty_poll_completion: xev.Completion = .{},
     lifecycle_timer_completion: xev.Completion = .{},
     tty_ready: bool = false,
@@ -636,17 +650,30 @@ const WmEventLoop = struct {
     lifecycle_timer_armed: bool = false,
 
     fn init() !WmEventLoop {
-        return .{
-            .loop = try xev.Loop.init(.{}),
-            .lifecycle_timer = try xev.Timer.init(),
-        };
+        var loop = try xev.Loop.init(.{});
+        errdefer loop.deinit();
+        var timer = try xev.Timer.init();
+        errdefer timer.deinit();
+        return .{ .loop = loop, .lifecycle_timer = timer, .session_wake = if (cleat_enabled) try xev.Async.init() else {} };
     }
 
     fn deinit(self: *WmEventLoop) void {
+        if (cleat_enabled) self.session_wake.deinit();
         self.lifecycle_timer.deinit();
         self.loop.deinit();
     }
 };
+
+fn onSessionWake(context: ?*anyopaque) callconv(.c) void {
+    const events: *WmEventLoop = @ptrCast(@alignCast(context.?));
+    events.session_wake.notify() catch {};
+}
+
+fn onSessionReady(context: ?*WmEventLoop, _: *xev.Loop, _: *xev.Completion, result: xev.Async.WaitError!void) xev.CallbackAction {
+    result catch return .disarm;
+    context.?.session_ready = true;
+    return .rearm;
+}
 
 fn ttyXevPollSupported() bool {
     // Keep this as a capability hook rather than inlining `true`; the main loop
@@ -655,7 +682,7 @@ fn ttyXevPollSupported() bool {
     return true;
 }
 
-fn armWmEventSources(events: *WmEventLoop, tty: *DirectTty, sessions: []WmProducerSession) void {
+fn armWmEventSources(events: *WmEventLoop, tty: *DirectTty, sessions: []WmWindow) void {
     armWmTtyRead(events, tty);
     armWmLifecycleTick(events);
     for (sessions) |*session| armWmSessionStdoutRead(events, session);
@@ -675,12 +702,12 @@ fn armWmLifecycleTick(events: *WmEventLoop) void {
     events.lifecycle_timer_armed = true;
 }
 
-fn armWmSessionStdoutRead(events: *WmEventLoop, session: *WmProducerSession) void {
+fn armWmSessionStdoutRead(events: *WmEventLoop, session: *WmWindow) void {
     if (!session.stdout_poll_supported) return;
     if (session.stdout_ready or session.stdout_poll_armed) return;
     const stdout_file = session.producer.channel.presentationFile() orelse return;
     const file = xev.File.initFd(stdout_file.handle);
-    file.poll(&events.loop, &session.stdout_poll_completion, .read, WmProducerSession, session, onWmSessionStdoutReadable);
+    file.poll(&events.loop, &session.stdout_poll_completion, .read, WmWindow, session, onWmSessionStdoutReadable);
     session.stdout_poll_armed = true;
 }
 
@@ -716,7 +743,7 @@ fn onWmLifecycleTick(
 }
 
 fn onWmSessionStdoutReadable(
-    session: ?*WmProducerSession,
+    session: ?*WmWindow,
     _: *xev.Loop,
     _: *xev.Completion,
     _: xev.File,
@@ -769,16 +796,27 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         .pixel_origin = ts_kitty.capabilities.mousePixelOrigin(ts_kitty.capabilities.detectTerminalIdentity()),
     };
     const session_capacity = @max(specs.len, default_wm_session_capacity);
-    var sessions = try allocator.alloc(WmProducerSession, session_capacity);
+    var sessions = try allocator.alloc(WmWindow, session_capacity);
     defer allocator.free(sessions);
     var z_order = try allocator.alloc(usize, session_capacity);
     defer allocator.free(z_order);
+    var wm_events = try WmEventLoop.init();
+    defer wm_events.deinit();
+    if (cleat_enabled) wm_events.session_wake.wait(&wm_events.loop, &wm_events.session_wake_completion, WmEventLoop, &wm_events, onSessionReady);
     var initialized: usize = 0;
     var next_session_id: u64 = 1;
     var first_exit_code: u8 = 0;
+    var provider: if (cleat_enabled) ?session_content.Provider else void = if (cleat_enabled) null else {};
+    defer if (cleat_enabled) {
+        if (provider) |value| {
+            session_content.setWake(value, null, null);
+            value.close();
+        }
+    };
     defer {
         peer_queue.close();
         for (sessions[0..initialized]) |*session| {
+            if (session.content == .session) session.content.session.deinit();
             session.producer.deinit();
             session.stdout_buffer.deinit(allocator);
             deinitUploadPolicy(io, allocator, &session.upload);
@@ -815,8 +853,56 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         try startSessionProcessPolling(&sessions[i]);
     }
 
+    var session_error: ?[]u8 = null;
+    defer if (session_error) |message| allocator.free(message);
+    const attach_id = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_WM_ATTACH") catch null;
+    defer if (attach_id) |value| allocator.free(value);
+    if (attach_id) |id| {
+        if (cleat_enabled) attach: {
+            const binary = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_CLEAT_BINARY") catch try allocator.dupe(u8, "cleat");
+            defer allocator.free(binary);
+            // An empty runtime root asks the library to use cleat's discovery.
+            const root = system_io.process.getEnvVarOwned(allocator, "CLEAT_RUNTIME_DIR") catch try allocator.dupe(u8, "");
+            defer allocator.free(root);
+            const opened = session_content.Provider.open(allocator, io, binary, root, session_content.pin) catch |err| {
+                try recordLaunchFailure(&event_log, &logger, id, err);
+                break :attach;
+            };
+            switch (opened) {
+                .mismatch => |mismatch| {
+                    const message = try std.fmt.allocPrint(allocator, "cleat mismatch: library {d}/{d}, installed {d}/{d} (ABI/protocol)", .{ mismatch.expected.abi, mismatch.expected.protocol, mismatch.actual.abi, mismatch.actual.protocol });
+                    session_error = message;
+                    try event_log.record(.parse_error, message);
+                    break :attach;
+                },
+                .provider => |value| provider = value,
+            }
+            session_content.setWake(provider.?, onSessionWake, &wm_events);
+            const i = initialized;
+            if (i == sessions.len) {
+                try event_log.record(.parse_error, "session limit reached");
+                break :attach;
+            }
+            const title = try allocator.dupe(u8, id);
+            const outer = cascadedOuterRect(terminal, i);
+            const area = contentRectForOuter(outer);
+            const content = session_content.Content.attach(allocator, provider.?, id, @intCast(@max(1, area.cols)), @intCast(@max(1, area.rows))) catch |err| {
+                allocator.free(title);
+                try recordLaunchFailure(&event_log, &logger, id, err);
+                break :attach;
+            };
+            sessions[i] = .{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_policy.mode };
+            sessions[i].window.markAttached();
+            z_order[i] = i;
+            initialized += 1;
+            try updateSessionGeometry(&sessions[i], terminal);
+            wm_events.session_ready = true;
+            try event_log.record(.attach_sent, id);
+        } else try event_log.record(.parse_error, "session windows require -Dcleat=true");
+    }
+
     var focused_index: usize = 0;
-    var redraw_state = WmDesktopRedrawState{ .cover_policy = cover_policy };
+    var redraw_state = WmDesktopRedrawState{ .cover_policy = cover_policy, .session_error = session_error };
     var writer_state = tty.file.writerStreaming(&.{});
     const writer = &writer_state.interface;
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -833,8 +919,6 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var mouse_state = WmMouseInputState{};
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
-    var wm_events = try WmEventLoop.init();
-    defer wm_events.deinit();
     while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
         syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
@@ -845,8 +929,37 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             _ = try drainSessionStdoutChunk(allocator, session, &peer_queue);
             _ = try drainMainLoopPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, trace_blocking, &logger);
         }
+        if (wm_events.session_ready) {
+            wm_events.session_ready = false;
+            var changed = false;
+            for (sessions[0..initialized]) |*session| {
+                if (session.content != .session or session.retired) continue;
+                changed = try session.content.session.pump() or changed;
+                if (session.content.session.ended()) changed = true;
+            }
+            const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
+            if (lifecycle.changed) {
+                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+            } else if (changed) {
+                for (z_order[0..initialized]) |index| {
+                    if (!sessionIsDrawable(&sessions[index]) or sessions[index].content != .session) continue;
+                    try paintSessionContent(writer, terminal, sessions[0..initialized], z_order[0..initialized], index, focused_index, &event_log, &redraw_state, false);
+                }
+            }
+        }
+
         if (wm_events.lifecycle_ready) {
             wm_events.lifecycle_ready = false;
+            if (tty.refreshSize()) {
+                terminal.rows = tty.rows;
+                terminal.cols = tty.cols;
+                terminal.pixel_width = tty.pixel_width;
+                terminal.pixel_height = tty.pixel_height;
+                for (sessions[0..initialized]) |*session| session.window.outer = clampOuterRect(session.window.outer, terminal);
+                try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                redraw_requested.store(true, .seq_cst);
+            }
             if (!wm_events.tty_poll_supported) wm_events.tty_ready = true;
             for (sessions[0..initialized]) |*session| {
                 if (!session.stdout_poll_supported) session.stdout_ready = true;
@@ -1024,6 +1137,10 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                 }
+                if (initialized > 0 and sessions[focused_index].resize_deferred and mouse_state.drag == null) {
+                    sessions[focused_index].resize_deferred = false;
+                    try updateSessionGeometry(&sessions[focused_index], terminal);
+                }
                 switch (input.action) {
                     .none, .consume => {},
                     .start_launch => {
@@ -1087,6 +1204,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     .mouse_drag => |outer| {
                         if (initialized == 0) continue;
                         const focused = &sessions[focused_index];
+                        focused.resize_deferred = if (mouse_state.drag) |drag| drag.hit != .title else false;
                         const presentation_status = blk: {
                             tty_lock.lock();
                             defer tty_lock.unlock();
@@ -1138,7 +1256,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     return 0;
 }
 
-fn allSessionsDrained(sessions: []const WmProducerSession) bool {
+fn allSessionsDrained(sessions: []const WmWindow) bool {
     if (!allSessionsDone(sessions)) return false;
     for (sessions) |session| if (session.producer.channel.presentationFile() != null) return false;
     return true;
@@ -1153,14 +1271,15 @@ fn recordLaunchFailure(events: *ProtocolEventLog, logger: *Logger, profile: []co
 
 const wm_input_buffer_len = 256;
 
-fn availableSessionSlot(sessions: []const WmProducerSession, capacity: usize) ?usize {
+fn availableSessionSlot(sessions: []const WmWindow, capacity: usize) ?usize {
     for (sessions, 0..) |session, i| if (session.retired) return i;
     return if (sessions.len < capacity) sessions.len else null;
 }
 
-fn installSession(allocator: std.mem.Allocator, sessions: []WmProducerSession, initialized: *usize, index: usize, session: WmProducerSession, z_order: []usize) void {
+fn installSession(allocator: std.mem.Allocator, sessions: []WmWindow, initialized: *usize, index: usize, session: WmWindow, z_order: []usize) void {
     if (index < initialized.*) {
         std.debug.assert(sessions[index].retired);
+        if (sessions[index].content == .session) sessions[index].content.session.deinit();
         sessions[index].stdout_buffer.deinit(allocator);
         allocator.free(sessions[index].profile_name);
     } else {
@@ -1170,7 +1289,7 @@ fn installSession(allocator: std.mem.Allocator, sessions: []WmProducerSession, i
     sessions[index] = session;
 }
 
-fn retireFinishedSessions(io: std.Io, allocator: std.mem.Allocator, sessions: []WmProducerSession, queue: *WmPeerLineQueue, writer: anytype) !void {
+fn retireFinishedSessions(io: std.Io, allocator: std.mem.Allocator, sessions: []WmWindow, queue: *WmPeerLineQueue, writer: anytype) !void {
     for (sessions, 0..) |*session, index| {
         if (session.retired or session.state != .exited or session.producer.channel.presentationFile() != null or session.stdout_poll_armed) continue;
         if (queue.hasSession(session)) continue;
@@ -1188,7 +1307,7 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
 }
 
-fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
+fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
     const io = tty_file.io;
     var producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
     errdefer producer.deinit();
@@ -1199,14 +1318,14 @@ fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8,
 
 // Takes ownership of the channel only on success. Both owned and external
 // producers use the same presentation allocation and initial attach.
-fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmProducerSession {
+fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.File, terminal: TerminalSize, title: []const u8, session_index: usize, channel: *ClientChannel, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
     const io = tty_file.io;
     var upload = try uploadPolicyForSession(allocator, output_profile, session_index);
     errdefer deinitUploadPolicy(io, allocator, &upload);
     const owned_title = try allocator.dupe(u8, title);
     errdefer allocator.free(owned_title);
 
-    var session = WmProducerSession{
+    var session = WmWindow{
         .cover_mode = cover_mode,
         .profile_name = owned_title,
         .window = WmWindowState.init("main", cascadedOuterRect(terminal, session_index)),
@@ -1238,12 +1357,12 @@ fn attachProducerSession(allocator: std.mem.Allocator, tty_file: system_io.fs.Fi
 
 const buildProducerArgv = @import("wm/producer.zig").buildArgv;
 
-fn startSessionStdoutPolling(session: *WmProducerSession) !void {
+fn startSessionStdoutPolling(session: *WmWindow) !void {
     const stdout_file = session.producer.channel.presentationFile() orelse return;
     setNonBlocking(stdout_file.handle);
 }
 
-fn drainSessionStdoutAvailable(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+fn drainSessionStdoutAvailable(allocator: std.mem.Allocator, session: *WmWindow, peer_queue: *WmPeerLineQueue) !bool {
     var made_progress = false;
     while (try drainSessionStdoutChunk(allocator, session, peer_queue)) {
         made_progress = true;
@@ -1251,11 +1370,11 @@ fn drainSessionStdoutAvailable(allocator: std.mem.Allocator, session: *WmProduce
     return made_progress;
 }
 
-fn drainSessionStdoutChunk(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !bool {
+fn drainSessionStdoutChunk(allocator: std.mem.Allocator, session: *WmWindow, peer_queue: *WmPeerLineQueue) !bool {
     return drainSessionStdoutChunkWithLimit(allocator, session, peer_queue, 8192);
 }
 
-fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, max_bytes: usize) !bool {
+fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmWindow, peer_queue: *WmPeerLineQueue, max_bytes: usize) !bool {
     const stdout_file = session.producer.channel.presentationFile() orelse return false;
 
     var buf: [8192]u8 = undefined;
@@ -1278,7 +1397,7 @@ fn drainSessionStdoutChunkWithLimit(allocator: std.mem.Allocator, session: *WmPr
     return true;
 }
 
-fn queuePeerStdoutBytes(allocator: std.mem.Allocator, session: *WmProducerSession, peer_queue: *WmPeerLineQueue, bytes: []const u8) !void {
+fn queuePeerStdoutBytes(allocator: std.mem.Allocator, session: *WmWindow, peer_queue: *WmPeerLineQueue, bytes: []const u8) !void {
     for (bytes) |byte| {
         if (byte == '\n') {
             try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
@@ -1289,7 +1408,7 @@ fn queuePeerStdoutBytes(allocator: std.mem.Allocator, session: *WmProducerSessio
     }
 }
 
-fn flushPeerStdoutBuffer(session: *WmProducerSession, peer_queue: *WmPeerLineQueue) !void {
+fn flushPeerStdoutBuffer(session: *WmWindow, peer_queue: *WmPeerLineQueue) !void {
     if (session.stdout_buffer.items.len == 0) return;
     try peer_queue.enqueueCopy(session, session.stdout_buffer.items);
     session.stdout_buffer.clearRetainingCapacity();
@@ -1302,11 +1421,11 @@ fn setNonBlocking(fd: std.posix.fd_t) void {
     _ = system_io.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(typed_flags))) catch {};
 }
 
-fn startSessionProcessPolling(session: *WmProducerSession) !void {
+fn startSessionProcessPolling(session: *WmWindow) !void {
     if (session.producer.child) |*child| try child.waitForSpawn();
 }
 
-fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
+fn pollSessionChildExits(sessions: []WmWindow) !bool {
     var changed = false;
     for (sessions) |*session| {
         if (try pollSessionChildExit(session)) changed = true;
@@ -1314,20 +1433,20 @@ fn pollSessionChildExits(sessions: []WmProducerSession) !bool {
     return changed;
 }
 
-fn pollSessionChildExit(session: *WmProducerSession) !bool {
+fn pollSessionChildExit(session: *WmWindow) !bool {
     if (session.wait_state.done.load(.seq_cst)) return false;
     const term = (try session.producer.pollExit()) orelse return false;
     markSessionChildExited(session, term);
     return true;
 }
 
-fn waitForSessionChildExit(session: *WmProducerSession) !void {
+fn waitForSessionChildExit(session: *WmWindow) !void {
     const child = if (session.producer.child) |*child| child else return;
     if (session.wait_state.done.load(.seq_cst)) return;
     markSessionChildExited(session, child.wait() catch .{ .Unknown = 0 });
 }
 
-fn markSessionChildExited(session: *WmProducerSession, term: system_io.process.Child.Term) void {
+fn markSessionChildExited(session: *WmWindow, term: system_io.process.Child.Term) void {
     session.producer.child.?.term = term;
     session.wait_state.term = term;
     // term is safe to read after done is observed true; seq_cst releases the write.
@@ -1405,7 +1524,7 @@ fn hitWindowIndex(windows: []const WmWindowState, z_order: []const usize, cell: 
     return null;
 }
 
-fn hitSessionIndex(sessions: []const WmProducerSession, z_order: []const usize, cell: Cell) ?usize {
+fn hitSessionIndex(sessions: []const WmWindow, z_order: []const usize, cell: Cell) ?usize {
     var index = z_order.len;
     while (index > 0) {
         index -= 1;
@@ -1415,11 +1534,11 @@ fn hitSessionIndex(sessions: []const WmProducerSession, z_order: []const usize, 
     return null;
 }
 
-fn sessionIsVisible(session: *const WmProducerSession) bool {
+fn sessionIsVisible(session: *const WmWindow) bool {
     return session.state == .running and !sessionHasEnded(session);
 }
 
-fn sessionIsDrawable(session: *const WmProducerSession) bool {
+fn sessionIsDrawable(session: *const WmWindow) bool {
     return sessionIsVisible(session) and session.presentation_status.ready_to_show;
 }
 
@@ -1429,13 +1548,14 @@ const LifecycleReconcileResult = struct {
     z_order_changed: bool = false,
 };
 
-fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focused_index: *usize, mouse: *WmMouseInputState, events: *ProtocolEventLog, logger: *Logger) !LifecycleReconcileResult {
+fn reconcileExitedSessions(sessions: []WmWindow, z_order: []usize, focused_index: *usize, mouse: *WmMouseInputState, events: *ProtocolEventLog, logger: *Logger) !LifecycleReconcileResult {
     var result = LifecycleReconcileResult{};
     if (sessions.len == 0) return result;
     for (sessions, 0..) |*session, session_index| {
         if (session.state == .exited or !sessionHasEnded(session)) continue;
 
         session.state = .exited;
+        if (session.content == .session) session.content.session.detach();
         closeSessionControl(session);
         result.changed = true;
         if (session.producer.child != null) {
@@ -1479,7 +1599,7 @@ fn reconcileExitedSessions(sessions: []WmProducerSession, z_order: []usize, focu
     return result;
 }
 
-fn nextVisibleSessionIndex(sessions: []const WmProducerSession, current_index: usize) ?usize {
+fn nextVisibleSessionIndex(sessions: []const WmWindow, current_index: usize) ?usize {
     if (sessions.len == 0) return null;
     var offset: usize = 1;
     while (offset <= sessions.len) : (offset += 1) {
@@ -1489,7 +1609,7 @@ fn nextVisibleSessionIndex(sessions: []const WmProducerSession, current_index: u
     return null;
 }
 
-fn compactVisibleZOrder(sessions: []const WmProducerSession, z_order: []usize) bool {
+fn compactVisibleZOrder(sessions: []const WmWindow, z_order: []usize) bool {
     var first_visible: usize = 0;
     while (first_visible < z_order.len and !zOrderEntryVisible(sessions, z_order[first_visible])) : (first_visible += 1) {}
 
@@ -1507,7 +1627,7 @@ fn compactVisibleZOrder(sessions: []const WmProducerSession, z_order: []usize) b
     return changed;
 }
 
-fn zOrderEntryVisible(sessions: []const WmProducerSession, session_index: usize) bool {
+fn zOrderEntryVisible(sessions: []const WmWindow, session_index: usize) bool {
     return session_index < sessions.len and sessionIsVisible(&sessions[session_index]);
 }
 
@@ -1518,14 +1638,14 @@ fn bringWindowToFront(z_order: []usize, window_index: usize) void {
     z_order[z_order.len - 1] = window_index;
 }
 
-fn applyLayoutAction(sessions: []WmProducerSession, action: LayoutAction, terminal: TerminalSize) bool {
+fn applyLayoutAction(sessions: []WmWindow, action: LayoutAction, terminal: TerminalSize) bool {
     return switch (action) {
         .cascade => applyCascadeLayout(sessions, terminal),
         .tile => applyTileLayout(sessions, terminal),
     };
 }
 
-fn applyCascadeLayout(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+fn applyCascadeLayout(sessions: []WmWindow, terminal: TerminalSize) bool {
     var changed = false;
     var visible_index: usize = 0;
     for (sessions) |*session| {
@@ -1540,7 +1660,7 @@ fn applyCascadeLayout(sessions: []WmProducerSession, terminal: TerminalSize) boo
     return changed;
 }
 
-fn applyTileLayout(sessions: []WmProducerSession, terminal: TerminalSize) bool {
+fn applyTileLayout(sessions: []WmWindow, terminal: TerminalSize) bool {
     const visible_count = countVisibleSessions(sessions);
     if (visible_count == 0) return false;
 
@@ -1576,7 +1696,7 @@ fn applyTileLayout(sessions: []WmProducerSession, terminal: TerminalSize) bool {
     return changed;
 }
 
-fn countVisibleSessions(sessions: []const WmProducerSession) usize {
+fn countVisibleSessions(sessions: []const WmWindow) usize {
     var count: usize = 0;
     for (sessions) |*session| {
         if (sessionIsVisible(session)) count += 1;
@@ -1881,7 +2001,7 @@ fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8
     }
 }
 
-fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: *system_io.Mutex, session: ?*WmProducerSession, redraw_requested: ?*std.atomic.Value(bool), line: []const u8) !void {
+fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: *system_io.Mutex, session: ?*WmWindow, redraw_requested: ?*std.atomic.Value(bool), line: []const u8) !void {
     var message = attach_protocol.parsePeerMessage(allocator, line) catch return;
     defer message.deinit(allocator);
     switch (message) {
@@ -1931,7 +2051,7 @@ const writeInitialControl = producer_control.writeInitialControl;
 const writeViewportControl = producer_control.writeViewportControl;
 
 // Fitting belongs to this host. The producer receives only the resulting grid.
-fn placeholderGridRect(session: *const WmProducerSession, terminal: TerminalSize) Rect {
+fn placeholderGridRect(session: *const WmWindow, terminal: TerminalSize) Rect {
     const content = session.focusedContent();
     var cols = std.math.clamp(content.cols, 1, 297);
     var rows = std.math.clamp(content.rows, 1, 297);
@@ -1951,7 +2071,7 @@ fn placeholderGridRect(session: *const WmProducerSession, terminal: TerminalSize
     return .{ .row = content.row + @divTrunc(content.rows - rows, 2), .col = content.col + @divTrunc(content.cols - cols, 2), .rows = rows, .cols = cols };
 }
 
-fn placeholderTarget(session: *const WmProducerSession, terminal: TerminalSize) ?render_batch_protocol.PlaceholderPresentation {
+fn placeholderTarget(session: *const WmWindow, terminal: TerminalSize) ?render_batch_protocol.PlaceholderPresentation {
     const image_id = session.placeholder_image_id orelse return null;
     const grid = placeholderGridRect(session, terminal);
     return .{ .image_id = image_id, .cols = grid.cols, .rows = grid.rows, .target_px = if (terminal.pixel_width > 0 and terminal.pixel_height > 0 and terminal.cols > 0 and terminal.rows > 0) .{
@@ -1978,7 +2098,7 @@ fn translatePlaceholderInput(writer: anytype, bytes: []const u8, grid: Rect, ter
     }
 }
 
-fn renderPlaceholderGrid(writer: anytype, session: *const WmProducerSession, terminal: TerminalSize) !void {
+fn renderPlaceholderGrid(writer: anytype, session: *const WmWindow, terminal: TerminalSize) !void {
     const id = session.placeholder_image_id orelse return;
     const grid = placeholderGridRect(session, terminal);
     const area = windowAreaForTerminal(terminal);
@@ -2082,16 +2202,31 @@ fn zBaseForSessionIndex(z_order: []const usize, session_index: usize, mode: cove
     return zBaseForSlot(slot, mode);
 }
 
-fn sendViewportZOrderForSessions(sessions: []WmProducerSession, z_order: []const usize, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, events: *ProtocolEventLog, logger: *Logger) !void {
+fn cellPainterRect(rect: Rect) session_cells.Rect {
+    return .{ .row = rect.row - 1, .col = rect.col - 1, .rows = @intCast(@max(0, rect.rows)), .cols = @intCast(@max(0, rect.cols)) };
+}
+
+fn updateSessionGeometry(window: *WmWindow, terminal: TerminalSize) !void {
+    if (window.content != .session or window.resize_deferred) return;
+    const content = window.focusedContent();
+    try window.content.session.resize(@intCast(@max(1, content.cols)), @intCast(@max(1, content.rows)));
+    if (terminal.pixelGridKnown()) try window.content.session.geometry(@as(f32, @floatFromInt(terminal.pixel_width)) / @as(f32, @floatFromInt(terminal.cols)), @as(f32, @floatFromInt(terminal.pixel_height)) / @as(f32, @floatFromInt(terminal.rows)));
+}
+
+fn sendViewportZOrderForSessions(sessions: []WmWindow, z_order: []const usize, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, events: *ProtocolEventLog, logger: *Logger) !void {
     for (sessions, 0..) |*session, session_index| {
         if (!sessionIsVisible(session)) continue;
+        if (session.content == .session) {
+            try updateSessionGeometry(session, terminal);
+            continue;
+        }
         var occlusion_scratch: [default_wm_session_capacity]render_batch_protocol.PresentationRectCells = undefined;
         const occlusion_rects = if (session.cover_mode == .band) &.{} else occlusionRectsForSession(sessions, z_order, session_index, occlusion_scratch[0..]);
         try sendViewportForSession(session, terminal, aspect, zBaseForSessionIndex(z_order, session_index, session.cover_mode), occlusion_rects, events, logger);
     }
 }
 
-fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []const usize, session_index: usize, scratch: []render_batch_protocol.PresentationRectCells) []const render_batch_protocol.PresentationRectCells {
+fn occlusionRectsForSession(sessions: []const WmWindow, z_order: []const usize, session_index: usize, scratch: []render_batch_protocol.PresentationRectCells) []const render_batch_protocol.PresentationRectCells {
     const slot = std.mem.indexOfScalar(usize, z_order, session_index) orelse return scratch[0..0];
     var count: usize = 0;
     for (z_order[slot + 1 ..]) |higher_index| {
@@ -2105,7 +2240,7 @@ fn occlusionRectsForSession(sessions: []const WmProducerSession, z_order: []cons
     return scratch[0..count];
 }
 
-fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
+fn sendViewportForSession(session: *WmWindow, terminal: TerminalSize, aspect: render_batch_protocol.PresentationAspect, z_base: i32, occlusion_rects: []const render_batch_protocol.PresentationRectCells, events: *ProtocolEventLog, logger: *Logger) !void {
     if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
     const content = session.focusedContent();
@@ -2130,7 +2265,7 @@ fn sendViewportForSession(session: *WmProducerSession, terminal: TerminalSize, a
     }
 }
 
-fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
+fn syncInputFocus(sessions: []WmWindow, focused: ?usize) void {
     for (sessions, 0..) |*session, i| {
         const active = focused != null and focused.? == i;
         if ((!session.input_focus_initialized or session.input_was_focused != active) and session.producer.channel.controlFile() != null) {
@@ -2141,7 +2276,8 @@ fn syncInputFocus(sessions: []WmProducerSession, focused: ?usize) void {
     }
 }
 
-fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
+fn forwardInputToSession(session: *WmWindow, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
+    if (session.content == .session) return;
     if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
     if (keyboard_flags != 0 and !session.keyboard_flags_sent) {
@@ -2182,8 +2318,15 @@ fn forwardInputToSession(session: *WmProducerSession, bytes: []const u8, termina
     }
 }
 
-fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logger: *Logger) !void {
+fn shutdownSession(session: *WmWindow, events: *ProtocolEventLog, logger: *Logger) !void {
     if (session.state == .draining or session.state == .exited) return;
+    if (session.content == .session) {
+        session.content.session.detach();
+        session.state = .exited;
+        session.window.markDetached();
+        try events.record(.detach_sent, session.profile_name);
+        return;
+    }
     session.state = .draining;
     if (session.producer.channel.controlFile() != null) {
         if (tryWriteShutdownControl(session.producer.channel.writer())) {
@@ -2198,7 +2341,7 @@ fn shutdownSession(session: *WmProducerSession, events: *ProtocolEventLog, logge
     try events.record(.shutdown_sent, session.profile_name);
 }
 
-fn closeSessionControl(session: *WmProducerSession) void {
+fn closeSessionControl(session: *WmWindow) void {
     session.producer.channel.closeControl();
 }
 
@@ -2267,16 +2410,17 @@ fn sessionUploadPath(allocator: std.mem.Allocator, base_path: []const u8, sessio
 
 // Owned launchers retain process-based lifetime; external clients end at
 // presentation EOF. Closing control alone starts draining, not retirement.
-fn sessionHasEnded(session: *const WmProducerSession) bool {
+fn sessionHasEnded(session: *const WmWindow) bool {
+    if (session.content == .session) return session.content.session.ended();
     if (session.producer.child != null) return session.wait_state.done.load(.seq_cst);
     return session.producer.channel.presentationFile() == null;
 }
 
-fn sessionEndEvent(session: *const WmProducerSession) EventKind {
+fn sessionEndEvent(session: *const WmWindow) EventKind {
     return if (session.producer.child != null) .process_exited else .connection_closed;
 }
 
-fn allSessionsDone(sessions: []const WmProducerSession) bool {
+fn allSessionsDone(sessions: []const WmWindow) bool {
     for (sessions) |*session| {
         if (!sessionHasEnded(session)) return false;
     }
@@ -2319,7 +2463,7 @@ const InputRead = struct {
     focus_changed: bool = false,
 };
 
-fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: []const WmProducerSession, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
+fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: []const WmWindow, z_order: []usize, focused_index: *usize, terminal: TerminalSize) InputRead {
     if (sessions.len == 0) return .{ .action = .none };
     if (focused_index.* >= sessions.len) focused_index.* = 0;
     if (!sessionIsVisible(&sessions[focused_index.*])) {
@@ -2515,31 +2659,69 @@ fn mouseUnitsReply(bytes: []const u8) ?terminal_keys.MouseUnits {
     return null;
 }
 
-fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
+fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal: TerminalSize, sessions: []const WmWindow, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     tty_lock.lock();
     defer tty_lock.unlock();
     var bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer bytes.deinit();
+    try bytes.writer.writeAll("\x1b[?2026h");
     try renderDesktopMany(&bytes.writer, terminal, sessions, z_order, focused_index, events, redraw_state);
+    try bytes.writer.writeAll("\x1b[?2026l");
     try writer.writeAll(bytes.written());
+    for (sessions) |session| if (session.content == .session) session.content.session.mirror.clearDirty();
 }
 
-fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const WmProducerSession, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
+fn paintSessionContent(writer: anytype, terminal: TerminalSize, sessions: []const WmWindow, z_order: []const usize, session_index: usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *const WmDesktopRedrawState, full: bool) !void {
+    const session = &sessions[session_index];
+
+    var higher: [default_wm_session_capacity]session_cells.Rect = undefined;
+    var count: usize = 0;
+    const slot = std.mem.indexOfScalar(usize, z_order, session_index).?;
+    for (z_order[slot + 1 ..]) |index| {
+        if (index >= sessions.len or !sessionIsDrawable(&sessions[index])) continue;
+        if (count == higher.len) break;
+        higher[count] = cellPainterRect(sessions[index].window.outer);
+        count += 1;
+    }
+    const content = session.content.session;
+    const painted = try session_cells.paint(events.allocator, &content.mirror, .{
+        .content = cellPainterRect(session.focusedContent()),
+        .terminal = .{ .rows = @intCast(@max(0, terminal.rows - 1)), .cols = @intCast(@max(0, terminal.cols)) },
+        .higher = higher[0..count],
+        .focused = session_index == focused_index,
+        .default_background = redraw_state.cover_policy.paintedBackground(),
+        .full = full,
+        .synchronized = !full,
+    });
+    defer events.allocator.free(painted);
+    // The desktop owns synchronization across clearing, cells and chrome.
+    try writer.writeAll(painted);
+    if (!full) content.mirror.clearDirty();
+}
+
+fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const WmWindow, z_order: []const usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *WmDesktopRedrawState) !void {
     for (redraw_state.previous_chrome[0..redraw_state.previous_count]) |previous| {
         if (!chromeSnapshotStillCurrent(previous, sessions)) {
-            if (previous.placeholder or redraw_state.cover_policy.mode == .band) try clearWindowArea(writer, previous.outer, terminal) else try clearChrome(writer, previous.outer, terminal);
+            if (previous.session_cells) {
+                const next = if (previous.session_index < sessions.len and sessionIsDrawable(&sessions[previous.session_index])) sessions[previous.session_index].window.outer else null;
+                try clearOldSessionArea(writer, previous.outer, next, terminal);
+            } else if (previous.placeholder or redraw_state.cover_policy.mode == .band) try clearWindowArea(writer, previous.outer, terminal) else try clearChrome(writer, previous.outer, terminal);
         }
     }
     for (z_order) |session_index| {
         if (session_index >= sessions.len) continue;
         const session = &sessions[session_index];
         if (!sessionIsDrawable(session)) continue;
+        if (session.content == .session) try paintSessionContent(writer, terminal, sessions, z_order, session_index, focused_index, events, redraw_state, true);
         if (session.placeholder_image_id != null) {
             try clearWindowArea(writer, session.window.outer, terminal);
             try renderPlaceholderGrid(writer, session, terminal);
         }
-        if (redraw_state.cover_policy.mode == .band and session.placeholder_image_id == null) {
-            try renderContentBackground(writer, session, terminal, redraw_state.cover_policy.paintedBackground().?);
+        const has_session_cells = for (sessions) |other| {
+            if (other.content == .session and sessionIsDrawable(&other)) break true;
+        } else false;
+        if (session.content == .producer and (redraw_state.cover_policy.mode == .band or has_session_cells) and session.placeholder_image_id == null) {
+            try renderContentBackground(writer, session, terminal, redraw_state.cover_policy.paintedBackground());
         }
         try renderChrome(writer, .{
             .background = if (session.placeholder_image_id != null) null else redraw_state.cover_policy.paintedBackground() orelse cover.Color{ 0, 0, 0 },
@@ -2554,6 +2736,14 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
         try renderStatusAndReturn(writer, terminal, focused.window, focused.upload.profile, focused.presentation_status, events, redraw_state.cover_policy.paintedBackground());
     } else {
         try renderEmptyStatusAndReturn(writer, terminal, events, redraw_state.cover_policy.paintedBackground());
+    }
+    if (redraw_state.session_error) |message| {
+        try moveCursor(writer, terminal.rows, 1);
+        try writer.writeAll("\x1b[0m\x1b[2K\x1b[7m");
+        var remaining: usize = @intCast(@max(0, terminal.cols));
+        try writeStatusPart(writer, &remaining, message);
+        if (remaining > 0) try writer.splatByteAll(' ', remaining);
+        try writer.writeAll("\x1b[0m");
     }
     if (events.last()) |event| {
         if (event.kind == .launch_prompt and std.mem.startsWith(u8, event.detail, "launch:")) {
@@ -2584,7 +2774,7 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
 
 // Use the producer's cell fit and pixel rounding, including its 10x20
 // fallback when the outer terminal does not report physical dimensions.
-fn positionedImageRect(session: *const WmProducerSession, terminal: TerminalSize) Rect {
+fn positionedImageRect(session: *const WmWindow, terminal: TerminalSize) Rect {
     const content = session.focusedContent();
     const source = session.presentation_status.source_px orelse return content;
     const cols = std.math.clamp(content.cols, 1, std.math.maxInt(u16));
@@ -2605,7 +2795,7 @@ fn positionedImageRect(session: *const WmProducerSession, terminal: TerminalSize
     return .{ .row = content.row + fit.row - 1, .col = content.col + fit.col - 1, .rows = fit.h, .cols = fit.w };
 }
 
-fn renderContentBackground(writer: anytype, session: *const WmProducerSession, terminal: TerminalSize, background: cover.Color) !void {
+fn renderContentBackground(writer: anytype, session: *const WmWindow, terminal: TerminalSize, background: ?cover.Color) !void {
     const content = session.focusedContent();
     const image = positionedImageRect(session, terminal);
     const area = windowAreaForTerminal(terminal);
@@ -2621,7 +2811,7 @@ fn renderContentBackground(writer: anytype, session: *const WmProducerSession, t
             const paint = !rectContainsCell(image, row, col);
             if (painted == null or painted.? != paint) {
                 try writer.writeAll("\x1b[0m");
-                if (paint) try cover.writeBackground(writer, background);
+                if (paint) if (background) |color| try cover.writeBackground(writer, color);
                 painted = paint;
             }
             // Default-background spaces remove lower chrome under this image.
@@ -2631,10 +2821,27 @@ fn renderContentBackground(writer: anytype, session: *const WmProducerSession, t
     try writer.writeAll("\x1b[0m");
 }
 
-fn chromeSnapshotStillCurrent(previous: WmChromeSnapshot, sessions: []const WmProducerSession) bool {
+fn chromeSnapshotStillCurrent(previous: WmChromeSnapshot, sessions: []const WmWindow) bool {
     if (previous.session_index >= sessions.len) return false;
     const session = &sessions[previous.session_index];
     return sessionIsDrawable(session) and std.meta.eql(session.window.outer, previous.outer);
+}
+
+fn clearOldSessionArea(writer: anytype, old: Rect, next: ?Rect, terminal: TerminalSize) !void {
+    var row = @max(1, old.row);
+    const end_row = @min(terminal.rows, old.row + old.rows);
+    while (row < end_row) : (row += 1) {
+        if (next) |rect| {
+            if (row >= rect.row and row < rect.row + rect.rows) {
+                const left_end = @min(old.col + old.cols, rect.col);
+                if (left_end > old.col) try clearCellSpan(writer, row, old.col, left_end - old.col, terminal);
+                const right_start = @max(old.col, rect.col + rect.cols);
+                if (right_start < old.col + old.cols) try clearCellSpan(writer, row, right_start, old.col + old.cols - right_start, terminal);
+                continue;
+            }
+        }
+        try clearCellSpan(writer, row, old.col, old.cols, terminal);
+    }
 }
 
 fn clearChrome(writer: anytype, outer: Rect, terminal: TerminalSize) !void {
@@ -2664,7 +2871,7 @@ fn clearCellSpan(writer: anytype, row: i32, col: i32, cols: i32, terminal: Termi
     try writer.splatByteAll(' ', @intCast(end_col - start_col + 1));
 }
 
-fn visibleStatusSessionIndex(sessions: []const WmProducerSession, focused_index: usize) ?usize {
+fn visibleStatusSessionIndex(sessions: []const WmWindow, focused_index: usize) ?usize {
     if (sessions.len == 0) return null;
     const clamped = @min(focused_index, sessions.len - 1);
     if (sessionIsDrawable(&sessions[clamped])) return clamped;
@@ -3010,7 +3217,7 @@ test "wm status band renders producer presentation status" {
 
 test "wm peer presentation status updates session cache" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3040,7 +3247,7 @@ test "wm peer presentation status updates session cache" {
 
 test "wm peer presentation status only requests redraw on visible state changes" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3063,7 +3270,7 @@ test "wm peer presentation status only requests redraw on visible state changes"
 
 test "wm peer stdout queue defers terminal writes until main loop drain" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3091,7 +3298,7 @@ test "wm peer stdout queue defers terminal writes until main loop drain" {
 
 test "wm main loop peer drain does not leave older queued frames behind input" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3131,7 +3338,7 @@ test "wm main loop peer drain does not leave older queued frames behind input" {
 
 test "wm peer stdout polling queues complete lines and retains partial lines" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3160,7 +3367,7 @@ test "wm peer stdout chunk drain reads a bounded amount" {
     const writer = system_io.fs.File{ .io = io, .handle = pipe[1] };
     try writer.writeAll("one\ntwo\nthree\n");
 
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3205,7 +3412,7 @@ test "wm tty poll error does not mark tty ready" {
 
 test "wm producer stdout poll error does not mark stdout ready" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3293,7 +3500,7 @@ test "wm peer stdout queue wakes blocked producers when drained" {
 
 test "wm queued presentation status still updates during drain" {
     const io = std.testing.io;
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 20, .cols = 80 }),
         .upload = .{ .profile = .direct_apc },
@@ -3320,7 +3527,7 @@ test "wm queued presentation status still updates during drain" {
 
 test "wm resolves initial ready presentation to effective content rect" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "ready",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 22, .cols = 78 }),
@@ -3344,7 +3551,7 @@ test "wm resolves initial ready presentation to effective content rect" {
 
 test "wm desktop waits for presentation ready before drawing producer chrome" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "not-ready",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -3379,7 +3586,7 @@ test "wm desktop can render with no producer sessions" {
     try log.record(.launch_prompt, "launch:");
     var tty_lock = system_io.Mutex{};
     defer tty_lock.deinit();
-    const sessions = [_]WmProducerSession{};
+    const sessions = [_]WmWindow{};
     const z_order = [_]usize{};
     var redraw_state = WmDesktopRedrawState{};
     try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
@@ -3396,7 +3603,7 @@ test "wm desktop redraw avoids full screen clear" {
     try log.record(.attach_sent, "main");
     var tty_lock = system_io.Mutex{};
     defer tty_lock.deinit();
-    const sessions = [_]WmProducerSession{};
+    const sessions = [_]WmWindow{};
     const z_order = [_]usize{};
     var redraw_state = WmDesktopRedrawState{};
     try redrawDesktopManyLocked(&tty_lock, &out.writer, .{ .rows = 24, .cols = 80 }, sessions[0..], z_order[0..], 0, &log, &redraw_state);
@@ -3407,7 +3614,7 @@ test "wm desktop redraw avoids full screen clear" {
 
 test "wm desktop redraw does not clear unchanged window chrome" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "moved",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 8, .cols = 24 }),
@@ -3507,7 +3714,7 @@ test "wm attach and viewport controls advertise occlusion rectangles" {
 
 test "wm occlusion policy uses outer rects of higher running windows" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(io, &.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
         .{ .profile_name = "top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(io, &.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
     };
@@ -3526,7 +3733,7 @@ test "wm occlusion policy uses outer rects of higher running windows" {
 
 test "wm occlusion policy ignores higher producers that are not drawable yet" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{ .profile_name = "bottom", .window = WmWindowState.init("main", .{ .row = 4, .col = 4, .rows = 10, .cols = 30 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(io, &.{"true"}, std.testing.allocator) }, .presentation_status = .{ .seen = true, .ready_to_show = true } },
         .{ .profile_name = "launching-top", .window = WmWindowState.init("main", .{ .row = 2, .col = 6, .rows = 5, .cols = 12 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(io, &.{"true"}, std.testing.allocator) } },
     };
@@ -3831,7 +4038,7 @@ test "wm z order hit test chooses frontmost window under mouse" {
 
 test "wm mouse drag keeps original focused window when crossing another window" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "back",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -3866,7 +4073,7 @@ test "wm mouse drag keeps original focused window when crossing another window" 
 
 test "wm closed producer sessions stop drawing and hit testing immediately" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "active",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -3902,7 +4109,7 @@ test "wm closed producer sessions stop drawing and hit testing immediately" {
 
 test "wm reconciles externally exited producer sessions" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "dead",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -3943,7 +4150,7 @@ test "wm child exit polling marks finished child without wait thread" {
     var child = system_io.process.Child.init(io, &.{"/usr/bin/true"}, std.testing.allocator);
     try child.spawn();
 
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "done",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
         .upload = .{ .profile = .direct_apc },
@@ -3963,7 +4170,7 @@ test "wm child exit polling marks finished child without wait thread" {
 
 test "wm z order compacts exited sessions behind visible sessions" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "visible-a",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -3995,7 +4202,7 @@ test "wm z order compacts exited sessions behind visible sessions" {
 
 test "wm tile layout arranges visible producers without overlap" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "one",
             .window = WmWindowState.init("main", .{ .row = 5, .col = 5, .rows = 8, .cols = 30 }),
@@ -4020,7 +4227,7 @@ test "wm tile layout arranges visible producers without overlap" {
 
 test "wm cascade layout skips non-visible producers" {
     const io = std.testing.io;
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "visible-a",
             .window = WmWindowState.init("main", .{ .row = 9, .col = 9, .rows = 8, .cols = 30 }),
@@ -4087,7 +4294,7 @@ test "wm mixed ownership retires child exit and external EOF independently" {
     const pipe = try system_io.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
     var peer: ?system_io.fs.File = .{ .io = io, .handle = pipe[1] };
     defer if (peer) |file| file.close();
-    var sessions = [_]WmProducerSession{
+    var sessions = [_]WmWindow{
         .{
             .profile_name = "owned",
             .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -4154,7 +4361,7 @@ test "wm external shutdown drains presentation after control half close" {
     var fds: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     defer system_io.posix.close(fds[1]);
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "external",
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
         .upload = .{ .profile = .direct_apc },
@@ -4195,7 +4402,7 @@ test "wm external shutdown drains presentation after control half close" {
 test "wm slots wait for EOF callbacks and queued output before reuse" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var sessions = [_]WmProducerSession{.{
+    var sessions = [_]WmWindow{.{
         .profile_name = try allocator.dupe(u8, "old"),
         .session_id = 7,
         .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 40 }),
@@ -4254,7 +4461,7 @@ test "WM selects placeholder presentation without sending window geometry" {
 
 test "WM fits a placeholder grid and keeps image identity when moving" {
     const terminal = TerminalSize{ .rows = 40, .cols = 100, .pixel_width = 1000, .pixel_height = 800 };
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .placeholder_image_id = 100000,
         .window = WmWindowState.init("main", .{ .row = 2, .col = 3, .rows = 24, .cols = 42 }),
@@ -4319,7 +4526,7 @@ test "WM converts pixel mouse reports to cells for itself and forwards grid-loca
 }
 
 test "WM clipped placeholder text retains its source row and column indices" {
-    var session = WmProducerSession{
+    var session = WmWindow{
         .profile_name = "test",
         .placeholder_image_id = 0x123456,
         .window = WmWindowState.init("main", .{ .row = -3, .col = -2, .rows = 8, .cols = 8 }),
@@ -4373,6 +4580,7 @@ const CoverTestScreen = struct {
                     'K' => {
                         for (&self.cells[self.row]) |*cell| cell.* = .{ .background = self.background };
                     },
+                    'h', 'l' => {},
                     else => return error.UnexpectedCsi,
                 }
                 i = end + 1;
@@ -4420,7 +4628,7 @@ test "WM positioned cell fitting agrees with producer placement across geometry 
         for ([_]i32{ 1, 2, 17, 38 }) |cols| {
             for ([_]i32{ 1, 2, 13, 25 }) |rows| {
                 for ([_]render_batch_protocol.SourcePixels{ .{ .w = 1, .h = 1 }, .{ .w = 640, .h = 480 }, .{ .w = 1000, .h = 17 }, .{ .w = 17, .h = 1000 } }) |source| {
-                    const session = WmProducerSession{
+                    const session = WmWindow{
                         .profile_name = "fit",
                         .window = WmWindowState.init("main", .{ .row = -2, .col = -3, .rows = rows + 4, .cols = cols + 2 }),
                         .upload = .{ .profile = .direct_apc },
@@ -4446,7 +4654,7 @@ test "WM desktop paints chrome and bars while higher image cells erase covered t
     for ([_]cover.Mode{ .split, .band }) |mode| {
         const policy = cover.Policy{ .mode = mode, .background = .{ 18, 52, 254 } };
         const painted = policy.paintedBackground().?;
-        var sessions = [_]WmProducerSession{
+        var sessions = [_]WmWindow{
             .{ .profile_name = "lower", .window = WmWindowState.init("main", .{ .row = 6, .col = 4, .rows = 10, .cols = 26 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) }, .state = .running, .presentation_status = .{ .ready_to_show = true, .source_px = .{ .w = 240, .h = 120 } } },
             .{ .profile_name = "upper", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 10, .cols = 20 }), .upload = .{ .profile = .direct_apc }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) }, .state = .running, .presentation_status = .{ .ready_to_show = true, .source_px = .{ .w = 180, .h = 40 } } },
         };
@@ -4537,7 +4745,7 @@ test "WM band attach and viewport omit occlusions and fallback keeps splitting" 
         try std.testing.expectEqual(zBaseForSlot(0, mode), attach.z_base);
         bottom.producer.child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator);
         bottom.presentation_status = .{ .ready_to_show = true };
-        var sessions = [_]WmProducerSession{ bottom, .{
+        var sessions = [_]WmWindow{ bottom, .{
             .profile_name = "top",
             .window = WmWindowState.init("main", .{ .row = 4, .col = 5, .rows = 10, .cols = 20 }),
             .upload = .{ .profile = .direct_apc },
@@ -4559,6 +4767,70 @@ test "WM band attach and viewport omit occlusions and fallback keeps splitting" 
             const expected_count: usize = if (mode == .split and order[0] == 0) 1 else 0;
             try std.testing.expectEqual(expected_count, viewport.occlusion_rects.len);
             if (mode == .band) try std.testing.expect(std.mem.indexOf(u8, bytes, "occlusion_rects") == null);
+        }
+    }
+}
+
+// #117: both content kinds share covering, focus and order. Generate both
+// cover policies, then check overlap, dirty updates, raising, movement and
+// closing after each operation against the terminal byte interpreter.
+test "session cells share desktop order and repaint after covering changes" {
+    if (!cleat_enabled) return error.SkipZigTest;
+    const model = @import("wm/session_mirror.zig");
+    const a = std.testing.allocator;
+    for ([_]cover.Mode{ .split, .band }) |mode| {
+        var content = session_content.Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 8, .cols = 18 } };
+        defer content.mirror.deinit();
+        try content.mirror.apply(.{ .size = content.requested });
+        const cells: [18]model.Cell = @splat(.{ .text = "s" });
+        for (0..8) |row| try content.mirror.apply(.{ .row_replace = .{ .row = row, .cells = &cells } });
+        var windows = [_]WmWindow{
+            .{ .profile_name = "session", .content = .{ .session = &content }, .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 12, .cols = 20 }), .upload = .{ .profile = .file_whole }, .state = .running, .presentation_status = .{ .ready_to_show = true } },
+            .{ .profile_name = "producer", .window = WmWindowState.init("main", .{ .row = 2, .col = 3, .rows = 9, .cols = 15 }), .upload = .{ .profile = .file_whole }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, a) }, .state = .running, .presentation_status = .{ .ready_to_show = true } },
+        };
+        var order = [_]usize{ 0, 1 };
+        var log = try ProtocolEventLog.init(a, 1);
+        defer log.deinit();
+        var state = WmDesktopRedrawState{ .cover_policy = .{ .mode = mode, .background = .{ 18, 52, 86 } } };
+        var screen = CoverTestScreen{};
+        for (0..8) |step| {
+            var bytes = std.Io.Writer.Allocating.init(a);
+            defer bytes.deinit();
+            switch (step) {
+                0 => {},
+                1 => bringWindowToFront(&order, 0),
+                2 => {
+                    const changed: [18]model.Cell = @splat(.{ .text = "t" });
+                    content.mirror.clearDirty();
+                    try content.mirror.apply(.{ .row_replace = .{ .row = 1, .cells = &changed } });
+                    try paintSessionContent(&bytes.writer, .{ .rows = 30, .cols = 80 }, &windows, &order, 0, 0, &log, &state, false);
+                },
+                3 => bringWindowToFront(&order, 1),
+                4 => {
+                    const changed: [18]model.Cell = @splat(.{ .text = "u" });
+                    content.mirror.clearDirty();
+                    try content.mirror.apply(.{ .row_replace = .{ .row = 1, .cells = &changed } });
+                    try paintSessionContent(&bytes.writer, .{ .rows = 30, .cols = 80 }, &windows, &order, 0, 0, &log, &state, false);
+                },
+                5 => windows[1].window.outer.col += 24,
+                6 => windows[0].window.outer.col += 10,
+                7 => windows[0].state = .exited,
+                else => unreachable,
+            }
+            if (step != 2 and step != 4) try renderDesktopMany(&bytes.writer, .{ .rows = 30, .cols = 80 }, &windows, &order, 0, &log, &state);
+            try screen.apply(bytes.written());
+            switch (step) {
+                0, 3, 4 => try std.testing.expectEqual(@as(u8, ' '), screen.at(5, 4).glyph),
+                1 => try std.testing.expectEqual(@as(u8, 's'), screen.at(5, 4).glyph),
+                2 => try std.testing.expectEqual(@as(u8, 't'), screen.at(5, 4).glyph),
+                5 => try std.testing.expectEqual(@as(u8, 'u'), screen.at(5, 4).glyph),
+                6 => {
+                    try std.testing.expectEqual(@as(u8, ' '), screen.at(4, 2).glyph);
+                    try std.testing.expectEqual(@as(u8, 's'), screen.at(4, 12).glyph);
+                },
+                7 => try std.testing.expectEqual(@as(u8, ' '), screen.at(4, 12).glyph),
+                else => unreachable,
+            }
         }
     }
 }
