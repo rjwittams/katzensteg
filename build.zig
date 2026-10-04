@@ -945,6 +945,7 @@ pub fn build(b: *std.Build) void {
         .termscene = termscene_mod,
         .xev = xev_mod,
         .link_libc = true,
+        .wm_host = true,
         .cleat_library_dir = if (enable_cleat) b.pathJoin(&.{ cleat_prefix.?, "lib" }) else null,
     });
     addUnitTest(b, test_step, "katzensteg-render-batch-sink-test", "src/katzensteg/render_batch_sink.zig", target, optimize, use_llvm, test_library_dir, .{
@@ -1076,6 +1077,7 @@ fn linkVulkanLoader(b: *std.Build, module: *std.Build.Module, target: std.Build.
 }
 
 const UnitTestOptions = struct {
+    wm_host: bool = false,
     termscene: ?*std.Build.Module = null,
     xev: ?*std.Build.Module = null,
     katzensteg_sdl: ?*std.Build.Module = null,
@@ -1108,7 +1110,7 @@ fn addUnitTest(
             .link_libc = options.link_libc,
         }),
     });
-    if (std.mem.eql(u8, name, "katzensteg-wm-host-test")) {
+    if (options.wm_host) {
         unit_test.root_module.addImport("features", b.modules.get("features").?);
         if (b.modules.get("cleat")) |cleat| unit_test.root_module.addImport("cleat", cleat);
     }
@@ -1136,7 +1138,7 @@ fn addUnitTest(
         if (options.link_sdl3) if (windows_sdl_prefixes.sdl3) |prefix| run_unit_test.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
     }
     test_step.dependOn(&run_unit_test.step);
-    if (std.mem.eql(u8, name, "katzensteg-wm-host-test")) {
+    if (options.wm_host) {
         b.step("test-wm", "Run standalone desktop WM tests").dependOn(&run_unit_test.step);
     }
 }

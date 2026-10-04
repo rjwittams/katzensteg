@@ -228,6 +228,8 @@ while not (root / 'end').exists():
         fake.chmod(0o755)
         wm = self.start({"KATZENSTEG_CLEAT_BINARY": str(fake)})
         self.until(wm, lambda s: "mismatch" in self.text(s, 40))
+        # ABI/protocol are pinned by profiles/cleat-dependency.json; update
+        # these expectations together with that pin when upgrading cleat.
         self.assertIn("library 10/11", self.text(wm[3], 40))
         self.assertIn("installed 10/999", self.text(wm[3], 40))
         self.assertFalse(self.title_visible(wm[3]))

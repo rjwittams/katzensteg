@@ -1244,7 +1244,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     while (try drainQueuedPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0, trace_blocking, &logger)) {}
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized], 0..) |*session, index| {
-        if (!session.retired) try deleteSessionGraphics(writer, index);
+        if (!session.retired and session.content != .session) try deleteSessionGraphics(writer, index);
     }
     if (shutdown_sent) return 0;
     if (first_exit_code != 0) return first_exit_code;
@@ -1293,7 +1293,7 @@ fn retireFinishedSessions(io: std.Io, allocator: std.mem.Allocator, sessions: []
     for (sessions, 0..) |*session, index| {
         if (session.retired or session.state != .exited or session.producer.channel.presentationFile() != null or session.stdout_poll_armed) continue;
         if (queue.hasSession(session)) continue;
-        try deleteSessionGraphics(writer, index);
+        if (session.content != .session) try deleteSessionGraphics(writer, index);
         session.producer.channel.deinit();
         deinitUploadPolicy(io, allocator, &session.upload);
         session.retired = true;
@@ -2745,7 +2745,7 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
         if (remaining > 0) try writer.splatByteAll(' ', remaining);
         try writer.writeAll("\x1b[0m");
     }
-    if (events.last()) |event| {
+    if (redraw_state.session_error == null) if (events.last()) |event| {
         if (event.kind == .launch_prompt and std.mem.startsWith(u8, event.detail, "launch:")) {
             try moveCursor(writer, terminal.rows, 1);
             try writer.writeAll("\x1b[0m\x1b[2K");
@@ -2760,7 +2760,7 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
             if (remaining > 0) try writer.splatByteAll(' ', remaining);
             try writer.writeAll("\x1b[0m");
         }
-    }
+    };
     if (redraw_state.menu.active) {
         var snapshot = redraw_state.menu;
         snapshot.cols = @intCast(@max(0, terminal.cols));
@@ -4832,5 +4832,23 @@ test "session cells share desktop order and repaint after covering changes" {
                 else => unreachable,
             }
         }
+    }
+}
+
+// #117: version refusal remains visible even when the producer launch prompt
+// becomes the latest event. Generate absent/present errors over the same prompt.
+test "session version refusal takes precedence over launch prompt" {
+    const a = std.testing.allocator;
+    var log = try ProtocolEventLog.init(a, 1);
+    defer log.deinit();
+    try log.record(.launch_prompt, "launch: producer");
+    for ([_]?[]const u8{ null, "cleat mismatch: library 10/11, installed 10/999" }) |message| {
+        var state = WmDesktopRedrawState{ .session_error = message };
+        var bytes = std.Io.Writer.Allocating.init(a);
+        defer bytes.deinit();
+        try renderDesktopMany(&bytes.writer, .{ .rows = 30, .cols = 80 }, &.{}, &.{}, 0, &log, &state);
+        var screen = CoverTestScreen{};
+        try screen.apply(bytes.written());
+        try std.testing.expectEqual(@as(u8, if (message != null) 'c' else ' '), screen.at(30, 1).glyph);
     }
 }

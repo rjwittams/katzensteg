@@ -68,6 +68,8 @@ pub const Content = struct {
         return true;
     }
     fn apply(self: *Content, update: c.cleat_render_update) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
         try self.mirror.apply(.{ .size = .{ .cols = update.cols, .rows = update.rows } });
         if (update.op_count > 0) for (update.ops[0..update.op_count]) |op| {
             switch (op.kind) {
@@ -77,7 +79,7 @@ pub const Content = struct {
                     if (op.row_desc_count > 0) for (op.rows[0..op.row_desc_count]) |row| {
                         defer flat += row.cell_count;
                         const source = if (row.cells != null) row.cells else if (op.cells != null) op.cells + flat else continue;
-                        try self.applyRow(row.row, source[0..row.cell_count]);
+                        try self.applyRow(arena.allocator(), row.row, source[0..row.cell_count]);
                     };
                 },
                 c.CLEAT_RENDER_OP_SCROLL_COPY => try self.mirror.apply(.{ .scroll_copy = .{ .src_row = op.src_row, .dst_row = op.dst_row, .row_count = op.row_count } }),
@@ -111,10 +113,7 @@ pub const Content = struct {
         } });
         try self.mirror.apply(.{ .scrolled_back = update.viewport_kind == c.CLEAT_VIEWPORT_NORMAL_SCROLLBACK });
     }
-    fn applyRow(self: *Content, row: usize, source: []const c.cleat_render_cell) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
+    fn applyRow(self: *Content, a: std.mem.Allocator, row: usize, source: []const c.cleat_render_cell) !void {
         const cells = try a.alloc(model.Cell, source.len);
         for (source, cells) |in, *out| {
             var text = std.Io.Writer.Allocating.init(a);
