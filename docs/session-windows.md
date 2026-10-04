@@ -193,6 +193,16 @@ rules come from.)
 - Each cell is painted with its glyph, colours and style. A cell whose
   background is the session's default is painted as the
   [covering rule](#one-window-covering-another) says.
+- **Default colours are the outer terminal's.** A cell whose foreground is the
+  session's default is painted with the outer terminal's default foreground (an
+  SGR reset), and a default background follows the covering rule above, so
+  default background too derives from the outer terminal. For sessions the WM
+  starts, this matches, because they are created with the outer defaults ([What
+  the program is told](#what-the-program-is-told)). A session the WM attaches to
+  whose own defaults differ is shown in the outer terminal's defaults instead of
+  its own. This mismatch is accepted
+  ([#127](https://github.com/rjwittams/katzensteg/issues/127)); painting an
+  attached session's own defaults is left undesigned.
 - A wide character needs both of its columns inside the window and uncovered.
   Otherwise a space is painted in its place.
 - The session's cursor is drawn in the focused window. The outer terminal's own
