@@ -1,0 +1,194 @@
+//! Owner-thread cleat attachment and borrowed-update adapter. Presentation and
+//! window policy remain with the desktop; the provider owns its reader thread.
+const std = @import("std");
+const cleat = @import("cleat");
+const model = @import("session_mirror.zig");
+const c = cleat.c;
+
+pub const Provider = cleat.Provider;
+pub const pin = cleat.pin;
+pub const OpenResult = cleat.OpenResult;
+pub fn setWake(provider: Provider, callback: ?*const fn (?*anyopaque) callconv(.c) void, context: ?*anyopaque) void {
+    c.cleat_provider_set_wake_callback(provider.handle, callback, context);
+}
+
+pub const Content = struct {
+    allocator: std.mem.Allocator,
+    session: ?cleat.Session,
+    mirror: model.Mirror,
+    requested: model.Size,
+    closed: bool = false,
+    pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
+        const self = try allocator.create(Content);
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .session = try provider.attach(id, cols, rows), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
+        return self;
+    }
+    pub fn detach(self: *Content) void {
+        if (self.session) |session| session.destroy();
+        self.session = null;
+        self.closed = true;
+    }
+    pub fn deinit(self: *Content) void {
+        self.detach();
+        self.mirror.deinit();
+        self.allocator.destroy(self);
+    }
+    pub fn ended(self: *const Content) bool {
+        return self.closed;
+    }
+    pub fn resize(self: *Content, cols: u16, rows: u16) !void {
+        if (self.session) |session| {
+            if (self.requested.cols == cols and self.requested.rows == rows) return;
+            try session.resize(cols, rows);
+            self.requested = .{ .cols = cols, .rows = rows };
+        }
+    }
+    pub fn geometry(self: *Content, width: f32, height: f32) !void {
+        if (width <= 0 or height <= 0) return;
+        if (self.session) |session| {
+            var value = std.mem.zeroes(c.cleat_terminal_geometry);
+            value.cell_width_px = width;
+            value.cell_height_px = height;
+            value.content_width_px = width * @as(f32, @floatFromInt(self.requested.cols));
+            value.content_height_px = height * @as(f32, @floatFromInt(self.requested.rows));
+            try session.reportGeometry(value);
+        }
+    }
+    /// Called only after a provider wake (and once after attachment). Copies
+    /// every retained byte before releasing the provider's render borrow.
+    pub fn pump(self: *Content) !bool {
+        const session = self.session orelse return false;
+        _ = c.cleat_session_poll(session.handle);
+        self.closed = c.cleat_session_connection_state(session.handle) == c.CLEAT_SESSION_CLOSED;
+        var update = session.pull() orelse return false;
+        defer session.release(&update);
+        try self.apply(update);
+        _ = c.cleat_session_mark_observed(session.handle, update.render_generation);
+        return true;
+    }
+    fn apply(self: *Content, update: c.cleat_render_update) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        try self.mirror.apply(.{ .size = .{ .cols = update.cols, .rows = update.rows } });
+        if (update.op_count > 0) for (update.ops[0..update.op_count]) |op| {
+            switch (op.kind) {
+                c.CLEAT_RENDER_OP_FULL_VISIBLE_REPLACE, c.CLEAT_RENDER_OP_ROW_REPLACE => {
+                    if (op.kind == c.CLEAT_RENDER_OP_FULL_VISIBLE_REPLACE) try self.mirror.apply(.{ .full_replace = &.{} });
+                    var flat: usize = 0;
+                    if (op.row_desc_count > 0) for (op.rows[0..op.row_desc_count]) |row| {
+                        defer flat += row.cell_count;
+                        const source = if (row.cells != null) row.cells else if (op.cells != null) op.cells + flat else continue;
+                        try self.applyRow(arena.allocator(), row.row, source[0..row.cell_count]);
+                    };
+                },
+                c.CLEAT_RENDER_OP_SCROLL_COPY => try self.mirror.apply(.{ .scroll_copy = .{ .src_row = op.src_row, .dst_row = op.dst_row, .row_count = op.row_count } }),
+                else => {},
+            }
+        };
+        try self.mirror.apply(.{ .cursor = .{
+            .row = update.cursor.row,
+            .col = update.cursor.col,
+            .visible = update.cursor.visible,
+            .shape = switch (update.cursor.style) {
+                c.CLEAT_CURSOR_STYLE_BAR => .bar,
+                c.CLEAT_CURSOR_STYLE_UNDERLINE => .underline,
+                else => .block,
+            },
+            .blinking = update.cursor.blink,
+        } });
+        try self.mirror.apply(.{ .modes = .{
+            .mouse_tracking = switch (update.terminal_modes.mouse_tracking_mode) {
+                c.CLEAT_MOUSE_TRACKING_X10, c.CLEAT_MOUSE_TRACKING_NORMAL => .press,
+                c.CLEAT_MOUSE_TRACKING_BUTTON => .button,
+                c.CLEAT_MOUSE_TRACKING_ANY => .any,
+                else => .none,
+            },
+            .mouse_encoding = switch (update.terminal_modes.mouse_report_format) {
+                c.CLEAT_MOUSE_FORMAT_SGR => .sgr,
+                c.CLEAT_MOUSE_FORMAT_SGR_PIXELS => .sgr_pixels,
+                else => .legacy,
+            },
+            .alternate_screen = update.terminal_modes.active_alternate_screen,
+        } });
+        try self.mirror.apply(.{ .scrolled_back = update.viewport_kind == c.CLEAT_VIEWPORT_NORMAL_SCROLLBACK });
+    }
+    fn applyRow(self: *Content, a: std.mem.Allocator, row: usize, source: []const c.cleat_render_cell) !void {
+        const cells = try a.alloc(model.Cell, source.len);
+        for (source, cells) |in, *out| {
+            var text = std.Io.Writer.Allocating.init(a);
+            if (in.grapheme_count > 0) for (in.graphemes[0..in.grapheme_count]) |cp| {
+                if (cp < 0x20 or cp > 0x10ffff) continue;
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch continue;
+                try text.writer.writeAll(buf[0..len]);
+            };
+            out.* = .{
+                .text = text.written(),
+                .foreground = .{ .rgb = .{ in.style.fg.r, in.style.fg.g, in.style.fg.b }, .is_default = in.style.fg_color.tag == c.CLEAT_STYLE_COLOR_NONE },
+                .background = .{ .rgb = .{ in.style.bg.r, in.style.bg.g, in.style.bg.b }, .is_default = in.style.bg_color.tag == c.CLEAT_STYLE_COLOR_NONE },
+                .style_flags = in.style.flags,
+                .width = switch (in.style.width) {
+                    c.CLEAT_CELL_WIDTH_WIDE => .wide,
+                    c.CLEAT_CELL_WIDTH_SPACER_HEAD => .spacer_head,
+                    c.CLEAT_CELL_WIDTH_SPACER_TAIL => .spacer_tail,
+                    else => .narrow,
+                },
+            };
+        }
+        try self.mirror.apply(.{ .row_replace = .{ .row = row, .cells = cells } });
+    }
+};
+
+// Provider payloads are borrowed. The mirror must retain graphemes, colours,
+// widths and metadata after a borrow is released, and full updates clear rows
+// omitted by the provider. Generate both operation forms and every width.
+test "render adapter owns borrowed cells and full replacement clears omissions" {
+    const a = std.testing.allocator;
+    var content = Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 3, .cols = 4 } };
+    defer content.mirror.deinit();
+    var points = [_]u32{ 'a', 0x301, 0x1f600, 0x1b, 0xd800, 0x110000 };
+    var cell = std.mem.zeroes(c.cleat_render_cell);
+    cell.graphemes = &points;
+    cell.grapheme_count = points.len;
+    cell.style.fg_color.tag = c.CLEAT_STYLE_COLOR_RGB;
+    cell.style.fg = .{ .r = 11, .g = 22, .b = 33 };
+    var row = std.mem.zeroes(c.cleat_render_row);
+    row.row = 1;
+    row.cells = @ptrCast(&cell);
+    row.cell_count = 1;
+    var op = std.mem.zeroes(c.cleat_render_update_op);
+    op.rows = @ptrCast(&row);
+    op.row_desc_count = 1;
+    var update = std.mem.zeroes(c.cleat_render_update);
+    update.cols = 4;
+    update.rows = 3;
+    update.ops = @ptrCast(&op);
+    update.op_count = 1;
+    update.cursor.visible = true;
+    update.cursor.row = 1;
+    update.cursor.style = c.CLEAT_CURSOR_STYLE_UNDERLINE;
+    update.terminal_modes.mouse_tracking_mode = c.CLEAT_MOUSE_TRACKING_ANY;
+    update.terminal_modes.mouse_report_format = c.CLEAT_MOUSE_FORMAT_SGR_PIXELS;
+    for ([_]u32{ c.CLEAT_RENDER_OP_FULL_VISIBLE_REPLACE, c.CLEAT_RENDER_OP_ROW_REPLACE }) |kind| {
+        op.kind = kind;
+        for ([_]u32{ c.CLEAT_CELL_WIDTH_NARROW, c.CLEAT_CELL_WIDTH_WIDE, c.CLEAT_CELL_WIDTH_SPACER_HEAD, c.CLEAT_CELL_WIDTH_SPACER_TAIL }, [_]model.Width{ .narrow, .wide, .spacer_head, .spacer_tail }) |width, expected| {
+            cell.style.width = width;
+            try content.apply(update);
+            const retained = content.mirror.row(1)[0];
+            try std.testing.expectEqualStrings("a\u{301}\u{1f600}", retained.text);
+            try std.testing.expectEqual(expected, retained.width);
+            try std.testing.expectEqualDeep(model.Color{ .rgb = .{ 11, 22, 33 }, .is_default = false }, retained.foreground);
+            try std.testing.expect(content.mirror.modes.mouse_tracking == .any);
+            try std.testing.expect(content.mirror.cursor.shape == .underline);
+            points[0] = 'b';
+            try std.testing.expectEqualStrings("a\u{301}\u{1f600}", retained.text);
+            points[0] = 'a';
+        }
+    }
+    row.row = 2;
+    op.kind = c.CLEAT_RENDER_OP_FULL_VISIBLE_REPLACE;
+    try content.apply(update);
+    try std.testing.expectEqualStrings("", content.mirror.row(1)[0].text);
+    try std.testing.expectEqualStrings("a\u{301}\u{1f600}", content.mirror.row(2)[0].text);
+}

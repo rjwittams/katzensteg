@@ -59,6 +59,16 @@ class Screen:
                     self.frames[image] = self.frames.get(image, 0) + 1
                 self.pending = s[end + 2:]
                 continue
+            if s.startswith("\x1b]"):
+                end = s.find("\x1b\\")
+                bell = s.find("\x07")
+                if bell >= 0 and (end < 0 or bell < end):
+                    self.pending = s[bell + 1:]
+                elif end >= 0:
+                    self.pending = s[end + 2:]
+                else:
+                    return
+                continue
             if s.startswith("\x1b["):
                 match = re.match(r"\x1b\[([0-?]*)([ -/]*)([@-~])", s)
                 if not match:

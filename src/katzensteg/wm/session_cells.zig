@@ -33,8 +33,11 @@ pub const Options = struct {
     terminal: TerminalSize,
     higher: []const Rect = &.{},
     focused: bool = false,
-    default_background: [3]u8,
+    /// Unknown background in split mode keeps the outer terminal default.
+    default_background: ?[3]u8,
     full: bool = false,
+    /// Disable when the caller encloses cells and chrome in one desktop update.
+    synchronized: bool = true,
     /// Moving/resizing forces a full paint and clears the visible old-minus-new
     /// area with the outer terminal's default background, in the same update.
     previous: ?Rect = null,
@@ -89,7 +92,8 @@ fn build(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Opt
     defer bytes.deinit();
     const out = &bytes.writer;
     var pen = Pen{};
-    try out.writeAll("\x1b[?2026h\x1b[?25l");
+    if (options.synchronized) try out.writeAll("\x1b[?2026h");
+    try out.writeAll("\x1b[?25l");
     const prefix_len = bytes.written().len;
     if (options.previous) |old| {
         const end_row = @min(@as(i64, old.row) + old.rows, options.terminal.rows);
@@ -129,7 +133,11 @@ fn build(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Opt
                 (mirror.cursor.col == c or (wide and mirror.cursor.col == c + 1))) cell.style_flags ^= Style.inverse;
             // Normalize the style-cache key: default foreground RGB hints are not emitted.
             if (cell.foreground.is_default) cell.foreground.rgb = .{ 0, 0, 0 };
-            if (cell.background.is_default) cell.background = .{ .rgb = options.default_background, .is_default = false };
+            if (cell.background.is_default) {
+                if (options.default_background) |background_color| {
+                    cell.background = .{ .rgb = background_color, .is_default = false };
+                } else cell.background.rgb = .{ 0, 0, 0 };
+            }
             try pen.at(out, row, col);
             try pen.use(out, cell);
             try out.writeAll(text);
@@ -138,7 +146,8 @@ fn build(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Opt
         }
     }
     if (bytes.written().len == prefix_len) return allocator.dupe(u8, "");
-    try out.writeAll("\x1b[0m\x1b[?2026l");
+    try out.writeAll("\x1b[0m");
+    if (options.synchronized) try out.writeAll("\x1b[?2026l");
     return allocator.dupe(u8, bytes.written());
 }
 
@@ -446,4 +455,29 @@ test "empty mirror terminal and extreme rectangles" {
         try testing.expectEqual(@as(u21, ' '), grid.glyph[r][c]);
         try testing.expect(grid.default_bg[r][c]);
     };
+}
+
+// The desktop may own the synchronized transaction across content and chrome.
+test "caller owned synchronization still hides cursor and resets style" {
+    var mirror = try fixture();
+    defer mirror.deinit();
+    var options = defaults(.{ .row = 1, .col = 2, .rows = 2, .cols = 3 });
+    options.synchronized = false;
+    const bytes = try paint(testing.allocator, &mirror, options);
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "2026") == null);
+    try testing.expect(std.mem.startsWith(u8, bytes, "\x1b[?25l"));
+    try testing.expect(std.mem.endsWith(u8, bytes, "\x1b[0m"));
+}
+
+// Split image clipping removes lower images, so unknown outer colours need no
+// fabricated RGB background. Explicit session backgrounds are still preserved.
+test "unknown outer background preserves terminal default in split mode" {
+    var mirror = try fixture();
+    defer mirror.deinit();
+    var options = defaults(.{ .row = 1, .col = 2, .rows = 2, .cols = 3 });
+    options.default_background = null;
+    const bytes = try paint(testing.allocator, &mirror, options);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings(prefix ++ "\x1b[2;3H\x1b[0mabc\x1b[3;3Hdef" ++ suffix, bytes);
 }

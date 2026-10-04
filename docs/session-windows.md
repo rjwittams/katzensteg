@@ -1,8 +1,10 @@
 # Session windows
 
 A design for showing [cleat](https://github.com/flotilla-org/cleat) terminal
-sessions as windows in the desktop WM, beside producer windows. Nothing here is
-implemented. The decisions behind each rule are indexed on
+sessions as windows in the desktop WM, beside producer windows. Attached sessions
+have an optional cells presentation; its temporary entry point is described in
+[development.md](development.md#desktop-session-windows). Input, prompt forms,
+and session images remain separate tickets. The decisions behind each rule are indexed on
 [#89](https://github.com/rjwittams/katzensteg/issues/89); the ticket holding a
 decision is linked where the rule is stated.
 

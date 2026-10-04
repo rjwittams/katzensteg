@@ -255,9 +255,27 @@ installed binary. Provider open checks the library's reported ABI and the
 selected binary's `cleat --version` protocol against the pin, returning a
 mismatch with both expected and actual pairs before connecting.
 
-`zig build test-cleat` with the same options runs just the provider tests. The
+`zig build test-cleat` with the same options runs the provider and desktop session tests. The
 integration harness starts its own daemon in a temporary runtime root, passes
 that root explicitly to the provider, and stops only that daemon. Session
 handles and render borrows belong to one caller thread; release each update
 before another pull or session destruction, and destroy sessions before closing
 the provider. No window-manager integration is enabled by this dependency.
+
+### Desktop session windows
+
+With cleat enabled, `KATZENSTEG_WM_ATTACH=<session-id>` attaches one existing
+session as a desktop window. This temporary entry point precedes the launch
+prompt forms. `KATZENSTEG_CLEAT_BINARY` selects the binary for the version check
+(default `cleat`); `CLEAT_RUNTIME_DIR` selects the provider's runtime root.
+Close detaches, and quitting the WM detaches every session. Attached sessions
+keep their existing default colours; this entry point creates no sessions.
+
+`zig build wm` builds just the desktop, and `zig build test-wm` runs its
+standalone unit tests. With `-Dcleat=true -Dcleat-prefix=<prepared-prefix>`,
+`zig build test-cleat` also runs the desktop PTY scenarios against a private
+daemon. These check terminal bytes and daemon state without a graphical terminal.
+
+The default `zig build test` gate with cleat enabled additionally installs the
+SDL probe and its runtime, then runs the real-producer overlap scenario. It
+requires the usual full-build development dependencies.
