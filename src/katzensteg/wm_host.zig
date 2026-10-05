@@ -4900,7 +4900,7 @@ test "session cells share desktop order and repaint after covering changes" {
     const model = @import("wm/session_mirror.zig");
     const a = std.testing.allocator;
     for ([_]cover.Mode{ .split, .band }) |mode| {
-        var content = session_content.Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 8, .cols = 18 } };
+        var content = session_content.Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 8, .cols = 18 }, .images = @import("wm/session_images.zig").State.init(a) };
         defer content.mirror.deinit();
         try content.mirror.apply(.{ .size = content.requested });
         const cells: [18]model.Cell = @splat(.{ .text = "s" });
@@ -5009,7 +5009,7 @@ test "session opening distinguishes async refusal from established exit" {
     if (cleat_enabled) {
         for ([_]bool{ false, true }) |established| {
             for ([_]bool{ false, true }) |closed| {
-                var content = session_content.Content{ .allocator = std.testing.allocator, .session = null, .mirror = @import("wm/session_mirror.zig").Mirror.init(std.testing.allocator), .requested = .{ .cols = 80, .rows = 24 }, .established = established, .closed = closed };
+                var content = session_content.Content{ .allocator = std.testing.allocator, .session = null, .mirror = @import("wm/session_mirror.zig").Mirror.init(std.testing.allocator), .requested = .{ .cols = 80, .rows = 24 }, .established = established, .closed = closed, .images = @import("wm/session_images.zig").State.init(std.testing.allocator) };
                 defer content.mirror.deinit();
                 var window = WmWindow{ .content = .{ .session = &content }, .profile_name = "id", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 24, .cols = 80 }), .upload = .{ .profile = .file_whole }, .state = .launching };
                 try std.testing.expect(!sessionIsVisible(&window));

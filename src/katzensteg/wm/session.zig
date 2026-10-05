@@ -19,7 +19,7 @@ pub const Content = struct {
     session: ?cleat.Session,
     mirror: model.Mirror,
     requested: model.Size,
-    images: images.State = images.State.init(std.heap.page_allocator),
+    images: images.State,
     closed: bool = false,
     established: bool = false,
     watching: bool = false,
@@ -295,8 +295,9 @@ pub const Content = struct {
 // omitted by the provider. Generate both operation forms and every width.
 test "render adapter owns borrowed cells and full replacement clears omissions" {
     const a = std.testing.allocator;
-    var content = Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 3, .cols = 4 } };
+    var content = Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 3, .cols = 4 }, .images = images.State.init(a) };
     defer content.mirror.deinit();
+    defer content.images.deinit();
     var points = [_]u32{ 'a', 0x301, 0x1f600, 0x1b, 0xd800, 0x110000 };
     var cell = std.mem.zeroes(c.cleat_render_cell);
     cell.graphemes = &points;

@@ -223,8 +223,8 @@ pub fn plan(p: Placement, g: Geometry) ?Planned {
         .col = @divTrunc(left, cw),
         .rows = @intCast(@divTrunc(bottom + ch - 1, ch) - @divTrunc(top, ch)),
         .cols = @intCast(@divTrunc(right + cw - 1, cw) - @divTrunc(left, cw)),
-        .source_x = @intCast(p.source_x + sx),
-        .source_y = @intCast(p.source_y + sy),
+        .source_x = std.math.cast(u32, p.source_x + sx) orelse return null,
+        .source_y = std.math.cast(u32, p.source_y + sy) orelse return null,
         .source_width = @intCast(ex - sx),
         .source_height = @intCast(ey - sy),
         .offset_x = @intCast(@mod(left, cw)),
@@ -434,4 +434,18 @@ test "subpixel source crops retain a visible pixel" {
     try std.testing.expectEqual(@as(u32, 1), clipped.source_height);
     try std.testing.expectEqual(@as(u32, 1), clipped.cols);
     try std.testing.expectEqual(@as(u32, 1), clipped.rows);
+}
+
+test "source crop rejects coordinates outside Kitty u32 range" {
+    for ([_]bool{ false, true }) |vertical| {
+        var p = samplePlacement();
+        if (vertical) {
+            p.row = -1;
+            p.source_y = std.math.maxInt(u32);
+        } else {
+            p.col = -1;
+            p.source_x = std.math.maxInt(u32);
+        }
+        try std.testing.expect(plan(p, geometry()) == null);
+    }
 }
