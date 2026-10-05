@@ -89,7 +89,7 @@ class SessionWindows(unittest.TestCase):
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
         proc = subprocess.Popen([WM, "--listen", str(self.root / f"wm-{len(self.wms)}.sock"), "--presentation", presentation, *profiles, *requests], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=controlling_terminal)
-        wm = (proc, master, slave, Screen())
+        wm = (proc, master, slave, Screen(allow_explicit=True))
         self.wms.append(wm)
         return wm
 

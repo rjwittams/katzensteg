@@ -29,13 +29,15 @@ GLYPH = "\U0010eeee"
 
 class Screen:
     """Small recorder for the cursor/SGR/text sequences emitted by this WM."""
-    def __init__(self):
+    def __init__(self, allow_explicit=False):
         self.pending = ""
         self.raw = bytearray()
         self.row = self.col = 1
         self.fg = None
         self.cells = {}
         self.placements = {}
+        self.explicit_placements = {}
+        self.allow_explicit = allow_explicit
         self.frames = {}
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
@@ -51,9 +53,13 @@ class Screen:
                 header = s[3:end].split(";", 1)[0]
                 fields = dict(field.split("=", 1) for field in header.split(",") if "=" in field)
                 if fields.get("a") == "p":
-                    assert fields.get("U") == "1", fields
-                    assert not any(k in fields for k in ("x", "y", "z", "C")), fields
-                    self.placements[int(fields["i"])] = (int(fields["c"]), int(fields["r"]))
+                    if fields.get("U") == "1":
+                        assert not any(k in fields for k in ("x", "y", "z", "C")), fields
+                        self.placements[int(fields["i"])] = (int(fields["c"]), int(fields["r"]))
+                    else:
+                        assert self.allow_explicit, fields
+                        assert fields.get("C") == "1", fields
+                        self.explicit_placements[int(fields["i"]), int(fields["p"])] = (self.row, self.col, fields)
                 if fields.get("a") == "t":
                     image = int(fields["i"])
                     self.frames[image] = self.frames.get(image, 0) + 1
