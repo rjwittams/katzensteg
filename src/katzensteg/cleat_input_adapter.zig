@@ -65,8 +65,11 @@ const named = [_]struct { []const u8, u32 }{
     .{ "ArrowLeft", c.CLEAT_KEY_ARROW_LEFT }, .{ "ArrowRight", c.CLEAT_KEY_ARROW_RIGHT },
 };
 
+/// Keys beyond this capacity are released immediately rather than left held.
+pub const max_held_keys = 128;
+
 pub const Adapter = struct {
-    held: [128]?native.Key = @splat(null),
+    held: [max_held_keys]?native.Key = @splat(null),
     pasting: bool = false,
     paste: std.ArrayList(u8) = .empty,
     pub fn deinit(self: *Adapter, allocator: std.mem.Allocator) void {
@@ -122,7 +125,7 @@ pub const Adapter = struct {
             if (std.mem.eql(u8, input, "\x1b[201~")) {
                 var event = std.mem.zeroes(c.cleat_input_event);
                 event.kind = c.CLEAT_INPUT_PASTE;
-                event.text = self.paste.items.ptr;
+                if (self.paste.items.len > 0) event.text = self.paste.items.ptr;
                 event.text_len = self.paste.items.len;
                 try sink.sendInput(event);
                 self.pasting = false;
@@ -315,4 +318,23 @@ test "associated text survives projection and releases pair by position" {
     try adapter.focus(false, &recorder);
     try std.testing.expectEqual(@as(usize, 4), recorder.count);
     try std.testing.expectEqual(@as(usize, 0), keyEvent(&decoded).generated_text_len);
+}
+
+// Empty paste still emits one event with no borrowed text pointer.
+test "empty paste has a null text pointer" {
+    const Sink = struct {
+        received: bool = false,
+        pub fn sendInput(self: *@This(), event: c.cleat_input_event) !void {
+            try std.testing.expectEqual(@as(u32, c.CLEAT_INPUT_PASTE), event.kind);
+            try std.testing.expectEqual(@as(usize, 0), event.text_len);
+            try std.testing.expect(event.text == null);
+            self.received = true;
+        }
+    };
+    var adapter = Adapter{};
+    defer adapter.deinit(std.testing.allocator);
+    var sink = Sink{};
+    try adapter.bytes(std.testing.allocator, "\x1b[200~", false, &sink);
+    try adapter.bytes(std.testing.allocator, "\x1b[201~", false, &sink);
+    try std.testing.expect(sink.received);
 }

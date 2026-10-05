@@ -23,6 +23,11 @@ BINARY = None
 WM = None
 REAL_PRODUCER = False
 
+# Fixed positioned-window geometry used by the PTY and content assertions.
+FIXTURE_ROWS = 40
+FIXTURE_COLS = 100
+CONTENT_COLUMNS = slice(1, FIXTURE_COLS - 5)
+
 
 class SessionWindows(unittest.TestCase):
     def setUp(self):
@@ -75,7 +80,7 @@ class SessionWindows(unittest.TestCase):
 
     def start(self, extra_env=None, profiles=(), presentation="positioned", requests=("--attach", "wm-test")):
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 1000, 800))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", FIXTURE_ROWS, FIXTURE_COLS, 1000, 800))
         env = dict(self.env, **(extra_env or {}))
         def controlling_terminal():
             os.setsid()
@@ -123,7 +128,7 @@ class SessionWindows(unittest.TestCase):
     def content_text(screen, row):
         # The 100x40 fixture starts with content at columns 2..95. Chrome at
         # columns 1 and 96 must not participate in program-output assertions.
-        return SessionWindows.text(screen, row)[1:95]
+        return SessionWindows.text(screen, row)[CONTENT_COLUMNS]
 
     def title_visible(self, screen):
         return "wm-test" in self.text(screen, 2)

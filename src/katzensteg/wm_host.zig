@@ -2316,6 +2316,7 @@ fn syncInputFocus(sessions: []WmWindow, focused: ?usize) void {
             _ = tryWriteInputControl(session.producer.channel.writer(), if (active) "\x1b[I" else "\x1b[O");
         }
         if (session.content == .session and (!session.input_focus_initialized or session.input_was_focused != active)) {
+            // Focus notifications are best-effort, matching producer control writes.
             session.content.session.focus(active) catch {};
         }
         session.input_was_focused = active;
