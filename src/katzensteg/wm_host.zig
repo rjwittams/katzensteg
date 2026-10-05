@@ -887,19 +887,20 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             wm_events.session_ready = false;
             var changed = false;
             var failed_open: ?[]const u8 = null;
-            var role_changed = false;
+            var chrome_changed = false;
             for (sessions[0..initialized]) |*session| {
                 if (session.content != .session or session.retired) continue;
                 const was_watching = session.content.session.watching;
                 changed = try session.content.session.pump() or changed;
-                role_changed = role_changed or was_watching != session.content.session.watching;
+                chrome_changed = chrome_changed or was_watching != session.content.session.watching;
                 switch (sessionOpening(session)) {
                     .pending => {},
                     .opened => {
                         session.state = .running;
                         session.window.markAttached();
                         try event_log.record(.attach_sent, session.profile_name);
-                        redraw_requested.store(true, .seq_cst);
+                        // Paint new chrome together with the first session content.
+                        chrome_changed = true;
                     },
                     .failed => {
                         session.state = .exited;
@@ -912,7 +913,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 if (session.content.session.ended()) changed = true;
             }
             const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
-            if (lifecycle.changed or failed_open != null or role_changed) {
+            if (lifecycle.changed or failed_open != null or chrome_changed) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 // Focus and viewport events must not overwrite an async refusal.
                 if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
