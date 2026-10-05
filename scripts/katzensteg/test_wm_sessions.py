@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Byte/state scenarios for session windows against a private cleat daemon."""
 import argparse
+import base64
+import ctypes
+import re
 import errno
 import fcntl
 import json
@@ -171,6 +174,51 @@ class SessionWindows(unittest.TestCase):
         os.write(wm[1], b"\x1b[<72;2;4M")
         self.until(wm, lambda s: "MOUSE_BYTES_1b5b3c37323b313b314d" in self.content_text(s, 4))
         self.assertNotIn("[scrollback]", self.text(wm[3], 2))
+    def test_explicit_session_image_upload_placement_and_deletion(self):
+        # #121: a real PTY program's image is uploaded by name under a WM-owned
+        # ID and placed within its content rectangle. Removal and detach delete it.
+        source = self.root / "draw-image.py"
+        source.write_text(
+            "import os, pathlib, time\n"
+            "os.write(1, b'\\x1b_Ga=T,C=1,i=7,p=1,f=32,s=1,v=1,c=4,r=2,z=-1;ESIz/w==\\x1b\\\\')\n"
+            f"while not pathlib.Path({str(self.root / 'delete-image')!r}).exists(): time.sleep(.01)\n"
+            "os.write(1, b'\\x1b_Ga=d,d=I,i=7;\\x1b\\\\')\n"
+            "time.sleep(30)\n"
+        )
+        self.cleat("launch", "image-test", "--size", "100x40", "--cmd", f"python3 {source}")
+        wm = self.start({"KATZENSTEG_WM_ATTACH": "image-test"})
+        upload_pattern = re.compile(rb"\x1b_Ga=t,t=s,f=32,s=1,v=1,i=(\d+),S=4,q=2;([^;]+?)\x1b\\")
+        self.until(wm, lambda s: upload_pattern.search(s.raw) is not None)
+        upload = upload_pattern.search(wm[3].raw)
+        image_id = int(upload[1])
+        self.assertGreaterEqual(image_id, 100000)
+        self.assertLessEqual(image_id, 199999)
+        self.assertNotEqual(image_id, 7)
+        name = base64.b64decode(upload[2])
+        # Emulate only the outer terminal's OS boundary: map the real SHM
+        # upload and unlink its name after consumption, just as Kitty does.
+        libc = ctypes.CDLL(None, use_errno=True)
+        fd = libc.shm_open(name, os.O_RDONLY, 0)
+        self.assertGreaterEqual(fd, 0, ctypes.get_errno())
+        try:
+            self.assertEqual(os.read(fd, 4), bytes([17, 34, 51, 255]))
+        finally:
+            os.close(fd)
+            libc.shm_unlink(name)
+        placement = re.compile(rb"\x1b\[(\d+);(\d+)H\x1b_Ga=p,C=1,i=" + str(image_id).encode() + rb",p=(\d+),c=(\d+),r=(\d+),[^;]+;\x1b\\")
+        self.until(wm, lambda s: placement.search(s.raw) is not None)
+        placed = placement.search(wm[3].raw)
+        row, col, placement_id, cols, rows = map(int, placed.groups())
+        self.assertEqual((row, col, cols, rows), (4, 2, 4, 2))
+        self.assertGreaterEqual(placement_id, 200000)
+        self.assertLessEqual(placement_id, 299999)
+        (self.root / "delete-image").touch()
+        deletion = f"a=d,d=I,i={image_id};".encode()
+        self.until(wm, lambda s: deletion in s.raw)
+        before = wm[3].raw.count(b"a=d,d=R,x=100000,y=199999")
+        os.write(wm[1], b"\x1dq")
+        self.until(wm, lambda s: s.raw.count(b"a=d,d=R,x=100000,y=199999") > before)
+        self.assertIn("image-test", self.cleat("list"))
 
     def test_text_close_detaches_program_exit_closes_and_quit_detaches(self):
         wm = self.start()

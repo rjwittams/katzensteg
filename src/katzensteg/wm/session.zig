@@ -5,6 +5,7 @@ const cleat = @import("cleat");
 const model = @import("session_mirror.zig");
 const c = cleat.c;
 const input = @import("../cleat_input_adapter.zig");
+const images = @import("session_images.zig");
 
 pub const Provider = cleat.Provider;
 pub const pin = cleat.pin;
@@ -18,6 +19,7 @@ pub const Content = struct {
     session: ?cleat.Session,
     mirror: model.Mirror,
     requested: model.Size,
+    images: images.State = images.State.init(std.heap.page_allocator),
     closed: bool = false,
     established: bool = false,
     watching: bool = false,
@@ -33,7 +35,7 @@ pub const Content = struct {
     pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
         const self = try allocator.create(Content);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .session = try provider.attach(id, cols, rows), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
+        self.* = .{ .allocator = allocator, .session = try provider.attach(id, cols, rows), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows }, .images = images.State.init(allocator) };
         return self;
     }
     pub fn create(allocator: std.mem.Allocator, provider: Provider, command: []const u8, cols: u16, rows: u16, foreground: ?[3]u8, background: ?[3]u8) !*Content {
@@ -59,7 +61,7 @@ pub const Content = struct {
             desc.command = command.ptr;
             desc.command_len = command.len;
         }
-        self.* = .{ .allocator = allocator, .session = try provider.create(desc), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
+        self.* = .{ .allocator = allocator, .session = try provider.create(desc), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows }, .images = images.State.init(allocator) };
         return self;
     }
     pub fn detach(self: *Content) void {
@@ -73,6 +75,7 @@ pub const Content = struct {
         self.pending_input.deinit(self.allocator);
         self.input.deinit(self.allocator);
         self.mirror.deinit();
+        self.images.deinit();
         self.allocator.destroy(self);
     }
     pub fn ended(self: *const Content) bool {
@@ -177,9 +180,42 @@ pub const Content = struct {
         if (role_changed) try self.input.focus(!watching and self.focused, self);
         var update = session.pull() orelse return role_changed;
         defer session.release(&update);
+        try self.applyImages(session, update);
         try self.apply(update);
         _ = c.cleat_session_mark_observed(session.handle, update.render_generation);
         return true;
+    }
+    fn applyImages(self: *Content, session: cleat.Session, update: c.cleat_render_update) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const resources = try a.alloc(images.Resource, update.image_resource_count);
+        for (update.image_resources[0..update.image_resource_count], resources) |in, *out| {
+            const old = self.images.find(in.image_id);
+            const pixels = if (old != null and self.images.images.items[old.?].resource.generation == in.generation)
+                self.images.images.items[old.?].resource.pixels
+            else blk: {
+                var copy = ImageCopy{ .allocator = a };
+                if (!c.cleat_session_with_image_resource_data(session.handle, in.image_id, in.generation, copyImage, &copy)) return error.ImageDataUnavailable;
+                break :blk copy.pixels;
+            };
+            if (in.compression != c.CLEAT_IMAGE_COMPRESSION_NONE) return error.CompressedImageData;
+            out.* = .{ .id = in.image_id, .generation = in.generation, .width = in.width_px, .height = in.height_px, .format = switch (in.format) {
+                c.CLEAT_IMAGE_FORMAT_RGB => 24,
+                c.CLEAT_IMAGE_FORMAT_RGBA => 32,
+                c.CLEAT_IMAGE_FORMAT_PNG => 100,
+                else => return error.UnsupportedImageFormat,
+            }, .pixels = pixels };
+        }
+        var placements: std.ArrayList(images.Placement) = .empty;
+        for (update.image_placements[0..update.image_placement_count]) |in| {
+            // Preserve #121's placeholder contract: never replay resolved strips.
+            // Original virtual declarations will be supplied by cleat#317.
+            if (in.flags & c.CLEAT_IMAGE_PLACEMENT_VIRTUAL != 0) continue;
+            try placements.append(a, .{ .image = in.image_id, .col = in.viewport_col, .row = in.viewport_row, .cols = in.grid_cols, .rows = in.grid_rows, .z = in.z, .source_x = in.source_x, .source_y = in.source_y, .source_width = in.source_width, .source_height = in.source_height, .pixel_width = in.pixel_width, .pixel_height = in.pixel_height, .offset_x = in.x_offset_px, .offset_y = in.y_offset_px });
+        }
+        try self.images.replace(resources, placements.items);
+        self.mirror.markAllDirty();
     }
     fn apply(self: *Content, update: c.cleat_render_update) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -305,4 +341,11 @@ test "render adapter owns borrowed cells and full replacement clears omissions" 
     try content.apply(update);
     try std.testing.expectEqualStrings("", content.mirror.row(1)[0].text);
     try std.testing.expectEqualStrings("a\u{301}\u{1f600}", content.mirror.row(2)[0].text);
+}
+
+const ImageCopy = struct { allocator: std.mem.Allocator, pixels: []const u8 = &.{} };
+fn copyImage(context: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) bool {
+    const copy: *ImageCopy = @ptrCast(@alignCast(context.?));
+    copy.pixels = copy.allocator.dupe(u8, data[0..len]) catch return false;
+    return true;
 }
