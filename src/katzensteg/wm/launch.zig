@@ -4,6 +4,8 @@ const std = @import("std");
 pub const Kind = enum { profile, term, attach };
 pub const Spec = struct {
     kind: Kind = .profile,
+    /// Profile name for .profile, shell command (empty for the shell) for
+    /// .term, and existing session id for .attach.
     profile_name: []const u8,
     extra_args: []const []const u8 = &.{},
 };

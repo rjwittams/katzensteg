@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const SessionSpec = struct {
     kind: enum { profile, term, attach } = .profile,
+    /// Profile name for .profile, shell command (empty for the shell) for
+    /// .term, and existing session id for .attach.
     profile_name: []const u8,
     extra_args: []const []const u8 = &.{},
 };

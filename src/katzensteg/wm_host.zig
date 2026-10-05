@@ -1272,43 +1272,41 @@ const OptionalProvider = if (cleat_enabled) ?session_content.Provider else void;
 fn launchWindow(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog, provider: *OptionalProvider, wm_events: *WmEventLoop, session_error: *?[]u8, foreground: ?cover.Color, background: ?cover.Color) !WmWindow {
     if (spec.kind == .profile) return launchProducerSession(allocator, producer_exe, tty_file, terminal, spec, index, presentation, cover_mode, output_profile, events);
     if (!cleat_enabled) return error.SessionWindowsDisabled;
-    if (cleat_enabled) {
-        if (provider.* == null) {
-            const binary = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_CLEAT_BINARY") catch try allocator.dupe(u8, "cleat");
-            defer allocator.free(binary);
-            const root = system_io.process.getEnvVarOwned(allocator, "CLEAT_RUNTIME_DIR") catch try allocator.dupe(u8, "");
-            defer allocator.free(root);
-            switch (try session_content.Provider.open(allocator, tty_file.io, binary, root, session_content.pin)) {
-                .mismatch => |mismatch| {
-                    const message = try std.fmt.allocPrint(allocator, "cleat mismatch: library {d}/{d}, installed {d}/{d} (ABI/protocol)", .{ mismatch.expected.abi, mismatch.expected.protocol, mismatch.actual.abi, mismatch.actual.protocol });
-                    if (session_error.*) |previous| allocator.free(previous);
-                    session_error.* = message;
-                    return error.VersionMismatch;
-                },
-                .provider => |value| provider.* = value,
-            }
-            session_content.setWake(provider.*.?, onSessionWake, wm_events);
+    if (provider.* == null) {
+        const binary = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_CLEAT_BINARY") catch try allocator.dupe(u8, "cleat");
+        defer allocator.free(binary);
+        const root = system_io.process.getEnvVarOwned(allocator, "CLEAT_RUNTIME_DIR") catch try allocator.dupe(u8, "");
+        defer allocator.free(root);
+        switch (try session_content.Provider.open(allocator, tty_file.io, binary, root, session_content.pin)) {
+            .mismatch => |mismatch| {
+                const message = try std.fmt.allocPrint(allocator, "cleat mismatch: library {d}/{d}, installed {d}/{d} (ABI/protocol)", .{ mismatch.expected.abi, mismatch.expected.protocol, mismatch.actual.abi, mismatch.actual.protocol });
+                if (session_error.*) |previous| allocator.free(previous);
+                session_error.* = message;
+                return error.VersionMismatch;
+            },
+            .provider => |value| provider.* = value,
         }
-        const outer = cascadedOuterRect(terminal, index);
-        const area = contentRectForOuter(outer);
-        const cols: u16 = @intCast(@max(1, area.cols));
-        const rows: u16 = @intCast(@max(1, area.rows));
-        const content = if (spec.kind == .term)
-            try session_content.Content.create(allocator, provider.*.?, spec.profile_name, cols, rows, foreground, background)
-        else
-            try session_content.Content.attach(allocator, provider.*.?, spec.profile_name, cols, rows);
-        errdefer content.deinit();
-        const title = try allocator.dupe(u8, try content.session.?.id());
-        errdefer allocator.free(title);
-        var window = WmWindow{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_mode };
-        window.window.markAttached();
-        try updateSessionGeometry(&window, terminal);
-        wm_events.session_ready = true;
-        try events.record(.attach_sent, title);
-        if (session_error.*) |previous| allocator.free(previous);
-        session_error.* = null;
-        return window;
+        session_content.setWake(provider.*.?, onSessionWake, wm_events);
     }
+    const outer = cascadedOuterRect(terminal, index);
+    const area = contentRectForOuter(outer);
+    const cols: u16 = @intCast(@max(1, area.cols));
+    const rows: u16 = @intCast(@max(1, area.rows));
+    const content = if (spec.kind == .term)
+        try session_content.Content.create(allocator, provider.*.?, spec.profile_name, cols, rows, foreground, background)
+    else
+        try session_content.Content.attach(allocator, provider.*.?, spec.profile_name, cols, rows);
+    errdefer content.deinit();
+    const title = try allocator.dupe(u8, try content.session.?.id());
+    errdefer allocator.free(title);
+    var window = WmWindow{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_mode };
+    window.window.markAttached();
+    try updateSessionGeometry(&window, terminal);
+    wm_events.session_ready = true;
+    try events.record(.attach_sent, title);
+    if (session_error.*) |previous| allocator.free(previous);
+    session_error.* = null;
+    return window;
 }
 
 fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
