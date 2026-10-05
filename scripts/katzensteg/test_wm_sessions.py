@@ -186,7 +186,7 @@ class SessionWindows(unittest.TestCase):
             "time.sleep(30)\n"
         )
         self.cleat("launch", "image-test", "--size", "100x40", "--cmd", f"python3 {source}")
-        wm = self.start({"KATZENSTEG_WM_ATTACH": "image-test"})
+        wm = self.start(requests=("--attach", "image-test"))
         upload_pattern = re.compile(rb"\x1b_Ga=t,t=s,f=32,s=1,v=1,i=(\d+),S=4,q=2;([^;]+?)\x1b\\")
         self.until(wm, lambda s: upload_pattern.search(s.raw) is not None)
         upload = upload_pattern.search(wm[3].raw)
