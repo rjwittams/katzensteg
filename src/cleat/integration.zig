@@ -2,6 +2,7 @@
 const std = @import("std");
 const cleat = @import("cleat");
 const c = cleat.c;
+const Content = @import("wm_session").Content;
 
 fn appendCells(cells: [*c]const c.cleat_render_cell, count: usize, bytes: []u8, len: *usize) void {
     if (count == 0) return;
@@ -61,20 +62,47 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqualDeep(cleat.pin, (try cleat.Provider.open(init.gpa, init.io, args[1], args[2], wrong)).mismatch.actual);
     const provider = (try cleat.Provider.open(init.gpa, init.io, args[1], args[2], cleat.pin)).provider;
     defer provider.close();
-    var desc = std.mem.zeroes(c.cleat_session_desc);
-    desc.cols = 80;
-    desc.rows = 24;
-    desc.cell_width_px = 8;
-    desc.cell_height_px = 16;
     const command = "stty -echo; printf CLEAT_READY; read answer; printf 'CLEAT_EFFECT_%s' \"$answer\"; sleep 30";
-    desc.command = command.ptr;
-    desc.command_len = command.len;
-    desc.role = c.CLEAT_ROLE_CONTROLLER;
-    const created = try provider.create(desc);
-    defer created.destroy();
+    // Exercise the WM's descriptor construction, including cleat-allocated id
+    // and optional outer default colours, through the real provider.
+    const content = try Content.create(init.gpa, provider, command, 80, 24, .{ 171, 205, 239 }, .{ 18, 52, 86 });
+    defer content.deinit();
+    const created = content.session.?;
     try waitText(init.io, created, "CLEAT_READY", false);
     const id = try init.gpa.dupe(u8, try created.id());
     defer init.gpa.free(id);
+    // Unknown ids return a handle synchronously but are refused asynchronously.
+    // The WM adapter must distinguish this from an established program exit.
+    const missing = try Content.attach(init.gpa, provider, "unknown-session", 80, 24);
+    defer missing.deinit();
+    for (0..500) |_| {
+        _ = try missing.pump();
+        if (missing.ended()) break;
+        try init.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(missing.ended());
+    try std.testing.expect(!missing.established);
+    const confirmed = try Content.attach(init.gpa, provider, id, 80, 24);
+    defer confirmed.deinit();
+    for (0..500) |_| {
+        _ = try confirmed.pump();
+        if (confirmed.established) break;
+        try init.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(confirmed.established);
+    try std.testing.expect(!confirmed.ended());
+    // A quickly exiting program is an accepted session's normal exit, not an
+    // opening refusal, even if the owner misses the streaming interval.
+    const quick = try Content.create(init.gpa, provider, "true", 80, 24, null, null);
+    defer quick.deinit();
+    for (0..500) |_| {
+        _ = try quick.pump();
+        if (quick.ended()) break;
+        try init.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(quick.ended());
+    try std.testing.expect(quick.established);
+
     const attached = try provider.attach(id, 80, 24);
     defer attached.destroy();
     // The attached client receives printed text in its initial full update.

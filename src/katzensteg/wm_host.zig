@@ -886,13 +886,32 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         if (wm_events.session_ready) {
             wm_events.session_ready = false;
             var changed = false;
+            var failed_open: ?[]const u8 = null;
             for (sessions[0..initialized]) |*session| {
                 if (session.content != .session or session.retired) continue;
                 changed = try session.content.session.pump() or changed;
+                switch (sessionOpening(session)) {
+                    .pending => {},
+                    .opened => {
+                        session.state = .running;
+                        session.window.markAttached();
+                        try event_log.record(.attach_sent, session.profile_name);
+                        redraw_requested.store(true, .seq_cst);
+                    },
+                    .failed => {
+                        session.state = .exited;
+                        session.content.session.detach();
+                        failed_open = session.profile_name;
+                        first_exit_code = 1;
+                    },
+                    .settled => {},
+                }
                 if (session.content.session.ended()) changed = true;
             }
             const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
-            if (lifecycle.changed) {
+            // Lifecycle focus events must not overwrite an asynchronous refusal.
+            if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
+            if (lifecycle.changed or failed_open != null) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
             } else if (changed) {
@@ -1299,11 +1318,9 @@ fn launchWindow(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file
     errdefer content.deinit();
     const title = try allocator.dupe(u8, try content.session.?.id());
     errdefer allocator.free(title);
-    var window = WmWindow{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_mode };
-    window.window.markAttached();
+    var window = WmWindow{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .launching, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_mode };
     try updateSessionGeometry(&window, terminal);
     wm_events.session_ready = true;
-    try events.record(.attach_sent, title);
     if (session_error.*) |previous| allocator.free(previous);
     session_error.* = null;
     return window;
@@ -1542,6 +1559,17 @@ fn sessionIsVisible(session: *const WmWindow) bool {
 
 fn sessionIsDrawable(session: *const WmWindow) bool {
     return sessionIsVisible(session) and session.presentation_status.ready_to_show;
+}
+
+const SessionOpening = enum { pending, opened, failed, settled };
+
+fn sessionOpening(session: *const WmWindow) SessionOpening {
+    if (session.content != .session or session.state != .launching) return .settled;
+    // A stream or role grant confirms the daemon accepted this attachment. Closed
+    // before confirmation is an opening refusal, not an established session exit.
+    if (session.content.session.established) return .opened;
+    if (session.content.session.ended()) return .failed;
+    return .pending;
 }
 
 const LifecycleReconcileResult = struct {
@@ -4880,4 +4908,27 @@ test "launch prompt accepts printable command bytes up to capacity" {
     try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(Key.character(127), &prompt, std.testing.allocator));
     try std.testing.expectEqual(LaunchPromptAction.submit, try applyLaunchPromptKey(try Key.logical("Enter"), &prompt, std.testing.allocator));
     try std.testing.expectEqual(LaunchPromptAction.cancel, try applyLaunchPromptKey(try Key.logical("Escape"), &prompt, std.testing.allocator));
+}
+
+// #119: an asynchronous opening stays hidden until daemon confirmation. A close
+// before that confirmation is a launch failure; later closes are lifecycle
+// events. Generate all confirmation/closed combinations and settled states.
+test "session opening distinguishes async refusal from established exit" {
+    if (!cleat_enabled) return error.SkipZigTest;
+    if (cleat_enabled) {
+        for ([_]bool{ false, true }) |established| {
+            for ([_]bool{ false, true }) |closed| {
+                var content = session_content.Content{ .allocator = std.testing.allocator, .session = null, .mirror = @import("wm/session_mirror.zig").Mirror.init(std.testing.allocator), .requested = .{ .cols = 80, .rows = 24 }, .established = established, .closed = closed };
+                defer content.mirror.deinit();
+                var window = WmWindow{ .content = .{ .session = &content }, .profile_name = "id", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 24, .cols = 80 }), .upload = .{ .profile = .file_whole }, .state = .launching };
+                try std.testing.expect(!sessionIsVisible(&window));
+                const expected: SessionOpening = if (established) .opened else if (closed) .failed else .pending;
+                try std.testing.expectEqual(expected, sessionOpening(&window));
+                for ([_]ProducerSessionState{ .running, .draining, .exited }) |state| {
+                    window.state = state;
+                    try std.testing.expectEqual(SessionOpening.settled, sessionOpening(&window));
+                }
+            }
+        }
+    }
 }

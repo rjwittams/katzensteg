@@ -232,8 +232,8 @@ class SessionWindows(unittest.TestCase):
         wm = self.start(requests=(), presentation="placeholder")
         self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
         self.launch_prompt(wm, "probe.input")
-        self.until(wm, lambda s: s.frames.get(100000, 0) > 0)
-        self.assertIn("probe.input", self.text(wm[3], 2))
+        self.until(wm, lambda s: s.frames.get(100000, 0) > 0 and any("probe.input" in self.text(s, row) for row in range(1, 40)))
+        self.assertTrue(any("probe.input" in self.text(wm[3], row) for row in range(1, 40)))
 
     def test_resize_geometry_and_controller_role(self):
         wm = self.start()

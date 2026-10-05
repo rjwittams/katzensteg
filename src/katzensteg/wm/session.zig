@@ -18,6 +18,7 @@ pub const Content = struct {
     mirror: model.Mirror,
     requested: model.Size,
     closed: bool = false,
+    established: bool = false,
     pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
         const self = try allocator.create(Content);
         errdefer allocator.destroy(self);
@@ -86,7 +87,11 @@ pub const Content = struct {
     pub fn pump(self: *Content) !bool {
         const session = self.session orelse return false;
         _ = c.cleat_session_poll(session.handle);
-        self.closed = c.cleat_session_connection_state(session.handle) == c.CLEAT_SESSION_CLOSED;
+        const state = c.cleat_session_connection_state(session.handle);
+        self.closed = state == c.CLEAT_SESSION_CLOSED;
+        // A role grant also confirms acceptance when a short program exits
+        // before the owner observes the intermediate streaming state.
+        self.established = self.established or state == c.CLEAT_SESSION_STREAMING or c.cleat_session_role(session.handle) != c.CLEAT_ROLE_UNKNOWN;
         var update = session.pull() orelse return false;
         defer session.release(&update);
         try self.apply(update);
