@@ -35,6 +35,11 @@ pub fn build(b: *std.Build) void {
         const install = b.addInstallLibFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", library }) }, library);
         b.getInstallStep().dependOn(&install.step);
     }
+    const termscene_mod = projectModule(b, .{
+        .root_source_file = b.path("src/termscene/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const enable_cleat = b.option(bool, "cleat", "Build optional cleat daemon provider") orelse false;
     const cleat_prefix = b.option([]const u8, "cleat-prefix", "Prepared pinned cleat prefix");
     features.addOption(bool, "cleat", enable_cleat);
@@ -63,6 +68,7 @@ pub fn build(b: *std.Build) void {
         fixture_mod.addImport("cleat", mod);
         const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_integration_content.zig"), .target = target, .optimize = optimize, .link_libc = true });
         session_mod.addImport("cleat", mod);
+        session_mod.addImport("termscene", termscene_mod);
         fixture_mod.addImport("wm_session", session_mod);
         const session_unit = b.addTest(.{ .name = "session-content-test", .root_module = session_mod, .use_llvm = use_llvm });
         session_unit.root_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
@@ -76,6 +82,7 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&scenario.step);
         const input_fixture_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_input_integration.zig"), .target = target, .optimize = optimize, .link_libc = true });
         input_fixture_mod.addImport("cleat", mod);
+        input_fixture_mod.addImport("termscene", termscene_mod);
         input_fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
         const input_fixture = b.addExecutable(.{ .name = "session-input-integration", .root_module = input_fixture_mod, .use_llvm = use_llvm });
         const input_scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });
@@ -104,11 +111,6 @@ pub fn build(b: *std.Build) void {
         .sdl3 = b.option([]const u8, "sdl3-prefix", "SDL3 development prefix with include/ and lib/ (Windows)"),
     };
 
-    const termscene_mod = projectModule(b, .{
-        .root_source_file = b.path("src/termscene/mod.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const xev_mod = b.dependency("libxev", .{
         .target = target,
         .optimize = optimize,

@@ -190,7 +190,7 @@ pub const Content = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const resources = try a.alloc(images.Resource, update.image_resource_count);
-        for (update.image_resources[0..update.image_resource_count], resources) |in, *out| {
+        if (update.image_resource_count > 0) for (update.image_resources[0..update.image_resource_count], resources) |in, *out| {
             const old = self.images.find(in.image_id);
             const pixels = if (old != null and self.images.images.items[old.?].resource.generation == in.generation)
                 self.images.images.items[old.?].resource.pixels
@@ -206,14 +206,14 @@ pub const Content = struct {
                 c.CLEAT_IMAGE_FORMAT_PNG => 100,
                 else => return error.UnsupportedImageFormat,
             }, .pixels = pixels };
-        }
+        };
         var placements: std.ArrayList(images.Placement) = .empty;
-        for (update.image_placements[0..update.image_placement_count]) |in| {
-            // Preserve #121's placeholder contract: never replay resolved strips.
+        if (update.image_placement_count > 0) for (update.image_placements[0..update.image_placement_count]) |in| {
+            // Preserve #135's placeholder contract: never replay resolved strips.
             // Original virtual declarations will be supplied by cleat#317.
             if (in.flags & c.CLEAT_IMAGE_PLACEMENT_VIRTUAL != 0) continue;
             try placements.append(a, .{ .image = in.image_id, .col = in.viewport_col, .row = in.viewport_row, .cols = in.grid_cols, .rows = in.grid_rows, .z = in.z, .source_x = in.source_x, .source_y = in.source_y, .source_width = in.source_width, .source_height = in.source_height, .pixel_width = in.pixel_width, .pixel_height = in.pixel_height, .offset_x = in.x_offset_px, .offset_y = in.y_offset_px });
-        }
+        };
         try self.images.replace(resources, placements.items);
         self.mirror.markAllDirty();
     }
@@ -348,4 +348,18 @@ fn copyImage(context: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) 
     const copy: *ImageCopy = @ptrCast(@alignCast(context.?));
     copy.pixels = copy.allocator.dupe(u8, data[0..len]) catch return false;
     return true;
+}
+
+// Empty C lists use null pointers, including when the last image disappears.
+test "render image adapter accepts null empty lists and retires images" {
+    const a = std.testing.allocator;
+    var content = Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 1, .cols = 1 }, .images = images.State.init(a) };
+    defer content.mirror.deinit();
+    defer content.images.deinit();
+    try content.images.replace(&.{.{ .id = 7, .generation = 1, .width = 1, .height = 1, .pixels = &.{ 1, 2, 3, 255 } }}, &.{});
+    content.images.images.items[0].outer = 100000;
+    try content.applyImages(.{ .handle = undefined }, std.mem.zeroes(c.cleat_render_update));
+    try std.testing.expectEqual(@as(usize, 0), content.images.images.items.len);
+    try std.testing.expectEqual(@as(usize, 0), content.images.placements.items.len);
+    try std.testing.expectEqualSlices(u32, &.{100000}, content.images.deleted.items);
 }
