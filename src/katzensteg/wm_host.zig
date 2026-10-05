@@ -909,10 +909,10 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 if (session.content.session.ended()) changed = true;
             }
             const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
-            // Lifecycle focus events must not overwrite an asynchronous refusal.
-            if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
             if (lifecycle.changed or failed_open != null) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                // Focus and viewport events must not overwrite an async refusal.
+                if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
             } else if (changed) {
                 for (z_order[0..initialized]) |index| {

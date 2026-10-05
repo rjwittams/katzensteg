@@ -198,6 +198,18 @@ class SessionWindows(unittest.TestCase):
                 self.assertTrue(self.title_visible(wm[3]))
                 self.assertNotIn("launch failed", self.text(wm[3], 40))
 
+    def test_unknown_prompt_id_keeps_existing_producer_and_reports_failure(self):
+        # An asynchronous refusal must remain the status event after focus and
+        # viewport reconciliation, while the established producer stays visible.
+        wm = self.start(requests=())
+        self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
+        self.producer(wm)
+        self.until(wm, lambda s: "producer" in self.text(s, 2))
+        self.launch_prompt(wm, "@missing-session")
+        self.until(wm, lambda s: "launch failed" in self.text(s, 40))
+        self.assertIn("producer", self.text(wm[3], 2))
+        self.assertNotIn("missing-session", self.text(wm[3], 3))
+
     def test_real_sdl_producer_and_session_in_both_orders(self):
         if not REAL_PRODUCER:
             self.skipTest("full-build SDL producer scenario is enabled by CI")
@@ -315,7 +327,7 @@ while not (root / 'end').exists():
         pending = b""
         while b'"type":"attach"' not in pending:
             pending += peer.recv(65536)
-        peer.sendall(b'{"type":"presentation_status","window_id":"main","ready_to_show":true}\n')
+        peer.sendall(b'{"type":"presentation_status","window_id":"main","ready_to_show":true,"input_supported":true}\n')
         return peer
 
     def test_mixed_windows_cover_in_both_orders_and_modes(self):
