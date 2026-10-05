@@ -28,11 +28,11 @@ class SessionWindows(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="wm-session-")
         self.root = Path(self.temp.name)
-        self.env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_PROFILE_DIR=str(Path(__file__).resolve().parents[2] / "profiles"), CLEAT_RUNTIME_DIR=str(self.root), KATZENSTEG_WM_ATTACH="wm-test", KATZENSTEG_CLEAT_BINARY=BINARY, KATZENSTEG_OUTPUT_PROFILE="file_whole")
-        for name in ("CLEAT_DAEMON", "CLEAT_SESSION", "CLEAT_OUTPUT_DAEMON"):
+        self.env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide", KATZENSTEG_PROFILE_DIR=str(Path(__file__).resolve().parents[2] / "profiles"), CLEAT_RUNTIME_DIR=str(self.root), KATZENSTEG_CLEAT_BINARY=BINARY, KATZENSTEG_OUTPUT_PROFILE="file_whole")
+        for name in ("CLEAT_DAEMON", "CLEAT_SESSION", "CLEAT_OUTPUT_DAEMON", "KATZENSTEG_WM_ATTACH"):
             self.env.pop(name, None)
         self.daemon_log = open(self.root / "daemon.log", "w+")
-        self.daemon = subprocess.Popen([BINARY, "--runtime-root", str(self.root), "--server", "default", "serve"], stdout=self.daemon_log, stderr=self.daemon_log)
+        self.daemon = subprocess.Popen([BINARY, "--runtime-root", str(self.root), "--server", "default", "serve"], stdout=self.daemon_log, stderr=self.daemon_log, env=self.env)
         self.wms = []
         self.peers = []
         deadline = time.monotonic() + 5
@@ -73,14 +73,14 @@ class SessionWindows(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
-    def start(self, extra_env=None, profiles=(), presentation="positioned"):
+    def start(self, extra_env=None, profiles=(), presentation="positioned", requests=("--attach", "wm-test")):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 1000, 800))
         env = dict(self.env, **(extra_env or {}))
         def controlling_terminal():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        proc = subprocess.Popen([WM, "--listen", str(self.root / f"wm-{len(self.wms)}.sock"), "--presentation", presentation, *profiles], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=controlling_terminal)
+        proc = subprocess.Popen([WM, "--listen", str(self.root / f"wm-{len(self.wms)}.sock"), "--presentation", presentation, *profiles, *requests], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=controlling_terminal)
         wm = (proc, master, slave, Screen())
         self.wms.append(wm)
         return wm
@@ -101,6 +101,11 @@ class SessionWindows(unittest.TestCase):
             if queries > answered:
                 os.write(master, b"\x1b]11;rgb:1212/3434/5656\x1b\\" * (queries - answered))
                 screen.background_queries = queries
+            queries = screen.raw.count(b"\x1b]10;?")
+            answered = getattr(screen, "foreground_queries", 0)
+            if queries > answered:
+                os.write(master, b"\x1b]10;rgb:abab/cdcd/efef\x1b\\" * (queries - answered))
+                screen.foreground_queries = queries
         return proc, screen
 
     def until(self, wm, predicate, timeout=8):
@@ -140,6 +145,71 @@ class SessionWindows(unittest.TestCase):
         self.until(third, lambda s: b"\x1b[?1049l" in s.raw)
         self.assertIn("wm-test", self.cleat("list"))
 
+    def launch_prompt(self, wm, text):
+        os.write(wm[1], b"\x1dn" + text.encode() + b"\r")
+
+    def test_launch_command_and_attach_by_allocated_id(self):
+        # #119: starting through CLI allocates an id, paints real PTY output,
+        # and leaves a durable session that another WM attaches to by that id.
+        wm = self.start(requests=("--term", "printf STARTED_FROM_WM; sleep 30"))
+        self.until(wm, lambda s: "STARTED_FROM_WM" in self.text(s, 4))
+        session_id = self.text(wm[3], 2).split("katzensteg wm ", 1)[1].split("│")[0].strip()
+        self.assertTrue(session_id)
+        self.assertNotEqual(session_id, "wm-test")
+        again = self.start(requests=("--attach", session_id))
+        self.until(again, lambda s: "STARTED_FROM_WM" in self.text(s, 4))
+        self.assertIn(session_id, self.text(again[3], 2))
+
+    def test_prompt_forms_start_shell_command_and_attach(self):
+        # Generate every prompt spelling against a real daemon. Shell forms
+        # must create a controller attachment and expose the allocated id.
+        for form in ("term", "!", "term printf PROMPT_COMMAND; sleep 30", "!printf PROMPT_COMMAND; sleep 30", "attach wm-test", "@wm-test"):
+            with self.subTest(form=form):
+                wm = self.start({}, requests=())
+                self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
+                self.launch_prompt(wm, form)
+                expected = "SESSION_TEXT" if form.startswith(("attach", "@")) else "PROMPT_COMMAND" if "printf" in form else None
+                if expected is not None:
+                    self.until(wm, lambda s: expected in self.text(s, 4))
+                else:
+                    self.until(wm, lambda s: "katzensteg wm " in self.text(s, 2))
+                    session_id = self.text(wm[3], 2).split("katzensteg wm ", 1)[1].split("│")[0].strip()
+                    state = json.loads(self.cleat("inspect", session_id, "--json"))
+                    self.assertEqual(state["attachments"][0]["role"], "controller")
+                    self.assertEqual(state["terminal"], {"cols": 94, "rows": 34})
+                self.assertNotIn("launch failed", self.text(wm[3], 40))
+                os.write(wm[1], b"\x1dQ")
+                self.until(wm, lambda s: b"\x1b[?1049l" in s.raw)
+
+    def test_unknown_id_reports_failure_without_window_and_can_retry(self):
+        # #119: a failed request consumes no window slot. A subsequent attach
+        # paints at the first window's position and clears the failure row.
+        for requests in (("--attach", "missing-session"), ()):
+            with self.subTest(requests=requests):
+                wm = self.start(requests=requests)
+                if not requests:
+                    self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
+                    self.launch_prompt(wm, "@missing-session")
+                self.until(wm, lambda s: "launch failed" in self.text(s, 40))
+                self.assertNotIn("missing-session", self.text(wm[3], 2))
+                self.assertNotIn("katzensteg wm", self.text(wm[3], 1))
+                self.launch_prompt(wm, "attach wm-test")
+                self.until(wm, lambda s: "SESSION_TEXT" in self.text(s, 4))
+                self.assertTrue(self.title_visible(wm[3]))
+                self.assertNotIn("launch failed", self.text(wm[3], 40))
+
+    def test_unknown_prompt_id_keeps_existing_producer_and_reports_failure(self):
+        # An asynchronous refusal must remain the status event after focus and
+        # viewport reconciliation, while the established producer stays visible.
+        wm = self.start(requests=())
+        self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
+        self.producer(wm)
+        self.until(wm, lambda s: "producer" in self.text(s, 2))
+        self.launch_prompt(wm, "@missing-session")
+        self.until(wm, lambda s: "launch failed" in self.text(s, 40))
+        self.assertIn("producer", self.text(wm[3], 2))
+        self.assertNotIn("missing-session", self.text(wm[3], 3))
+
     def test_real_sdl_producer_and_session_in_both_orders(self):
         if not REAL_PRODUCER:
             self.skipTest("full-build SDL producer scenario is enabled by CI")
@@ -165,6 +235,17 @@ class SessionWindows(unittest.TestCase):
         self.assertNotIn(GLYPH, session_content(wm[3]))
         os.write(wm[1], b"\x1dQ")
         self.until(wm, lambda s: b"\x1b[?1049l" in s.raw)
+
+    def test_prompt_profile_still_launches_producer(self):
+        if not REAL_PRODUCER:
+            self.skipTest("full-build SDL producer scenario is enabled by CI")
+        # #119: an ordinary profile name in the widened prompt still starts
+        # the producer, observable as real kitty image frames.
+        wm = self.start(requests=(), presentation="placeholder")
+        self.until(wm, lambda s: "wm windows=0" in self.text(s, 40))
+        self.launch_prompt(wm, "probe.input")
+        self.until(wm, lambda s: s.frames.get(100000, 0) > 0 and any("probe.input" in self.text(s, row) for row in range(1, 40)))
+        self.assertTrue(any("probe.input" in self.text(wm[3], row) for row in range(1, 40)))
 
     def test_resize_geometry_and_controller_role(self):
         wm = self.start()
@@ -209,7 +290,7 @@ while not (root / 'end').exists():
     time.sleep(.02)
 """)
         self.cleat("launch", "wm-pixels", "--size", "100x40", "--cmd", f"{sys.executable} {program} {self.root}")
-        wm = self.start({"KATZENSTEG_WM_ATTACH": "wm-pixels"})
+        wm = self.start(requests=("--attach", "wm-pixels"))
         self.until(wm, lambda s: "PIXELS_READY" in self.text(s, 4))
         def await_response(expected):
             deadline = time.monotonic() + 5
@@ -246,7 +327,7 @@ while not (root / 'end').exists():
         pending = b""
         while b'"type":"attach"' not in pending:
             pending += peer.recv(65536)
-        peer.sendall(b'{"type":"presentation_status","window_id":"main","ready_to_show":true}\n')
+        peer.sendall(b'{"type":"presentation_status","window_id":"main","ready_to_show":true,"input_supported":true}\n')
         return peer
 
     def test_mixed_windows_cover_in_both_orders_and_modes(self):

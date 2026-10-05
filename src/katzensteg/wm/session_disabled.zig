@@ -2,6 +2,7 @@
 const model = @import("session_mirror.zig");
 pub const Content = struct {
     mirror: model.Mirror,
+    established: bool = false,
     pub fn deinit(_: *Content) void {}
     pub fn detach(_: *Content) void {}
     pub fn ended(_: *const Content) bool {

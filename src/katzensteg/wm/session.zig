@@ -18,10 +18,37 @@ pub const Content = struct {
     mirror: model.Mirror,
     requested: model.Size,
     closed: bool = false,
+    established: bool = false,
     pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
         const self = try allocator.create(Content);
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .session = try provider.attach(id, cols, rows), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
+        return self;
+    }
+    pub fn create(allocator: std.mem.Allocator, provider: Provider, command: []const u8, cols: u16, rows: u16, foreground: ?[3]u8, background: ?[3]u8) !*Content {
+        const self = try allocator.create(Content);
+        errdefer allocator.destroy(self);
+        var desc = std.mem.zeroes(c.cleat_session_desc);
+        desc.cols = cols;
+        desc.rows = rows;
+        desc.role = c.CLEAT_ROLE_CONTROLLER;
+        var colors = std.mem.zeroes(c.cleat_session_colors);
+        colors.size = @sizeOf(c.cleat_session_colors);
+        if (foreground) |rgb| {
+            colors.has_foreground = true;
+            colors.foreground = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+        }
+        if (background) |rgb| {
+            colors.has_background = true;
+            colors.background = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+        }
+        desc.colors = &colors;
+        // A null command starts cleat's shell; a null id lets cleat allocate it.
+        if (command.len > 0) {
+            desc.command = command.ptr;
+            desc.command_len = command.len;
+        }
+        self.* = .{ .allocator = allocator, .session = try provider.create(desc), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
         return self;
     }
     pub fn detach(self: *Content) void {
@@ -60,7 +87,11 @@ pub const Content = struct {
     pub fn pump(self: *Content) !bool {
         const session = self.session orelse return false;
         _ = c.cleat_session_poll(session.handle);
-        self.closed = c.cleat_session_connection_state(session.handle) == c.CLEAT_SESSION_CLOSED;
+        const state = c.cleat_session_connection_state(session.handle);
+        self.closed = state == c.CLEAT_SESSION_CLOSED;
+        // A role grant also confirms acceptance when a short program exits
+        // before the owner observes the intermediate streaming state.
+        self.established = self.established or state == c.CLEAT_SESSION_STREAMING or c.cleat_session_role(session.handle) != c.CLEAT_ROLE_UNKNOWN;
         var update = session.pull() orelse return false;
         defer session.release(&update);
         try self.apply(update);

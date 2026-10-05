@@ -61,6 +61,9 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run.step);
         const fixture_mod = b.createModule(.{ .root_source_file = b.path("src/cleat/integration.zig"), .target = target, .optimize = optimize, .link_libc = true });
         fixture_mod.addImport("cleat", mod);
+        const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/wm/session.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        session_mod.addImport("cleat", mod);
+        fixture_mod.addImport("wm_session", session_mod);
         fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
         const fixture = b.addExecutable(.{ .name = "cleat-integration", .root_module = fixture_mod, .use_llvm = use_llvm });
         const scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });
