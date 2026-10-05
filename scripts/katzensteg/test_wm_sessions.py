@@ -119,6 +119,12 @@ class SessionWindows(unittest.TestCase):
     def text(screen, row):
         return "".join(screen.cells.get((row, col), (" ",))[0] for col in range(1, 101))
 
+    @staticmethod
+    def content_text(screen, row):
+        # The 100x40 fixture starts with content at columns 2..95. Chrome at
+        # columns 1 and 96 must not participate in program-output assertions.
+        return SessionWindows.text(screen, row)[1:95]
+
     def title_visible(self, screen):
         return "wm-test" in self.text(screen, 2)
 
@@ -220,10 +226,12 @@ class SessionWindows(unittest.TestCase):
         # Paste reaches the program through the same WM route.
         os.write(wm[1], b"\x1b[200~printf 'PASTE_%s\\n' OK\x1b[201~\r")
         self.until(wm, lambda s: any("PASTE_OK" in self.text(s, row) for row in range(4, 38)))
-        os.write(wm[1], b"trap 'echo INTERRUPTED' INT; printf 'RUN_%s\\n' READY; sleep 30\r")
-        self.until(wm, lambda s: any(self.text(s, row).strip() == "RUN_READY" for row in range(4, 38)))
+        # Assemble the interrupt marker only in the trap, so command echo
+        # cannot satisfy it. The PTY may echo ^C before the marker.
+        os.write(wm[1], b"trap 'printf \"INT%s\\n\" ERRUPTED' INT; printf 'RUN_%s\\n' READY; sleep 30\r")
+        self.until(wm, lambda s: any(self.content_text(s, row).strip() == "RUN_READY" for row in range(4, 38)))
         os.write(wm[1], b"\x03")
-        self.until(wm, lambda s: any(self.text(s, row).strip() == "INTERRUPTED" for row in range(4, 38)))
+        self.until(wm, lambda s: any("INTERRUPTED" in self.content_text(s, row) for row in range(4, 38)))
 
     def test_held_key_is_released_when_menu_arms(self):
         # A real raw-mode program enables kitty events and focus reporting.
@@ -399,6 +407,19 @@ while not (root / 'end').exists():
                 self.assertNotIn("SESSION_TEXT", self.text(wm[3], 4))
                 os.write(wm[1], b"\x1dQ")
                 self.until(wm, lambda s: b"\x1b[?1049l" in s.raw)
+
+
+class ScreenContentAssertions(unittest.TestCase):
+    def test_program_markers_exclude_chrome_and_cannot_match_command_echo(self):
+        # Session content assertions ignore window borders. A complete marker
+        # exists only in trap output, which may follow the terminal's ^C echo.
+        screen = Screen()
+        rows = ("RUN_READY", 'trap \'printf "INT%s\\n" ERRUPTED\' INT', "^CINTERRUPTED")
+        for row, text in enumerate(rows, 4):
+            screen.feed((f"\x1b[{row};1H│" + text.ljust(94) + "│").encode())
+        self.assertEqual(SessionWindows.content_text(screen, 4).strip(), "RUN_READY")
+        self.assertNotIn("INTERRUPTED", SessionWindows.content_text(screen, 5))
+        self.assertIn("INTERRUPTED", SessionWindows.content_text(screen, 6))
 
 
 if __name__ == "__main__":
