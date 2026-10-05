@@ -32,9 +32,13 @@ pub fn writeBackground(writer: anytype, color: Color) !void {
 /// Accept X11 rgb replies (one to four hex digits/channel) with BEL or ST.
 /// Partial and malformed replies cannot enable band mode.
 pub fn parseBackground(bytes: []const u8) ?Color {
+    return parseColor(bytes, "\x1b]11;rgb:");
+}
+
+pub fn parseColor(bytes: []const u8, marker: []const u8) ?Color {
     var offset: usize = 0;
-    while (std.mem.indexOfPos(u8, bytes, offset, "\x1b]11;rgb:")) |start| {
-        offset = start + 9;
+    while (std.mem.indexOfPos(u8, bytes, offset, marker)) |start| {
+        offset = start + marker.len;
         const rest = bytes[offset..];
         const end = std.mem.indexOfAny(u8, rest, "\x07\x1b") orelse return null;
         if (rest[end] == '\x1b' and (end + 1 >= rest.len or rest[end + 1] != '\\')) continue;
@@ -70,8 +74,16 @@ pub fn parseBackground(bytes: []const u8) ?Color {
 /// Before input capture, like the graphics probes: unrelated input is discarded.
 /// A bounded read handles replies split across terminal reads.
 pub fn queryBackground(tty: platform.terminal.Tty, timeout_ms: i64) ?Color {
+    return queryColor(tty, timeout_ms, "\x1b]11;?\x1b\\", "\x1b]11;rgb:");
+}
+
+pub fn queryForeground(tty: platform.terminal.Tty, timeout_ms: i64) ?Color {
+    return queryColor(tty, timeout_ms, "\x1b]10;?\x1b\\", "\x1b]10;rgb:");
+}
+
+fn queryColor(tty: platform.terminal.Tty, timeout_ms: i64, query: []const u8, marker: []const u8) ?Color {
     var output = tty.output.writerStreaming(&.{});
-    output.interface.writeAll("\x1b]11;?\x1b\\") catch return null;
+    output.interface.writeAll(query) catch return null;
     output.interface.flush() catch return null;
     var replies: [512]u8 = undefined;
     var len: usize = 0;
@@ -82,7 +94,7 @@ pub fn queryBackground(tty: platform.terminal.Tty, timeout_ms: i64) ?Color {
             else => return null,
         };
         len += n;
-        if (parseBackground(replies[0..len])) |color| return color;
+        if (parseColor(replies[0..len], marker)) |color| return color;
         if (n == 0) platform.time.sleep(10 * std.time.ns_per_ms);
     }
     return null;
@@ -142,5 +154,20 @@ test "startup query writes OSC 11 once and unanswered or malformed replies fall 
         var bytes: [64]u8 = undefined;
         try std.testing.expectEqualStrings("\x1b]11;?\x1b\\", bytes[0..try request.read(&bytes)]);
         try std.testing.expectError(error.WouldBlock, request.read(&bytes));
+    }
+}
+
+// Session creation queries both outer defaults; each reply must be associated
+// with its OSC number. Generate channel boundaries and interior values.
+test "foreground and background replies retain their OSC identity" {
+    for ([_]u8{ 0, 1, 127, 254, 255 }) |value| {
+        for ([_][]const u8{ "10", "11" }) |number| {
+            var bytes: [100]u8 = undefined;
+            const reply = try std.fmt.bufPrint(&bytes, "\x1b]{s};rgb:{x:0>2}/{x:0>2}/{x:0>2}\x1b\\", .{ number, value, value, value });
+            const marker = if (std.mem.eql(u8, number, "10")) "\x1b]10;rgb:" else "\x1b]11;rgb:";
+            const other = if (std.mem.eql(u8, number, "10")) "\x1b]11;rgb:" else "\x1b]10;rgb:";
+            try std.testing.expectEqualDeep(@as(?Color, .{ value, value, value }), parseColor(reply, marker));
+            try std.testing.expectEqual(@as(?Color, null), parseColor(reply, other));
+        }
     }
 }

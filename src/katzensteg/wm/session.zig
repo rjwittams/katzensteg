@@ -24,6 +24,32 @@ pub const Content = struct {
         self.* = .{ .allocator = allocator, .session = try provider.attach(id, cols, rows), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
         return self;
     }
+    pub fn create(allocator: std.mem.Allocator, provider: Provider, command: []const u8, cols: u16, rows: u16, foreground: ?[3]u8, background: ?[3]u8) !*Content {
+        const self = try allocator.create(Content);
+        errdefer allocator.destroy(self);
+        var desc = std.mem.zeroes(c.cleat_session_desc);
+        desc.cols = cols;
+        desc.rows = rows;
+        desc.role = c.CLEAT_ROLE_CONTROLLER;
+        var colors = std.mem.zeroes(c.cleat_session_colors);
+        colors.size = @sizeOf(c.cleat_session_colors);
+        if (foreground) |rgb| {
+            colors.has_foreground = true;
+            colors.foreground = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+        }
+        if (background) |rgb| {
+            colors.has_background = true;
+            colors.background = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] };
+        }
+        desc.colors = &colors;
+        // A null command starts cleat's shell; a null id lets cleat allocate it.
+        if (command.len > 0) {
+            desc.command = command.ptr;
+            desc.command_len = command.len;
+        }
+        self.* = .{ .allocator = allocator, .session = try provider.create(desc), .mirror = model.Mirror.init(allocator), .requested = .{ .cols = cols, .rows = rows } };
+        return self;
+    }
     pub fn detach(self: *Content) void {
         if (self.session) |session| session.destroy();
         self.session = null;

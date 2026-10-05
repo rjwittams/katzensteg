@@ -47,6 +47,11 @@ pub fn main(process_init: std.process.Init) !void {
     defer allocator.free(specs);
     for (parsed.sessions, 0..) |session, i| {
         specs[i] = .{
+            .kind = switch (session.kind) {
+                .profile => .profile,
+                .term => .term,
+                .attach => .attach,
+            },
             .profile_name = session.profile_name,
             .extra_args = session.extra_args,
         };
@@ -82,7 +87,7 @@ const usage_text =
     \\Usage:
     \\  katzensteg-wm [--http 127.0.0.1:<port>] [--host-file <path>] --wrap [--] command [arg...]
     \\  katzensteg-wm --headless [--background] [--tty <device>] [--parent-pid <pid>] [--http 127.0.0.1:<port>] [--host-file <path>] [--idle-refresh-ms <ms; 0 disables>]
-    \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] [profile...]
+    \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] [profile...] [--term [command]] [--attach <id>]
     \\  katzensteg-wm [--presentation positioned|placeholder] [--listen <socket-path>] --session <profile> [-- arg...] [--session <profile> [-- arg...] ...]
     \\
 ;

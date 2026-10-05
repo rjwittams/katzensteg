@@ -427,10 +427,8 @@ fn divRoundI64(numerator: i64, denominator: i64) i64 {
     return @divTrunc(numerator + @divTrunc(denominator, 2), denominator);
 }
 
-pub const SessionLaunchSpec = struct {
-    profile_name: []const u8,
-    extra_args: []const []const u8 = &.{},
-};
+const launch_request = @import("wm/launch.zig");
+pub const SessionLaunchSpec = launch_request.Spec;
 
 pub fn runProfile(io: std.Io, allocator: std.mem.Allocator, profile_name: []const u8) !u8 {
     return runSessionSpecs(io, allocator, &.{.{ .profile_name = profile_name }});
@@ -806,7 +804,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var initialized: usize = 0;
     var next_session_id: u64 = 1;
     var first_exit_code: u8 = 0;
-    var provider: if (cleat_enabled) ?session_content.Provider else void = if (cleat_enabled) null else {};
+    var provider: OptionalProvider = if (cleat_enabled) null else {};
     defer if (cleat_enabled) {
         if (provider) |value| {
             session_content.setWake(value, null, null);
@@ -838,11 +836,15 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     else
         cover.Policy{};
     logger.writeFmtScoped(.info, .wm, "desktop cover mode={s}", .{@tagName(cover_policy.mode)});
+    const foreground = if (cleat_enabled) cover.queryForeground(tty.terminal(), 250) else null;
+    const background = if (cleat_enabled and cover_policy.background == null) cover.queryBackground(tty.terminal(), 250) else cover_policy.background;
     try tty.enableInputCapture();
+    var session_error: ?[]u8 = null;
+    defer if (session_error) |message| allocator.free(message);
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
-        sessions[i] = launchProducerSession(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
+        sessions[i] = launchWindow(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
             continue;
@@ -851,54 +853,6 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         next_session_id += 1;
         initialized += 1;
         try startSessionProcessPolling(&sessions[i]);
-    }
-
-    var session_error: ?[]u8 = null;
-    defer if (session_error) |message| allocator.free(message);
-    const attach_id = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_WM_ATTACH") catch null;
-    defer if (attach_id) |value| allocator.free(value);
-    if (attach_id) |id| {
-        if (cleat_enabled) attach: {
-            const binary = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_CLEAT_BINARY") catch try allocator.dupe(u8, "cleat");
-            defer allocator.free(binary);
-            // An empty runtime root asks the library to use cleat's discovery.
-            const root = system_io.process.getEnvVarOwned(allocator, "CLEAT_RUNTIME_DIR") catch try allocator.dupe(u8, "");
-            defer allocator.free(root);
-            const opened = session_content.Provider.open(allocator, io, binary, root, session_content.pin) catch |err| {
-                try recordLaunchFailure(&event_log, &logger, id, err);
-                break :attach;
-            };
-            switch (opened) {
-                .mismatch => |mismatch| {
-                    const message = try std.fmt.allocPrint(allocator, "cleat mismatch: library {d}/{d}, installed {d}/{d} (ABI/protocol)", .{ mismatch.expected.abi, mismatch.expected.protocol, mismatch.actual.abi, mismatch.actual.protocol });
-                    session_error = message;
-                    try event_log.record(.parse_error, message);
-                    break :attach;
-                },
-                .provider => |value| provider = value,
-            }
-            session_content.setWake(provider.?, onSessionWake, &wm_events);
-            const i = initialized;
-            if (i == sessions.len) {
-                try event_log.record(.parse_error, "session limit reached");
-                break :attach;
-            }
-            const title = try allocator.dupe(u8, id);
-            const outer = cascadedOuterRect(terminal, i);
-            const area = contentRectForOuter(outer);
-            const content = session_content.Content.attach(allocator, provider.?, id, @intCast(@max(1, area.cols)), @intCast(@max(1, area.rows))) catch |err| {
-                allocator.free(title);
-                try recordLaunchFailure(&event_log, &logger, id, err);
-                break :attach;
-            };
-            sessions[i] = .{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_policy.mode };
-            sessions[i].window.markAttached();
-            z_order[i] = i;
-            initialized += 1;
-            try updateSessionGeometry(&sessions[i], terminal);
-            wm_events.session_ready = true;
-            try event_log.record(.attach_sent, id);
-        } else try event_log.record(.parse_error, "session windows require -Dcleat=true");
     }
 
     var focused_index: usize = 0;
@@ -1070,10 +1024,16 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                                     try event_log.record(.parse_error, "session limit reached");
                                 } else launch: {
                                     const new_index = availableSessionSlot(sessions[0..initialized], session_capacity).?;
-                                    var session = launchProducerSession(allocator, producer_exe, tty.file, terminal, .{ .profile_name = launch_prompt.items }, new_index, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
+                                    const spec = launch_request.prompt(launch_prompt.items) catch |err| {
                                         try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
                                         break :launch;
                                     };
+                                    var session = launchWindow(allocator, producer_exe, tty.file, terminal, spec, new_index, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
+                                        redraw_state.session_error = session_error;
+                                        try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
+                                        break :launch;
+                                    };
+                                    redraw_state.session_error = session_error;
                                     session.session_id = next_session_id;
                                     next_session_id += 1;
                                     installSession(allocator, sessions, &initialized, new_index, session, z_order);
@@ -1305,6 +1265,50 @@ fn deleteSessionGraphics(writer: anytype, index: usize) !void {
     // Kitty's range deletion removes both placements and image storage.
     // Only this slot's assigned IDs are deleted, after its last batch.
     try writer.print("\x1b_Ga=d,d=R,x={d},y={d},q=2;\x1b\\", .{ range.start, range.end });
+}
+
+const OptionalProvider = if (cleat_enabled) ?session_content.Provider else void;
+
+fn launchWindow(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog, provider: *OptionalProvider, wm_events: *WmEventLoop, session_error: *?[]u8, foreground: ?cover.Color, background: ?cover.Color) !WmWindow {
+    if (spec.kind == .profile) return launchProducerSession(allocator, producer_exe, tty_file, terminal, spec, index, presentation, cover_mode, output_profile, events);
+    if (!cleat_enabled) return error.SessionWindowsDisabled;
+    if (cleat_enabled) {
+        if (provider.* == null) {
+            const binary = system_io.process.getEnvVarOwned(allocator, "KATZENSTEG_CLEAT_BINARY") catch try allocator.dupe(u8, "cleat");
+            defer allocator.free(binary);
+            const root = system_io.process.getEnvVarOwned(allocator, "CLEAT_RUNTIME_DIR") catch try allocator.dupe(u8, "");
+            defer allocator.free(root);
+            switch (try session_content.Provider.open(allocator, tty_file.io, binary, root, session_content.pin)) {
+                .mismatch => |mismatch| {
+                    const message = try std.fmt.allocPrint(allocator, "cleat mismatch: library {d}/{d}, installed {d}/{d} (ABI/protocol)", .{ mismatch.expected.abi, mismatch.expected.protocol, mismatch.actual.abi, mismatch.actual.protocol });
+                    if (session_error.*) |previous| allocator.free(previous);
+                    session_error.* = message;
+                    return error.VersionMismatch;
+                },
+                .provider => |value| provider.* = value,
+            }
+            session_content.setWake(provider.*.?, onSessionWake, wm_events);
+        }
+        const outer = cascadedOuterRect(terminal, index);
+        const area = contentRectForOuter(outer);
+        const cols: u16 = @intCast(@max(1, area.cols));
+        const rows: u16 = @intCast(@max(1, area.rows));
+        const content = if (spec.kind == .term)
+            try session_content.Content.create(allocator, provider.*.?, spec.profile_name, cols, rows, foreground, background)
+        else
+            try session_content.Content.attach(allocator, provider.*.?, spec.profile_name, cols, rows);
+        errdefer content.deinit();
+        const title = try allocator.dupe(u8, try content.session.?.id());
+        errdefer allocator.free(title);
+        var window = WmWindow{ .content = .{ .session = content }, .profile_name = title, .window = WmWindowState.init("main", outer), .upload = .{ .profile = .file_whole }, .state = .running, .initial_presentation_resolved = true, .presentation_status = .{ .ready_to_show = true }, .cover_mode = cover_mode };
+        window.window.markAttached();
+        try updateSessionGeometry(&window, terminal);
+        wm_events.session_ready = true;
+        try events.record(.attach_sent, title);
+        if (session_error.*) |previous| allocator.free(previous);
+        session_error.* = null;
+        return window;
+    }
 }
 
 fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
@@ -2544,7 +2548,7 @@ fn applyLaunchPromptKey(key: @import("native_key.zig").Key, prompt: *std.ArrayLi
     }
     if (key.modifiers.suppressText()) return .none;
     const cp = key.codepoint() orelse return .none;
-    if (cp > 127 or !isProfileNameByte(@intCast(cp)) or prompt.items.len >= max_launch_prompt_len) return .none;
+    if (cp < 32 or cp > 126 or prompt.items.len >= max_launch_prompt_len) return .none;
     try prompt.append(allocator, @intCast(cp));
     return .changed;
 }
@@ -4851,4 +4855,31 @@ test "session version refusal takes precedence over launch prompt" {
         try screen.apply(bytes.written());
         try std.testing.expectEqual(@as(u8, if (message != null) 'c' else ' '), screen.at(30, 1).glyph);
     }
+}
+
+// #119: prompt editing accepts spaces, both sigils, and command punctuation.
+// Exhaustively generate printable ASCII and check the capacity boundary; key
+// releases and shortcut modifiers must not append text.
+test "launch prompt accepts printable command bytes up to capacity" {
+    const Key = @import("native_key.zig").Key;
+    var prompt = std.ArrayList(u8).empty;
+    defer prompt.deinit(std.testing.allocator);
+    for (32..127) |cp| {
+        try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptKey(Key.character(@intCast(cp)), &prompt, std.testing.allocator));
+        try std.testing.expectEqual(@as(u8, @intCast(cp)), prompt.items[prompt.items.len - 1]);
+    }
+    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptKey(Key.character('!'), &prompt, std.testing.allocator));
+    try std.testing.expectEqual(max_launch_prompt_len, prompt.items.len);
+    try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(Key.character('@'), &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.changed, try applyLaunchPromptKey(try Key.logical("Backspace"), &prompt, std.testing.allocator));
+    var key = Key.character('@');
+    key.action = .up;
+    try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(key, &prompt, std.testing.allocator));
+    key.action = .tap;
+    key.modifiers.control = true;
+    try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(key, &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(Key.character(31), &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.none, try applyLaunchPromptKey(Key.character(127), &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.submit, try applyLaunchPromptKey(try Key.logical("Enter"), &prompt, std.testing.allocator));
+    try std.testing.expectEqual(LaunchPromptAction.cancel, try applyLaunchPromptKey(try Key.logical("Escape"), &prompt, std.testing.allocator));
 }

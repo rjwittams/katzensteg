@@ -290,6 +290,36 @@ prefix and decoder, with its own commands shown in the existing status row.
 Bare letters and Tab reach the focused producer. The launch prompt accepts
 both legacy bytes and Kitty keyboard reports.
 
+With a cleat-enabled build, the desktop launch prompt accepts spaces and shell
+punctuation as well as profile names:
+
+| Action | Prompt | Command line |
+|---|---|---|
+| Start the shell | `term` or `!` | `katzensteg-wm --term` |
+| Run a command | `term <command>` or `!<command>` | `katzensteg-wm --term '<command>'` |
+| Attach a session | `attach <id>` or `@<id>` | `katzensteg-wm --attach <id>` |
+
+Cleat allocates each new session's id, shown in the window title. Closing a
+window detaches; the session keeps running. Failed starts and unknown ids appear
+in the status row without leaving a window. Builds without cleat report that
+session windows are disabled; profile launches remain available.
+
+The prompt words `term` and `attach` shadow profiles with those exact names,
+without a warning. Other profile names launch producers as before. Explicit
+command-line profile names, including `--session term`, still select profiles.
+`--term` and `--attach` are repeatable and mix with profiles, in launch order:
+
+```sh
+katzensteg-wm probe.input --term 'htop' --attach session-id --term
+katzensteg-wm --session retroarch -- rom.sfc --term 'htop' --attach session-id
+```
+
+A command is one quoted argument. `--term` consumes the next argument unless it
+begins with `--`; place a shell-only `--term` last or before another option.
+With `--session`, `--term` and `--attach` also end the preceding profile's extra
+arguments, just as another `--session` does. A session picker is not provided.
+
+
 Set `KATZENSTEG_COMMAND_KEY='^X'` to choose another control key, or `none` to
 disable the mode. The inheritable profile field is `runtime.command_key`, with
 the same caret notation. Environment configuration overrides the profile.

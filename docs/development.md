@@ -264,12 +264,12 @@ the provider. No window-manager integration is enabled by this dependency.
 
 ### Desktop session windows
 
-With cleat enabled, `KATZENSTEG_WM_ATTACH=<session-id>` attaches one existing
-session as a desktop window. This temporary entry point precedes the launch
-prompt forms. `KATZENSTEG_CLEAT_BINARY` selects the binary for the version check
-(default `cleat`); `CLEAT_RUNTIME_DIR` selects the provider's runtime root.
-Close detaches, and quitting the WM detaches every session. Attached sessions
-keep their existing default colours; this entry point creates no sessions.
+With cleat enabled, `--term [command]` starts a session and `--attach <id>`
+attaches an existing one. The [launch prompt](launcher.md) offers the same forms.
+`KATZENSTEG_CLEAT_BINARY` selects the binary for the version check (default
+`cleat`); `CLEAT_RUNTIME_DIR` selects the provider's runtime root. Close detaches,
+and quitting the WM detaches every session. New sessions receive the outer
+terminal's queried default colours; attached sessions keep their existing ones.
 
 `zig build wm` builds just the desktop, and `zig build test-wm` runs its
 standalone unit tests. With `-Dcleat=true -Dcleat-prefix=<prepared-prefix>`,

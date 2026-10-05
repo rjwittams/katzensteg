@@ -1,8 +1,9 @@
 const std = @import("std");
 
 pub const SessionSpec = struct {
+    kind: enum { profile, term, attach } = .profile,
     profile_name: []const u8,
-    extra_args: []const []const u8,
+    extra_args: []const []const u8 = &.{},
 };
 
 pub const PresentationMode = enum { positioned, placeholder };
@@ -127,48 +128,60 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
         sessions.deinit(allocator);
     }
 
-    if (!uses_session_syntax) {
-        for (args) |profile_name| {
-            try sessions.append(allocator, .{
-                .profile_name = try allocator.dupe(u8, profile_name),
-                .extra_args = &.{},
-            });
-        }
-        return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator), .listen_path = listen_path, .presentation = presentation };
-    }
-
-    if (args.len > 0 and !std.mem.eql(u8, args[0], "--session")) return error.MixedSessionSyntax;
-
     var i: usize = 0;
     while (i < args.len) {
-        if (!std.mem.eql(u8, args[i], "--session")) return error.MixedSessionSyntax;
+        const token = args[i];
         i += 1;
-        if (i >= args.len) return error.MissingSessionProfile;
+        if (std.mem.eql(u8, token, "--term") or std.mem.eql(u8, token, "--attach")) {
+            const attaching = std.mem.eql(u8, token, "--attach");
+            var value: []const u8 = "";
+            if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                value = args[i];
+                i += 1;
+            }
+            if (attaching and value.len == 0) return error.MissingSessionId;
+            const owned = try allocator.dupe(u8, value);
+            errdefer allocator.free(owned);
+            try sessions.append(allocator, .{ .kind = if (attaching) .attach else .term, .profile_name = owned });
+            continue;
+        }
+        if (!std.mem.eql(u8, token, "--session")) {
+            if (uses_session_syntax) return error.MixedSessionSyntax;
+            const owned = try allocator.dupe(u8, token);
+            errdefer allocator.free(owned);
+            try sessions.append(allocator, .{ .profile_name = owned });
+            continue;
+        }
+        if (i >= args.len or isLaunchOption(args[i])) return error.MissingSessionProfile;
         const profile_name = args[i];
         i += 1;
-
         var extra = std.ArrayList([]const u8).empty;
         errdefer {
             for (extra.items) |arg| allocator.free(arg);
             extra.deinit(allocator);
         }
-
         if (i < args.len and std.mem.eql(u8, args[i], "--")) {
             i += 1;
-            while (i < args.len and !std.mem.eql(u8, args[i], "--session")) : (i += 1) {
-                try extra.append(allocator, try allocator.dupe(u8, args[i]));
+            while (i < args.len and !isLaunchOption(args[i])) : (i += 1) {
+                const owned = try allocator.dupe(u8, args[i]);
+                errdefer allocator.free(owned);
+                try extra.append(allocator, owned);
             }
-        } else if (i < args.len and !std.mem.eql(u8, args[i], "--session")) {
-            return error.MissingSessionArgsSeparator;
+        } else if (i < args.len and !isLaunchOption(args[i])) return error.MissingSessionArgsSeparator;
+        const owned = try allocator.dupe(u8, profile_name);
+        errdefer allocator.free(owned);
+        const extra_args = try extra.toOwnedSlice(allocator);
+        errdefer {
+            for (extra_args) |arg| allocator.free(arg);
+            allocator.free(extra_args);
         }
-
-        try sessions.append(allocator, .{
-            .profile_name = try allocator.dupe(u8, profile_name),
-            .extra_args = try extra.toOwnedSlice(allocator),
-        });
+        try sessions.append(allocator, .{ .profile_name = owned, .extra_args = extra_args });
     }
-
     return .{ .allocator = allocator, .sessions = try sessions.toOwnedSlice(allocator), .listen_path = listen_path, .presentation = presentation };
+}
+
+fn isLaunchOption(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--term") or std.mem.eql(u8, arg, "--attach");
 }
 
 fn freeSession(allocator: std.mem.Allocator, session: SessionSpec) void {
@@ -260,4 +273,37 @@ test "wrap owns remaining argv including child help and rejects background mode"
     try std.testing.expectEqual(@as(u32, 0), args.idle_refresh_ms);
     try std.testing.expectError(error.MissingWrappedCommand, parse(std.testing.allocator, &.{ "wm", "--wrap" }));
     try std.testing.expectError(error.InvalidWrapOption, parse(std.testing.allocator, &.{ "wm", "--background", "--wrap", "claude" }));
+}
+
+// #119: command-line session requests preserve order, repeat, and mix with
+// both profile syntaxes. The optional command is one shell-quoted argv item.
+test "term and attach repeat and mix with profiles" {
+    const Kind = @FieldType(SessionSpec, "kind");
+    for ([_][]const []const u8{
+        &.{ "wm", "--term" },
+        &.{ "wm", "--term", "echo hello" },
+    }, [_][]const u8{ "", "echo hello" }) |argv, command| {
+        var parsed = try parse(std.testing.allocator, argv);
+        defer parsed.deinit();
+        try std.testing.expectEqual(Kind.term, parsed.sessions[0].kind);
+        try std.testing.expectEqualStrings(command, parsed.sessions[0].profile_name);
+    }
+    for ([_][]const []const u8{
+        &.{ "wm", "probe", "--term", "--attach", "a", "--term", "printf '%s' hi", "--attach", "a" },
+        &.{ "wm", "--session", "probe", "--", "rom", "--term", "--attach", "a", "--term", "printf '%s' hi", "--attach", "a" },
+    }) |argv| {
+        var parsed = try parse(std.testing.allocator, argv);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 5), parsed.sessions.len);
+        for (parsed.sessions, [_]Kind{ .profile, .term, .attach, .term, .attach }, [_][]const u8{ "probe", "", "a", "printf '%s' hi", "a" }) |spec, kind, value| {
+            try std.testing.expectEqual(kind, spec.kind);
+            try std.testing.expectEqualStrings(value, spec.profile_name);
+        }
+    }
+    for ([_][]const []const u8{ &.{ "wm", "--attach" }, &.{ "wm", "--attach", "" }, &.{ "wm", "--attach", "--term" } }) |argv|
+        try std.testing.expectError(error.MissingSessionId, parse(std.testing.allocator, argv));
+    // Reserved words only shadow prompt profiles, not explicit CLI profiles.
+    var reserved = try parse(std.testing.allocator, &.{ "wm", "term", "attach" });
+    defer reserved.deinit();
+    for (reserved.sessions) |spec| try std.testing.expectEqual(Kind.profile, spec.kind);
 }
