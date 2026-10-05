@@ -255,8 +255,10 @@ installed binary. Provider open checks the library's reported ABI and the
 selected binary's `cleat --version` protocol against the pin, returning a
 mismatch with both expected and actual pairs before connecting.
 
-`zig build test-cleat` with the same options runs the provider and desktop session tests. The
-integration harness starts its own daemon in a temporary runtime root, passes
+`zig build test-cleat` with the same options runs the provider and desktop session tests.
+`zig build test-session` with those options runs the session content and navigation unit
+tests without the desktop event loop (useful where `io_uring` is unavailable).
+The integration harness starts its own daemon in a temporary runtime root, passes
 that root explicitly to the provider, and stops only that daemon. Session
 handles and render borrows belong to one caller thread; release each update
 before another pull or session destruction, and destroy sessions before closing

@@ -23,6 +23,7 @@ pub const Content = struct {
     watching: bool = false,
     focused: bool = false,
     input: input.Adapter = .{},
+    navigation: @import("session_navigation.zig").Navigation = .{},
     // Input can arrive as soon as chrome appears, before the async role grant.
     pending_input: std.ArrayList(PendingInput) = .empty,
     const PendingInput = union(enum) {
@@ -99,23 +100,23 @@ pub const Content = struct {
         self.focused = active;
         if (self.session) |session| {
             const role = c.cleat_session_role(session.handle);
-            try self.flushPendingInput(session, role);
+            try self.flushPendingInput(role);
             if (role == c.CLEAT_ROLE_UNKNOWN) {
                 try self.pending_input.append(self.allocator, .{ .focus = active });
-            } else try self.input.focus(active, session);
+            } else try self.input.focus(active, self);
         }
     }
     pub fn sendBytes(self: *Content, bytes: []const u8, reports_events: bool) !void {
         if (self.session) |session| {
             const role = c.cleat_session_role(session.handle);
-            try self.flushPendingInput(session, role);
+            try self.flushPendingInput(role);
             switch (role) {
                 c.CLEAT_ROLE_UNKNOWN => {
                     const owned = try self.allocator.dupe(u8, bytes);
                     errdefer self.allocator.free(owned);
                     try self.pending_input.append(self.allocator, .{ .bytes = .{ .value = owned, .reports_events = reports_events } });
                 },
-                c.CLEAT_ROLE_CONTROLLER => try self.input.bytes(self.allocator, bytes, reports_events, session),
+                c.CLEAT_ROLE_CONTROLLER => try self.input.bytes(self.allocator, bytes, reports_events, self),
                 else => {},
             }
         }
@@ -124,21 +125,32 @@ pub const Content = struct {
         for (self.pending_input.items) |event| if (event == .bytes) self.allocator.free(event.bytes.value);
         self.pending_input.clearRetainingCapacity();
     }
-    fn flushPendingInput(self: *Content, session: cleat.Session, role: u32) !void {
+    fn flushPendingInput(self: *Content, role: u32) !void {
         if (role == c.CLEAT_ROLE_UNKNOWN) return;
         defer self.clearPendingInput();
         if (role != c.CLEAT_ROLE_CONTROLLER) return;
         for (self.pending_input.items) |event| switch (event) {
-            .bytes => |bytes| try self.input.bytes(self.allocator, bytes.value, bytes.reports_events, session),
-            .focus => |active| try self.input.focus(active, session),
+            .bytes => |bytes| try self.input.bytes(self.allocator, bytes.value, bytes.reports_events, self),
+            .focus => |active| try self.input.focus(active, self),
         };
     }
+    /// Structured key routing also applies when draining pre-grant input.
+    pub fn sendInput(self: *Content, event: c.cleat_input_event) !void {
+        const session = self.session orelse return;
+        try self.navigation.send(event, self.mirror.modes.alternate_screen, @intCast(self.requested.rows), session);
+    }
     pub fn sendPointer(self: *Content, pointer: input.Pointer) !void {
-        if (self.watching or self.mirror.modes.mouse_tracking == .none) return;
+        // Viewport navigation is local to this attachment, including watchers.
+        // Watchers still cannot send tracked pointer events to the program.
+        if (self.mirror.modes.mouse_tracking == .none) {
+            if (self.session) |session| try self.navigation.pointer(pointer, session);
+            return;
+        }
+        if (self.watching) return;
         if (self.session) |session| {
             const role = c.cleat_session_role(session.handle);
             if (role != c.CLEAT_ROLE_CONTROLLER) return;
-            try self.flushPendingInput(session, role);
+            try self.flushPendingInput(role);
             try session.sendInput(input.mouseEvent(pointer));
         }
     }
@@ -158,11 +170,11 @@ pub const Content = struct {
         // before the owner observes the intermediate streaming state.
         self.established = self.established or state == c.CLEAT_SESSION_STREAMING or c.cleat_session_role(session.handle) != c.CLEAT_ROLE_UNKNOWN;
         const role = c.cleat_session_role(session.handle);
-        try self.flushPendingInput(session, role);
+        try self.flushPendingInput(role);
         const watching = if (role == c.CLEAT_ROLE_UNKNOWN) self.watching else role == c.CLEAT_ROLE_WATCHER;
         const role_changed = watching != self.watching;
         self.watching = watching;
-        if (role_changed) try self.input.focus(!watching and self.focused, session);
+        if (role_changed) try self.input.focus(!watching and self.focused, self);
         var update = session.pull() orelse return role_changed;
         defer session.release(&update);
         try self.apply(update);

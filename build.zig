@@ -64,6 +64,11 @@ pub fn build(b: *std.Build) void {
         const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_integration_content.zig"), .target = target, .optimize = optimize, .link_libc = true });
         session_mod.addImport("cleat", mod);
         fixture_mod.addImport("wm_session", session_mod);
+        const session_unit = b.addTest(.{ .name = "session-content-test", .root_module = session_mod, .use_llvm = use_llvm });
+        session_unit.root_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        const session_run = b.addRunArtifact(session_unit);
+        step.dependOn(&session_run.step);
+        b.step("test-session", "Test session content and navigation without a desktop event loop").dependOn(&session_run.step);
         fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
         const fixture = b.addExecutable(.{ .name = "cleat-integration", .root_module = fixture_mod, .use_llvm = use_llvm });
         const scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });

@@ -98,6 +98,13 @@ pub const Session = struct {
     pub fn resize(self: Session, cols: u16, rows: u16) !void {
         if (!c.cleat_session_resize(self.handle, cols, rows)) return error.ResizeFailed;
     }
+    pub fn scrollViewport(self: Session, kind: u32, delta_rows: i32) !void {
+        var command = std.mem.zeroes(c.cleat_viewport_command);
+        command.kind = kind;
+        command.delta_rows = delta_rows;
+        var result = std.mem.zeroes(c.cleat_viewport_command_result);
+        if (!c.cleat_session_scroll_viewport(self.handle, &command, &result)) return error.ScrollFailed;
+    }
     pub fn reportGeometry(self: Session, geometry: c.cleat_terminal_geometry) !void {
         if (!c.cleat_session_update_geometry(self.handle, &geometry)) return error.GeometryFailed;
     }
