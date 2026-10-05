@@ -1641,12 +1641,12 @@ fn nextVisibleSessionIndex(sessions: []const WmWindow, current_index: usize) ?us
 
 fn compactVisibleZOrder(sessions: []const WmWindow, z_order: []usize) bool {
     var first_visible: usize = 0;
-    while (first_visible < z_order.len and !zOrderEntryVisible(sessions, z_order[first_visible])) : (first_visible += 1) {}
+    while (first_visible < z_order.len and !zOrderEntryActive(sessions, z_order[first_visible])) : (first_visible += 1) {}
 
     var changed = false;
     var scan = first_visible + 1;
     while (scan < z_order.len) : (scan += 1) {
-        if (zOrderEntryVisible(sessions, z_order[scan])) continue;
+        if (zOrderEntryActive(sessions, z_order[scan])) continue;
         const value = z_order[scan];
         var shift = scan;
         while (shift > first_visible) : (shift -= 1) z_order[shift] = z_order[shift - 1];
@@ -1657,8 +1657,12 @@ fn compactVisibleZOrder(sessions: []const WmWindow, z_order: []usize) bool {
     return changed;
 }
 
-fn zOrderEntryVisible(sessions: []const WmWindow, session_index: usize) bool {
-    return session_index < sessions.len and sessionIsVisible(&sessions[session_index]);
+fn zOrderEntryActive(sessions: []const WmWindow, session_index: usize) bool {
+    if (session_index >= sessions.len) return false;
+    const session = &sessions[session_index];
+    // Connecting windows are hidden, but moving them below visible windows
+    // would reverse the requested order when their confirmation arrives.
+    return session.state == .launching or sessionIsVisible(session);
 }
 
 fn bringWindowToFront(z_order: []usize, window_index: usize) void {
@@ -4930,5 +4934,32 @@ test "session opening distinguishes async refusal from established exit" {
                 }
             }
         }
+    }
+}
+
+// A connecting window stays hidden but retains its requested place in the
+// shared order. Generate every order of a running, connecting and exited slot;
+// confirming the connection must not change their relative order.
+test "z order retains connecting slots until confirmation" {
+    const orders = [_][3]usize{ .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 }, .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 } };
+    for (orders) |order| {
+        var windows: [3]WmWindow = undefined;
+        for (&windows, [_]ProducerSessionState{ .running, .launching, .exited }) |*window, state| {
+            window.* = .{ .profile_name = "window", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 24, .cols = 80 }), .upload = .{ .profile = .file_whole }, .state = state, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) } };
+        }
+        var z_order = order;
+        _ = compactVisibleZOrder(&windows, &z_order);
+        var expected: [3]usize = undefined;
+        expected[0] = 2;
+        var next: usize = 1;
+        for (order) |index| if (index != 2) {
+            expected[next] = index;
+            next += 1;
+        };
+        try std.testing.expectEqualDeep(expected, z_order);
+        try std.testing.expect(!sessionIsVisible(&windows[1]));
+        windows[1].state = .running;
+        try std.testing.expect(!compactVisibleZOrder(&windows, &z_order));
+        try std.testing.expectEqualDeep(expected, z_order);
     }
 }
