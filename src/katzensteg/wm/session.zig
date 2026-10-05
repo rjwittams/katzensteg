@@ -4,6 +4,7 @@ const std = @import("std");
 const cleat = @import("cleat");
 const model = @import("session_mirror.zig");
 const c = cleat.c;
+const input = @import("../cleat_input_adapter.zig");
 
 pub const Provider = cleat.Provider;
 pub const pin = cleat.pin;
@@ -19,6 +20,9 @@ pub const Content = struct {
     requested: model.Size,
     closed: bool = false,
     established: bool = false,
+    watching: bool = false,
+    focused: bool = false,
+    input: input.Adapter = .{},
     pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
         const self = try allocator.create(Content);
         errdefer allocator.destroy(self);
@@ -58,6 +62,7 @@ pub const Content = struct {
     }
     pub fn deinit(self: *Content) void {
         self.detach();
+        self.input.deinit(self.allocator);
         self.mirror.deinit();
         self.allocator.destroy(self);
     }
@@ -82,6 +87,23 @@ pub const Content = struct {
             try session.reportGeometry(value);
         }
     }
+    pub fn focus(self: *Content, active: bool) !void {
+        self.focused = active;
+        if (self.session) |session| try self.input.focus(active, session);
+    }
+    pub fn sendBytes(self: *Content, bytes: []const u8, reports_events: bool) !void {
+        if (self.watching) return;
+        if (self.session) |session| try self.input.bytes(self.allocator, bytes, reports_events, session);
+    }
+    pub fn sendPointer(self: *Content, pointer: input.Pointer) !void {
+        if (self.watching or self.mirror.modes.mouse_tracking == .none) return;
+        if (self.session) |session| try session.sendInput(input.mouseEvent(pointer));
+    }
+    pub fn requestControl(self: *Content) !void {
+        if (self.session) |session| {
+            if (!c.cleat_session_take_control(session.handle)) return error.ControlFailed;
+        }
+    }
     /// Called only after a provider wake (and once after attachment). Copies
     /// every retained byte before releasing the provider's render borrow.
     pub fn pump(self: *Content) !bool {
@@ -92,7 +114,11 @@ pub const Content = struct {
         // A role grant also confirms acceptance when a short program exits
         // before the owner observes the intermediate streaming state.
         self.established = self.established or state == c.CLEAT_SESSION_STREAMING or c.cleat_session_role(session.handle) != c.CLEAT_ROLE_UNKNOWN;
-        var update = session.pull() orelse return false;
+        const watching = c.cleat_session_role(session.handle) == c.CLEAT_ROLE_WATCHER;
+        const role_changed = watching != self.watching;
+        self.watching = watching;
+        if (role_changed) try self.input.focus(!watching and self.focused, session);
+        var update = session.pull() orelse return role_changed;
         defer session.release(&update);
         try self.apply(update);
         _ = c.cleat_session_mark_observed(session.handle, update.render_generation);

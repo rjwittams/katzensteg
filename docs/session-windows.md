@@ -116,7 +116,7 @@ session for all of them, until the window grows or detaches.
 If another client takes exclusive control, cleat demotes the WM's attachment to
 a watcher and drops its input. The chrome marks the window as watching, and a
 command in the Ctrl-] menu asks cleat for control again. Control is not retaken
-automatically ([#95](https://github.com/rjwittams/katzensteg/issues/95)).
+automatically; Ctrl-] then `r` asks for control ([#95](https://github.com/rjwittams/katzensteg/issues/95)).
 
 ### Closing and ending
 

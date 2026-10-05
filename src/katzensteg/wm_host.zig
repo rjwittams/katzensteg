@@ -874,7 +874,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var launch_prompt = std.ArrayList(u8).empty;
     defer launch_prompt.deinit(allocator);
     while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
-        syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
+        syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt or !command_input.terminal_focused) null else focused_index);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
         for (sessions[0..initialized]) |*session| {
@@ -887,9 +887,12 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             wm_events.session_ready = false;
             var changed = false;
             var failed_open: ?[]const u8 = null;
+            var role_changed = false;
             for (sessions[0..initialized]) |*session| {
                 if (session.content != .session or session.retired) continue;
+                const was_watching = session.content.session.watching;
                 changed = try session.content.session.pump() or changed;
+                role_changed = role_changed or was_watching != session.content.session.watching;
                 switch (sessionOpening(session)) {
                     .pending => {},
                     .opened => {
@@ -909,7 +912,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 if (session.content.session.ended()) changed = true;
             }
             const lifecycle = try reconcileExitedSessions(sessions[0..initialized], z_order[0..initialized], &focused_index, &mouse_state, &event_log, &logger);
-            if (lifecycle.changed or failed_open != null) {
+            if (lifecycle.changed or failed_open != null or role_changed) {
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 // Focus and viewport events must not overwrite an async refusal.
                 if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
@@ -1111,7 +1114,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
 
                 if (input.focus_changed) {
                     command_input.focusByClick();
-                    syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt) null else focused_index);
+                    syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt or !command_input.terminal_focused) null else focused_index);
                     try event_log.record(.focus_changed, sessions[focused_index].profile_name);
                     try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
@@ -1149,6 +1152,10 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                             try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                         }
                         try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                    },
+                    .request_control => {
+                        if (initialized > 0 and sessions[focused_index].content == .session)
+                            try sessions[focused_index].content.session.requestControl();
                     },
                     .forward => {
                         if (initialized == 0) continue;
@@ -2305,13 +2312,36 @@ fn syncInputFocus(sessions: []WmWindow, focused: ?usize) void {
         if ((!session.input_focus_initialized or session.input_was_focused != active) and session.producer.channel.controlFile() != null) {
             _ = tryWriteInputControl(session.producer.channel.writer(), if (active) "\x1b[I" else "\x1b[O");
         }
+        if (session.content == .session and (!session.input_focus_initialized or session.input_was_focused != active)) {
+            session.content.session.focus(active) catch {};
+        }
         session.input_was_focused = active;
         session.input_focus_initialized = true;
     }
 }
 
 fn forwardInputToSession(session: *WmWindow, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
-    if (session.content == .session) return;
+    if (session.content == .session) {
+        if (!sessionIsVisible(session)) return;
+        const content = session.content.session;
+        if (parseSgrMouseAt(bytes, 0, terminal)) |pointer| {
+            if (comptime cleat_enabled) {
+                const area = contentRectForOuter(session.window.outer);
+                const width = if (terminal.pixelGridKnown()) @as(f32, @floatFromInt(terminal.pixel_width)) / @as(f32, @floatFromInt(terminal.cols)) else 0;
+                const height = if (terminal.pixelGridKnown()) @as(f32, @floatFromInt(terminal.pixel_height)) / @as(f32, @floatFromInt(terminal.rows)) else 0;
+                try content.sendPointer(.{
+                    .button = pointer.button,
+                    .pressed = pointer.pressed,
+                    .col = @intCast(@max(0, pointer.col - area.col)),
+                    .row = @intCast(@max(0, pointer.row - area.row)),
+                    .x = if (pointer.units == .pixel) @as(f32, @floatFromInt(pointer.x - terminal.pixel_origin)) - @as(f32, @floatFromInt(area.col - 1)) * width else @as(f32, @floatFromInt(pointer.col - area.col)) * width,
+                    .y = if (pointer.units == .pixel) @as(f32, @floatFromInt(pointer.y - terminal.pixel_origin)) - @as(f32, @floatFromInt(area.row - 1)) * height else @as(f32, @floatFromInt(pointer.row - area.row)) * height,
+                });
+            }
+        } else try content.sendBytes(bytes, keyboard_flags & 2 != 0);
+        try events.record(.input_sent, session.profile_name);
+        return;
+    }
     if (!sessionIsVisible(session) or !session.presentation_status.input_supported) return;
     if (session.producer.channel.controlFile() == null) return;
     if (keyboard_flags != 0 and !session.keyboard_flags_sent) {
@@ -2484,6 +2514,7 @@ const InputAction = union(enum) {
     start_launch,
     focus_next,
     close_focused,
+    request_control,
     forward,
     quit,
     window: WindowAction,
@@ -2539,6 +2570,7 @@ fn desktopCommandAction(action: command_binding.Command) InputAction {
         .quit_host => .quit,
         .launch => .start_launch,
         .focus_next => .focus_next,
+        .request_control => .request_control,
         .move_left => .{ .window = .move_left },
         .move_down => .{ .window = .move_down },
         .move_up => .{ .window = .move_up },
@@ -2757,10 +2789,15 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
         if (session.content == .producer and (redraw_state.cover_policy.mode == .band or has_session_cells) and session.placeholder_image_id == null) {
             try renderContentBackground(writer, session, terminal, redraw_state.cover_policy.paintedBackground());
         }
+        var title_buffer: [256]u8 = undefined;
+        const title = if (session.content == .session and session.content.session.watching)
+            std.fmt.bufPrint(&title_buffer, "{s} [watching]", .{session.profile_name}) catch session.profile_name
+        else
+            session.profile_name;
         try renderChrome(writer, .{
             .background = if (session.placeholder_image_id != null) null else redraw_state.cover_policy.paintedBackground() orelse cover.Color{ 0, 0, 0 },
             .outer = session.window.outer,
-            .title = session.profile_name,
+            .title = title,
             .focused = session_index == focused_index,
             .terminal = windowAreaForTerminal(terminal),
         });

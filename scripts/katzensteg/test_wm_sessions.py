@@ -209,6 +209,55 @@ class SessionWindows(unittest.TestCase):
         self.until(wm, lambda s: "launch failed" in self.text(s, 40))
         self.assertIn("producer", self.text(wm[3], 2))
         self.assertNotIn("missing-session", self.text(wm[3], 3))
+    def test_session_keys_paste_and_interrupt_reach_program(self):
+        # Issue #118: type a command through the WM and observe its result in
+        # the mirror. Ctrl-C must interrupt a running command in that session.
+        self.cleat("launch", "wm-input", "--cmd", "exec /bin/sh")
+        wm = self.start({"KATZENSTEG_WM_ATTACH": "wm-input"})
+        self.until(wm, lambda s: "wm-input" in self.text(s, 2))
+        os.write(wm[1], b"printf 'INPUT_%s\\n' OK\r")
+        self.until(wm, lambda s: any("INPUT_OK" in self.text(s, row) for row in range(4, 38)))
+        # Paste reaches the program through the same WM route.
+        os.write(wm[1], b"\x1b[200~printf 'PASTE_%s\\n' OK\x1b[201~\r")
+        self.until(wm, lambda s: any("PASTE_OK" in self.text(s, row) for row in range(4, 38)))
+        os.write(wm[1], b"trap 'echo INTERRUPTED' INT; printf 'RUN_%s\\n' READY; sleep 30\r")
+        self.until(wm, lambda s: any(self.text(s, row).strip() == "RUN_READY" for row in range(4, 38)))
+        os.write(wm[1], b"\x03")
+        self.until(wm, lambda s: any(self.text(s, row).strip() == "INTERRUPTED" for row in range(4, 38)))
+
+    def test_held_key_is_released_when_menu_arms(self):
+        # A real raw-mode program enables kitty events and focus reporting.
+        # Arming the WM menu must emit focus lost and the held key's release;
+        # cancelling returns focus, while the outer release stays consumed.
+        program = self.root / "input.py"
+        received = self.root / "input.received"
+        program.write_text("""import os, pathlib, select, sys, tty
+tty.setraw(0)
+os.write(1, b'\\x1b[>3u\\x1b[?1004hKEYS_READY')
+root = pathlib.Path(sys.argv[1])
+with (root / 'input.received').open('ab', buffering=0) as output:
+    while not (root / 'end').exists():
+        if select.select([0], [], [], .02)[0]:
+            output.write(os.read(0, 4096))
+""")
+        self.cleat("launch", "wm-keys", "--cmd", f"{sys.executable} {program} {self.root}")
+        wm = self.start({"KATZENSTEG_WM_ATTACH": "wm-keys"})
+        self.until(wm, lambda s: "KEYS_READY" in self.text(s, 4))
+        os.write(wm[1], b"\x1b[?3u\x1b[119;5:1u\x1d")
+        deadline = time.monotonic() + 5
+        while not received.exists() or b"\x1b[119;5:3u" not in received.read_bytes():
+            self.pump(wm)
+            self.assertLess(time.monotonic(), deadline, received.read_bytes() if received.exists() else None)
+        data = received.read_bytes()
+        self.assertIn(b"\x1b[119;5u", data)
+        self.assertIn(b"\x1b[O", data)
+        self.assertLess(data.index(b"\x1b[O"), data.index(b"\x1b[119;5:3u"))
+        os.write(wm[1], b"\x1b[27u\x1b[119;5:3u")
+        deadline = time.monotonic() + 5
+        while not received.read_bytes().endswith(b"\x1b[I"):
+            self.pump(wm)
+            self.assertLess(time.monotonic(), deadline, received.read_bytes())
+        self.assertEqual(received.read_bytes().count(b"\x1b[119;5:3u"), 1)
 
     def test_real_sdl_producer_and_session_in_both_orders(self):
         if not REAL_PRODUCER:

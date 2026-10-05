@@ -33,7 +33,7 @@ pub const Snapshot = struct {
         if (self.desktop and self.hint) {
             writer.writeAll(" q Quit | Esc Return | Unknown key") catch {};
         } else if (self.desktop) {
-            writer.print(" q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^{c} Literal", .{std.ascii.toUpper(self.binding)}) catch {};
+            writer.print(" q Quit | Esc Return | n Launch | r Control | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^{c} Literal", .{std.ascii.toUpper(self.binding)}) catch {};
         } else if (self.quitting) {
             writer.writeAll(" Quitting... waiting for app") catch {};
         } else {
@@ -95,7 +95,7 @@ test "menu text clips at each terminal width and pads the whole row" {
         .{ Snapshot{}, " q Quit | Esc Return | ^] Literal" },
         .{ Snapshot{ .hint = true }, " q Quit | Esc Return | ^] Literal | Unknown key" },
         .{ Snapshot{ .quitting = true }, " Quitting... waiting for app" },
-        .{ Snapshot{ .desktop = true }, " q Quit | Esc Return | n Launch | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^] Literal" },
+        .{ Snapshot{ .desktop = true }, " q Quit | Esc Return | n Launch | r Control | Tab Next | Q Quit WM | hjkl Move | HJKL Resize | c/t Layout | ^] Literal" },
         .{ Snapshot{ .desktop = true, .hint = true }, " q Quit | Esc Return | Unknown key" },
     };
     inline for (cases) |case| {
