@@ -219,7 +219,7 @@ class SessionWindows(unittest.TestCase):
         # Issue #118: type a command through the WM and observe its result in
         # the mirror. Ctrl-C must interrupt a running command in that session.
         self.cleat("launch", "wm-input", "--cmd", "exec /bin/sh")
-        wm = self.start({"KATZENSTEG_WM_ATTACH": "wm-input"})
+        wm = self.start(requests=("--attach", "wm-input"))
         self.until(wm, lambda s: "wm-input" in self.text(s, 2))
         os.write(wm[1], b"printf 'INPUT_%s\\n' OK\r")
         self.until(wm, lambda s: any("INPUT_OK" in self.text(s, row) for row in range(4, 38)))
@@ -249,7 +249,7 @@ with (root / 'input.received').open('ab', buffering=0) as output:
             output.write(os.read(0, 4096))
 """)
         self.cleat("launch", "wm-keys", "--cmd", f"{sys.executable} {program} {self.root}")
-        wm = self.start({"KATZENSTEG_WM_ATTACH": "wm-keys"})
+        wm = self.start(requests=("--attach", "wm-keys"))
         self.until(wm, lambda s: "KEYS_READY" in self.text(s, 4))
         os.write(wm[1], b"\x1b[?3u\x1b[119;5:1u\x1d")
         deadline = time.monotonic() + 5
