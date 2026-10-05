@@ -82,4 +82,49 @@ pub fn main(init: std.process.Init) !void {
     try waitText(init.io, shell_content, "RUN_READY");
     try shell_content.sendBytes("\x03", false);
     try waitText(init.io, shell_content, "INTERRUPTED");
+    // History belongs to cleat. Exercise the public WM Content API against
+    // real PTY output: both wheel and key navigation expose earlier mirror
+    // lines, and typing immediately after scrolling restores the live view.
+    const history = try session.Content.create(init.gpa, provider, "stty -echo; i=1; while [ $i -le 20 ]; do printf 'HISTORY_%02d\\n' $i; i=$((i+1)); done; printf 'HISTORY_READY\\n'; read line; printf 'TYPED_%s\\n' \"$line\"; sleep 30", 40, 6, null, null);
+    defer history.deinit();
+    try waitText(init.io, history, "HISTORY_READY");
+    const wheel = @import("cleat_input_adapter.zig").Pointer{ .button = 64, .pressed = true, .col = 0, .row = 0, .x = 0, .y = 0 };
+    try history.sendPointer(wheel);
+    try waitText(init.io, history, "HISTORY_14");
+    if (!history.mirror.scrolled_back) return error.ExpectedScrollback;
+    try history.sendBytes("\x1b[6;2~", false);
+    try waitText(init.io, history, "HISTORY_READY");
+    if (history.mirror.scrolled_back) return error.ExpectedBottom;
+    try history.sendBytes("\x1b[5;2~", false);
+    try waitText(init.io, history, "HISTORY_11");
+    if (!history.mirror.scrolled_back) return error.ExpectedScrollback;
+    try history.sendBytes("x", false);
+    try waitText(init.io, history, "HISTORY_READY");
+    if (history.mirror.scrolled_back) return error.ExpectedBottom;
+    // No render pump between wheel and typing: snap-back must not depend on
+    // the mirror having observed the viewport transition yet.
+    try history.sendPointer(wheel);
+    try history.sendBytes("y\r", false);
+    try waitText(init.io, history, "TYPED_xy");
+    if (history.mirror.scrolled_back) return error.ExpectedBottom;
+
+    // A real raw-mode program enables SGR mouse tracking. The wheel must
+    // arrive as program bytes, even with a modifier, without moving history.
+    const mouse = try session.Content.create(init.gpa, provider, "python3 -c 'import os,tty; tty.setraw(0); os.write(1,b\"\\x1b[?1000h\\x1b[?1006hMOUSE_READY\"); data=os.read(0,64); os.write(1,b\"MOUSE_BYTES_\"+data.hex().encode()); import time; time.sleep(30)'", 80, 6, null, null);
+    defer mouse.deinit();
+    try waitText(init.io, mouse, "MOUSE_READY");
+    if (mouse.mirror.modes.mouse_tracking == .none) return error.ExpectedMouseTracking;
+    var modified_wheel = wheel;
+    modified_wheel.button |= 8;
+    try mouse.sendPointer(modified_wheel);
+    try waitText(init.io, mouse, "MOUSE_BYTES_1b5b3c37323b313b314d");
+    if (mouse.mirror.scrolled_back) return error.ExpectedBottom;
+
+    // On the alternate screen Shift+PageUp belongs to the program.
+    const alternate = try session.Content.create(init.gpa, provider, "python3 -c 'import os,tty; tty.setraw(0); os.write(1,b\"\\x1b[?1049hALT_READY\"); data=os.read(0,64); os.write(1,b\"ALT_BYTES_\"+data.hex().encode()); import time; time.sleep(30)'", 80, 6, null, null);
+    defer alternate.deinit();
+    try waitText(init.io, alternate, "ALT_READY");
+    if (!alternate.mirror.modes.alternate_screen) return error.ExpectedAlternate;
+    try alternate.sendBytes("\x1b[5;2~", false);
+    try waitText(init.io, alternate, "ALT_BYTES_1b5b353b327e");
 }

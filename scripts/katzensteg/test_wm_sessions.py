@@ -133,6 +133,45 @@ class SessionWindows(unittest.TestCase):
     def title_visible(self, screen):
         return "wm-test" in self.text(screen, 2)
 
+    def test_scrollback_wheel_keys_title_and_typing(self):
+        # #120: real PTY history reaches the painted WM cells; the title follows
+        # viewport state, and input restores the bottom before reaching the PTY.
+        command = (f"stty -echo; printf HISTORY_WAIT; while test ! -e {self.root}/history-go; do sleep .02; done; "
+                   "i=1; while [ $i -le 100 ]; do printf 'HISTORY_%03d\\n' $i; i=$((i+1)); done; "
+                   "printf 'HISTORY_READY\\n'; read line; printf 'TYPED_%s\\n' \"$line\"; sleep 30")
+        wm = self.start(requests=("--term", command))
+        self.until(wm, lambda s: "HISTORY_WAIT" in self.content_text(s, 4))
+        (self.root / "history-go").touch()
+        visible = lambda s, marker: any(marker in self.content_text(s, row) for row in range(4, 39))
+        self.until(wm, lambda s: visible(s, "HISTORY_READY"))
+        bottom_first = self.content_text(wm[3], 4).strip()
+        self.assertTrue(bottom_first.startswith("HISTORY_"), bottom_first)
+        first_number = int(bottom_first.removeprefix("HISTORY_"))
+        os.write(wm[1], b"\x1b[<64;2;4M")
+        self.until(wm, lambda s: f"HISTORY_{first_number - 3:03d}" in self.content_text(s, 4) and "[scrollback]" in self.text(s, 2))
+        os.write(wm[1], b"\x1b[6;2~")
+        self.until(wm, lambda s: visible(s, "HISTORY_READY") and "[scrollback]" not in self.text(s, 2))
+        os.write(wm[1], b"\x1b[5;2~")
+        self.until(wm, lambda s: "[scrollback]" in self.text(s, 2) and self.content_text(s, 4).strip() != bottom_first)
+        self.assertFalse(visible(wm[3], "HISTORY_READY"))
+        os.write(wm[1], b"x")
+        self.until(wm, lambda s: visible(s, "HISTORY_READY") and "[scrollback]" not in self.text(s, 2))
+        os.write(wm[1], b"\x1b[<64;2;4M" + b"y\r")
+        self.until(wm, lambda s: visible(s, "TYPED_xy") and "[scrollback]" not in self.text(s, 2))
+
+    def test_tracking_program_receives_modified_wheel(self):
+        # No modifier bypasses mouse tracking: the program receives a real
+        # SGR wheel report, which it prints back as hex into the WM content.
+        command = ("python3 -c 'import os,tty; tty.setraw(0); "
+                   "os.write(1,b\"\\x1b[?1000h\\x1b[?1006hMOUSE_READY\"); "
+                   "data=os.read(0,64); os.write(1,b\"MOUSE_BYTES_\"+data.hex().encode()); "
+                   "import time; time.sleep(30)'")
+        wm = self.start(requests=("--term", command))
+        self.until(wm, lambda s: "MOUSE_READY" in self.content_text(s, 4))
+        os.write(wm[1], b"\x1b[<72;2;4M")
+        self.until(wm, lambda s: "MOUSE_BYTES_1b5b3c37323b313b314d" in self.content_text(s, 4))
+        self.assertNotIn("[scrollback]", self.text(wm[3], 2))
+
     def test_text_close_detaches_program_exit_closes_and_quit_detaches(self):
         wm = self.start()
         # Attach paints the session's text inside the shared window content

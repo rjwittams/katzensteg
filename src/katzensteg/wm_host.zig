@@ -891,8 +891,9 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
             for (sessions[0..initialized]) |*session| {
                 if (session.content != .session or session.retired) continue;
                 const was_watching = session.content.session.watching;
+                const was_scrolled_back = session.content.session.mirror.scrolled_back;
                 changed = try session.content.session.pump() or changed;
-                chrome_changed = chrome_changed or was_watching != session.content.session.watching;
+                chrome_changed = chrome_changed or was_watching != session.content.session.watching or was_scrolled_back != session.content.session.mirror.scrolled_back;
                 switch (sessionOpening(session)) {
                     .pending => {},
                     .opened => {
@@ -2794,8 +2795,12 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
             try renderContentBackground(writer, session, terminal, redraw_state.cover_policy.paintedBackground());
         }
         var title_buffer: [256]u8 = undefined;
-        const title = if (session.content == .session and session.content.session.watching)
-            std.fmt.bufPrint(&title_buffer, "{s} [watching]", .{session.profile_name}) catch session.profile_name
+        const title = if (session.content == .session)
+            std.fmt.bufPrint(&title_buffer, "{s}{s}{s}", .{
+                session.profile_name,
+                if (session.content.session.watching) " [watching]" else "",
+                if (session.content.session.mirror.scrolled_back) " [scrollback]" else "",
+            }) catch session.profile_name
         else
             session.profile_name;
         try renderChrome(writer, .{
