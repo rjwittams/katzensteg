@@ -43,6 +43,7 @@ const Recorder = struct {
     count: usize = 0,
     inputs: usize = 0,
     pub fn scrollViewport(self: *@This(), kind: u32, delta: i32) !void {
+        std.debug.assert(self.count < self.commands.len);
         self.commands[self.count] = .{ .kind = kind, .delta = delta };
         self.count += 1;
     }

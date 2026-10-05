@@ -140,6 +140,8 @@ pub const Content = struct {
         try self.navigation.send(event, self.mirror.modes.alternate_screen, @intCast(self.requested.rows), session);
     }
     pub fn sendPointer(self: *Content, pointer: input.Pointer) !void {
+        // Viewport navigation is local to this attachment, including watchers.
+        // Watchers still cannot send tracked pointer events to the program.
         if (self.mirror.modes.mouse_tracking == .none) {
             if (self.session) |session| try self.navigation.pointer(pointer, session);
             return;
