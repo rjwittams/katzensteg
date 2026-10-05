@@ -22,6 +22,7 @@ pub const Model = struct {
     hint: bool = false,
     prompt: bool = false,
     keyboard_flags: u32 = 0,
+    terminal_focused: bool = true,
     pending: std.ArrayList(u8) = .empty,
     offset: usize = 0,
     paste: bool = false,
@@ -172,6 +173,11 @@ pub const Model = struct {
                 if (!self.drop_paste) return .{ .forward = token };
                 continue;
             }
+            if (std.mem.eql(u8, token, "\x1b[I") or std.mem.eql(u8, token, "\x1b[O")) {
+                self.terminal_focused = token[2] == 'I';
+                if (!self.terminal_focused) self.blur();
+                return .{ .focus = self.terminal_focused and !self.armed and !self.prompt };
+            }
             if (std.mem.startsWith(u8, token, "\x1b[<")) return .{ .pointer = token };
             if (decode(token, self.keyboard_flags & 2 != 0)) |report| switch (report) {
                 .protocol_flags => |flags| {
@@ -237,7 +243,7 @@ pub const Model = struct {
 
 /// Frame complete terminal reports before routing, including split reads. A
 /// standalone Escape is resolved by the host's idle tick; no prefix timeout.
-fn tokenLen(bytes: []const u8, flush_escape: bool) ?usize {
+pub fn tokenLen(bytes: []const u8, flush_escape: bool) ?usize {
     if (bytes[0] == 0x1b) {
         if (bytes.len == 1) return if (flush_escape) 1 else null;
         switch (bytes[1]) {
@@ -265,7 +271,7 @@ fn tokenLen(bytes: []const u8, flush_escape: bool) ?usize {
     return if (bytes.len >= len) len else null;
 }
 
-fn decode(bytes: []const u8, reports_events: bool) ?keys.Report {
+pub fn decode(bytes: []const u8, reports_events: bool) ?keys.Report {
     if (std.mem.startsWith(u8, bytes, "\x1b[") or bytes[0] == 0x9b) {
         const start: usize = if (bytes[0] == 0x9b) 1 else 2;
         return keys.decodeCsi(bytes[start .. bytes.len - 1], bytes[bytes.len - 1], reports_events);
@@ -403,4 +409,33 @@ test "desktop chrome owns drags through menu and content without resuming the ap
     try std.testing.expectEqual(PointerRoute.consume, model.routePointer(32, true, null, true));
     try std.testing.expectEqual(PointerRoute.consume, model.routePointer(0, false, null, true));
     try std.testing.expectEqual(PointerRoute.window, model.routePointer(0, true, null, true));
+}
+
+// Leaving the outer terminal blurs held keys; return must not reopen input
+// while the WM menu owns focus. Late repeats and releases stay consumed.
+test "outer focus respects menu ownership and releases barrier" {
+    var model = Model.init(std.testing.allocator, ']');
+    defer model.deinit();
+    try model.feed("\x1b[119;1:1u\x1b[O\x1b[I\x1b[119;1:2u\x1b[119;1:3u\x1d\x1b[O\x1b[I");
+    try std.testing.expect(model.next(false).? == .forward);
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expect(model.next(false).?.focus);
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expect(model.next(false) == null);
+    try std.testing.expect(model.terminal_focused and model.armed);
+}
+
+// A control request is a desktop menu command, so it cannot steal plain `r`
+// from the program and closes the menu before returning application focus.
+test "control request requires the desktop attention menu" {
+    var model = Model.init(std.testing.allocator, ']');
+    defer model.deinit();
+    try model.feed("r\x1dr");
+    try std.testing.expectEqualStrings("r", model.next(false).?.forward);
+    try std.testing.expect(!model.next(false).?.focus);
+    try std.testing.expectEqual(binding.Command.request_control, model.next(false).?.command);
+    try std.testing.expect(model.next(false).?.focus);
+    try std.testing.expect(model.next(false) == null);
 }

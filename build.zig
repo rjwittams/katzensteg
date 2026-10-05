@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run.step);
         const fixture_mod = b.createModule(.{ .root_source_file = b.path("src/cleat/integration.zig"), .target = target, .optimize = optimize, .link_libc = true });
         fixture_mod.addImport("cleat", mod);
-        const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/wm/session.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_integration_content.zig"), .target = target, .optimize = optimize, .link_libc = true });
         session_mod.addImport("cleat", mod);
         fixture_mod.addImport("wm_session", session_mod);
         fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
@@ -69,6 +69,13 @@ pub fn build(b: *std.Build) void {
         const scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });
         scenario.addArtifactArg(fixture);
         step.dependOn(&scenario.step);
+        const input_fixture_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_input_integration.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        input_fixture_mod.addImport("cleat", mod);
+        input_fixture_mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        const input_fixture = b.addExecutable(.{ .name = "session-input-integration", .root_module = input_fixture_mod, .use_llvm = use_llvm });
+        const input_scenario = b.addSystemCommand(&.{ "python3", "scripts/katzensteg/test_cleat.py", "--binary", b.pathJoin(&.{ prefix, "bin", "cleat" }), "--fixture" });
+        input_scenario.addArtifactArg(input_fixture);
+        step.dependOn(&input_scenario.step);
     }
     const default_preload_options = b.addOptions();
     default_preload_options.addOption(bool, "use_c_real_sdl", target.result.os.tag == .linux);

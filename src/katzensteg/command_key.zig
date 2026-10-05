@@ -35,6 +35,7 @@ pub const Command = enum {
     quit_host,
     launch,
     focus_next,
+    request_control,
     move_left,
     move_down,
     move_up,
@@ -60,6 +61,7 @@ pub fn decode(binding: u8, key: native.Key, context: Context) Command {
     return switch (key.codepoint() orelse return .unknown) {
         'Q' => .quit_host,
         'n' => .launch,
+        'r' => .request_control,
         'h' => .move_left,
         'j' => .move_down,
         'k' => .move_up,

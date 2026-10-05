@@ -4,6 +4,7 @@ const std = @import("std");
 const cleat = @import("cleat");
 const model = @import("session_mirror.zig");
 const c = cleat.c;
+const input = @import("../cleat_input_adapter.zig");
 
 pub const Provider = cleat.Provider;
 pub const pin = cleat.pin;
@@ -19,6 +20,15 @@ pub const Content = struct {
     requested: model.Size,
     closed: bool = false,
     established: bool = false,
+    watching: bool = false,
+    focused: bool = false,
+    input: input.Adapter = .{},
+    // Input can arrive as soon as chrome appears, before the async role grant.
+    pending_input: std.ArrayList(PendingInput) = .empty,
+    const PendingInput = union(enum) {
+        bytes: struct { value: []u8, reports_events: bool },
+        focus: bool,
+    };
     pub fn attach(allocator: std.mem.Allocator, provider: Provider, id: []const u8, cols: u16, rows: u16) !*Content {
         const self = try allocator.create(Content);
         errdefer allocator.destroy(self);
@@ -58,6 +68,9 @@ pub const Content = struct {
     }
     pub fn deinit(self: *Content) void {
         self.detach();
+        self.clearPendingInput();
+        self.pending_input.deinit(self.allocator);
+        self.input.deinit(self.allocator);
         self.mirror.deinit();
         self.allocator.destroy(self);
     }
@@ -82,6 +95,58 @@ pub const Content = struct {
             try session.reportGeometry(value);
         }
     }
+    pub fn focus(self: *Content, active: bool) !void {
+        self.focused = active;
+        if (self.session) |session| {
+            const role = c.cleat_session_role(session.handle);
+            try self.flushPendingInput(session, role);
+            if (role == c.CLEAT_ROLE_UNKNOWN) {
+                try self.pending_input.append(self.allocator, .{ .focus = active });
+            } else try self.input.focus(active, session);
+        }
+    }
+    pub fn sendBytes(self: *Content, bytes: []const u8, reports_events: bool) !void {
+        if (self.session) |session| {
+            const role = c.cleat_session_role(session.handle);
+            try self.flushPendingInput(session, role);
+            switch (role) {
+                c.CLEAT_ROLE_UNKNOWN => {
+                    const owned = try self.allocator.dupe(u8, bytes);
+                    errdefer self.allocator.free(owned);
+                    try self.pending_input.append(self.allocator, .{ .bytes = .{ .value = owned, .reports_events = reports_events } });
+                },
+                c.CLEAT_ROLE_CONTROLLER => try self.input.bytes(self.allocator, bytes, reports_events, session),
+                else => {},
+            }
+        }
+    }
+    fn clearPendingInput(self: *Content) void {
+        for (self.pending_input.items) |event| if (event == .bytes) self.allocator.free(event.bytes.value);
+        self.pending_input.clearRetainingCapacity();
+    }
+    fn flushPendingInput(self: *Content, session: cleat.Session, role: u32) !void {
+        if (role == c.CLEAT_ROLE_UNKNOWN) return;
+        defer self.clearPendingInput();
+        if (role != c.CLEAT_ROLE_CONTROLLER) return;
+        for (self.pending_input.items) |event| switch (event) {
+            .bytes => |bytes| try self.input.bytes(self.allocator, bytes.value, bytes.reports_events, session),
+            .focus => |active| try self.input.focus(active, session),
+        };
+    }
+    pub fn sendPointer(self: *Content, pointer: input.Pointer) !void {
+        if (self.watching or self.mirror.modes.mouse_tracking == .none) return;
+        if (self.session) |session| {
+            const role = c.cleat_session_role(session.handle);
+            if (role != c.CLEAT_ROLE_CONTROLLER) return;
+            try self.flushPendingInput(session, role);
+            try session.sendInput(input.mouseEvent(pointer));
+        }
+    }
+    pub fn requestControl(self: *Content) !void {
+        if (self.session) |session| {
+            if (!c.cleat_session_take_control(session.handle)) return error.ControlFailed;
+        }
+    }
     /// Called only after a provider wake (and once after attachment). Copies
     /// every retained byte before releasing the provider's render borrow.
     pub fn pump(self: *Content) !bool {
@@ -92,7 +157,13 @@ pub const Content = struct {
         // A role grant also confirms acceptance when a short program exits
         // before the owner observes the intermediate streaming state.
         self.established = self.established or state == c.CLEAT_SESSION_STREAMING or c.cleat_session_role(session.handle) != c.CLEAT_ROLE_UNKNOWN;
-        var update = session.pull() orelse return false;
+        const role = c.cleat_session_role(session.handle);
+        try self.flushPendingInput(session, role);
+        const watching = if (role == c.CLEAT_ROLE_UNKNOWN) self.watching else role == c.CLEAT_ROLE_WATCHER;
+        const role_changed = watching != self.watching;
+        self.watching = watching;
+        if (role_changed) try self.input.focus(!watching and self.focused, session);
+        var update = session.pull() orelse return role_changed;
         defer session.release(&update);
         try self.apply(update);
         _ = c.cleat_session_mark_observed(session.handle, update.render_generation);
