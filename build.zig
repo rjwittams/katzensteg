@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
         const session_mod = b.createModule(.{ .root_source_file = b.path("src/katzensteg/session_integration_content.zig"), .target = target, .optimize = optimize, .link_libc = true });
         session_mod.addImport("cleat", mod);
         session_mod.addImport("termscene", termscene_mod);
+        session_mod.addImport("platform", b.modules.get("platform").?);
         fixture_mod.addImport("wm_session", session_mod);
         const session_unit = b.addTest(.{ .name = "session-content-test", .root_module = session_mod, .use_llvm = use_llvm });
         session_unit.root_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
