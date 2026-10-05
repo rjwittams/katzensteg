@@ -145,11 +145,21 @@ const Recorder = struct {
     events: [300]c.cleat_input_event = undefined,
     count: usize = 0,
     text: [300][128]u8 = undefined,
+    generated: [300][128]u8 = undefined,
+    physical: [300][64]u8 = undefined,
     fn sendInput(self: *Recorder, event: c.cleat_input_event) !void {
         self.events[self.count] = event;
         if (event.text_len > 0) {
             @memcpy(self.text[self.count][0..event.text_len], event.text[0..event.text_len]);
             self.events[self.count].text = &self.text[self.count];
+        }
+        if (event.generated_text_len > 0) {
+            @memcpy(self.generated[self.count][0..event.generated_text_len], event.generated_text[0..event.generated_text_len]);
+            self.events[self.count].generated_text = &self.generated[self.count];
+        }
+        if (event.physical_key_len > 0) {
+            @memcpy(self.physical[self.count][0..event.physical_key_len], event.physical_key[0..event.physical_key_len]);
+            self.events[self.count].physical_key = &self.physical[self.count];
         }
         self.count += 1;
     }
@@ -290,6 +300,9 @@ test "associated text survives projection and releases pair by position" {
     try std.testing.expectEqualStrings("Z", event.generated_text[0..event.generated_text_len]);
     try std.testing.expectEqualStrings("KeyW", event.physical_key[0..event.physical_key_len]);
     try adapter.key(decoded, &recorder);
+    decoded.text_buf[0] = 'X';
+    try std.testing.expectEqualStrings("Z", recorder.events[0].generated_text[0..recorder.events[0].generated_text_len]);
+    try std.testing.expectEqualStrings("KeyW", recorder.events[0].physical_key[0..recorder.events[0].physical_key_len]);
     try adapter.key(decoded, &recorder); // Duplicate down must not add another held key.
     decoded.key = native.Key.character('Z');
     decoded.key.code = try native.Name.init("KeyW");

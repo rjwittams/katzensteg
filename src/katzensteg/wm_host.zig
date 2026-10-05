@@ -1155,7 +1155,9 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     },
                     .request_control => {
                         if (initialized > 0 and sessions[focused_index].content == .session)
-                            try sessions[focused_index].content.session.requestControl();
+                            sessions[focused_index].content.session.requestControl() catch |err| {
+                                logger.writeFmtScoped(.warn, .wm, "session control request failed profile={s}: {s}", .{ sessions[focused_index].profile_name, @errorName(err) });
+                            };
                     },
                     .forward => {
                         if (initialized == 0) continue;
