@@ -148,6 +148,10 @@ const Recorder = struct {
     generated: [300][128]u8 = undefined,
     physical: [300][64]u8 = undefined,
     fn sendInput(self: *Recorder, event: c.cleat_input_event) !void {
+        std.debug.assert(self.count < self.events.len);
+        std.debug.assert(event.text_len <= self.text[0].len);
+        std.debug.assert(event.generated_text_len <= self.generated[0].len);
+        std.debug.assert(event.physical_key_len <= self.physical[0].len);
         self.events[self.count] = event;
         if (event.text_len > 0) {
             @memcpy(self.text[self.count][0..event.text_len], event.text[0..event.text_len]);
