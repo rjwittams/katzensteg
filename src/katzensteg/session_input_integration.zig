@@ -76,7 +76,9 @@ pub fn main(init: std.process.Init) !void {
     try shell_content.sendBytes("\x1b[201~", false);
     try shell_content.sendBytes("\r", false);
     try waitText(init.io, shell_content, "PASTE_OK");
-    try shell_content.sendBytes("trap 'echo INTERRUPTED' INT; printf 'RUN_%s\\n' READY; sleep 30\r", false);
+    // The complete marker never appears in command echo; only the INT trap
+    // can produce it. Suppressing Ctrl-C must therefore time out.
+    try shell_content.sendBytes("trap 'printf \"INT%s\\n\" ERRUPTED' INT; printf 'RUN_%s\\n' READY; sleep 30\r", false);
     try waitText(init.io, shell_content, "RUN_READY");
     try shell_content.sendBytes("\x03", false);
     try waitText(init.io, shell_content, "INTERRUPTED");
