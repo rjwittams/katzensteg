@@ -23,6 +23,9 @@ import time
 import unicodedata
 import unittest
 
+# unittest discovers the isolated recovery scenarios with this existing CI suite.
+from test_wm_recovery import WmRecoveryTest
+
 REPO = Path(__file__).resolve().parents[2]
 GLYPH = "\U0010eeee"
 
