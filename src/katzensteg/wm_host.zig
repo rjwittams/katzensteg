@@ -859,6 +859,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var redraw_state = WmDesktopRedrawState{ .cover_policy = cover_policy, .session_error = session_error };
     var writer_state = tty.file.writerStreaming(&.{});
     const writer = &writer_state.interface;
+    for (sessions[0..initialized], 0..) |session, index| if (session.content == .session) try deleteSessionGraphics(writer, index);
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized]) |*session| {
         try startSessionStdoutPolling(session);
@@ -920,6 +921,8 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 if (failed_open) |title| try recordLaunchFailure(&event_log, &logger, title, error.SessionOpenFailed);
                 try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
             } else if (changed) {
+                tty_lock.lock();
+                defer tty_lock.unlock();
                 for (z_order[0..initialized]) |index| {
                     if (!sessionIsDrawable(&sessions[index]) or sessions[index].content != .session) continue;
                     try paintSessionContent(writer, terminal, sessions[0..initialized], z_order[0..initialized], index, focused_index, &event_log, &redraw_state, false);
@@ -938,6 +941,14 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
                 redraw_requested.store(true, .seq_cst);
             }
+            if (cleat_enabled) for (z_order[0..initialized]) |index| {
+                if (!sessionIsDrawable(&sessions[index]) or sessions[index].content != .session) continue;
+                if (sessions[index].content.session.images.pending) {
+                    tty_lock.lock();
+                    defer tty_lock.unlock();
+                    try paintSessionContent(writer, terminal, sessions[0..initialized], z_order[0..initialized], index, focused_index, &event_log, &redraw_state, false);
+                }
+            };
             if (!wm_events.tty_poll_supported) wm_events.tty_ready = true;
             for (sessions[0..initialized]) |*session| {
                 if (!session.stdout_poll_supported) session.stdout_ready = true;
@@ -1234,7 +1245,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     while (try drainQueuedPeerLinesWithTrace(allocator, &peer_queue, writer, &tty_lock, &redraw_requested, 0, trace_blocking, &logger)) {}
     try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
     for (sessions[0..initialized], 0..) |*session, index| {
-        if (!session.retired and session.content != .session) try deleteSessionGraphics(writer, index);
+        if (!session.retired) try deleteSessionGraphics(writer, index);
     }
     if (shutdown_sent) return 0;
     if (first_exit_code != 0) return first_exit_code;
@@ -1283,7 +1294,7 @@ fn retireFinishedSessions(io: std.Io, allocator: std.mem.Allocator, sessions: []
     for (sessions, 0..) |*session, index| {
         if (session.retired or session.state != .exited or session.producer.channel.presentationFile() != null or session.stdout_poll_armed) continue;
         if (queue.hasSession(session)) continue;
-        if (session.content != .session) try deleteSessionGraphics(writer, index);
+        try deleteSessionGraphics(writer, index);
         session.producer.channel.deinit();
         deinitUploadPolicy(io, allocator, &session.upload);
         session.retired = true;
@@ -2739,7 +2750,10 @@ fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal
     try renderDesktopMany(&bytes.writer, terminal, sessions, z_order, focused_index, events, redraw_state);
     try bytes.writer.writeAll("\x1b[?2026l");
     try writer.writeAll(bytes.written());
-    for (sessions) |session| if (session.content == .session) session.content.session.mirror.clearDirty();
+    for (sessions) |session| if (session.content == .session) {
+        if (cleat_enabled and session.content.session.images.pending) continue;
+        session.content.session.mirror.clearDirty();
+    };
 }
 
 fn paintSessionContent(writer: anytype, terminal: TerminalSize, sessions: []const WmWindow, z_order: []const usize, session_index: usize, focused_index: usize, events: *const ProtocolEventLog, redraw_state: *const WmDesktopRedrawState, full: bool) !void {
@@ -2755,18 +2769,45 @@ fn paintSessionContent(writer: anytype, terminal: TerminalSize, sessions: []cons
         count += 1;
     }
     const content = session.content.session;
+    var image_areas: std.ArrayList(session_cells.ImageArea) = .empty;
+    defer image_areas.deinit(events.allocator);
+    var graphics = std.Io.Writer.Allocating.init(events.allocator);
+    defer graphics.deinit();
+    if (cleat_enabled) {
+        const image_module = @import("wm/session_images.zig");
+        const geometry = image_module.Geometry{
+            .content = cellPainterRect(session.focusedContent()),
+            .terminal = .{ .rows = @intCast(@max(0, terminal.rows - 1)), .cols = @intCast(@max(0, terminal.cols)) },
+            .cell_width = if (terminal.cols > 0) @intCast(@divTrunc(@max(0, terminal.pixel_width), terminal.cols)) else 0,
+            .cell_height = if (terminal.rows > 0) @intCast(@divTrunc(@max(0, terminal.pixel_height), terminal.rows)) else 0,
+            .z_base = zBaseForSlot(slot, .band),
+            .higher = higher[0..count],
+        };
+        const range = idRangesForSession(session_index).image;
+        if (!try content.images.paint(&graphics.writer, range.start, range.end, geometry)) return;
+        for (content.images.placements.items) |placement| {
+            if (image_module.plan(placement, geometry)) |planned| try image_areas.append(events.allocator, .{
+                .rect = .{ .row = @intCast(planned.row), .col = @intCast(planned.col), .rows = planned.rows, .cols = planned.cols },
+                .z = placement.z,
+            });
+        }
+    }
     const painted = try session_cells.paint(events.allocator, &content.mirror, .{
+        .images = image_areas.items,
         .content = cellPainterRect(session.focusedContent()),
         .terminal = .{ .rows = @intCast(@max(0, terminal.rows - 1)), .cols = @intCast(@max(0, terminal.cols)) },
         .higher = higher[0..count],
         .focused = session_index == focused_index,
         .default_background = redraw_state.cover_policy.paintedBackground(),
         .full = full,
-        .synchronized = !full,
+        .synchronized = false,
     });
     defer events.allocator.free(painted);
     // The desktop owns synchronization across clearing, cells and chrome.
+    if (!full) try writer.writeAll("\x1b[?2026h");
+    try writer.writeAll(graphics.written());
     try writer.writeAll(painted);
+    if (!full) try writer.writeAll("\x1b[?2026l");
     if (!full) content.mirror.clearDirty();
 }
 
@@ -4859,7 +4900,7 @@ test "session cells share desktop order and repaint after covering changes" {
     const model = @import("wm/session_mirror.zig");
     const a = std.testing.allocator;
     for ([_]cover.Mode{ .split, .band }) |mode| {
-        var content = session_content.Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 8, .cols = 18 } };
+        var content = session_content.Content{ .allocator = a, .session = null, .mirror = model.Mirror.init(a), .requested = .{ .rows = 8, .cols = 18 }, .images = @import("wm/session_images.zig").State.init(a) };
         defer content.mirror.deinit();
         try content.mirror.apply(.{ .size = content.requested });
         const cells: [18]model.Cell = @splat(.{ .text = "s" });
@@ -4968,7 +5009,7 @@ test "session opening distinguishes async refusal from established exit" {
     if (cleat_enabled) {
         for ([_]bool{ false, true }) |established| {
             for ([_]bool{ false, true }) |closed| {
-                var content = session_content.Content{ .allocator = std.testing.allocator, .session = null, .mirror = @import("wm/session_mirror.zig").Mirror.init(std.testing.allocator), .requested = .{ .cols = 80, .rows = 24 }, .established = established, .closed = closed };
+                var content = session_content.Content{ .allocator = std.testing.allocator, .session = null, .mirror = @import("wm/session_mirror.zig").Mirror.init(std.testing.allocator), .requested = .{ .cols = 80, .rows = 24 }, .established = established, .closed = closed, .images = @import("wm/session_images.zig").State.init(std.testing.allocator) };
                 defer content.mirror.deinit();
                 var window = WmWindow{ .content = .{ .session = &content }, .profile_name = "id", .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 24, .cols = 80 }), .upload = .{ .profile = .file_whole }, .state = .launching };
                 try std.testing.expect(!sessionIsVisible(&window));
@@ -5008,4 +5049,8 @@ test "z order retains connecting slots until confirmation" {
         try std.testing.expect(!compactVisibleZOrder(&windows, &z_order));
         try std.testing.expectEqualDeep(expected, z_order);
     }
+}
+
+test {
+    _ = @import("wm/session_images.zig");
 }

@@ -247,6 +247,12 @@ composed of images, and sub-cell placement of image windows.
 
 ([#99](https://github.com/rjwittams/katzensteg/issues/99).)
 
+Implementation status: decoded-resource uploads, lifetime handling and explicit
+placements are supported by the cells presentation. Unicode placeholders await
+Cleat's original virtual placement declarations
+([cleat#317](https://github.com/flotilla-org/cleat/issues/317)); the rules below
+remain the contract for that follow-up.
+
 Cleat hands the WM decoded pixels plus resolved placements. The program's own
 graphics commands never reach a client. The WM uploads each image to the outer
 terminal under an id of its own.

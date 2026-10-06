@@ -11,7 +11,7 @@ pub const Rect = struct {
     rows: u32,
     cols: u32,
 
-    fn contains(self: Rect, row: i64, col: i64) bool {
+    pub fn contains(self: Rect, row: i64, col: i64) bool {
         return row >= self.row and col >= self.col and
             row < @as(i64, self.row) + self.rows and col < @as(i64, self.col) + self.cols;
     }
@@ -28,7 +28,9 @@ pub const Style = struct {
     pub const strike: u32 = 1 << 6;
     pub const underline: u32 = 1 << 8;
 };
+pub const ImageArea = struct { rect: Rect, z: i32 };
 pub const Options = struct {
+    images: []const ImageArea = &.{},
     content: Rect,
     terminal: TerminalSize,
     higher: []const Rect = &.{},
@@ -131,10 +133,23 @@ fn build(allocator: std.mem.Allocator, mirror: *const model.Mirror, options: Opt
             if (options.focused and !mirror.scrolled_back and mirror.cursor.visible and
                 r < mirror.size.rows and mirror.cursor.row == r and mirror.cursor.col < mirror.size.cols and
                 (mirror.cursor.col == c or (wide and mirror.cursor.col == c + 1))) cell.style_flags ^= Style.inverse;
+            var own_image = false;
+            var over_text = false;
+            for (options.images) |image| {
+                if (image.rect.contains(row, col) or (wide and image.rect.contains(row, col + 1))) {
+                    own_image = true;
+                    over_text = over_text or image.z >= 0;
+                }
+            }
+            if (own_image) cell.background = .{};
+            if (over_text) {
+                text = if (wide) "  " else " ";
+                cell.style_flags = 0;
+            }
             // Normalize the style-cache key: default foreground RGB hints are not emitted.
             if (cell.foreground.is_default) cell.foreground.rgb = .{ 0, 0, 0 };
             if (cell.background.is_default) {
-                if (options.default_background) |background_color| {
+                if (if (own_image) null else options.default_background) |background_color| {
                     cell.background = .{ .rgb = background_color, .is_default = false };
                 } else cell.background.rgb = .{ 0, 0, 0 };
             }
@@ -480,4 +495,26 @@ test "unknown outer background preserves terminal default in split mode" {
     const bytes = try paint(testing.allocator, &mirror, options);
     defer testing.allocator.free(bytes);
     try testing.expectEqualStrings(prefix ++ "\x1b[2;3H\x1b[0mabc\x1b[3;3Hdef" ++ suffix, bytes);
+}
+
+// #121: under-text images reveal the true default background and preserve
+// glyphs, while over-text images blank covered cells. Generate both z signs
+// and explicit/default backgrounds; unrelated cells keep covering backgrounds.
+test "session images reveal or blank cells according to program z" {
+    for ([_]i32{ -2147483648, -1, 0, 2147483647 }) |z| {
+        for ([_]bool{ false, true }) |default| {
+            var mirror = model.Mirror.init(testing.allocator);
+            defer mirror.deinit();
+            try mirror.apply(.{ .size = .{ .rows = 1, .cols = 2 } });
+            try mirror.apply(.{ .row_replace = .{ .row = 0, .cells = &.{
+                .{ .text = "a", .background = .{ .is_default = default, .rgb = .{ 99, 88, 77 } } }, .{ .text = "b" },
+            } } });
+            var options = defaults(.{ .row = 1, .col = 2, .rows = 1, .cols = 2 });
+            const images = [_]ImageArea{.{ .rect = .{ .row = 1, .col = 2, .rows = 1, .cols = 1 }, .z = z }};
+            options.images = &images;
+            const bytes = try paint(testing.allocator, &mirror, options);
+            defer testing.allocator.free(bytes);
+            try testing.expectEqualStrings(if (z < 0) prefix ++ "\x1b[2;3H\x1b[0ma" ++ background ++ "b" ++ suffix else prefix ++ "\x1b[2;3H\x1b[0m " ++ background ++ "b" ++ suffix, bytes);
+        }
+    }
 }

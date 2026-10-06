@@ -51,7 +51,7 @@ pub const Provider = struct {
         var desc = std.mem.zeroes(c.cleat_provider_desc);
         desc.abi_version = expected.abi;
         desc.backend = c.CLEAT_PROVIDER_BACKEND_DAEMON;
-        desc.requested_features = c.CLEAT_PROVIDER_FEATURE_RENDER_UPDATES;
+        desc.requested_features = c.CLEAT_PROVIDER_FEATURE_RENDER_UPDATES | c.CLEAT_PROVIDER_FEATURE_IMAGE_STATE;
         desc.runtime_root = runtime_root.ptr;
         desc.runtime_root_len = runtime_root.len;
         return .{ .provider = .{ .handle = c.cleat_provider_open(&desc) orelse return error.ProviderOpenFailed } };
