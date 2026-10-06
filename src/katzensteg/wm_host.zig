@@ -5078,8 +5078,8 @@ test "wm initial control failure kills and reaps spawned producer" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(executable_z, 0o700));
     var events = try ProtocolEventLog.init(allocator, 4);
     defer events.deinit();
-    const readonly = try system_io.fs.cwd(io).openFile("/dev/null", .{});
-    defer readonly.close();
+    const tty_stub = try system_io.fs.cwd(io).openFile("/dev/null", .{});
+    defer tty_stub.close();
     var producer = try Producer.spawn(io, allocator, executable, "failure", &.{});
     const pid = producer.child.?.id;
     var cleanup_verified = false;
@@ -5091,7 +5091,7 @@ test "wm initial control failure kills and reaps spawned producer" {
     producer.channel.closeControl();
     producer.channel.stdio.control = try system_io.fs.cwd(io).openFile("/dev/null", .{});
     producer.channel.stdio.control_open = true;
-    try std.testing.expectError(error.WriteFailed, finishProducerLaunch(allocator, producer, readonly, .{ .rows = 24, .cols = 80 }, .{ .profile_name = "failure" }, 0, .positioned, .split, .direct_apc, &events));
+    try std.testing.expectError(error.WriteFailed, finishProducerLaunch(allocator, producer, tty_stub, .{ .rows = 24, .cols = 80 }, .{ .profile_name = "failure" }, 0, .positioned, .split, .direct_apc, &events));
     // A live child returns pid=0; a zombie returns its pid. Only ECHILD proves
     // the failed launch has already waited for and removed its child.
     try std.testing.expectError(error.NoChild, system_io.posix.waitpid(pid, std.posix.W.NOHANG));
