@@ -1,10 +1,21 @@
 const std = @import("std");
 const system_io = @import("platform");
 
+// Preload libraries share the core library's file and lifetime state. Hosts
+// and unit tests have their own process and keep the local backend.
+const shared_file = if (@hasDecl(@import("root"), "katzensteg_shared_log")) @import("root").katzensteg_shared_log else false;
+const CoreLog = struct {
+    extern fn ks_katzensteg_log_write_line(message: [*]const u8, len: usize) callconv(.c) void;
+    extern fn ks_katzensteg_log_retain() callconv(.c) void;
+    extern fn ks_katzensteg_log_release() callconv(.c) void;
+};
+
 var file_io: std.Io.Threaded = .init_single_threaded;
 var file_mutex: system_io.Mutex = .{};
 var file: ?system_io.fs.File = null;
 var logger_ref_count: usize = 0;
+var opened_once: bool = false;
+var test_path: ?[]const u8 = null;
 
 fn levelName(comptime level: std.log.Level) []const u8 {
     return switch (level) {
@@ -54,7 +65,8 @@ fn writeCLogScoped(comptime scope: @TypeOf(.enum_literal), message: []const u8) 
     writeLine(line);
 }
 
-fn writeLine(message: []const u8) void {
+pub fn writeLine(message: []const u8) void {
+    if (shared_file) return CoreLog.ks_katzensteg_log_write_line(message.ptr, message.len);
     file_mutex.lock();
     defer file_mutex.unlock();
     writeLineLocked(message);
@@ -75,13 +87,15 @@ fn closeFile() void {
     }
 }
 
-fn retainLoggerFileUser() void {
+pub fn retainLoggerFileUser() void {
+    if (shared_file) return CoreLog.ks_katzensteg_log_retain();
     file_mutex.lock();
     defer file_mutex.unlock();
     logger_ref_count += 1;
 }
 
-fn releaseLoggerFileUser() void {
+pub fn releaseLoggerFileUser() void {
+    if (shared_file) return CoreLog.ks_katzensteg_log_release();
     file_mutex.lock();
     defer file_mutex.unlock();
     if (logger_ref_count > 0) logger_ref_count -= 1;
@@ -101,8 +115,16 @@ fn ensureFileLocked() !*system_io.fs.File {
 /// stderr.
 fn openFileLocked() void {
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() }) catch return;
-    file = system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = false, .read = false }) catch return;
+    const path = if (@import("builtin").is_test and test_path != null) test_path.? else std.fmt.bufPrint(&path_buf, "{s}/katzensteg-{d}.log", .{ system_io.fs.logDir(), system_io.process.id() }) catch return;
+    const opened = system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = !opened_once, .read = false }) catch return;
+    // The shared mutex serializes all module writers. A fresh handle starts
+    // at zero, so a reopen must explicitly resume at the end of this run.
+    if (opened_once) opened.seekFromEnd(0) catch {
+        opened.close();
+        return;
+    };
+    file = opened;
+    opened_once = true;
 }
 
 pub const Logger = struct {
@@ -203,4 +225,104 @@ test "C log adapter maps unknown scopes to static fallback scope" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("katzensteg: warn(c): failed", line);
+}
+
+// Real file operations exercise the public logger lifecycle without touching
+// another process's /tmp log. Only unit tests can override the destination.
+const LogTest = struct {
+    tmp: system_io.fs.TmpDir,
+    path: [:0]u8,
+
+    fn init(stale: []const u8) !LogTest {
+        var tmp = system_io.fs.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(.{ .sub_path = "runtime.log", .data = stale });
+        const path = try tmp.dir.value.realPathFileAlloc(std.testing.io, "runtime.log", std.testing.allocator);
+        file_mutex.lock();
+        defer file_mutex.unlock();
+        std.debug.assert(logger_ref_count == 0);
+        closeFile();
+        opened_once = false;
+        test_path = path;
+        return .{ .tmp = tmp, .path = path };
+    }
+
+    fn deinit(self: *LogTest) void {
+        file_mutex.lock();
+        std.debug.assert(logger_ref_count == 0);
+        closeFile();
+        opened_once = false;
+        test_path = null;
+        file_mutex.unlock();
+        std.testing.allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+
+    fn expect(self: *LogTest, expected: []const u8) !void {
+        const actual = try self.tmp.dir.readFileAlloc(std.testing.allocator, "runtime.log", 65536);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+};
+
+test "first log open removes a reused PID file's stale tail" {
+    // A new process's first write replaces all old content, even when its
+    // first line is shorter than the previous run's file.
+    var fixture = try LogTest.init("old run\nstale queued replay worker exiting\n");
+    defer fixture.deinit();
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    logger.write("new");
+    try fixture.expect("new\n");
+}
+
+test "reopen after the last logger closes preserves this run's lines" {
+    // Every reopen resumes at EOF rather than erasing earlier output.
+    var fixture = try LogTest.init("");
+    defer fixture.deinit();
+    for (0..3) |_| {
+        var logger = Logger.init(std.testing.allocator);
+        logger.write("line");
+        logger.deinit();
+    }
+    try fixture.expect("line\nline\nline\n");
+}
+
+test "two openers share one file and closing one preserves the other" {
+    // Interleaved logger lifetimes preserve all lines; only the last close
+    // closes the shared handle, and a later opener continues this run.
+    var fixture = try LogTest.init("stale contents");
+    defer fixture.deinit();
+    var first = Logger.init(std.testing.allocator);
+    var second = Logger.init(std.testing.allocator);
+    first.write("first");
+    second.write("second");
+    first.deinit();
+    second.write("still open");
+    second.deinit();
+    var third = Logger.init(std.testing.allocator);
+    defer third.deinit();
+    third.write("");
+    try fixture.expect("first\nsecond\nstill open\n\n");
+}
+
+test "an unavailable first destination does not consume the fresh open" {
+    // Failed logging is silent, and the first successful open still removes
+    // old PID content rather than treating a failed attempt as initialization.
+    var fixture = try LogTest.init("stale contents");
+    defer fixture.deinit();
+    const invalid_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/missing", .{fixture.path});
+    defer std.testing.allocator.free(invalid_path);
+    var logger = Logger.init(std.testing.allocator);
+    defer logger.deinit();
+    file_mutex.lock();
+    test_path = invalid_path;
+    file_mutex.unlock();
+    logger.write("dropped");
+    try fixture.expect("stale contents");
+    file_mutex.lock();
+    test_path = fixture.path;
+    file_mutex.unlock();
+    logger.write("successful");
+    try fixture.expect("successful\n");
 }

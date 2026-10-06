@@ -95,7 +95,15 @@ rather than termios, `ioctl` or `shm_open` directly.
 
 `test_injected_io.py` loads the core library into an ordinary C process and
 checks that startup, threaded logging, and shutdown preserve the application's
-SIGIO and SIGPIPE handlers. `test_embed_render_batches.py` covers SDL2 and SDL3
+SIGIO and SIGPIPE handlers. Runtime logging is file-only: the first successful
+open truncates a previous process's PID file, and reopening after the last
+logger closes resumes at EOF. SDL preload/dynapi libraries link the sibling
+core library and forward complete lines and logger retain/release calls to it;
+the core owns the file handle, mutex, and truncate-once state. This ownership
+also holds when SDL and Vulkan load their libraries privately. Hosts keep a
+local logger in their own process. `test_runtime_log.py` exercises stale files,
+reopening, both library load orders, and concurrent writers through that ABI.
+`test_embed_render_batches.py` covers SDL2 and SDL3
 with both synchronous composition and queued replay.
 
 ## Windows

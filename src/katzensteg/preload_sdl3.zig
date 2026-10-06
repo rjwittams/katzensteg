@@ -1,4 +1,6 @@
 const std = @import("std");
+// Production SDL modules delegate file ownership to katzensteg-core.
+pub const katzensteg_shared_log = !@import("builtin").is_test;
 // This starts as an SDL2-parity frontend shell and is expected to diverge as
 // SDL3-specific signatures and renderer/input paths are implemented.
 const sdl = @import("katzensteg_sdl");

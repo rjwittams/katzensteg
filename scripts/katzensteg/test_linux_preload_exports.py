@@ -73,6 +73,9 @@ EXPECTED_EXPORTED_DEFINITIONS = {
 }
 
 EXPECTED_CORE_EXPORTED_DEFINITIONS = {
+    "ks_katzensteg_log_write_line",
+    "ks_katzensteg_log_retain",
+    "ks_katzensteg_log_release",
     "ks_katzensteg_shutdown",
     "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",
@@ -258,7 +261,6 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/real_sdl3.zig",
             "src/katzensteg/sdl3.zig",
             "src/katzensteg/sdl3/abi.zig",
-            "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
             "src/katzensteg/real_sdl3_functions.h",
         ):
@@ -276,7 +278,6 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/real_sdl3.zig",
             "src/katzensteg/sdl3.zig",
             "src/katzensteg/sdl3/abi.zig",
-            "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
             "src/katzensteg/real_sdl3_functions.h",
         ):
