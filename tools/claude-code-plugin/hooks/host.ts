@@ -284,3 +284,6 @@ export const inputSince = (previousInst: unknown, inst: unknown, lastN: number):
 /** The wire form of input events: the numbering is the panel's, not the wm's. */
 export const stripNumbers = (events: InputEvent[]): Omit<InputEvent, 'n'>[] =>
   events.map(({ n: _n, ...rest }) => rest)
+
+/** Retry delivery conflicts quickly and overload (503) or other failures after 500 ms. */
+export const frameRetryDelay = (status: number): number => status === 409 ? 150 : 500

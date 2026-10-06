@@ -134,6 +134,7 @@ const Host = struct {
     presentation_start: usize = 0,
     next_observation: u32 = 1,
     observations: [16]?PendingObservation = @splat(null),
+    frame_waits: [max_sessions]?PendingObservation = @splat(null),
     idle_since: i64,
     pending_deletes: std.ArrayList(u32) = .empty,
     idle_refresh_ms: u32 = 500,
@@ -545,7 +546,7 @@ const Host = struct {
             };
             const slot = for (&self.observations) |*item| {
                 if (item.* == null) break item;
-            } else return error.ObservationLimit;
+            } else return .{ .status = 503, .retry_after = 1, .body = "{\"error\":\"ObservationLimit\"}" };
             if (self.next_observation == std.math.maxInt(u32)) return error.ObservationIdsExhausted;
             const request_id = self.next_observation;
             self.next_observation += 1;
@@ -577,12 +578,12 @@ const Host = struct {
         if (std.mem.eql(u8, action, "frame")) {
             if (session.delivery != .client) return .{ .status = 409, .body = "{\"error\":\"TerminalDelivery\"}" };
             const parsed = try std.json.parseFromSlice(struct { after: ?u64 = null }, allocator, request.body, .{});
-            for (self.observations) |slot| if (slot) |pending| {
+            for (self.frame_waits) |slot| if (slot) |pending| {
                 if (pending.session_id == id and pending.kind == .frame) return .{ .status = 409, .body = "{\"error\":\"FramePending\"}" };
             };
-            const slot = for (&self.observations) |*item| {
+            const slot = for (&self.frame_waits) |*item| {
                 if (item.* == null) break item;
-            } else return error.ObservationLimit;
+            } else return .{ .status = 503, .retry_after = 1, .body = "{\"error\":\"FrameLimit\"}" };
             if (self.next_observation == std.math.maxInt(u32)) return error.ObservationIdsExhausted;
             const request_id = self.next_observation;
             self.next_observation += 1;
@@ -644,20 +645,25 @@ const Host = struct {
     }
 
     pub fn cancelResponse(self: *Host, id: u32) void {
-        for (&self.observations) |*slot| if (slot.*) |pending| {
-            if (pending.id == id) {
-                slot.* = null;
-                return;
-            }
-        };
+        for ([_][]?PendingObservation{ &self.observations, &self.frame_waits }) |table| {
+            for (table) |*slot| if (slot.*) |pending| {
+                if (pending.id == id) {
+                    slot.* = null;
+                    return;
+                }
+            };
+        }
     }
 
     pub fn pollResponse(self: *Host, allocator: std.mem.Allocator, id: u32, now: i64) !?http.Response {
-        const pending = for (&self.observations) |*slot| {
-            if (slot.*) |*item| if (item.id == id) {
-                break item;
-            };
-        } else return http.Response{ .status = 404 };
+        const pending = search: {
+            for ([_][]?PendingObservation{ &self.observations, &self.frame_waits }) |table| {
+                for (table) |*slot| {
+                    if (slot.*) |*item| if (item.id == id) break :search item;
+                }
+            }
+            return http.Response{ .status = 404 };
+        };
         const alive = for (self.clients.items) |client| {
             if (std.mem.eql(u8, &client.id, &pending.owner)) break true;
         } else false;
@@ -1165,4 +1171,77 @@ test "encodeInput rejects source pixels outside the frame" {
     defer bytes.deinit();
     var buttons: u32 = 0;
     try std.testing.expectError(error.PointerOutsideSource, encodeInput(allocator, &bytes.writer, parsed.value, .{ .cols = 46, .rows = 16 }, .{ .w = 1288, .h = 800 }, &buttons));
+}
+
+// Issue #83: every client-delivery session can wait for a frame while the
+// observation table remains available. Exercise both boundaries and reuse.
+test "frame waits have session capacity independent of observations" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var terminal: terminal_mod.Terminal = undefined;
+    terminal.file.io = std.testing.io;
+    var host: Host = undefined;
+    host.terminal = &terminal;
+    host.token = @splat('t');
+    host.clients = .empty;
+    defer host.clients.deinit(allocator);
+    host.sessions = .empty;
+    defer host.sessions.deinit(allocator);
+    host.observations = @splat(null);
+    host.frame_waits = @splat(null);
+    host.next_observation = 1;
+    const owner: [32]u8 = @splat('c');
+    try host.clients.append(allocator, .{ .id = owner, .listener = undefined, .seen = 0 });
+    // Generate all session ids, crossing the old 16-slot ceiling up to 128.
+    for (0..max_sessions + 1) |i| {
+        var session: Session = undefined;
+        session.id = @intCast(i + 1);
+        session.owner = owner;
+        session.closing_at = null;
+        session.exited_at = null;
+        session.delivery = .client;
+        session.frame = null;
+        try host.sessions.append(allocator, session);
+    }
+    var ids: [max_sessions]u32 = undefined;
+    for (&ids, 0..) |*id, i| {
+        const path = try std.fmt.allocPrint(arena.allocator(), "/v1/sessions/{d}/frame", .{i + 1});
+        const response = try host.handle(arena.allocator(), .{ .method = "POST", .path = path, .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+        id.* = response.pending orelse return error.ExpectedFrameWait;
+        try std.testing.expect((try host.pollResponse(arena.allocator(), id.*, 0)) == null);
+    }
+    const extra = try host.handle(arena.allocator(), .{ .method = "POST", .path = "/v1/sessions/129/frame", .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+    try std.testing.expectEqual(@as(u16, 503), extra.status);
+    try std.testing.expectEqual(@as(?u32, 1), extra.retry_after);
+    const duplicate = try host.handle(arena.allocator(), .{ .method = "POST", .path = "/v1/sessions/1/frame", .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+    try std.testing.expectEqual(@as(u16, 409), duplicate.status);
+    for (0..host.observations.len) |i| {
+        const path = try std.fmt.allocPrint(arena.allocator(), "/v1/sessions/{d}/observe", .{i + 1});
+        const response = try host.handle(arena.allocator(), .{ .method = "POST", .path = path, .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+        try std.testing.expect(response.pending != null);
+    }
+    const full = try host.handle(arena.allocator(), .{ .method = "POST", .path = "/v1/sessions/17/observe", .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+    try std.testing.expectEqual(@as(u16, 503), full.status);
+    try std.testing.expectEqual(@as(?u32, 1), full.retry_after);
+    // Cancelling a frame wait frees its slot without consuming observations.
+    host.cancelResponse(ids[0]);
+    try std.testing.expectEqual(@as(u16, 404), (try host.pollResponse(arena.allocator(), ids[0], 0)).?.status);
+    const reused = try host.handle(arena.allocator(), .{ .method = "POST", .path = "/v1/sessions/129/frame", .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{}" });
+    try std.testing.expect(reused.pending != null);
+    const timeout = (try host.pollResponse(arena.allocator(), ids[1], std.math.maxInt(i64))).?;
+    try std.testing.expectEqualStrings("{\"seq\":null}", timeout.body);
+    // A newly arrived frame resolves a wait from the separate frame table.
+    const uploads = [_][]const u8{"\x1b_Ga=t,t=s,i=100001,q=2,f=32,s=4,v=2;L2tzMS0x\x1b\\"};
+    _ = acceptClientFrame(&host.sessions.items[2], 7, &uploads);
+    const ready = (try host.pollResponse(arena.allocator(), ids[2], 0)).?;
+    try std.testing.expectEqual(@as(u16, 200), ready.status);
+    try std.testing.expect(std.mem.indexOf(u8, ready.body, "\"seq\":7") != null);
+    try std.testing.expect(host.sessions.items[2].frame.?.handed);
+    // Cancellation finds observations too, and terminal delivery ends a wait.
+    const observation_id = host.observations[0].?.id;
+    host.cancelResponse(observation_id);
+    try std.testing.expectEqual(@as(u16, 404), (try host.pollResponse(arena.allocator(), observation_id, 0)).?.status);
+    host.sessions.items[3].delivery = .terminal;
+    try std.testing.expectEqual(@as(u16, 409), (try host.pollResponse(arena.allocator(), ids[3], 0)).?.status);
 }

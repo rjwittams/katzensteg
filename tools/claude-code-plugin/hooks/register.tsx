@@ -2,7 +2,7 @@
 import type { Elements, EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 import { fitGrid, type Grid } from './placeholders.ts'
 import {
-  chooseRoute, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
+  chooseRoute, frameRetryDelay, frameSource, inputSince, isPanelEvent, isRouteWish, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseHostFile, parseSessions, stripNumbers,
   type FrameSource, type HostClient, type HostFile, type Route, type RouteWish, type Session,
 } from './host.ts'
 import { dragReport, ordered, placePanels, samePlaces, type Place as PanelPlace } from './layout.ts'
@@ -239,7 +239,7 @@ function pump($: $, id: string): void {
         }
       } else if (!r.ok) {
         // 409 until the host has switched this session to client delivery.
-        delay = r.status === 409 ? 150 : 500
+        delay = frameRetryDelay(r.status)
       }
     } catch {
       delay = 500

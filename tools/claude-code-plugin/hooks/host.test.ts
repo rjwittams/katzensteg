@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chooseRoute, frameSource, inputSince, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
+import { chooseRoute, frameRetryDelay, frameSource, inputSince, newInputEvents, parseFrame, uploadLabel, parseCellAspect, parseClient, parseEvents, parseHostFile, parseSessions, parseStandin, stripNumbers } from './host.ts'
 
 test('parseHostFile accepts the wm host file and rejects junk', () => {
   assert.deepEqual(parseHostFile('{"pid":12,"port":4567,"token":"abc","tty":"ttys007","socket":"/tmp/k.sock"}'),
@@ -171,4 +171,11 @@ test('newInputEvents forwards only events after the last number, in order', () =
   assert.equal(again.lastN, 3)
   assert.deepEqual(stripNumbers(first.events)[0], { type: 'key', key: 'a' })
   assert.deepEqual(newInputEvents('nope', 5), { events: [], lastN: 5 })
+})
+
+// Issue #83 permits the existing 500 ms retry for a retryable 503 response.
+test('frame waits retry overload rather than stopping the frame loop', () => {
+  assert.equal(frameRetryDelay(503), 500)
+  assert.equal(frameRetryDelay(409), 150)
+  for (const status of [400, 404, 500, 502, 504]) assert.equal(frameRetryDelay(status), 500)
 })
