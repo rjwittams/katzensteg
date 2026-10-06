@@ -285,5 +285,9 @@ export const inputSince = (previousInst: unknown, inst: unknown, lastN: number):
 export const stripNumbers = (events: InputEvent[]): Omit<InputEvent, 'n'>[] =>
   events.map(({ n: _n, ...rest }) => rest)
 
-/** Retry delivery conflicts quickly and overload (503) or other failures after 500 ms. */
+/**
+ * Retry delivery conflicts quickly and overload (503) or other failures after
+ * 500 ms. Keep the existing loopback retry policy rather than reading the
+ * server's advisory Retry-After hint (currently one second).
+ */
 export const frameRetryDelay = (status: number): number => status === 409 ? 150 : 500

@@ -2,7 +2,8 @@ const std = @import("std");
 const system_io = @import("platform");
 
 // Room for all session frame waits, observations, and control requests.
-const max_connections = 128 + 16 + 16;
+const limits = @import("limits.zig");
+const max_connections = limits.max_sessions + limits.max_observations + limits.control_connection_headroom;
 const max_request_bytes = 64 * 1024;
 const max_header_bytes = 8 * 1024;
 const header_separator = "\r\n\r\n";
@@ -304,7 +305,7 @@ test "HTTP admits session waits and observations concurrently" {
         clients.deinit(std.testing.allocator);
     }
     const address = try system_io.net.Address.parseIp4("127.0.0.1", server.port);
-    for (0..128 + 16 + 1) |i| {
+    for (0..limits.max_sessions + limits.max_observations + 1) |i| {
         const fd = try system_io.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
         const client = system_io.fs.File{ .io = io, .handle = fd };
         try clients.append(std.testing.allocator, client);

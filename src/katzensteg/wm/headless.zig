@@ -26,7 +26,8 @@ pub const Options = struct {
 const lease_ms = 120_000;
 const idle_ms = 30_000;
 const max_clients = 16;
-const max_sessions = 128;
+const limits = @import("limits.zig");
+const max_sessions = limits.max_sessions;
 var stopping = std.atomic.Value(u8).init(0);
 fn stop(signal: std.posix.SIG) callconv(.c) void {
     stopping.store(@intCast(@intFromEnum(signal)), .seq_cst);
@@ -133,7 +134,7 @@ const Host = struct {
     next_session: u32 = 1,
     presentation_start: usize = 0,
     next_observation: u32 = 1,
-    observations: [16]?PendingObservation = @splat(null),
+    observations: [limits.max_observations]?PendingObservation = @splat(null),
     frame_waits: [max_sessions]?PendingObservation = @splat(null),
     idle_since: i64,
     pending_deletes: std.ArrayList(u32) = .empty,
@@ -1238,6 +1239,20 @@ test "frame waits have session capacity independent of observations" {
     try std.testing.expectEqual(@as(u16, 200), ready.status);
     try std.testing.expect(std.mem.indexOf(u8, ready.body, "\"seq\":7") != null);
     try std.testing.expect(host.sessions.items[2].frame.?.handed);
+    // An `after` wait ignores older and equal frames, and hands on only a
+    // strictly newer sequence. Cover both sides of that comparison.
+    host.cancelResponse(ids[2]);
+    const after = try host.handle(arena.allocator(), .{ .method = "POST", .path = "/v1/sessions/3/frame", .authorization = "Bearer " ++ "t" ** 32, .client = &owner, .body = "{\"after\":8}" });
+    const after_id = after.pending orelse return error.ExpectedFrameWait;
+    try std.testing.expect((try host.pollResponse(arena.allocator(), after_id, 0)) == null);
+    _ = acceptClientFrame(&host.sessions.items[2], 8, &uploads);
+    try std.testing.expect((try host.pollResponse(arena.allocator(), after_id, 0)) == null);
+    try std.testing.expect(!host.sessions.items[2].frame.?.handed);
+    _ = acceptClientFrame(&host.sessions.items[2], 9, &uploads);
+    const newer = (try host.pollResponse(arena.allocator(), after_id, 0)).?;
+    try std.testing.expect(std.mem.indexOf(u8, newer.body, "\"seq\":9") != null);
+    try std.testing.expect(host.sessions.items[2].frame.?.handed);
+
     // Cancellation finds observations too, and terminal delivery ends a wait.
     const observation_id = host.observations[0].?.id;
     host.cancelResponse(observation_id);
