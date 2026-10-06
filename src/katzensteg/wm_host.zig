@@ -1350,7 +1350,14 @@ fn launchWindow(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file
 
 fn launchProducerSession(allocator: std.mem.Allocator, producer_exe: []const u8, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
     const io = tty_file.io;
-    var producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
+    const producer = try Producer.spawn(io, allocator, producer_exe, spec.profile_name, spec.extra_args);
+    return finishProducerLaunch(allocator, producer, tty_file, terminal, spec, session_index, presentation, cover_mode, output_profile, events);
+}
+
+// Owns the spawned child while initial attach is fallible. Failure closes the
+// transport, kills the child and waits for it before returning to the caller.
+fn finishProducerLaunch(allocator: std.mem.Allocator, spawned: Producer, tty_file: system_io.fs.File, terminal: TerminalSize, spec: SessionLaunchSpec, session_index: usize, presentation: PresentationMode, cover_mode: cover.Mode, output_profile: render_batch_protocol.UploadProfile, events: *ProtocolEventLog) !WmWindow {
+    var producer = spawned;
     errdefer producer.deinit();
     var session = try attachProducerSession(allocator, tty_file, terminal, spec.profile_name, session_index, &producer.channel, presentation, cover_mode, output_profile, events);
     session.producer.child = producer.child;
@@ -2575,6 +2582,7 @@ fn readInputBytes(bytes: []u8, mouse: *WmMouseInputState, outer: Rect, terminal:
     const content = contentRectForOuter(outer);
     const mouse_input = mouse.readMouseInput(bytes, outer, content, terminal);
     if (mouse_input.action != .none) return mouse_input;
+    // Compacts bytes in place; only the returned retained prefix is forwarded.
     const filtered = filterForwardedInputBytes(bytes, content, terminal);
     if (filtered.len > 0) return .{ .action = .forward, .bytes = filtered };
     return .{ .action = .none };
@@ -5053,4 +5061,39 @@ test "z order retains connecting slots until confirmation" {
 
 test {
     _ = @import("wm/session_images.zig");
+}
+
+// #15: an initial-control write failure after spawn must kill AND reap the
+// owned child. A read-only descriptor injects failure at the transport boundary.
+test "wm initial control failure kills and reaps spawned producer" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = system_io.fs.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "producer", .data = "#!/bin/sh\nexec sleep 30\n" });
+    const executable = try tmp.dir.realpathAlloc(allocator, "producer");
+    defer allocator.free(executable);
+    const executable_z = try allocator.dupeZ(u8, executable);
+    defer allocator.free(executable_z);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(executable_z, 0o700));
+    var events = try ProtocolEventLog.init(allocator, 4);
+    defer events.deinit();
+    const tty_stub = try system_io.fs.cwd(io).openFile("/dev/null", .{});
+    defer tty_stub.close();
+    var producer = try Producer.spawn(io, allocator, executable, "failure", &.{});
+    const pid = producer.child.?.id;
+    var cleanup_verified = false;
+    // Emergency cleanup only if a mutant leaves this child alive or a zombie.
+    defer if (!cleanup_verified) {
+        std.posix.kill(pid, .KILL) catch {};
+        _ = system_io.posix.waitpid(pid, 0) catch {};
+    };
+    producer.channel.closeControl();
+    producer.channel.stdio.control = try system_io.fs.cwd(io).openFile("/dev/null", .{});
+    producer.channel.stdio.control_open = true;
+    try std.testing.expectError(error.WriteFailed, finishProducerLaunch(allocator, producer, tty_stub, .{ .rows = 24, .cols = 80 }, .{ .profile_name = "failure" }, 0, .positioned, .split, .direct_apc, &events));
+    // A live child returns pid=0; a zombie returns its pid. Only ECHILD proves
+    // the failed launch has already waited for and removed its child.
+    try std.testing.expectError(error.NoChild, system_io.posix.waitpid(pid, std.posix.W.NOHANG));
+    cleanup_verified = true;
 }
