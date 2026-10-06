@@ -1,7 +1,9 @@
 const std = @import("std");
 const system_io = @import("platform");
 
-const max_connections = 16;
+// Room for all session frame waits, observations, and control requests.
+const limits = @import("limits.zig");
+const max_connections = limits.max_sessions + limits.max_observations + limits.control_connection_headroom;
 const max_request_bytes = 64 * 1024;
 const max_header_bytes = 8 * 1024;
 const header_separator = "\r\n\r\n";
@@ -21,6 +23,7 @@ pub const Request = struct {
 pub const Response = struct {
     pending: ?u32 = null,
     status: u16 = 200,
+    retry_after: ?u32 = null,
     body: []const u8 = "{}",
 };
 
@@ -151,7 +154,9 @@ pub const Server = struct {
         var output = std.Io.Writer.Allocating.fromArrayList(self.allocator, &connection.output);
         defer connection.output = output.toArrayList();
         const writer = &output.writer;
-        try writer.print("HTTP/1.1 {d} Response\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", .{ response.status, response.body.len });
+        try writer.print("HTTP/1.1 {d} Response\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\n", .{ response.status, response.body.len });
+        if (response.retry_after) |seconds| try writer.print("Retry-After: {d}\r\n", .{seconds});
+        try writer.writeAll("\r\n");
         try writer.writeAll(response.body);
         connection.responding = true;
     }
@@ -263,5 +268,50 @@ test "HTTP handler memory pressure returns 503 while invalid input remains 400" 
         const n = try client.read(&response);
         try std.testing.expect(std.mem.startsWith(u8, response[0..n], if (failure == error.OutOfMemory) "HTTP/1.1 503 " else "HTTP/1.1 400 "));
         try std.testing.expect(std.mem.indexOf(u8, response[0..n], @errorName(failure)) != null);
+    }
+}
+
+// Retryable capacity responses must expose Retry-After on the HTTP wire.
+test "HTTP overload response serializes retry after" {
+    var server: Server = undefined;
+    server.allocator = std.testing.allocator;
+    var connection: Connection = .{ .file = undefined, .started = 0 };
+    defer connection.output.deinit(std.testing.allocator);
+    try server.respond(&connection, .{ .status = 503, .retry_after = 1, .body = "{\"error\":\"ObservationLimit\"}" });
+    try std.testing.expect(std.mem.startsWith(u8, connection.output.items, "HTTP/1.1 503 "));
+    try std.testing.expect(std.mem.indexOf(u8, connection.output.items, "\r\nRetry-After: 1\r\n\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, connection.output.items, "{\"error\":\"ObservationLimit\"}"));
+}
+
+// The transport must admit all frame waits and observations with room left
+// for control requests, rather than imposing its own 16-connection ceiling.
+test "HTTP admits session waits and observations concurrently" {
+    const io = std.testing.io;
+    const Context = struct {
+        pub fn handle(_: *@This(), _: std.mem.Allocator, _: Request) anyerror!Response {
+            return .{ .pending = 1 };
+        }
+        pub fn pollResponse(_: *@This(), _: std.mem.Allocator, _: u32, _: i64) !?Response {
+            return null;
+        }
+        pub fn cancelResponse(_: *@This(), _: u32) void {}
+    };
+    var context: Context = .{};
+    var server = try Server.init(io, std.testing.allocator, "127.0.0.1:0");
+    defer server.deinit();
+    var clients: std.ArrayList(system_io.fs.File) = .empty;
+    defer {
+        for (clients.items) |client| client.close();
+        clients.deinit(std.testing.allocator);
+    }
+    const address = try system_io.net.Address.parseIp4("127.0.0.1", server.port);
+    for (0..limits.max_sessions + limits.max_observations + 1) |i| {
+        const fd = try system_io.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+        const client = system_io.fs.File{ .io = io, .handle = fd };
+        try clients.append(std.testing.allocator, client);
+        try system_io.posix.connect(fd, &address.any, address.getOsSockLen());
+        try client.writeAll("POST /v1/test HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+        try server.poll(0, &context);
+        try std.testing.expectEqual(i + 1, server.count);
     }
 }
