@@ -120,6 +120,15 @@ pub export fn ks_katzensteg_log_c(scope: [*:0]const u8, message: [*:0]const u8) 
 '''
 
 
+def copy_library_package(source, destination):
+    # Relocate the installed package, including optional dependencies such as
+    # Jackstay, so sibling-relative lookup tests the complete runtime package.
+    pattern = "lib*.dylib" if sys.platform == "darwin" else "lib*.so*"
+    for library in source.glob(pattern):
+        if library.is_file():
+            shutil.copy2(library, destination)
+
+
 @unittest.skipUnless(sys.platform in ("linux", "darwin"), "POSIX library loader")
 class RuntimeLogTest(unittest.TestCase):
     def compile_probe(self, folder):
@@ -155,19 +164,36 @@ class RuntimeLogTest(unittest.TestCase):
                 "-femit-bin=" + str(owner),
             ], check=True, capture_output=True)
             clients = []
+            # Stand-in only for an optional shared-library dependency at the
+            # loader boundary. It makes omitted package dependencies fail.
+            dependency_source = folder / "dependency.c"
+            dependency_source.write_text("int fixture_dependency(void) { return 1; }\n")
+            dependency = folder / ("libjackstay" + SUFFIX)
+            identity = "-Wl,-install_name,@rpath/libjackstay.dylib" if sys.platform == "darwin" else "-Wl,-soname,libjackstay.so"
+            subprocess.run(["cc", "-shared", "-fPIC", identity, str(dependency_source), "-o", str(dependency)], check=True, capture_output=True)
             for index in range(2):
                 source = folder / f"client{index}.zig"
-                source.write_text(CLIENT)
-                library = folder / (f"libclient{index}" + SUFFIX)
+                source.write_text(CLIENT + '''
+extern fn fixture_dependency() callconv(.c) c_int;
+pub export fn log_test_dependency() callconv(.c) c_int {
+    return fixture_dependency();
+}
+''')
+                name = f"katzensteg-sdl{index + 2}-dynapi"
+                library = folder / ("lib" + name + SUFFIX)
                 subprocess.run([
-                    "zig", "build-lib", "--name", f"client{index}", "-dynamic", "-ODebug", "-lc", str(owner),
-                    "-rpath", str(folder), "--dep", "runtime_log", "-Mroot=" + str(source),
+                    "zig", "build-lib", "--name", name, "-dynamic", "-ODebug", "-lc", str(owner), str(dependency),
+                    "-fno-each-lib-rpath", "-rpath", "@loader_path" if sys.platform == "darwin" else "$ORIGIN",
+                    "--dep", "runtime_log", "-Mroot=" + str(source),
                     "--dep", "platform", "-Mruntime_log=" + str(ROOT / "src/katzensteg/log.zig"),
                     "-Mplatform=" + str(ROOT / "src/platform/root.zig"),
                     "-femit-bin=" + str(library),
                 ], check=True, capture_output=True)
                 clients.append(library)
-            self.assert_shared_log(self.compile_probe(folder), clients)
+            relocated = folder / "relocated"
+            relocated.mkdir()
+            copy_library_package(folder, relocated)
+            self.assert_shared_log(self.compile_probe(folder), [relocated / client.name for client in clients])
 
     def test_installed_dynapi_and_core_share_log_after_relocation(self):
         # Production dependency wiring must work outside the checkout/cache,
@@ -179,12 +205,13 @@ class RuntimeLogTest(unittest.TestCase):
         self.assertTrue(core.exists(), "run the full zig build first")
         with tempfile.TemporaryDirectory(prefix="ks-installed-log-") as temporary:
             folder = Path(temporary)
-            copied_core = Path(shutil.copy2(core, folder))
+            copy_library_package(directory, folder)
+            copied_core = folder / core.name
             executable = self.compile_probe(folder)
             for version in (2, 3):
                 dynapi = directory / (f"libkatzensteg-sdl{version}-dynapi" + SUFFIX)
                 self.assertTrue(dynapi.exists(), "run the full zig build first")
-                copied_dynapi = Path(shutil.copy2(dynapi, folder))
+                copied_dynapi = folder / dynapi.name
                 self.assert_shared_log(executable, [copied_dynapi, copied_core])
 
 

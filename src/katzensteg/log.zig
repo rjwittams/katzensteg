@@ -119,7 +119,7 @@ fn openFileLocked() void {
     const opened = system_io.fs.createFileAbsolute(file_io.io(), path, .{ .truncate = !opened_once, .read = false }) catch return;
     // The shared mutex serializes all module writers. A fresh handle starts
     // at zero, so a reopen must explicitly resume at the end of this run.
-    opened.seekFromEnd(0) catch {
+    if (opened_once) opened.seekFromEnd(0) catch {
         opened.close();
         return;
     };
@@ -315,10 +315,14 @@ test "an unavailable first destination does not consume the fresh open" {
     defer std.testing.allocator.free(invalid_path);
     var logger = Logger.init(std.testing.allocator);
     defer logger.deinit();
+    file_mutex.lock();
     test_path = invalid_path;
+    file_mutex.unlock();
     logger.write("dropped");
     try fixture.expect("stale contents");
+    file_mutex.lock();
     test_path = fixture.path;
+    file_mutex.unlock();
     logger.write("successful");
     try fixture.expect("successful\n");
 }
