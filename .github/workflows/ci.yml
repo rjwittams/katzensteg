@@ -82,6 +82,7 @@ jobs:
           python3 scripts/katzensteg/test_command_mode.py
           python3 scripts/katzensteg/test_embed_render_batches.py
           python3 scripts/katzensteg/test_headless_wm.py
+          python3 scripts/katzensteg/test_wm_recovery.py
           python3 scripts/katzensteg/test_wm_wrap.py
           python3 scripts/katzensteg/test_wm_placeholder_host.py
           python3 scripts/katzensteg/test_linux_preload_exports.py
