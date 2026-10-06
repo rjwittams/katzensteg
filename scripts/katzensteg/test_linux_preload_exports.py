@@ -73,6 +73,9 @@ EXPECTED_EXPORTED_DEFINITIONS = {
 }
 
 EXPECTED_CORE_EXPORTED_DEFINITIONS = {
+    "ks_katzensteg_log_write_line",
+    "ks_katzensteg_log_retain",
+    "ks_katzensteg_log_release",
     "ks_katzensteg_shutdown",
     "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",

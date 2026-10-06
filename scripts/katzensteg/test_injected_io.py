@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+# Keep shared-library logging regressions in the existing CI entry point.
+from test_runtime_log import RuntimeLogTest
+
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = r'''
 #include <assert.h>

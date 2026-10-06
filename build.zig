@@ -223,7 +223,7 @@ pub fn build(b: *std.Build) void {
         .name = "katzensteg-core",
         .use_llvm = use_llvm,
         .root_module = projectModule(b, .{
-            .root_source_file = b.path("src/katzensteg/core_exports.zig"),
+            .root_source_file = b.path("src/katzensteg/core.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -256,7 +256,8 @@ pub fn build(b: *std.Build) void {
         katzensteg_core_lib.version_script = b.path("src/katzensteg/katzensteg_core_linux.map");
         katzensteg_core_lib.root_module.linkSystemLibrary("yuv", .{});
     }
-    b.installArtifact(katzensteg_core_lib);
+    const core_install = b.addInstallArtifact(katzensteg_core_lib, .{});
+    b.getInstallStep().dependOn(&core_install.step);
     if (dsym_step) |s| installDsym(b, katzensteg_core_lib, s);
 
     var katzensteg_metal_layer_install_step: ?*std.Build.Step = null;
@@ -321,6 +322,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(katzensteg_sdl2_lib);
     if (dsym_step) |s| installDsym(b, katzensteg_sdl2_lib, s);
     const sdl_dynapi_step = b.step("sdl-dynapi", "Build the SDL_DYNAMIC_API libraries, the launcher and the basic SDL demos");
+    sdl_dynapi_step.dependOn(&core_install.step);
     if (is_windows) {
         sdl_dynapi_step.dependOn(&b.addInstallArtifact(katzensteg_sdl2_lib, .{}).step);
     }
@@ -389,6 +391,7 @@ pub fn build(b: *std.Build) void {
             lib.root_module.strip = false;
             lib.root_module.omit_frame_pointer = false;
             addDynapiSources(b, lib, target, adapter.glue);
+            linkCoreLog(lib, katzensteg_core_lib, target);
             b.installArtifact(lib);
             if (dsym_step) |s| installDsym(b, lib, s);
             sdl_dynapi_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
@@ -421,6 +424,7 @@ pub fn build(b: *std.Build) void {
         katzensteg_sdl2_rebind_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/preload_macos_rebind.c") });
         katzensteg_sdl2_rebind_lib.root_module.linkFramework("Accelerate", .{});
         katzensteg_sdl2_rebind_lib.root_module.linkFramework("OpenGL", .{});
+        linkCoreLog(katzensteg_sdl2_rebind_lib, katzensteg_core_lib, target);
         b.installArtifact(katzensteg_sdl2_rebind_lib);
         if (dsym_step) |s| installDsym(b, katzensteg_sdl2_rebind_lib, s);
     }
@@ -492,6 +496,9 @@ pub fn build(b: *std.Build) void {
         katzensteg_unlinked_lib.root_module.addCSourceFile(.{ .file = b.path("src/katzensteg/real_sdl_linux.c") });
         katzensteg_unlinked_lib.version_script = b.path("src/katzensteg/katzensteg_linux.map");
         katzensteg_unlinked_lib.root_module.linkSystemLibrary("yuv", .{});
+    }
+    for ([_]*std.Build.Step.Compile{ katzensteg_sdl2_lib, katzensteg_sdl3_lib, katzensteg_lib, katzensteg_unlinked_lib }) |lib| {
+        linkCoreLog(lib, katzensteg_core_lib, target);
     }
     b.installArtifact(katzensteg_unlinked_lib);
     if (dsym_step) |s| installDsym(b, katzensteg_unlinked_lib, s);
@@ -1208,4 +1215,23 @@ fn projectModule(b: *std.Build, options: std.Build.Module.CreateOptions) *std.Bu
     // The platform adapters and C interposers use libc and pthread APIs.
     module.link_libc = true;
     return module;
+}
+
+/// All SDL modules resolve the same installed core logger, including when
+/// SDL loads a dynapi library privately. Windows finds the DLL beside them.
+fn linkCoreLog(lib: *std.Build.Step.Compile, core: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    // Linking a POSIX library by artifact injects its build-cache directory
+    // into RPATH. Use the emitted file so installed modules resolve only the
+    // sibling core, rather than accidentally loading a second cached copy.
+    if (target.result.os.tag == .windows) {
+        lib.root_module.linkLibrary(core);
+    } else {
+        lib.root_module.addObjectFile(core.getEmittedBin());
+        lib.each_lib_rpath = false;
+    }
+    switch (target.result.os.tag) {
+        .macos => lib.root_module.addRPathSpecial("@loader_path"),
+        .linux => lib.root_module.addRPathSpecial("$ORIGIN"),
+        else => {},
+    }
 }

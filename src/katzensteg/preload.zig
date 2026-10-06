@@ -1,4 +1,6 @@
 const std = @import("std");
+// Production SDL modules delegate file ownership to katzensteg-core.
+pub const katzensteg_shared_log = !@import("builtin").is_test;
 const system_io = @import("platform");
 const sdl = @import("katzensteg_sdl");
 const sdl_adapter = @import("sdl2_adapter.zig");
