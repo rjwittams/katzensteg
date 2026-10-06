@@ -258,7 +258,6 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/real_sdl3.zig",
             "src/katzensteg/sdl3.zig",
             "src/katzensteg/sdl3/abi.zig",
-            "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
             "src/katzensteg/real_sdl3_functions.h",
         ):
@@ -276,7 +275,6 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "src/katzensteg/real_sdl3.zig",
             "src/katzensteg/sdl3.zig",
             "src/katzensteg/sdl3/abi.zig",
-            "src/katzensteg/sdl3/real.zig",
             "src/katzensteg/real_sdl3_macos.c",
             "src/katzensteg/real_sdl3_functions.h",
         ):
