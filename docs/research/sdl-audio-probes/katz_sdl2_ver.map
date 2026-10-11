@@ -1,0 +1,11 @@
+/* katz_sdl2_ver.so: export the SDL2 wrappers under a private default version
+ * at index 2. Unversioned SDL2 references still bind to it (index 2 is
+ * accepted for unversioned lookups); references to SDL_x@SDL3_0.0.0 do not,
+ * because a named version that differs from the requested one is rejected
+ * (glibc dl-lookup.c check_match). */
+KATZ_SDL2 {
+    global:
+        SDL_*;
+    local:
+        *;
+};

@@ -1,0 +1,13 @@
+/* katz_sdl3_symver.so: export the wrappers only as SDL_x@SDL3_0.0.0 (a
+ * non-default, hidden version). The katz3_* definitions stay local.
+ * KATZ_PAD_0 takes version index 2: glibc lets unversioned references bind
+ * to a definition at index 2 even when it is hidden (dl-lookup.c
+ * check_match), so SDL3_0.0.0 must sit at index 3 or later. */
+KATZ_PAD_0 {
+    local:
+        *;
+};
+SDL3_0.0.0 {
+    global:
+        SDL_*;
+};
