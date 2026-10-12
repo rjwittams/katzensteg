@@ -1,4 +1,5 @@
 const std = @import("std");
+const program_status = @import("program_status.zig");
 const builtin = @import("builtin");
 const system_io = @import("platform");
 const attach_host = @import("attach_host.zig");
@@ -329,9 +330,16 @@ fn resolveDestination(allocator: std.mem.Allocator, explicit_stdio: bool) !desti
     return destination_mod.Destination.resolve(allocator, false, value, home);
 }
 
-/// Resolves a profile's launch plan; a profile whose SDL adapter cannot be
-/// loaded here ends the launcher with a message instead of an error trace.
+// Dry-run and proxy retain their established adapter-failure exit code.
 fn resolvePlanOrExit(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
+    return resolvePlan(allocator, profile, expansion, extra_args) catch |err| switch (err) {
+        error.PreloadUnavailable, error.NoAdapterLibrary, error.InvalidInjection => std.process.exit(66),
+        else => return err,
+    };
+}
+
+// Running profiles unwind through their terminal-status cleanup on failure.
+fn resolvePlan(allocator: std.mem.Allocator, profile: *const profiles_mod.LaunchProfile, expansion: ExpansionContext, extra_args: []const []const u8) !ResolvedLaunchPlan {
     return ResolvedLaunchPlan.fromProfile(allocator, profile, expansion, extra_args) catch |err| {
         const reason = switch (err) {
             error.PreloadUnavailable => "preload injection is unavailable on this platform; use injection \"dynapi\" or \"auto\"",
@@ -340,7 +348,7 @@ fn resolvePlanOrExit(allocator: std.mem.Allocator, profile: *const profiles_mod.
             else => return err,
         };
         std.debug.print("katzensteg: {s}: cannot load the SDL adapter: {s}\n", .{ profile.name, reason });
-        std.process.exit(66);
+        return err;
     };
 }
 
@@ -428,13 +436,22 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
     );
 }
 
-fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !u8 {
+fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) anyerror!u8 {
     const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
         std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
         return 64;
     };
     defer destination.deinit(allocator);
     const embed_jsonl = destination == .stdio or destination == .jsonl;
+    const status_title: []const u8 = target;
+    var status_exit: u8 = 1;
+    var status_reason: ?[]const u8 = "Startup failed";
+    defer if (destination == .standalone) launcherStatus(io, program_status.exited(status_exit, status_title, status_reason));
+    errdefer |err| status_reason = @errorName(err);
+
+    var starting: [2200]u8 = undefined;
+    const starting_msg = std.fmt.bufPrint(&starting, "Starting {s}", .{status_title}) catch "Starting";
+    if (destination == .standalone) launcherStatus(io, .{ .state = .working, .title = status_title, .msg = starting_msg });
     if (std.mem.eql(u8, target, "jackstay-source")) try @import("jackstay").checkAvailable();
     var catalog = try loadProfileCatalog(io, allocator);
     defer catalog.deinit();
@@ -444,16 +461,28 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
             std.debug.print("katzensteg: hosted launch requires a known profile: {s}\n", .{target});
             return 66;
         }
-        return runCommand(io, allocator, target, extra_args);
+        status_exit = try runCommand(io, allocator, target, extra_args);
+        status_reason = if (status_exit == 0) null else "Command exited non-zero";
+        return status_exit;
     };
     if (profileLaunchProblem(profile)) |problem| {
+        status_reason = switch (problem) {
+            .broken => "Profile is broken",
+            .fragment => "Profile is a fragment",
+        };
         printProfileLaunchProblem(target, problem);
         return 66;
     }
 
     var expansion = try ExpansionContext.init(io, allocator);
     defer expansion.deinit(allocator);
-    var plan = try resolvePlanOrExit(allocator, profile, expansion, extra_args);
+    var plan = resolvePlan(allocator, profile, expansion, extra_args) catch |err| {
+        status_reason = @errorName(err);
+        switch (err) {
+            error.PreloadUnavailable, error.NoAdapterLibrary, error.InvalidInjection => return 66,
+            else => return @as(anyerror!u8, err),
+        }
+    };
     defer plan.deinit();
 
     const host: ?system_io.fs.File = if (hosted_launch_supported and destination == .jsonl)
@@ -488,6 +517,7 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     defer env_map.deinit();
     for (plan.env) |entry| try env_map.put(entry.name, entry.value);
     try env_map.put("KATZENSTEG_CONFIG", runtime_config_path);
+    if (destination == .standalone) try env_map.put("KATZENSTEG_STATUS_TITLE", status_title) else _ = env_map.swapRemove("KATZENSTEG_STATUS_TITLE");
     if (destination == .jackstay) {
         try env_map.put("KATZENSTEG_PUBLISH", destination.jackstay);
     } else _ = env_map.swapRemove("KATZENSTEG_PUBLISH");
@@ -514,6 +544,7 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
         }
     else
         spawnAndWaitWithOutputSupervised(&child, plan.stdout, plan.stderr, if (command_supervisor) |*supervisor| supervisor else null) catch |err| {
+            status_reason = @errorName(err);
             if (destination == .standalone) resetTerminalBestEffort(io);
             printSpawnFailure(allocator, plan.profile_name, plan.argv, err);
             return spawnFailureExitCode(err);
@@ -522,6 +553,12 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
         if (destination == .standalone) resetTerminalBestEffort(io);
     }
     const exit_code = childExitCode(term);
+    status_exit = exit_code;
+    var exit_reason: [128]u8 = undefined;
+    status_reason = if (exit_code == 0) null else switch (term) {
+        .Signal => |sig| std.fmt.bufPrint(&exit_reason, "App terminated by signal {d}", .{sig}) catch "App crashed",
+        else => std.fmt.bufPrint(&exit_reason, "App exited with status {d}", .{exit_code}) catch "App exited non-zero",
+    };
     if (exit_code != 0 and !embed_jsonl) {
         reportExecutedCommand(allocator, plan.argv);
         reportOutputTail(io, allocator, plan.stdout, plan.stderr);
@@ -1744,4 +1781,12 @@ test "launcher command configuration round trips escaped caret bindings" {
     try std.testing.expectEqual(runtime.command_key, decoded.command_key);
     applyEmbedJsonlRuntime(&runtime, defaultEmbedRuntimeFds());
     try std.testing.expect(runtime.command_key == null);
+}
+
+fn launcherStatus(io: std.Io, report: program_status.Report) void {
+    const tty = system_io.terminal.Tty.open(io) catch return;
+    defer tty.close();
+    var writer = tty.output.writerStreaming(&.{});
+    program_status.write(&writer.interface, report) catch return;
+    writer.interface.flush() catch {};
 }

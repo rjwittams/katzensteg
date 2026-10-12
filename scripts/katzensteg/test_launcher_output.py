@@ -84,5 +84,58 @@ class LauncherOutputTests(unittest.TestCase):
                     time.sleep(.01)
 
 
+    @unittest.skipIf(os.name == "nt", "POSIX controlling-terminal boundary")
+    def test_program_status_startup_failure_and_hosted_silence(self):
+        # Real launcher failures leave an error on its controlling terminal;
+        # hosted failures emit no status even when a controlling terminal exists.
+        import base64
+        import fcntl
+        import pty
+        import re
+        import select
+        import termios
+        with tempfile.TemporaryDirectory(prefix="ks-status-") as directory:
+            root = Path(directory)
+            (root / "profiles.json").write_text(json.dumps({"profiles": {
+                "missing": {"target": str(root / "absent")},
+                "fragment": {},
+                "nonzero": {"target": sys.executable, "args": ["-c", "raise SystemExit(7)"]},
+            }}))
+            env = {k: v for k, v in os.environ.items() if not k.startswith("KATZENSTEG_")}
+            env["KATZENSTEG_PROFILE_DIR"] = str(root)
+            for profile in ("missing", "fragment", "nonzero"):
+                for hosted in (False, True):
+                    with self.subTest(profile=profile, hosted=hosted):
+                        master, slave = pty.openpty()
+                        def ctty():
+                            os.setsid()
+                            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+                        try:
+                            args = [str(LAUNCHER)] + (["--embed-jsonl"] if hosted else []) + [profile]
+                            child = subprocess.Popen(args, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=ctty)
+                            output = bytearray()
+                            deadline = time.monotonic() + 10
+                            while child.poll() is None or select.select([master], [], [], 0)[0]:
+                                if time.monotonic() > deadline:
+                                    child.kill()
+                                    child.wait()
+                                    self.fail("launcher did not exit")
+                                if select.select([master], [], [], .02)[0]:
+                                    output.extend(os.read(master, 65536))
+                            self.assertNotEqual(child.wait(), 0)
+                            reports = [dict(pair.split(b'=', 1) for pair in body.split(b':'))
+                                       for body in re.findall(rb'\x1b\]7501;([^\x1b]*)\x1b\\', output)]
+                            if hosted:
+                                self.assertEqual(reports, [])
+                            else:
+                                self.assertEqual([r[b'state'] for r in reports], [b'working', b'error'])
+                                self.assertEqual(base64.b64decode(reports[-1][b'title']), profile.encode())
+                                self.assertTrue(base64.b64decode(reports[-1][b'msg']))
+                                self.assertNotIn(b'\x1bc', output)
+                        finally:
+                            os.close(master)
+                            os.close(slave)
+
+
 if __name__ == "__main__":
     unittest.main()

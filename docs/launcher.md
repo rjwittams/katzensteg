@@ -576,3 +576,31 @@ SHM requires the producer and terminal to share a POSIX shared-memory namespace.
 Each upload creates an immutable object and sends one APC containing its encoded
 name. Kitty maps and unlinks the object. There is no per-frame `fsync`, but pixels
 are still copied into SHM; this is not a GPU-only transport.
+
+## Terminal program status (OSC 7501)
+
+Standalone launches report `app=katzensteg` and use the profile name as the
+`title` in the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+(revision 0.3). Startup reports `working` with `Starting <title>` and no progress
+percentage. After the first direct frame, the runtime reports `idle`, meaning
+that the app awaits the player. Clean exit clears the record; startup failures,
+crashes and non-zero exits leave an `error` record with the reason.
+
+The launcher writes only before the runtime starts and after it exits. The
+runtime writes through `DirectTty` under its presentation lock between frames,
+without writing to stdout or stderr. Cleanup does not send RIS, so errors
+survive exit. Reports are unconditional; terminals without support ignore them.
+Hosted targets (`--embed-jsonl`, `KATZENSTEG_TARGET=jsonl:…`, the pi host, and
+Jackstay publication) emit no reports from the launcher or runtime.
+
+The desktop WM owns the outer terminal writer. It reports an `idle` root titled
+`katzensteg`, and producer children named `window-<session-id>` with the profile
+title. Children report `working` until ready to show, then `idle`; a startup
+failure or non-zero app exit reports `error`, and a clean close clears the child.
+The WM clears the root and its children when it quits. Session windows do not
+report children yet.
+
+Titles and messages are standard base64 UTF-8, limited to 192 and 2048 decoded
+bytes respectively. Text is truncated at a UTF-8 boundary; invalid UTF-8 and
+C0/C1 control characters are rejected before any report bytes are written.
+The complete report remains within 4096 bytes.

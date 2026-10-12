@@ -550,6 +550,8 @@ pub const FrameBuilder = struct {
     dump_composites: bool = false,
     debug_composite: bool = false,
     last_inspect_summary: InspectFrameSummary = .{},
+    /// At least one direct frame completed its terminal output successfully.
+    direct_frame_shown: bool = false,
     next_image_id: u32 = 5000,
     image_id_start: u32 = 5000,
     image_id_end: u32 = std.math.maxInt(u32),
@@ -866,7 +868,11 @@ pub const FrameBuilder = struct {
         backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering GL framebuffer mode: {any}", .{err});
         engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering GL framebuffer mode: {any}", .{err});
 
-        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
+        self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| {
+            logger.writeFmtScoped(.info, .frame_builder, "external framebuffer present failed: {any}", .{err});
+            return;
+        };
+        self.direct_frame_shown = true;
 
         self.last_inspect_summary = self.buildInspectSummary(state, &job);
         if (image_gc) self.deleteRetiredImages(logger, backend);
@@ -1473,6 +1479,7 @@ pub const FrameBuilder = struct {
 
     pub fn renderPresentJob(self: *FrameBuilder, logger: *Logger, tty: *const DirectTty, engine: *ts_scene.SceneEngine, backend: *ts_kitty.Backend, renderer: core.CoreHandle, job: *PresentJob, debug_protocol_replies: bool, image_gc: bool) void {
         const state = self.renderers.getPtr(renderer) orelse return;
+        var presented = true;
         switch (job.*) {
             .framebuffer => |fb| {
                 engine.beginScene();
@@ -1483,15 +1490,27 @@ pub const FrameBuilder = struct {
                     state.lines.clearRetainingCapacity();
                     return;
                 };
-                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering composite direct mode: {any}", .{err});
-                engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering composite direct mode: {any}", .{err});
+                backend.applySpriteOps(engine.sprite_ops.items) catch |err| {
+                    presented = false;
+                    logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed while entering composite direct mode: {any}", .{err});
+                };
+                engine.commit() catch |err| {
+                    presented = false;
+                    logger.writeFmtScoped(.info, .frame_builder, "scene commit failed while entering composite direct mode: {any}", .{err});
+                };
                 if (state.composite_rgba == null or state.composite_rgba.?.ptr != fb.rgba.ptr or state.composite_rgba.?.len != fb.rgba.len) {
                     if (state.composite_rgba) |old| self.allocator.free(old);
                     state.composite_rgba = self.allocator.dupe(u8, fb.rgba) catch null;
                 }
                 switch (self.composite_mode) {
-                    .fullscreen => self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentCompositeFullscreenDirect failed: {any}", .{err}),
-                    .tiled_strip => self.presentCompositeTilesDirect(logger, tty, backend, state) catch |err| logger.writeFmtScoped(.info, .frame_builder, "presentCompositeTilesDirect failed: {any}", .{err}),
+                    .fullscreen => self.presentCompositeFullscreenDirect(logger, tty, backend, state) catch |err| {
+                        presented = false;
+                        logger.writeFmtScoped(.info, .frame_builder, "presentCompositeFullscreenDirect failed: {any}", .{err});
+                    },
+                    .tiled_strip => self.presentCompositeTilesDirect(logger, tty, backend, state) catch |err| {
+                        presented = false;
+                        logger.writeFmtScoped(.info, .frame_builder, "presentCompositeTilesDirect failed: {any}", .{err});
+                    },
                 }
             },
             .scene => |scene_job| {
@@ -1501,6 +1520,7 @@ pub const FrameBuilder = struct {
                             if (!self.published_assets.contains(asset.asset_id)) {
                                 const image_id = self.allocImageId();
                                 backend.registerRawImage(image_id, asset.rgba, asset.width, asset.height) catch |err| {
+                                    presented = false;
                                     logger.writeFmtScoped(.info, .frame_builder, "scene asset publish failed: {any}", .{err});
                                     continue;
                                 };
@@ -1551,13 +1571,20 @@ pub const FrameBuilder = struct {
                         }
                     }
                 }
-                backend.applySpriteOps(engine.sprite_ops.items) catch |err| logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed: {any}", .{err});
-                engine.commit() catch |err| logger.writeFmtScoped(.info, .frame_builder, "scene commit failed: {any}", .{err});
+                backend.applySpriteOps(engine.sprite_ops.items) catch |err| {
+                    presented = false;
+                    logger.writeFmtScoped(.info, .frame_builder, "applySpriteOps failed: {any}", .{err});
+                };
+                engine.commit() catch |err| {
+                    presented = false;
+                    logger.writeFmtScoped(.info, .frame_builder, "scene commit failed: {any}", .{err});
+                };
                 if (self.stats.enabled) {
                     self.stats.sprite_ops += engine.sprite_ops.items.len;
                 }
             },
         }
+        if (presented) self.direct_frame_shown = true;
         self.last_inspect_summary = self.buildInspectSummary(state, job);
         if (image_gc) self.deleteRetiredImages(logger, backend);
         if (debug_protocol_replies) self.drainKittyReplies(logger, tty);

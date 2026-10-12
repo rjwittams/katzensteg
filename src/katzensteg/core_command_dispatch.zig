@@ -14,6 +14,7 @@ pub fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start
     defer rt.presentation_mutex.unlock();
     rt.refreshTerminalSizeIfNeeded();
     rt.frame_builder.onRenderPresent(&rt.logger, &rt.tty.?, &rt.engine.?, &rt.backend.?, renderer, rt.bg_only, rt.cursor_state.snapshot(), rt.debug_protocol_replies, rt.image_gc);
+    rt.reportStatusIdle();
     rt.notePresentationLayout(rt.frame_builder.presentationLayoutForRenderer(&rt.tty.?, renderer));
     const duration = system_io.time.nanoTimestamp() - start_ns;
     rt.notePresentDuration(duration);

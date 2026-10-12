@@ -165,6 +165,7 @@ pub const Runtime = struct {
     real_window_visibility: window_policy_mod.RealWindowVisibility = .show,
     terminal_identity: []const u8 = "unknown",
     output_profile_name: []const u8 = "unknown",
+    status_idle_reported: bool = false,
     logged_queued_replay_stub: bool = false,
     active: bool = false,
     queue_mutex: system_io.Mutex = .{},
@@ -688,6 +689,18 @@ pub const Runtime = struct {
         return self.sdl_window_ids.get(window_id);
     }
 
+    /// Called under presentation_mutex after a direct frame, between uploads.
+    pub fn reportStatusIdle(self: *Runtime) void {
+        if (self.status_idle_reported or self.tty == null or !self.frame_builder.direct_frame_shown) return;
+        const title = system_io.process.getEnvVarOwned(self.allocator, "KATZENSTEG_STATUS_TITLE") catch return;
+        defer self.allocator.free(title);
+        var writer = self.tty.?.file.writerStreaming(&.{});
+        var reported = false;
+        @import("program_status.zig").ready(&writer.interface, title, &reported) catch return;
+        writer.interface.flush() catch return;
+        self.status_idle_reported = true;
+    }
+
     pub fn notePresentationLayout(self: *Runtime, layout: presentation_layout_mod.PresentationLayout) void {
         self.presentation_layout = layout;
         self.updateInputTarget();
@@ -967,6 +980,7 @@ pub const Runtime = struct {
         self.lockPresentation("direct_external_framebuffer");
         defer self.presentation_mutex.unlock();
         self.frame_builder.presentExternalFramebuffer(&self.logger, &self.tty.?, &self.engine.?, &self.backend.?, width, height, format, pixels, self.cursor_state.snapshot(), self.debug_protocol_replies, self.image_gc);
+        self.reportStatusIdle();
         self.notePresentationLayout(self.frame_builder.presentationLayoutForExternalFramebuffer(&self.tty.?));
         const duration = system_io.time.nanoTimestamp() - start_ns;
         self.notePresentDuration(duration);

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Command routing and bounded quit on isolated PTYs, with real SDL adapters."""
+import base64
 import fcntl
 import json
 import os
@@ -69,6 +70,43 @@ class CommandMode(unittest.TestCase):
             self.fail(f'timed out; events={events()!r}; exited={(folder/"exit").read_text() if (folder/"exit").exists() else None}')
         wait(lambda: 'ready ' in events())
         return folder, master, slave, original, events, wait
+
+    # OSC 7501 must follow the real first-frame and exit lifecycle through one terminal writer.
+    def test_program_status_lifecycle(self):
+        for wm in (False, True):
+            for crash in (False, True):
+                with self.subTest(wm=wm, crash=crash):
+                    folder, master, _, _, events, wait = self.run_app(2, wm=wm)
+                    def reports():
+                        output = (folder/'terminal').read_bytes()
+                        return [dict(pair.split(b'=', 1) for pair in body.split(b':'))
+                                for body in re.findall(rb'\x1b\]7501;([^\x1b]*)\x1b\\', output)]
+                    def children():
+                        return [r for r in reports() if (b'id' in r) == wm]
+                    wait(lambda: any(r[b'state'] == b'idle' for r in children()))
+                    records = children()
+                    self.assertEqual(records[0][b'state'], b'working')
+                    self.assertTrue(all(r[b'app'] == b'katzensteg' for r in records))
+                    self.assertTrue(all(base64.b64decode(r[b'title']) == b'test.command2' for r in records))
+                    self.assertTrue(all(b'progress' not in r for r in records))
+                    if wm:
+                        self.assertEqual(reports()[0][b'state'], b'idle')
+                        self.assertEqual(base64.b64decode(reports()[0][b'title']), b'katzensteg')
+                    else:
+                        self.assertEqual(base64.b64decode(records[0][b'msg']), b'Starting test.command2')
+                    if crash:
+                        pid = int(re.search(r'ready (\d+)', events()).group(1))
+                        os.kill(pid, signal.SIGKILL)
+                    else:
+                        os.write(master, b'\x1dq')
+                    expected = b'error' if crash else b'clear'
+                    wait(lambda: any(r[b'state'] == expected for r in children()))
+                    if crash:
+                        self.assertTrue(base64.b64decode(children()[-1][b'msg']))
+                    wait(lambda: (folder/'exit').exists())
+                    # Drain bytes written just before the supervisor records exit.
+                    wait(lambda: bool(reports()) and (not wm or reports()[-1][b'state'] == b'clear'))
+                    self.assertNotIn(b'\x1bc', (folder/'terminal').read_bytes())
 
     def test_focus_cancel_literal_and_graceful_quit(self):
         for version in (2, 3):
