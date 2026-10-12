@@ -695,7 +695,8 @@ pub const Runtime = struct {
         const title = system_io.process.getEnvVarOwned(self.allocator, "KATZENSTEG_STATUS_TITLE") catch return;
         defer self.allocator.free(title);
         var writer = self.tty.?.file.writerStreaming(&.{});
-        @import("program_status.zig").ready(&writer.interface, title, &self.status_idle_reported) catch return;
+        var reported = false;
+        @import("program_status.zig").ready(&writer.interface, title, &reported) catch return;
         writer.interface.flush() catch return;
         self.status_idle_reported = true;
     }

@@ -436,7 +436,7 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
     );
 }
 
-fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) !u8 {
+fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra_args: []const []const u8, explicit_stdio: bool) anyerror!u8 {
     const destination = resolveDestination(allocator, explicit_stdio) catch |err| {
         std.debug.print("katzensteg: invalid KATZENSTEG_TARGET: {s}\n", .{@errorName(err)});
         return 64;
@@ -480,7 +480,7 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
         status_reason = @errorName(err);
         switch (err) {
             error.PreloadUnavailable, error.NoAdapterLibrary, error.InvalidInjection => return 66,
-            else => return err,
+            else => return @as(anyerror!u8, err),
         }
     };
     defer plan.deinit();

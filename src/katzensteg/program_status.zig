@@ -47,6 +47,7 @@ fn textPrefix(value: []const u8, limit: usize) ![]const u8 {
 }
 
 fn textPair(writer: *std.Io.Writer, key: []const u8, value: []const u8) !void {
+    // Standard base64 needs ceil(2048 / 3) * 4 bytes for the maximum message.
     var encoded: [2732]u8 = undefined;
     try writer.print(":{s}={s}", .{ key, std.base64.standard.Encoder.encode(&encoded, value) });
 }

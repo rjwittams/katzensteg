@@ -774,7 +774,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var last_input_ms: i64 = 0;
     var tty = try DirectTty.init(io);
     defer tty.deinit();
-    try writeStatusFile(tty.file, .{ .state = .idle, .title = "katzensteg" });
+    writeStatusFile(tty.file, .{ .state = .idle, .title = "katzensteg" }) catch {};
     defer writeStatusFile(tty.file, .{ .state = .clear }) catch {};
 
     var logger = Logger.init(allocator);
@@ -852,11 +852,11 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
         z_order[i] = i;
         if (spec.kind == .profile) {
             var id: [32]u8 = undefined;
-            try writeStatusFile(tty.file, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name });
+            writeStatusFile(tty.file, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name }) catch {};
         }
         sessions[i] = launchWindow(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
             var status_id: [32]u8 = undefined;
-            if (spec.kind == .profile) try writeStatusFile(tty.file, .{ .state = .@"error", .id = try std.fmt.bufPrint(&status_id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) });
+            if (spec.kind == .profile) writeStatusFile(tty.file, .{ .state = .@"error", .id = try std.fmt.bufPrint(&status_id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) }) catch {};
             next_session_id += 1;
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
@@ -1016,7 +1016,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                     var id: [32]u8 = undefined;
                     tty_lock.lock();
                     defer tty_lock.unlock();
-                    try program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{session_id}), .title = registration.title, .msg = @errorName(err) });
+                    program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{session_id}), .title = registration.title, .msg = @errorName(err) }) catch {};
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -1084,14 +1084,14 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                                         var id: [32]u8 = undefined;
                                         tty_lock.lock();
                                         defer tty_lock.unlock();
-                                        try program_status.write(writer, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name });
+                                        program_status.write(writer, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name }) catch {};
                                     }
                                     var session = launchWindow(allocator, producer_exe, tty.file, terminal, spec, new_index, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
                                         if (spec.kind == .profile) {
                                             var id: [32]u8 = undefined;
                                             tty_lock.lock();
                                             defer tty_lock.unlock();
-                                            try program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) });
+                                            program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) }) catch {};
                                             next_session_id += 1;
                                         }
                                         redraw_state.session_error = session_error;
@@ -5144,12 +5144,12 @@ fn reportProducerStatuses(writer: *std.Io.Writer, sessions: []const WmWindow, ca
         const state: program_status.State = if (failed) .@"error" else if (ended) .clear else if (sessionIsDrawable(session)) .idle else .working;
         const previous = &cache[index % cache.len];
         if (previous.id == session.session_id and previous.state == state) continue;
-        try program_status.write(writer, .{
+        program_status.write(writer, .{
             .id = try std.fmt.bufPrint(&id, "window-{d}", .{session.session_id}),
             .title = session.profile_name,
             .state = state,
             .msg = if (failed) childTermSummary(session.wait_state.term) else null,
-        });
+        }) catch continue;
         previous.* = .{ .id = session.session_id, .state = state };
     }
 }
