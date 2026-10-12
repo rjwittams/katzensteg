@@ -1,3 +1,4 @@
+const program_status = @import("program_status.zig");
 const std = @import("std");
 const system_io = @import("platform");
 const xev = @import("xev");
@@ -271,7 +272,10 @@ const WmChromeSnapshot = struct {
     session_cells: bool = false,
 };
 
+const StatusSnapshot = struct { id: u64 = 0, state: ?program_status.State = null };
+
 pub const WmDesktopRedrawState = struct {
+    status_records: [default_wm_session_capacity]StatusSnapshot = @splat(.{}),
     cover_policy: cover.Policy = .{},
     menu: command_menu.Snapshot = .{},
     session_error: ?[]const u8 = null,
@@ -770,6 +774,8 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     var last_input_ms: i64 = 0;
     var tty = try DirectTty.init(io);
     defer tty.deinit();
+    try writeStatusFile(tty.file, .{ .state = .idle, .title = "katzensteg" });
+    defer writeStatusFile(tty.file, .{ .state = .clear }) catch {};
 
     var logger = Logger.init(allocator);
     defer logger.deinit();
@@ -844,7 +850,14 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     for (specs) |spec| {
         const i = initialized;
         z_order[i] = i;
+        if (spec.kind == .profile) {
+            var id: [32]u8 = undefined;
+            try writeStatusFile(tty.file, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name });
+        }
         sessions[i] = launchWindow(allocator, producer_exe, tty.file, terminal, spec, i, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
+            var status_id: [32]u8 = undefined;
+            if (spec.kind == .profile) try writeStatusFile(tty.file, .{ .state = .@"error", .id = try std.fmt.bufPrint(&status_id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) });
+            next_session_id += 1;
             try recordLaunchFailure(&event_log, &logger, spec.profile_name, err);
             first_exit_code = 1;
             continue;
@@ -1000,6 +1013,10 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                 next_session_id += 1;
                 channel.writer().print("{{\"type\":\"registered\",\"version\":1,\"session_id\":{d}}}\n", .{session_id}) catch continue;
                 var session = attachProducerSession(allocator, tty.file, terminal, registration.title, index, &channel, options.presentation, cover_policy.mode, output_profile, &event_log) catch |err| {
+                    var id: [32]u8 = undefined;
+                    tty_lock.lock();
+                    defer tty_lock.unlock();
+                    try program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{session_id}), .title = registration.title, .msg = @errorName(err) });
                     logger.writeFmtScoped(.warn, .wm, "external attach failed: {s}", .{@errorName(err)});
                     continue;
                 };
@@ -1063,7 +1080,20 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                                         try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
                                         break :launch;
                                     };
+                                    if (spec.kind == .profile) {
+                                        var id: [32]u8 = undefined;
+                                        tty_lock.lock();
+                                        defer tty_lock.unlock();
+                                        try program_status.write(writer, .{ .state = .working, .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name });
+                                    }
                                     var session = launchWindow(allocator, producer_exe, tty.file, terminal, spec, new_index, options.presentation, cover_policy.mode, output_profile, &event_log, &provider, &wm_events, &session_error, foreground, background) catch |err| {
+                                        if (spec.kind == .profile) {
+                                            var id: [32]u8 = undefined;
+                                            tty_lock.lock();
+                                            defer tty_lock.unlock();
+                                            try program_status.write(writer, .{ .state = .@"error", .id = try std.fmt.bufPrint(&id, "window-{d}", .{next_session_id}), .title = spec.profile_name, .msg = @errorName(err) });
+                                            next_session_id += 1;
+                                        }
                                         redraw_state.session_error = session_error;
                                         try recordLaunchFailure(&event_log, &logger, launch_prompt.items, err);
                                         break :launch;
@@ -2754,6 +2784,7 @@ fn redrawDesktopManyLocked(tty_lock: *system_io.Mutex, writer: anytype, terminal
     defer tty_lock.unlock();
     var bytes = std.Io.Writer.Allocating.init(events.allocator);
     defer bytes.deinit();
+    try reportProducerStatuses(&bytes.writer, sessions, &redraw_state.status_records);
     try bytes.writer.writeAll("\x1b[?2026h");
     try renderDesktopMany(&bytes.writer, terminal, sessions, z_order, focused_index, events, redraw_state);
     try bytes.writer.writeAll("\x1b[?2026l");
@@ -5096,4 +5127,74 @@ test "wm initial control failure kills and reaps spawned producer" {
     // the failed launch has already waited for and removed its child.
     try std.testing.expectError(error.NoChild, system_io.posix.waitpid(pid, std.posix.W.NOHANG));
     cleanup_verified = true;
+}
+
+fn writeStatusFile(file: system_io.fs.File, report: program_status.Report) !void {
+    var writer = file.writerStreaming(&.{});
+    try program_status.write(&writer.interface, report);
+    try writer.interface.flush();
+}
+
+fn reportProducerStatuses(writer: *std.Io.Writer, sessions: []const WmWindow, cache: *[default_wm_session_capacity]StatusSnapshot) !void {
+    for (sessions, 0..) |*session, index| {
+        if (session.content != .producer) continue;
+        var id: [32]u8 = undefined;
+        const ended = sessionHasEnded(session);
+        const failed = ended and session.producer.child != null and childTermExitCode(session.wait_state.term) != 0;
+        const state: program_status.State = if (failed) .@"error" else if (ended) .clear else if (sessionIsDrawable(session)) .idle else .working;
+        const previous = &cache[index % cache.len];
+        if (previous.id == session.session_id and previous.state == state) continue;
+        try program_status.write(writer, .{
+            .id = try std.fmt.bufPrint(&id, "window-{d}", .{session.session_id}),
+            .title = session.profile_name,
+            .state = state,
+            .msg = if (failed) childTermSummary(session.wait_state.term) else null,
+        });
+        previous.* = .{ .id = session.session_id, .state = state };
+    }
+}
+
+// Producer status follows readiness and exit; a clean externally hosted close clears its child.
+// Session windows are excluded because their host owns program status.
+test "WM producer status bytes follow window lifecycle" {
+    var session = WmWindow{
+        .profile_name = "probe",
+        .session_id = 42,
+        .window = WmWindowState.init("main", .{ .row = 2, .col = 2, .rows = 10, .cols = 30 }),
+        .upload = .{ .profile = .file_whole },
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    // Generate readiness and termination transitions using a borrowed terminal descriptor.
+    for ([_]program_status.State{ .working, .idle, .clear, .@"error" }) |expected| {
+        out.clearRetainingCapacity();
+        session.producer.channel.stdio.presentation = system_io.fs.File.stdout(std.testing.io);
+        session.state = .running;
+        session.presentation_status.ready_to_show = expected == .idle;
+        session.producer.child = null;
+        if (expected == .clear) session.producer.channel.stdio.presentation = null;
+        if (expected == .@"error") {
+            session.producer.child = system_io.process.Child.init(std.testing.io, &.{"unused"}, std.testing.allocator);
+            session.wait_state.term = .{ .Exited = 7 };
+            session.wait_state.done.store(true, .seq_cst);
+        }
+        var cache: [default_wm_session_capacity]StatusSnapshot = @splat(.{});
+        try reportProducerStatuses(&out.writer, &.{session}, &cache);
+        const first_len = out.written().len;
+        try reportProducerStatuses(&out.writer, &.{session}, &cache);
+        try std.testing.expectEqual(first_len, out.written().len);
+        var prefix: [128]u8 = undefined;
+        try std.testing.expect(std.mem.startsWith(u8, out.written(), try std.fmt.bufPrint(&prefix, "\x1b]7501;state={s}:app=katzensteg:id=window-42:title=cHJvYmU=", .{@tagName(expected)})));
+        if (expected == .@"error") try std.testing.expect(std.mem.indexOf(u8, out.written(), ":msg=") != null);
+    }
+}
+
+// The outer WM record is idle while running and root clear removes the complete tree on quit.
+test "WM root status bytes" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try program_status.write(&out.writer, .{ .state = .idle, .title = "katzensteg" });
+    try program_status.write(&out.writer, .{ .state = .clear });
+    try std.testing.expectEqualStrings("\x1b]7501;state=idle:app=katzensteg:title=a2F0emVuc3RlZw==\x1b\\" ++
+        "\x1b]7501;state=clear:app=katzensteg\x1b\\", out.written());
 }
