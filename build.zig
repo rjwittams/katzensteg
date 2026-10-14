@@ -609,10 +609,40 @@ pub fn build(b: *std.Build) void {
     linkSdlProbe(b, katzensteg_gl_probe_sdl3.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
     linkOpenGl(katzensteg_gl_probe_sdl3.root_module, target);
     b.installArtifact(katzensteg_gl_probe_sdl3);
+    // Audio probes: one 440 Hz tone per SDL audio model, selected by argument
+    // (profiles/probes.json, scripts/katzensteg/test_audio_probes.py).
+    const katzensteg_audio_probe = b.addExecutable(.{
+        .name = "katzensteg-audio-probe",
+        .use_llvm = use_llvm,
+        .root_module = projectModule(b, .{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_audio_probe.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl2/audio_probe.c") });
+    katzensteg_audio_probe.root_module.addIncludePath(b.path("examples/probes/common"));
+    if (is_macos) katzensteg_audio_probe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include/SDL2" });
+    linkSdlProbe(b, katzensteg_audio_probe.root_module, target, "SDL2", sdl2_prefix);
+    b.installArtifact(katzensteg_audio_probe);
+    const katzensteg_audio_probe_sdl3 = b.addExecutable(.{
+        .name = "katzensteg-audio-probe-sdl3",
+        .use_llvm = use_llvm,
+        .root_module = projectModule(b, .{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    katzensteg_audio_probe_sdl3.root_module.addCSourceFile(.{ .file = b.path("examples/probes/sdl3/audio_probe.c") });
+    katzensteg_audio_probe_sdl3.root_module.addIncludePath(b.path("examples/probes/common"));
+    if (is_macos) katzensteg_audio_probe_sdl3.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    linkSdlProbe(b, katzensteg_audio_probe_sdl3.root_module, target, "SDL3", windows_sdl_prefixes.sdl3);
+    b.installArtifact(katzensteg_audio_probe_sdl3);
     // The probes behind the parity matrix (docs/probe-parity.md). With
     // `sdl-dynapi`, this is how Windows builds the SDL scenarios.
-    const sdl_probes_step = b.step("sdl-probes", "Build the SDL input, OpenGL and Vulkan probes and the Vulkan capture layer");
-    for ([_]*std.Build.Step.Compile{ katzensteg_input_probe, katzensteg_input_probe_sdl3, katzensteg_gl_probe, katzensteg_gl_probe_sdl3 }) |probe| {
+    const sdl_probes_step = b.step("sdl-probes", "Build the SDL input, audio, OpenGL and Vulkan probes and the Vulkan capture layer");
+    for ([_]*std.Build.Step.Compile{ katzensteg_input_probe, katzensteg_input_probe_sdl3, katzensteg_audio_probe, katzensteg_audio_probe_sdl3, katzensteg_gl_probe, katzensteg_gl_probe_sdl3 }) |probe| {
         sdl_probes_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
     }
 

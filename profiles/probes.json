@@ -50,6 +50,96 @@
         "--custom-cursor"
       ]
     },
+    "app.audio_probe": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-audio-probe"
+    },
+    "app.audio_probe_sdl3": {
+      "hidden": true,
+      "target": "{repo}/zig-out/bin/katzensteg-audio-probe-sdl3"
+    },
+    "probe.audio.callback": {
+      "extends": [
+        "app.audio_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "callback"
+      ]
+    },
+    "probe.audio.queue": {
+      "extends": [
+        "app.audio_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "queue"
+      ]
+    },
+    "probe.audio.legacy": {
+      "extends": [
+        "app.audio_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "legacy"
+      ]
+    },
+    "probe.audio.reopen": {
+      "extends": [
+        "app.audio_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "callback",
+        "--reopen"
+      ]
+    },
+    "probe.audio.sdl3.bound": {
+      "extends": [
+        "app.audio_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "bound"
+      ]
+    },
+    "probe.audio.sdl3.devstream": {
+      "extends": [
+        "app.audio_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "devstream"
+      ]
+    },
+    "probe.audio.sdl3.devstream_callback": {
+      "extends": [
+        "app.audio_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "devstream-cb"
+      ]
+    },
+    "probe.audio.sdl3.reopen": {
+      "extends": [
+        "app.audio_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "bound",
+        "--reopen"
+      ]
+    },
     "probe.embed.basic_sdl": {
       "hidden": true,
       "extends": [

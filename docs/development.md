@@ -106,6 +106,43 @@ reopening, both library load orders, and concurrent writers through that ABI.
 `test_embed_render_batches.py` covers SDL2 and SDL3
 with both synchronous composition and queued replay.
 
+## Audio probes
+
+`katzensteg-audio-probe` (SDL2) and `katzensteg-audio-probe-sdl3` play a
+440 Hz sine at half of full scale, 48 kHz stereo, through one SDL audio model
+chosen by argument, then exit. The `probe.audio.*` profiles in
+`profiles/probes.json` select the model:
+
+| Profile | SDL | Model |
+| --- | --- | --- |
+| `probe.audio.callback` | SDL2 | `SDL_OpenAudioDevice` with an app callback |
+| `probe.audio.queue` | SDL2 | `SDL_QueueAudio`, paced on `SDL_GetQueuedAudioSize` |
+| `probe.audio.legacy` | SDL2 | `SDL_OpenAudio` (device 1) with an app callback |
+| `probe.audio.reopen` | SDL2 | callback, closed halfway and reopened with half the buffer |
+| `probe.audio.sdl3.bound` | SDL3 | `SDL_OpenAudioDevice` with a bound `SDL_AudioStream` |
+| `probe.audio.sdl3.devstream` | SDL3 | `SDL_OpenAudioDeviceStream`, fed with `SDL_PutAudioStreamData` |
+| `probe.audio.sdl3.devstream_callback` | SDL3 | `SDL_OpenAudioDeviceStream` with a get callback |
+| `probe.audio.sdl3.reopen` | SDL3 | bound stream, closed halfway and reopened with half the buffer |
+
+`test_audio_probes.py` runs every profile through the launcher with SDL's
+`disk` audio driver and checks the written file for the tone's frequency, RMS,
+peak, purity and continuity (`audio_tone_analysis.py`, no numpy). A reopen
+writes its second half to `<file>.seg2`, because reopening the disk device
+truncates the file. It also checks with `--dry-run` that each profile injects
+the matching SDL adapter. Without the disk variables a profile plays the tone
+on the default audio device; to inspect a disk run by hand:
+
+```sh
+SDL_AUDIODRIVER=disk SDL_AUDIO_DRIVER=disk \
+SDL_DISKAUDIOFILE=/tmp/tone.raw SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/tone.raw \
+  ./zig-out/bin/katzensteg probe.audio.queue
+python3 scripts/katzensteg/audio_tone_analysis.py /tmp/tone.raw
+```
+
+Katzensteg does not intercept audio yet, so these runs check that the tone
+survives launching with the SDL adapter injected; later audio work checks its
+taps and sinks against the same probes.
+
 ## Windows
 
 The launcher, the SDL2 and SDL3 runtime libraries, the SDL probes, the Vulkan
@@ -124,7 +161,7 @@ cp SDL2.dll SDL3.dll zig-out/bin/
 zig-out/bin/katzensteg probe.embed.basic_sdl --frames 0
 ```
 
-`sdl-probes` builds the input, OpenGL and Vulkan probes and the Vulkan capture
+`sdl-probes` builds the input, audio, OpenGL and Vulkan probes and the Vulkan capture
 layer, so every scenario in [probe-parity.md](probe-parity.md) runs from its
 launcher profile (`probe.input`, `probe.gl.sdl3`, `probe.vulkan`, ...). Windows
 has no system Vulkan headers or loader import library without the Vulkan SDK:
