@@ -15,6 +15,7 @@ The Windows column records what was observed running each scenario through
 | `opengl.context_swap` | present | present | working / working | SDL GL context + swap loop |
 | `vulkan.instance_surface_present` | present | present | working / working | Vulkan setup + present loop |
 | `metal.layer_drawable_present` | macOS | macOS | unsupported | SDL Metal view + `CAMetalLayer` drawable present loop |
+| `audio.tone` | present | present | not run / not run | `katzensteg-audio-probe` (callback, queue, legacy, reopen) and `katzensteg-audio-probe-sdl3` (bound, devstream, devstream-cb, reopen); Linux CI checks the disk driver output |
 | `input.gamepad_joystick` | present | partial | partial / partial | SDL3 now enumerates + optionally opens a device and counts related events, while staying hardware-agnostic |
 
 ## Windows results

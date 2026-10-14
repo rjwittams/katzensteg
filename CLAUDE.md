@@ -49,7 +49,7 @@ Artifacts (under `zig-out/`):
 - `bin/katzensteg` — the launcher (canonical entry point for running apps).
 - `bin/katzensteg-proxy` — proxy used by some profiles.
 - `bin/basic-sdl-demo`, `bin/ttytris`, `bin/termscene-demo` — demos.
-- `bin/katzensteg-{gl,input,vulkan}-probe` — probe binaries.
+- `bin/katzensteg-{gl,input,audio,vulkan}-probe` — probe binaries.
 - `lib/libkatzensteg-core.*` — core exported entry points.
 - `lib/libkatzensteg-sdl2.*` — SDL2 preload/interposer library.
 - `lib/libkatzensteg-sdl{2,3}-dynapi.*` — SDL_DYNAMIC_API libraries (on Windows, `bin/katzensteg-sdl{2,3}.dll`).
