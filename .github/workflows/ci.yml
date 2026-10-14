@@ -71,6 +71,7 @@ jobs:
 
       - name: Python tests
         run: |
+          python3 scripts/katzensteg/test_audio_probes.py
           python3 scripts/katzensteg/test_bootstrap_external_projects.py
           python3 scripts/katzensteg/test_dynapi_slots.py
           python3 scripts/katzensteg/test_env_scrub.py
