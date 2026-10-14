@@ -39,7 +39,7 @@ pub export fn ks_katzensteg_present_external_framebuffer(width: c_int, height: c
 /// entry to the app's present hook before capture; 0 means unknown and stamps
 /// the frame now.
 pub export fn ks_katzensteg_present_external_framebuffer_at(width: c_int, height: c_int, format_value: c_int, pixels: ?[*]const u8, len: usize, present_host_ns: u64) callconv(.c) void {
-    const stamp = if (present_host_ns != 0) present_host_ns else system_io.time.hostTimeNs();
+    const stamp = presentStamp(present_host_ns);
     if (width <= 0 or height <= 0) return;
     const data = pixels orelse return;
     const byte_len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
@@ -69,4 +69,19 @@ fn enqueueExternalFramebufferPresent(rt: *runtime.Runtime, width: i32, height: i
         .pixels = copied,
         .present_host_ns = present_host_ns,
     } });
+}
+
+/// The stamp a frame carries: the caller's hook-entry host time, or host time
+/// now when the caller passes 0 (unknown).
+fn presentStamp(present_host_ns: u64) u64 {
+    return if (present_host_ns != 0) present_host_ns else system_io.time.hostTimeNs();
+}
+
+test "a known present stamp passes through and an unknown one is stamped now" {
+    try std.testing.expectEqual(@as(u64, 42), presentStamp(42));
+    const before = system_io.time.hostTimeNs();
+    const stamped = presentStamp(0);
+    try std.testing.expect(stamped != 0);
+    try std.testing.expect(stamped >= before);
+    try std.testing.expect(stamped <= system_io.time.hostTimeNs());
 }
