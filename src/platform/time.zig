@@ -36,6 +36,31 @@ pub fn nanoTimestamp() i128 {
     if (is_windows) return windowsRealtime();
     return timestamp(std.c.CLOCK.REALTIME) catch unreachable;
 }
+const is_darwin = @import("builtin").os.tag.isDarwin();
+// mach_absolute_time ticks convert to nanoseconds by a fixed boot-time ratio.
+var mach_timebase = std.atomic.Value(u64).init(0);
+fn darwinHostTime() u64 {
+    var packed_ratio = mach_timebase.load(.monotonic);
+    if (packed_ratio == 0) {
+        var info: std.c.mach_timebase_info_data = .{ .numer = 1, .denom = 1 };
+        if (std.c.mach_timebase_info(&info) != 0 or info.numer == 0 or info.denom == 0) info = .{ .numer = 1, .denom = 1 };
+        packed_ratio = (@as(u64, info.numer) << 32) | info.denom;
+        mach_timebase.store(packed_ratio, .monotonic);
+    }
+    const numer: u64 = packed_ratio >> 32;
+    const denom: u64 = packed_ratio & 0xffff_ffff;
+    return @intCast(@as(u128, std.c.mach_absolute_time()) * numer / denom);
+}
+/// Host time: the platform monotonic clock in nanoseconds, the Jackstay
+/// `HostTime` clock domain. Linux and other POSIX hosts read
+/// `CLOCK_MONOTONIC`, macOS reads `mach_absolute_time` (the clock
+/// `CLOCK_UPTIME_RAW` exposes), and Windows reads QueryPerformanceCounter.
+/// Unlike `nanoTimestamp`, it never jumps when the wall clock is set.
+pub fn hostTimeNs() u64 {
+    if (is_windows) return @intCast(@max(0, windowsMonotonic()));
+    if (is_darwin) return darwinHostTime();
+    return @intCast(@max(0, timestamp(std.c.CLOCK.MONOTONIC) catch unreachable));
+}
 pub fn milliTimestamp() i64 {
     return @intCast(@divFloor(nanoTimestamp(), ns_per_ms));
 }

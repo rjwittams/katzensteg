@@ -946,12 +946,14 @@ pub const Runtime = struct {
         return self.shouldPresent();
     }
 
-    pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+    /// present_host_ns is the host time read on entry to the app's present
+    /// hook (see `system_io.time.hostTimeNs`); published frames carry it.
+    pub fn presentExternalFramebuffer(self: *Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, present_host_ns: u64) void {
         if (jackstay.enabled) if (self.publisher != null) {
             self.lockPresentation("publish_external_frame");
             defer self.presentation_mutex.unlock();
             const frame = self.frame_builder.externalContentFrame(&self.logger, width, height, format, pixels, self.cursor_state.snapshot()) orelse return;
-            self.publishContent(frame.width, frame.height, frame.rgba);
+            self.publishContent(frame.width, frame.height, frame.rgba, present_host_ns);
             return;
         };
         if (self.active and self.batch_sink != null and self.batch_writer != null) {
@@ -1055,7 +1057,9 @@ pub const Runtime = struct {
         self.notePresentDuration(duration);
     }
 
-    pub fn renderPublishedPresent(self: *Runtime, renderer: core.CoreHandle) void {
+    /// present_host_ns is the host time read on entry to the app's present
+    /// hook, before this composition; published frames carry it.
+    pub fn renderPublishedPresent(self: *Runtime, renderer: core.CoreHandle, present_host_ns: u64) void {
         if (jackstay.enabled) {
             if (!self.active or self.publisher == null) return;
             self.lockPresentation("publish_renderer");
@@ -1067,11 +1071,14 @@ pub const Runtime = struct {
                 return;
             };
             defer frame.deinit(self.allocator);
-            self.publishContent(frame.width, frame.height, frame.rgba);
+            self.publishContent(frame.width, frame.height, frame.rgba, present_host_ns);
         }
     }
 
-    fn publishContent(self: *Runtime, width: i32, height: i32, pixels: []const u8) void {
+    // Frames are stamped with source presentation time in host time
+    // (flotilla-org/jackstay#99): the time the app entered its present hook,
+    // not the time composition finished here.
+    fn publishContent(self: *Runtime, width: i32, height: i32, pixels: []const u8, present_host_ns: u64) void {
         if (jackstay.enabled) {
             self.publication_sequence +%= 1;
             _ = self.publisher.?.publish(.{
@@ -1081,8 +1088,8 @@ pub const Runtime = struct {
                 .format = .rgba8,
                 .pixels = pixels,
                 .sequence = self.publication_sequence,
-                .clock = .unix_time,
-                .timestamp_ns = @intCast(@max(0, system_io.time.nanoTimestamp())),
+                .clock = .host_time,
+                .timestamp_ns = present_host_ns,
             }) catch |err| log.warn("Jackstay publication failed: {any}", .{err});
         }
     }
@@ -1804,7 +1811,7 @@ fn isFrameLocalCommand(cmd: Command) bool {
 }
 
 test "external framebuffer present is a frame-local present command" {
-    const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null } };
+    const cmd = Command{ .external_framebuffer_present = .{ .width = 2, .height = 1, .format = .rgba8, .pixels = null, .present_host_ns = 0 } };
     try std.testing.expect(isFrameLocalCommand(cmd));
     try std.testing.expect(isPresentCommand(cmd));
 }
@@ -1856,7 +1863,7 @@ test "stalled replay consumer retains only latest full video upload" {
         @memset(pixels, @intCast(frame));
         runtime.enqueueCommand(.{ .update_texture = .{ .texture = 1, .rect = null, .pixels = pixels, .pitch = 4 } });
         runtime.enqueueCommand(.{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } });
-        runtime.enqueueCommand(.{ .render_present = .{ .renderer = 2 } });
+        runtime.enqueueCommand(.{ .render_present = .{ .renderer = 2, .present_host_ns = 0 } });
     }
     var uploads: usize = 0;
     for (runtime.queue.items[runtime.queue_head..]) |cmd| {
@@ -1876,7 +1883,7 @@ fn enqueueTestUpload(rt: *Runtime, value: u8, rect: ?core.CoreRect) !void {
 
 fn enqueueTestDraw(rt: *Runtime) void {
     rt.enqueueCommand(.{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } });
-    rt.enqueueCommand(.{ .render_present = .{ .renderer = 2 } });
+    rt.enqueueCommand(.{ .render_present = .{ .renderer = 2, .present_host_ns = 0 } });
 }
 
 test "texture conversion in flight protects its draw and present" {
@@ -1939,7 +1946,7 @@ test "upload retirement preserves surviving draws and resource lifetime barriers
     const barriers = [_]Command{
         .{ .render_copy = .{ .renderer = 2, .texture = 1, .src = null, .dst = null } },
         .{ .render_copy_ex = .{ .renderer = 2, .texture = 1, .src = null, .dst = null, .angle = 0, .center = null, .flip = 0 } },
-        .{ .render_present = .{ .renderer = 2 } },
+        .{ .render_present = .{ .renderer = 2, .present_host_ns = 0 } },
         .{ .destroy_texture = .{ .texture = 1 } },
         .{ .create_texture = .{ .texture = 1, .format = core.pixelFormat(.rgba8, .{ .sdl2 = 376840196 }), .w = 1, .h = 1 } },
         .{ .set_texture_color_mod = .{ .texture = 1, .r = 1, .g = 2, .b = 3 } },
@@ -1980,12 +1987,12 @@ test "queued replay does not drop present for a frame already started by worker"
         .src = null,
         .dst = null,
     } });
-    try runtime.queue.append(runtime.allocator, .{ .render_present = .{ .renderer = renderer } });
+    try runtime.queue.append(runtime.allocator, .{ .render_present = .{ .renderer = renderer, .present_host_ns = 0 } });
     runtime.queue_head = 1;
     runtime.pending_presents = 1;
     runtime.worker_frame_active = true;
 
-    runtime.enqueueCommand(.{ .render_present = .{ .renderer = renderer } });
+    runtime.enqueueCommand(.{ .render_present = .{ .renderer = renderer, .present_host_ns = 0 } });
 
     try std.testing.expectEqual(@as(usize, 3), runtime.queue.items.len);
     try std.testing.expectEqual(@as(usize, 1), runtime.queue_head);
@@ -2006,6 +2013,7 @@ test "sync dispatch recycles cloned external framebuffer payload" {
         .height = 2,
         .format = .rgba8,
         .pixels = copied,
+        .present_host_ns = 0,
     } };
     runtime.recycleCommand(&cmd);
 
@@ -2353,7 +2361,7 @@ test "external framebuffer batch present reports presentation status" {
     var pixels = [_]u8{255} ** (4 * 4 * 4);
 
     setNonblocking(pipe[0]);
-    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
+    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels, system_io.time.hostTimeNs());
 
     var buf: [8192]u8 = undefined;
     const n = try system_io.posix.read(pipe[0], &buf);
@@ -2382,7 +2390,7 @@ test "external framebuffer batch present skips detached sink" {
     var pixels = [_]u8{255} ** (4 * 4 * 4);
 
     setNonblocking(pipe[0]);
-    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels);
+    runtime.presentExternalFramebuffer(4, 4, .rgba8, &pixels, system_io.time.hostTimeNs());
 
     var buf: [128]u8 = undefined;
     try std.testing.expectError(error.WouldBlock, system_io.posix.read(pipe[0], &buf));
@@ -3022,4 +3030,63 @@ test "input target carries the terminal cell size when the tty reports pixels" {
     const cell = cellPixels(80, 24, 800, 480).?;
     try std.testing.expectEqual(@as(f32, 10), cell.w);
     try std.testing.expectEqual(@as(f32, 20), cell.h);
+}
+
+test "published frames carry host time read on present-hook entry, before composition" {
+    // Publishing needs the optional Jackstay transport (POSIX endpoints).
+    if (!jackstay.enabled) return error.SkipZigTest;
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    var path_buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/ks-host-time-{d}-{d}.sock", .{ std.c.getpid(), system_io.time.hostTimeNs() });
+    runtime.active = true;
+    runtime.intercept_mode = .queued_replay;
+    runtime.publisher = try jackstay.Publisher.create(std.testing.io, std.testing.allocator, path, .{}, null);
+
+    var fd = try jackstay.endpoint.connect(path);
+    defer if (fd >= 0) system_io.posix.close(fd);
+    _ = try jackstay.bootstrap.connect(&fd, .observe);
+    var connection = try jackstay.media.Connection.init(&fd);
+    defer connection.deinit();
+    try connection.attach();
+
+    const pixels = [_]u8{0x80} ** (4 * 4 * 4);
+    var previous_ns: u64 = 0;
+    var received: usize = 0;
+    var attempts: usize = 0;
+    // The first publication can be dropped while the consumer installs the
+    // producer's resized configuration, so present until frames arrive.
+    while (received < 3) : (attempts += 1) {
+        if (attempts == 500) return error.NoFrame;
+        // A present hook reads host time first, then hands the frame on; the
+        // queued replay worker composes and publishes later.
+        const hook_entry_ns = system_io.time.hostTimeNs();
+        const copied = try runtime.acquirePayloadBuffer(pixels.len);
+        @memcpy(copied, &pixels);
+        runtime.enqueueCommand(.{ .external_framebuffer_present = .{ .width = 4, .height = 4, .format = .rgba8, .pixels = copied, .present_host_ns = hook_entry_ns } });
+        system_io.time.sleep(std.time.ns_per_ms);
+
+        const composition_start_ns = system_io.time.hostTimeNs();
+        runtime.queue_mutex.lock();
+        var cmd = runtime.takeQueuedCommandLocked();
+        runtime.queue_mutex.unlock();
+        core_dispatch.handleCommand(&runtime, cmd);
+        runtime.recycleCommand(&cmd);
+
+        var acquired: ?jackstay.media.Frame = null;
+        for (0..5) |_| {
+            acquired = try connection.next(10 * std.time.ns_per_ms);
+            if (acquired != null) break;
+        }
+        var frame = acquired orelse continue;
+        defer frame.release();
+        const image = try frame.image();
+        try std.testing.expectEqual(.host_time, image.clock);
+        // Latest-frame acquisition returns this present, stamped at hook entry.
+        try std.testing.expectEqual(hook_entry_ns, image.timestamp_ns);
+        try std.testing.expect(image.timestamp_ns < composition_start_ns);
+        try std.testing.expect(image.timestamp_ns > previous_ns);
+        previous_ns = image.timestamp_ns;
+        received += 1;
+    }
 }

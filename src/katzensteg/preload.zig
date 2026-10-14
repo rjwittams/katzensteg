@@ -857,13 +857,15 @@ pub export fn ks_SDL_RenderSetClipRect(renderer: ?*sdl.SDL_Renderer, rect: ?*con
 }
 
 pub export fn ks_SDL_RenderPresent(renderer: ?*sdl.SDL_Renderer) callconv(.c) void {
+    // Source presentation time: read before any capture or composition.
+    const present_host_ns = system_io.time.hostTimeNs();
     const rt = runtime.get();
     refreshRendererOutputSize(rt, renderer);
     traceLimited(rt, &trace_render_present, "SDL_RenderPresent renderer={x}", .{if (renderer) |p| @intFromPtr(p) else 0});
     if (rt.captureEnabled()) {
         switch (rt.intercept_mode) {
-            .sync_compose => sink.onRenderPresent(rt, renderer),
-            .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = sdl_adapter.handleFromPtr(renderer) } }),
+            .sync_compose => sink.onRenderPresent(rt, renderer, present_host_ns),
+            .queued_replay => sink.dispatchCommand(rt, .{ .render_present = .{ .renderer = sdl_adapter.handleFromPtr(renderer), .present_host_ns = present_host_ns } }),
         }
     }
     if (rt.realRenderEnabled()) real_sdl.SDL_RenderPresent(renderer);
@@ -884,6 +886,8 @@ pub export fn ks_SDL_GL_MakeCurrent(window: ?*sdl.SDL_Window, context: sdl.SDL_G
 }
 
 pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
+    // Source presentation time: read before the framebuffer readback.
+    const present_host_ns = system_io.time.hostTimeNs();
     const rt = runtime.get();
     traceLimited(rt, &trace_gl_swap_window, "SDL_GL_SwapWindow window={x}", .{if (window) |p| @intFromPtr(p) else 0});
     const capture_mode = rt.glCaptureMode();
@@ -891,8 +895,8 @@ pub export fn ks_SDL_GL_SwapWindow(window: ?*sdl.SDL_Window) callconv(.c) void {
         rt.logger.writeOnceScoped(.warn, .gl, "GL capture disabled because OpenGL symbols are unavailable");
     } else switch (capture_mode) {
         .disabled => {},
-        .sync => captureGlFramebufferSync(rt, window),
-        .pbo => captureGlFramebufferPbo(rt, window),
+        .sync => captureGlFramebufferSync(rt, window, present_host_ns),
+        .pbo => captureGlFramebufferPbo(rt, window, present_host_ns),
     }
     real_sdl.SDL_GL_SwapWindow(window);
 }
@@ -919,7 +923,7 @@ fn drawableCaptureSize(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) ?struct {
     return .{ .w = w, .h = h, .len = @as(usize, @intCast(w)) * @as(usize, @intCast(h)) * 4 };
 }
 
-fn captureGlFramebufferSync(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void {
+fn captureGlFramebufferSync(rt: *runtime.Runtime, window: ?*sdl.SDL_Window, present_host_ns: u64) void {
     const size = drawableCaptureSize(rt, window) orelse return;
 
     const buffers = rt.ensureGlCaptureBuffers(size.len) orelse return;
@@ -948,10 +952,10 @@ fn captureGlFramebufferSync(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void
     }
 
     gl_capture.flipRgbaRows(buffers.rgba, buffers.raw, size.w, size.h);
-    publishGlFramebuffer(rt, size.w, size.h, buffers.rgba);
+    publishGlFramebuffer(rt, size.w, size.h, buffers.rgba, present_host_ns);
 }
 
-fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void {
+fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window, present_host_ns: u64) void {
     const size = drawableCaptureSize(rt, window) orelse return;
     const target = rt.externalFramebufferUploadSize(size.w, size.h);
     if (!ensureGlDownscaleTarget(rt, target.w, target.h)) return;
@@ -1006,6 +1010,7 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
         }
         return;
     }
+    state.present_host_ns[read_index] = present_host_ns;
 
     if (state.primed) {
         real_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, state.ids[map_index]);
@@ -1015,7 +1020,7 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
             if (real_gl.UnmapBuffer(GL_PIXEL_PACK_BUFFER) == 0) {
                 gl_log.warn("GL PBO unmap reported data invalid", .{});
             } else {
-                publishGlFramebuffer(rt, target.w, target.h, buffers.rgba);
+                publishGlFramebuffer(rt, target.w, target.h, buffers.rgba, state.present_host_ns[map_index]);
             }
         } else {
             const map_err = real_gl.GetError();
@@ -1030,14 +1035,14 @@ fn captureGlFramebufferPbo(rt: *runtime.Runtime, window: ?*sdl.SDL_Window) void 
     state.index = map_index;
 }
 
-fn publishGlFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, rgba: []const u8) void {
-    publishExternalFramebuffer(rt, width, height, .rgba8, rgba);
+fn publishGlFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, rgba: []const u8, present_host_ns: u64) void {
+    publishExternalFramebuffer(rt, width, height, .rgba8, rgba, present_host_ns);
 }
 
-fn publishExternalFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+fn publishExternalFramebuffer(rt: *runtime.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, present_host_ns: u64) void {
     switch (rt.intercept_mode) {
-        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, pixels),
-        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, pixels),
+        .sync_compose => sink.onExternalFramebufferPresent(rt, width, height, format, pixels, present_host_ns),
+        .queued_replay => sink.enqueueExternalFramebufferPresent(rt, width, height, format, pixels, present_host_ns),
     }
 }
 

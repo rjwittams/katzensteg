@@ -64,8 +64,8 @@ pub fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start
     }
 }
 
-pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
-    rt.presentExternalFramebuffer(width, height, format, pixels);
+pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, present_host_ns: u64) void {
+    rt.presentExternalFramebuffer(width, height, format, pixels, present_host_ns);
 }
 
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
@@ -157,7 +157,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         },
         .render_present => |c| {
             if (rt.publisher != null) {
-                rt.renderPublishedPresent(c.renderer);
+                rt.renderPublishedPresent(c.renderer, c.present_host_ns);
                 return;
             }
             if (rt.batch_sink != null) {
@@ -172,7 +172,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
                 onRenderPresentCore(rt, c.renderer, system_io.time.nanoTimestamp());
             }
         },
-        .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),
+        .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf, c.present_host_ns),
         .create_color_cursor => |c| if (c.rgba) |rgba| rt.cursor_state.createColorCursor(c.cursor, c.width, c.height, c.hot_x, c.hot_y, rgba),
         .set_cursor => |c| rt.cursor_state.setCursor(c.cursor),
         .show_cursor => |c| rt.cursor_state.showCursor(c.visible),

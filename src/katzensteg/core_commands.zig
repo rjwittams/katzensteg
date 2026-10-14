@@ -32,8 +32,11 @@ pub const Command = union(enum) {
     render_draw_line: struct { renderer: CoreHandle, x1: i32, y1: i32, x2: i32, y2: i32 },
     render_set_viewport: struct { renderer: CoreHandle, rect: ?CoreRect },
     render_set_clip_rect: struct { renderer: CoreHandle, rect: ?CoreRect },
-    render_present: struct { renderer: CoreHandle },
-    external_framebuffer_present: struct { width: i32, height: i32, format: ExternalFramebufferFormat, pixels: ?[]u8 },
+    // present_host_ns is host time (platform monotonic clock) read on entry to
+    // the app's present hook, before composition or capture; publication
+    // stamps the frame with it.
+    render_present: struct { renderer: CoreHandle, present_host_ns: u64 },
+    external_framebuffer_present: struct { width: i32, height: i32, format: ExternalFramebufferFormat, pixels: ?[]u8, present_host_ns: u64 },
     create_color_cursor: struct { cursor: CoreHandle, width: i32, height: i32, hot_x: i32, hot_y: i32, rgba: ?[]u8 },
     set_cursor: struct { cursor: CoreHandle },
     show_cursor: struct { visible: bool },

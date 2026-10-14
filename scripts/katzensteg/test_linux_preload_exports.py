@@ -69,6 +69,8 @@ EXPECTED_EXPORTED_DEFINITIONS = {
     "ks_katzensteg_shutdown",
     "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",
+    "ks_katzensteg_present_external_framebuffer_at",
+    "ks_katzensteg_host_time_ns",
     "ks_katzensteg_present_external_rgba",
 }
 
@@ -79,6 +81,8 @@ EXPECTED_CORE_EXPORTED_DEFINITIONS = {
     "ks_katzensteg_shutdown",
     "ks_katzensteg_log_c",
     "ks_katzensteg_present_external_framebuffer",
+    "ks_katzensteg_present_external_framebuffer_at",
+    "ks_katzensteg_host_time_ns",
     "ks_katzensteg_present_external_rgba",
 }
 
@@ -182,6 +186,8 @@ class LinuxPreloadExportsTests(unittest.TestCase):
             "ks_katzensteg_shutdown",
             "ks_katzensteg_present_external_rgba",
             "ks_katzensteg_present_external_framebuffer",
+            "ks_katzensteg_present_external_framebuffer_at",
+            "ks_katzensteg_host_time_ns",
         ):
             with self.subTest(symbol=symbol):
                 self.assertNotIn(f"pub export fn {symbol}", preload_text)

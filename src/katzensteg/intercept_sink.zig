@@ -141,6 +141,7 @@ fn cloneCommand(rt: *runtime_mod.Runtime, cmd: Command) !Command {
             .height = c.height,
             .format = c.format,
             .pixels = try cloneBytesToPayloadBuffer(rt, c.pixels),
+            .present_host_ns = c.present_host_ns,
         } },
         .create_color_cursor => |c| .{ .create_color_cursor = .{
             .cursor = c.cursor,
@@ -321,7 +322,7 @@ fn planeBytes(plane: ?[*]const u8, pitch: i32, rows: i32) ?[]const u8 {
     return src[0..byte_len];
 }
 
-pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
+pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, present_host_ns: u64) void {
     const start_ns: ?i128 = if (rt.producer_stats.enabled) system_io.time.nanoTimestamp() else null;
     defer if (start_ns) |start| rt.noteProducerTime(.render_present, @intCast(@max(0, system_io.time.nanoTimestamp() - start)));
     if (width <= 0 or height <= 0) return;
@@ -335,7 +336,7 @@ pub fn enqueueExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, h
         return;
     };
     @memcpy(copied, pixels[0..byte_len]);
-    rt.enqueueCommand(.{ .external_framebuffer_present = .{ .width = width, .height = height, .format = format, .pixels = copied } });
+    rt.enqueueCommand(.{ .external_framebuffer_present = .{ .width = width, .height = height, .format = format, .pixels = copied, .present_host_ns = present_host_ns } });
 }
 
 pub fn enqueueCreateTextureFromSurface(rt: *runtime_mod.Runtime, texture: ?*sdl.SDL_Texture, surface: ?*sdl.SDL_Surface) void {
@@ -545,9 +546,9 @@ pub fn onRenderSetClipRect(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Rendere
     rt.frame_builder.onRenderSetClipRect(sdl_adapter.handleFromPtr(renderer), if (core_rect) |*r| r else null);
 }
 
-pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer) void {
+pub fn onRenderPresent(rt: *runtime_mod.Runtime, renderer: ?*sdl.SDL_Renderer, present_host_ns: u64) void {
     if (rt.publisher != null) {
-        rt.renderPublishedPresent(sdl_adapter.handleFromPtr(renderer));
+        rt.renderPublishedPresent(sdl_adapter.handleFromPtr(renderer), present_host_ns);
         return;
     }
     if (rt.batch_sink != null) {
@@ -619,8 +620,8 @@ fn onRenderPresentCore(rt: *runtime_mod.Runtime, renderer: CoreHandle, start_ns:
     }
 }
 
-pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8) void {
-    rt.presentExternalFramebuffer(width, height, format, pixels);
+pub fn onExternalFramebufferPresent(rt: *runtime_mod.Runtime, width: i32, height: i32, format: ExternalFramebufferFormat, pixels: []const u8, present_host_ns: u64) void {
+    rt.presentExternalFramebuffer(width, height, format, pixels, present_host_ns);
 }
 
 pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
@@ -712,7 +713,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
         },
         .render_present => |c| {
             if (rt.publisher != null) {
-                rt.renderPublishedPresent(c.renderer);
+                rt.renderPublishedPresent(c.renderer, c.present_host_ns);
                 return;
             }
             if (rt.batch_sink != null) {
@@ -727,7 +728,7 @@ pub fn handleCommand(rt: *runtime_mod.Runtime, cmd: Command) void {
                 onRenderPresentCore(rt, c.renderer, system_io.time.nanoTimestamp());
             }
         },
-        .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf),
+        .external_framebuffer_present => |c| if (c.pixels) |buf| onExternalFramebufferPresent(rt, c.width, c.height, c.format, buf, c.present_host_ns),
         .create_color_cursor => |c| if (c.rgba) |rgba| rt.cursor_state.createColorCursor(c.cursor, c.width, c.height, c.hot_x, c.hot_y, rgba),
         .set_cursor => |c| rt.cursor_state.setCursor(c.cursor),
         .show_cursor => |c| rt.cursor_state.showCursor(c.visible),

@@ -25,7 +25,10 @@
 #define PATH_MAX 4096
 #endif
 
-typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len);
+/* present_host_ns is the core's host time (ks_katzensteg_host_time_ns) read
+   on entry to presentDrawable, before the capture blit; 0 means unknown. */
+typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len, uint64_t present_host_ns);
+typedef uint64_t (*ks_host_time_fn)(void);
 typedef void (*ks_log_c_fn)(const char *scope, const char *message);
 
 typedef struct HookRecord {
@@ -49,6 +52,7 @@ static bool g_logged_constructor;
 
 static void *g_core_handle;
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
+static ks_host_time_fn g_host_time;
 static ks_log_c_fn g_log_c;
 
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *symbol);
@@ -138,17 +142,36 @@ static void *open_core_library_from_layer_dir(void)
     return dlopen(path, RTLD_NOW | RTLD_LOCAL);
 }
 
+#define KS_PRESENT_SYMBOL "ks_katzensteg_present_external_framebuffer_at"
+#define KS_HOST_TIME_SYMBOL "ks_katzensteg_host_time_ns"
+
+/* Resolves the present callback and the host-time clock from one core
+   module, so the stamp and the frame always share a clock. */
 static ks_present_external_framebuffer_fn present_fn(void)
 {
     if (g_present_external_framebuffer) return g_present_external_framebuffer;
 
-    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, "ks_katzensteg_present_external_framebuffer");
-    if (g_present_external_framebuffer) return g_present_external_framebuffer;
+    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(RTLD_DEFAULT, KS_PRESENT_SYMBOL);
+    if (g_present_external_framebuffer) {
+        g_host_time = (ks_host_time_fn)dlsym(RTLD_DEFAULT, KS_HOST_TIME_SYMBOL);
+        return g_present_external_framebuffer;
+    }
 
     if (!g_core_handle) g_core_handle = open_core_library_from_layer_dir();
-    if (g_core_handle)
-        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(g_core_handle, "ks_katzensteg_present_external_framebuffer");
+    if (g_core_handle) {
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)dlsym(g_core_handle, KS_PRESENT_SYMBOL);
+        g_host_time = (ks_host_time_fn)dlsym(g_core_handle, KS_HOST_TIME_SYMBOL);
+    }
     return g_present_external_framebuffer;
+}
+
+/* Host time on entry to the present hook: the frame's source presentation
+   time. 0 when capture is off or the core is missing. */
+static uint64_t present_host_time(void)
+{
+    if (!capture_enabled()) return 0;
+    if (!present_fn() || !g_host_time) return 0;
+    return g_host_time();
 }
 
 static IMP original_imp_for_locked(Class cls, SEL sel)
@@ -298,7 +321,7 @@ static bool supported_pixel_format(MTLPixelFormat format)
     return format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatBGRA8Unorm_sRGB;
 }
 
-static void publish_completed_buffer(id<MTLBuffer> buffer, NSUInteger width, NSUInteger height, size_t row_bytes)
+static void publish_completed_buffer(id<MTLBuffer> buffer, NSUInteger width, NSUInteger height, size_t row_bytes, uint64_t present_host_ns)
 {
     if ([buffer contents] == NULL || width == 0 || height == 0) return;
 
@@ -318,11 +341,11 @@ static void publish_completed_buffer(id<MTLBuffer> buffer, NSUInteger width, NSU
         memcpy(compact + (size_t)y * tight_row, src + (size_t)y * row_bytes, tight_row);
     }
 
-    fn((int32_t)width, (int32_t)height, KS_EXTERNAL_FRAMEBUFFER_BGRA8, compact, tight_len);
+    fn((int32_t)width, (int32_t)height, KS_EXTERNAL_FRAMEBUFFER_BGRA8, compact, tight_len, present_host_ns);
     free(compact);
 }
 
-static void capture_drawable_on_command_buffer(id command_buffer, id drawable)
+static void capture_drawable_on_command_buffer(id command_buffer, id drawable, uint64_t present_host_ns)
 {
     if (!capture_enabled() || !command_buffer || !drawable) return;
     if (![drawable conformsToProtocol:@protocol(CAMetalDrawable)]) return;
@@ -371,7 +394,7 @@ static void capture_drawable_on_command_buffer(id command_buffer, id drawable)
 
     [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         if (completed.status != MTLCommandBufferStatusCompleted) return;
-        publish_completed_buffer(buffer, width, height, row_bytes);
+        publish_completed_buffer(buffer, width, height, row_bytes, present_host_ns);
     }];
 
     if (!g_logged_first_capture) {
@@ -426,24 +449,27 @@ static id ks_commandBufferWithDescriptor(id self, SEL _cmd, id descriptor)
 static void ks_presentDrawable(id self, SEL _cmd, id drawable)
 {
     typedef void (*Fn)(id, SEL, id);
+    const uint64_t present_host_ns = present_host_time();
     Fn original = (Fn)original_imp_for(self, _cmd);
-    capture_drawable_on_command_buffer(self, drawable);
+    capture_drawable_on_command_buffer(self, drawable, present_host_ns);
     if (original) original(self, _cmd, drawable);
 }
 
 static void ks_presentDrawableAtTime(id self, SEL _cmd, id drawable, CFTimeInterval presentation_time)
 {
     typedef void (*Fn)(id, SEL, id, CFTimeInterval);
+    const uint64_t present_host_ns = present_host_time();
     Fn original = (Fn)original_imp_for(self, _cmd);
-    capture_drawable_on_command_buffer(self, drawable);
+    capture_drawable_on_command_buffer(self, drawable, present_host_ns);
     if (original) original(self, _cmd, drawable, presentation_time);
 }
 
 static void ks_presentDrawableAfterMinimumDuration(id self, SEL _cmd, id drawable, CFTimeInterval duration)
 {
     typedef void (*Fn)(id, SEL, id, CFTimeInterval);
+    const uint64_t present_host_ns = present_host_time();
     Fn original = (Fn)original_imp_for(self, _cmd);
-    capture_drawable_on_command_buffer(self, drawable);
+    capture_drawable_on_command_buffer(self, drawable, present_host_ns);
     if (original) original(self, _cmd, drawable, duration);
 }
 

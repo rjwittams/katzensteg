@@ -54,7 +54,12 @@ pub const Frame = struct {
         const row = try std.math.mul(usize, desc.width, 4);
         const size = try std.math.mul(usize, desc.stride, desc.height);
         if (desc.width == 0 or desc.height == 0 or desc.stride < row or size > len) return error.InvalidFrame;
-        return .{ .width = desc.width, .height = desc.height, .stride = desc.stride, .format = format, .pixels = bytes[0..size], .timestamp_ns = desc.timestamp_ns, .sequence = desc.sequence };
+        return .{ .width = desc.width, .height = desc.height, .stride = desc.stride, .format = format, .pixels = bytes[0..size], .timestamp_ns = desc.timestamp_ns, .sequence = desc.sequence, .clock = switch (desc.clock_domain) {
+            c.FT_CLOCK_DOMAIN_UNIX_TIME => .unix_time,
+            c.FT_CLOCK_DOMAIN_MEDIA_TIME => .media_time,
+            c.FT_CLOCK_DOMAIN_HOST_TIME => .host_time,
+            else => .unknown,
+        } };
     }
 };
 

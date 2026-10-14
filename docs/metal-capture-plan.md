@@ -3,7 +3,8 @@
 The macOS-only `libkatzensteg-metal-layer.dylib` now hooks `CAMetalLayer`
 drawables and Metal command-buffer presentation. It copies supported BGRA
 drawables to shared buffers and publishes compact rows through
-`ks_katzensteg_present_external_framebuffer`. The existing queued framebuffer
+`ks_katzensteg_present_external_framebuffer_at`, stamped with the host time
+read on entry to `presentDrawable:`. The existing queued framebuffer
 path owns terminal presentation. This is narrow probe-level support; real-app
 acceptance with the Porthole native viewer is tracked in
 [issue #57](https://github.com/rjwittams/katzensteg/issues/57).
@@ -32,7 +33,8 @@ acceptance with the Porthole native viewer is tracked in
    - `-[MTLCommandBuffer presentDrawable:afterMinimumDuration:]`.
 3. On present, encode a copy from `drawable.texture` to a CPU-visible
    `MTLBuffer`, then add a completion handler that compacts rows and calls
-   `ks_katzensteg_present_external_framebuffer`.
+   `ks_katzensteg_present_external_framebuffer_at` with the host time read on
+   entry to the present hook.
 4. Only `MTLPixelFormatBGRA8Unorm` and `MTLPixelFormatBGRA8Unorm_sRGB` pass
    the current format check. Other formats are skipped with a file-log entry.
 
