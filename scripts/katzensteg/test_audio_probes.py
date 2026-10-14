@@ -53,6 +53,9 @@ MAX_LENGTH = 1.5
 
 def disk_env(output):
     """Launcher environment selecting SDL's disk driver for SDL2 and SDL3."""
+    # Drop every KATZENSTEG_* setting from the caller's shell (a custom
+    # KATZENSTEG_PROFILE_DIR, a whiskers socket, a proxy profile) so the test
+    # always runs this checkout's profiles the same way, then pin the repo.
     env = {key: value for key, value in os.environ.items() if not key.startswith("KATZENSTEG_")}
     env["KATZENSTEG_REPO"] = str(ROOT)
     env["SDL_AUDIODRIVER"] = "disk"  # SDL2
