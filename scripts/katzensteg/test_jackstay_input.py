@@ -29,9 +29,15 @@ class Geometry(C.Structure):
 class Config(C.Structure):
     _fields_ = [(name, C.c_uint32) for name in ("modes", "capabilities", "max_events", "max_bytes", "max_text_bytes", "idle_timeout_ms", "independent_contributions", "interaction_cancel")] + [("geometry", Geometry)]
 class Event(C.Structure):
-    _fields_ = [(name, C.c_uint32) for name in ("kind", "action", "key_kind", "modifiers")] + [("press", C.c_uint64), ("geometry_revision", C.c_uint64), ("button", C.c_uint32), ("scroll_unit", C.c_uint32)] + [(name, C.c_double) for name in ("x", "y", "pointer_x", "pointer_y")] + [("key", C.c_char * 64), ("text", C.c_void_p), ("text_len", C.c_size_t)]
+    _fields_ = [(name, C.c_uint32) for name in ("kind", "action", "key_kind", "modifiers")] + [("press", C.c_uint64), ("geometry_revision", C.c_uint64), ("button", C.c_uint32), ("scroll_unit", C.c_uint32)] + [(name, C.c_double) for name in ("x", "y", "pointer_x", "pointer_y")] + [("key", C.c_char * 64), ("text", C.c_void_p), ("text_len", C.c_size_t)] + [(name, C.c_uint32) for name in ("scroll_phase", "scroll_momentum_phase", "scroll_inverted_from_device")]
 class Status(C.Structure):
     _fields_ = [("kind", C.c_uint32), ("result", C.c_int32), ("sequence", C.c_uint64), ("epoch", C.c_uint64), ("reason", C.c_uint32), ("clean", C.c_uint32), ("geometry", Geometry)]
+class TrackOffer(C.Structure):
+    _fields_ = [("id", C.c_uint64), ("kind", C.c_char_p), ("label", C.c_char_p), ("descriptor", C.c_void_p), ("descriptor_len", C.c_size_t), ("direction", C.c_uint32), ("reserved", C.c_uint32)]
+class TrackSelection(C.Structure):
+    _fields_ = [("id", C.c_uint64), ("required", C.c_uint32), ("write", C.c_uint32)]
+class TrackAdmission(C.Structure):
+    _fields_ = [("id", C.c_uint64), ("result", C.c_uint32), ("reserved", C.c_uint32)]
 
 class Client:
     def __init__(self, library, path):
@@ -40,11 +46,19 @@ class Client:
         stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stream.connect(str(path))
         fd = C.c_int32(stream.detach())
-        input_status = C.c_int32()
-        status = library.ft_source_bootstrap_connect(C.byref(fd), 2, 4, C.byref(self.handle), C.byref(input_status))
-        # The input channel must survive independently of abandoned media setup.
-        if fd.value >= 0:
-            os.close(fd.value)
+        connection, offer = C.c_void_p(), C.c_void_p()
+        assert library.ft_local_connection_adopt(C.byref(fd), C.byref(connection)) == 0
+        assert library.ft_handshake_connect_local(C.byref(connection), C.byref(offer)) == 0
+        label, clock, tracks, count = C.c_char_p(), C.c_uint32(), C.POINTER(TrackOffer)(), C.c_size_t()
+        assert library.ft_handshake_offer_describe(offer, C.byref(label), C.byref(clock), C.byref(tracks), C.byref(count)) == 0
+        # The launcher labels the source with the profile title; frames are in host time.
+        assert (label.value.startswith(b"test.input"), clock.value) == (True, 3), (label.value, clock.value)
+        # Require cooperative input alone; the input channel must survive the
+        # media connection, which this controller abandons.
+        selection = TrackSelection(id=next(tracks[i].id for i in range(count.value) if tracks[i].kind == b"input"), required=1, write=1)
+        admission, media, affordances, input_status = TrackAdmission(), C.c_void_p(), C.c_void_p(), C.c_int32()
+        status = library.ft_handshake_select(C.byref(offer), C.byref(selection), 1, 4, C.byref(admission), C.byref(media), C.byref(self.handle), C.byref(input_status), C.byref(affordances))
+        library.ft_local_connection_destroy(C.byref(media))
         assert status == 0, status
         self.config = Config()
         controller, epoch = C.c_uint64(), C.c_uint64()
@@ -212,7 +226,11 @@ class PublisherInput(unittest.TestCase):
         suffix = "dylib" if sys.platform == "darwin" else "so"
         cls.lib = C.CDLL(str(prefix / "lib" / f"libjackstay.{suffix}"))
         for name, args in {
-            "ft_source_bootstrap_connect": [C.POINTER(C.c_int32), C.c_uint32, C.c_uint32, C.POINTER(C.c_void_p), C.POINTER(C.c_int32)],
+            "ft_local_connection_adopt": [C.POINTER(C.c_int32), C.POINTER(C.c_void_p)],
+            "ft_local_connection_destroy": [C.POINTER(C.c_void_p)],
+            "ft_handshake_connect_local": [C.POINTER(C.c_void_p), C.POINTER(C.c_void_p)],
+            "ft_handshake_offer_describe": [C.c_void_p, C.POINTER(C.c_char_p), C.POINTER(C.c_uint32), C.POINTER(C.POINTER(TrackOffer)), C.POINTER(C.c_size_t)],
+            "ft_handshake_select": [C.POINTER(C.c_void_p), C.POINTER(TrackSelection), C.c_size_t, C.c_uint32, C.POINTER(TrackAdmission), C.POINTER(C.c_void_p), C.POINTER(C.c_void_p), C.POINTER(C.c_int32), C.POINTER(C.c_void_p)],
             "ft_input_client_describe": [C.c_void_p, C.POINTER(Config), C.POINTER(C.c_uint64), C.POINTER(C.c_uint64)],
             "ft_input_client_send": [C.c_void_p, C.POINTER(Event), C.POINTER(C.c_uint64)],
             "ft_input_client_poll": [C.c_void_p, C.POINTER(Status)],
@@ -222,8 +240,8 @@ class PublisherInput(unittest.TestCase):
         }.items():
             fn = getattr(cls.lib, name); fn.argtypes = args
             fn.restype = None if name.endswith(("close", "destroy")) else C.c_int32
-        assert (C.sizeof(Config), C.sizeof(Event), C.sizeof(Status)) == (56, 152, 56)
-        assert cls.lib.ft_abi_version() == 8
+        assert (C.sizeof(Config), C.sizeof(Event), C.sizeof(Status), C.sizeof(TrackOffer)) == (56, 168, 56, 48)
+        assert cls.lib.ft_abi_version() == 16
         cls.temp = tempfile.TemporaryDirectory(prefix="ks-input-", dir="/tmp")
         cls.folder = Path(cls.temp.name)
         profiles = {}
@@ -642,11 +660,13 @@ class PublisherInput(unittest.TestCase):
                         if viewer.poll() is None: viewer.kill()
                         viewer.communicate(timeout=5)
                     self.addCleanup(stop_viewer)
-                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es) and any(e["event"] == "button" and e["down"] for e in es))
+                    # The viewer drops its self-test click at (20, 30): that lands
+                    # in the pillarbox of this 4:3 app in its 16:9 window.
+                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es))
                     if abrupt: viewer.kill()
                     stdout, stderr = viewer.communicate(timeout=10)
                     if not abrupt: self.assertEqual(viewer.returncode, 0, f"stdout:\n{stdout.decode()}\nstderr:\n{stderr.decode()}")
-                    events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
+                    events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es))
                     self.assertTrue(any(e["event"] == "key" and e["repeat"] for e in events))
                     self.assertEqual(b"".join(bytes.fromhex(e["hex"]) for e in events if e["event"] == "text"), "hé🙂".encode() + b"x" * 1024)
 

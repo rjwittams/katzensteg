@@ -12,7 +12,7 @@ input by default and remains observation-only when the source refuses it cleanly
 
 The dependency revision and C ABI are pinned in
 [`profiles/jackstay-dependency.json`](../profiles/jackstay-dependency.json).
-Prepare the ABI 0.8 headers and shared library, then enable the connectors:
+Prepare the ABI 0.16 headers and shared library, then enable the connectors:
 
 ```sh
 ks_jackstay_prefix="${XDG_CACHE_HOME:-$HOME/.cache}/katzensteg/jackstay"
@@ -67,9 +67,9 @@ positioned/placeholder producer protocol and observation requests. Hosts label i
 as observation-only unless input admission succeeds; moving and resizing its
 panel still work in either case.
 
-This source accepts a Jackstay shared-bootstrap source socket, followed by generic
-CPU media setup. The earlier raw media/two-path interface is replaced; source and
-presenter must both speak bootstrap. Porthole's session
+This source speaks Jackstay's v3 track handshake on its source socket: it selects
+the offered video track, plus the input track unless observing, then runs generic
+CPU media setup on the same connection. Porthole's session
 selection and authorization preface is not implemented here. The existing
 `jackstay-viewer` profile remains available for its SDL viewer.
 
@@ -92,7 +92,7 @@ the swap that drew it. Capture layers read the clock through the core export
 `ks_katzensteg_present_external_framebuffer` entry point stamps a frame when it
 is called. Native app input stays enabled. Audio is not transported by these connectors.
 The consumer acquires on a worker, copies into a bounded latest-frame mailbox,
-then releases the lease before presentation. Bootstrap runs on a setup worker:
+then releases the lease before presentation. The handshake runs on a setup worker:
 its absolute timeout is five seconds, with up to five more seconds for input
 admission. It has no cancellation handle. CPU attachment and frame waits remain
 cancellable independently of host control. Unexpected setup disconnect ends acquisition;
@@ -147,7 +147,10 @@ that setting, the publisher offers observation only. One remote controller is
 admitted at a time; an additional viewer can still observe. This replaces the
 old `KATZENSTEG_INPUT_SOCKET` setting.
 
-Bootstrap preserves the original connection for media admission, so Jackstay
+The publisher offers a video track, and an input track only with
+`KATZENSTEG_PUBLISH_INPUT=1`, declaring the host-time clock domain. The source
+label is the launched profile's title (`KATZENSTEG_PUBLISH_LABEL`). Media setup
+continues on the handshake connection, so Jackstay
 sees the consumer's actual kernel PID. Jackstay transfers the separate input
 channel internally; KS does not implement framing or FD passing. Each publisher
 setup gets a bounded worker, so a stalled peer cannot block frame publication,
@@ -173,7 +176,7 @@ State-acknowledged events remain available to mixed event/state readers until th
 768-event retention limit needs space. At that point, KS retires only copies
 already delivered through state APIs; unobserved events remain queued. If those
 unobserved events exhaust capacity, the executor ends the input connection and
-continues pumping cleanup. ABI 0.8 has no executor-side overflow notification, so
+continues pumping cleanup. The pinned ABI has no executor-side overflow notification, so
 KS logs the capacity failure and uses server teardown on its transport thread.
 The peer sees a disconnect, which does not confirm cleanup. The listener remains
 available, and Jackstay admits a new controller only after cleanup finishes.
@@ -218,18 +221,18 @@ These commands use normal destination selection: the current terminal, or a
 WM/pi/Claude host supplying `KATZENSTEG_TARGET`. The old `--input-socket` argument
 is no longer accepted. No second path or registry lookup is needed.
 
-The presenter performs bootstrap and admission on a worker while the main loop
+The presenter performs the handshake and admission on a worker while the main loop
 serves host control. It advertises input only after admission. Media attachment
-follows bootstrap; frame acquisition and input execution then run independently.
+follows the handshake; frame acquisition and input execution then run independently.
 Input disconnect disables forwarding while leaving video running. If media
 attachment fails, or setup is abandoned, any admitted input owner is explicitly
 closed and polled before destruction.
 
 Closing the presenter requests cleanup and polls for confirmation for up to two
 seconds; expiration logs an unconfirmed outcome. Destruction never proves remote
-cleanup. A host shutdown during a stalled bootstrap may force process exit under
-the existing host/launcher grace deadline because bootstrap cannot be cancelled.
-Once bootstrap finishes, stalled media attachment remains cancellable. A forced
+cleanup. A host shutdown during a stalled handshake may force process exit under
+the existing host/launcher grace deadline because the handshake cannot be cancelled.
+Once the handshake finishes, stalled media attachment remains cancellable. A forced
 exit relies on peer-disconnect cleanup and does not report confirmed release.
 
 Terminal and current hosted key inputs are logical keys, with separate UTF-8 text
@@ -310,7 +313,7 @@ publisher exit, and input while video is paused. Model tests also cover allocati
 failure during cleanup and preservation of local/native holds. Live game and
 hardware-input trials remain manual.
 
-The pinned ABI 0.8 dependency includes explicit initialization of the reference
+The pinned dependency includes explicit initialization of the reference
 viewer's synthetic SDL events, so CI builds that viewer without a local patch.
 Its input transport also stops client heartbeats during graceful close, allowing
 the final cleanup acknowledgement to be read after the server closes its socket.

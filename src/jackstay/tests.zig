@@ -10,7 +10,8 @@ test "cancellation interrupts a connection blocked in attach" {
     var fds: [2]i32 = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     defer os.posix.close(fds[0]);
-    var connection = try js.media.Connection.init(&fds[1]);
+    var local = try js.media.adopt(&fds[1]);
+    var connection = try js.media.Connection.init(&local);
     defer connection.deinit();
     const Worker = struct {
         fn run(conn: *js.media.Connection) void {
@@ -29,8 +30,10 @@ test "cancellation interrupts a frame wait and producer drains after setup joins
     var fds: [2]i32 = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     var producer = try js.media.Producer.init(4);
-    var server = try producer.serve(&fds[0]);
-    var connection = try js.media.Connection.init(&fds[1]);
+    var producer_local = try js.media.adopt(&fds[0]);
+    var server = try producer.serve(&producer_local);
+    var local = try js.media.adopt(&fds[1]);
+    var connection = try js.media.Connection.init(&local);
     try connection.attach();
     const Worker = struct {
         fn run(conn: *js.media.Connection) void {

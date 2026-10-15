@@ -2,9 +2,7 @@
 //! Work and all handles have one owner; destroy must not race other calls.
 const std = @import("std");
 const media = @import("media.zig");
-pub const c = @cImport({
-    @cInclude("jackstay_bootstrap.h");
-});
+pub const c = media.c;
 
 pub const Mode = enum(u32) { physical = c.FT_INPUT_MODE_PHYSICAL, source_text = c.FT_INPUT_MODE_SOURCE_TEXT, cooperative = c.FT_INPUT_MODE_COOPERATIVE };
 pub const Action = enum(u32) { down = c.FT_INPUT_DOWN, up = c.FT_INPUT_UP, repeat = c.FT_INPUT_REPEAT };
@@ -199,6 +197,8 @@ pub const Status = union(enum) {
     refused: struct { sequence: u64, result: i32 },
     reset: struct { epoch: u64, geometry: Geometry },
     closed: struct { reason: Reason, clean: bool },
+    /// The number of queued motions superseded by a later one; none complete.
+    coalesced: u64,
 };
 pub const Admission = struct {
     controller: u64,
@@ -282,6 +282,7 @@ pub const Client = struct {
             c.FT_INPUT_REFUSED => .{ .refused = .{ .sequence = status.sequence, .result = status.result } },
             c.FT_INPUT_RESET => .{ .reset = .{ .epoch = status.epoch, .geometry = Geometry.fromC(status.geometry) } },
             c.FT_INPUT_CLOSED => .{ .closed = .{ .reason = try enumFromInt(Reason, status.reason), .clean = status.clean != 0 } },
+            c.FT_INPUT_COALESCED => .{ .coalesced = status.sequence },
             else => error.InvalidStatus,
         };
     }

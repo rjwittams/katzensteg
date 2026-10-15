@@ -1,10 +1,11 @@
 /* Public-ABI acceptance source from Jackstay reference revision
- * 94a697e6ace998700fa7342b7bc7f217c496b367 (MIT OR Apache-2.0).
+ * 94a697e6ace998700fa7342b7bc7f217c496b367 (MIT OR Apache-2.0), moved to the
+ * v3 track handshake as in 5b9ad9df9aebac27884723ded600072f1cf7c9e2.
  * Synthetic pixels are inlined; --reject-media and --drop-input inject failures. */
 /* Interactive synthetic CPU source. Uses the same pixels as the reference
  * viewer and the public input/media interfaces; no Porthole daemon required. */
 #define _POSIX_C_SOURCE 200809L
-#include "jackstay_bootstrap.h"
+#include "jackstay_handshake.h"
 #include <stdint.h>
 #include <stddef.h>
 enum { WIDTH = 320, HEIGHT = 180, STRIDE = WIDTH * 4 };
@@ -68,9 +69,16 @@ int main(int argc, char **argv) {
   /* This example authorizes its private same-user endpoint for the selected
    * synthetic source. Passing NULL intentionally withholds input authority. */
   if (delay_bootstrap) { printf("bootstrap_wait\n"); fflush(stdout); pause_ms(300); }
-  checked(ft_source_bootstrap_accept(&media_fd, observe_only ? NULL : target, &input_server));
-  if (reject_media) close(media_fd);
-  else checked(ft_cpu_producer_serve(producer, &media_fd, &media_server));
+  ft_local_connection *connection = NULL;
+  checked(ft_local_connection_adopt(&media_fd, &connection));
+  /* Offer video 1 and input 2. A NULL target withholds input authority. */
+  ft_track_offer tracks[2] = {{1, FT_TRACK_KIND_VIDEO, "default", NULL, 0, FT_TRACK_FROM_SOURCE, 0},
+                              {2, FT_TRACK_KIND_INPUT, "default", NULL, 0, FT_TRACK_TO_SOURCE, 0}};
+  ft_track_admission admissions[2]; size_t admitted = 0; ft_affordances_producer *affordances = NULL;
+  checked(ft_handshake_accept_local(&connection, "reference input source", FT_CLOCK_DOMAIN_HOST_TIME, tracks, 2,
+                                    observe_only ? NULL : target, admissions, &admitted, &input_server, &affordances));
+  if (reject_media) ft_local_connection_destroy(&connection);
+  else checked(ft_cpu_producer_serve_local(producer, &connection, &media_server));
   close(media_listener); unlink(argv[1]);
   uint8_t *pixels = malloc(STRIDE * HEIGHT); if (!pixels) return 1;
   uint64_t held[256] = {0}; unsigned held_count = 0, buttons = 0, downs = 0, repeats = 0, releases = 0, cleanup = 0;
@@ -124,7 +132,7 @@ int main(int argc, char **argv) {
         p[0] = buttons ? 0 : 255; p[1] = buttons ? 0 : 255; p[2] = 255;
       }
     }
-    ft_acquired_frame_descriptor desc = {.sequence = sequence, .timestamp_ns = sequence * 16000000,
+    ft_acquired_frame_descriptor desc = {.sequence = sequence,
       .width = WIDTH, .height = HEIGHT, .stride = STRIDE, .pixel_format = FT_PIXEL_FORMAT_BGRA8_UNORM};
     uint64_t cursor; ft_status s = ft_cpu_producer_publish(producer, &desc, pixels, STRIDE * HEIGHT, &cursor);
     if (s != FT_STATUS_OK && s != FT_STATUS_DROPPED) checked(s);

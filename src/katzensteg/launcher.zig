@@ -359,7 +359,7 @@ fn dryRunTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, ex
     };
     defer destination.deinit(allocator);
     const embed_jsonl = destination == .stdio or destination == .jsonl;
-    if (destination == .jackstay) std.debug.print("destination=jackstay:{s} (dry-run; not listening)\nKATZENSTEG_PUBLISH={s}\nKATZENSTEG_AUDIO_DEVICE=virtual\nSDL_AUDIODRIVER=dummy\n", .{ destination.jackstay, destination.jackstay });
+    if (destination == .jackstay) std.debug.print("destination=jackstay:{s} (dry-run; not listening)\nKATZENSTEG_PUBLISH={s}\nKATZENSTEG_PUBLISH_LABEL={s}\nKATZENSTEG_AUDIO_DEVICE=virtual\nSDL_AUDIODRIVER=dummy\n", .{ destination.jackstay, destination.jackstay, target });
     if (destination == .jsonl) std.debug.print("destination=jsonl:{s} (dry-run; not connected)\n", .{destination.jsonl});
     if (std.mem.eql(u8, target, "jackstay-source")) try @import("jackstay").checkAvailable();
     var catalog = try loadProfileCatalog(io, allocator);
@@ -520,11 +520,16 @@ fn runTarget(io: std.Io, allocator: std.mem.Allocator, target: []const u8, extra
     if (destination == .standalone) try env_map.put("KATZENSTEG_STATUS_TITLE", status_title) else _ = env_map.swapRemove("KATZENSTEG_STATUS_TITLE");
     if (destination == .jackstay) {
         try env_map.put("KATZENSTEG_PUBLISH", destination.jackstay);
+        // The source label a Jackstay viewer sees: the profile title.
+        try env_map.put("KATZENSTEG_PUBLISH_LABEL", status_title);
         // A Jackstay target publishes only: the virtual paced device paces the
         // app, and SDL's real audio subsystem runs on its dummy driver.
         try env_map.put("KATZENSTEG_AUDIO_DEVICE", "virtual");
         try env_map.put("SDL_AUDIODRIVER", "dummy");
-    } else _ = env_map.swapRemove("KATZENSTEG_PUBLISH");
+    } else {
+        _ = env_map.swapRemove("KATZENSTEG_PUBLISH");
+        _ = env_map.swapRemove("KATZENSTEG_PUBLISH_LABEL");
+    }
 
     if (!embed_jsonl) {
         std.debug.print("katzensteg: launching {s}\n", .{plan.profile_name});
