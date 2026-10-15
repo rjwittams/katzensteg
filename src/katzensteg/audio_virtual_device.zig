@@ -91,9 +91,11 @@ pub const VirtualDevice = struct {
         self.thread = null;
     }
 
-    /// App thread.
+    /// App thread. An unpause requests the restart before it clears `paused`,
+    /// so the device thread never sees it unpaused without the restart.
     pub fn pause(self: *VirtualDevice, on: bool) void {
-        if (self.paused.swap(on, .acq_rel) and !on) self.restart.store(true, .release);
+        if (!on and self.paused.load(.acquire)) self.restart.store(true, .release);
+        self.paused.store(on, .release);
     }
 
     fn run(self: *VirtualDevice) void {

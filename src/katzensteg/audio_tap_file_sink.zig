@@ -3,7 +3,8 @@
 //! copied into buffers allocated when the stream opens (blocks past them are
 //! dropped), then written on the closing app thread as `<base>.<sequence>.raw`
 //! and `<base>.<sequence>.times` (one native-endian u64 nanosecond time per
-//! block). Nothing goes to stdout or stderr.
+//! block, with bit 63 set on a block after a discontinuity). Nothing goes to
+//! stdout or stderr.
 
 const std = @import("std");
 const audio_model = @import("audio_model.zig");
@@ -39,7 +40,7 @@ pub const TapFileSink = struct {
         if (capture.times_len == capture.times.len or capture.bytes_len + block.bytes.len > capture.bytes.len) return;
         @memcpy(capture.bytes[capture.bytes_len..][0..block.bytes.len], block.bytes);
         capture.bytes_len += block.bytes.len;
-        capture.times[capture.times_len] = block.time_ns;
+        capture.times[capture.times_len] = block.time_ns | @as(u64, @intFromBool(block.discontinuity)) << 63;
         capture.times_len += 1;
     }
 

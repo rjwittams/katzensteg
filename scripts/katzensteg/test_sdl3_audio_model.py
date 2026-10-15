@@ -30,7 +30,7 @@ class Sdl3AudioModelTests(sdl2.Sdl2AudioModelTests):
             match = re.search(r"app_postmix_calls=(\d+)", self.probe_log)
             self.assertIsNotNone(match, self.context)
             self.assertGreater(int(match.group(1)), 10, self.context)
-            data, fmt, _ = self.tap(1)
+            data, fmt, _, _ = self.tap(1)
             self.assert_tone(data, fmt, "tap", 1)
             self.assert_silent(self.dir / "disk.raw")
 
