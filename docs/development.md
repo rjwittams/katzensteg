@@ -123,6 +123,7 @@ chosen by argument, then exit. The `probe.audio.*` profiles in
 | `probe.audio.sdl3.devstream` | SDL3 | `SDL_OpenAudioDeviceStream`, fed with `SDL_PutAudioStreamData` |
 | `probe.audio.sdl3.devstream_callback` | SDL3 | `SDL_OpenAudioDeviceStream` with a get callback |
 | `probe.audio.sdl3.reopen` | SDL3 | bound stream, closed halfway and reopened with half the buffer |
+| `probe.audio.sdl3.app_postmix` | SDL3 | bound stream, with the app's own postmix callback |
 
 `test_audio_probes.py` runs every profile through the launcher with SDL's
 `disk` audio driver and checks the written file for the tone's frequency, RMS,
@@ -139,10 +140,9 @@ SDL_DISKAUDIOFILE=/tmp/tone.raw SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/tone.raw \
 python3 scripts/katzensteg/audio_tone_analysis.py /tmp/tone.raw
 ```
 
-The SDL2 profiles now run through Katzensteg's audio model (see "Audio" in
+The profiles run through Katzensteg's audio model (see "Audio" in
 `docs/architecture.md`); at the default volume the device plays the app's
-samples unchanged, so these checks hold with interception on. The SDL3
-profiles are not intercepted yet.
+samples unchanged, so these checks hold with interception on.
 
 `test_sdl2_audio_model.py` checks the SDL2 pipeline itself on the same
 probes. It sets `KATZENSTEG_AUDIO_TAP_FILE` so the preload records the audio
@@ -162,6 +162,10 @@ example the research build from `docs/research/sdl-audio-probes.md`:
 KS_SDL2_COMPAT_LIBRARY_PATH=$WORK/prefix/compat/lib:$WORK/prefix/sdl3/lib \
   python3 scripts/katzensteg/test_sdl2_audio_model.py
 ```
+
+`test_sdl3_audio_model.py` runs the same tap, gain-0 and reopen checks on the
+SDL3 probes, through preload and `SDL3_DYNAMIC_API`, and checks that
+`probe.audio.sdl3.app_postmix`'s own postmix still runs.
 
 ## Windows
 

@@ -1032,6 +1032,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .link_sdl3 = true,
     });
+    addUnitTest(b, test_step, "katzensteg-sdl3-audio-adapter-test", "src/katzensteg/sdl3_audio_adapter.zig", target, optimize, use_llvm, test_library_dir, .{
+        .katzensteg_sdl = katzensteg_sdl3_mod,
+        .katzensteg_build_options = test_preload_options.createModule(),
+        .link_libc = true,
+        .link_sdl3 = true,
+    });
     addUnitTest(b, test_step, "katzensteg-preload-test", "src/katzensteg/preload.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl2_mod,

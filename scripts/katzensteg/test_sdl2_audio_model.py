@@ -46,6 +46,8 @@ COMPAT_LIBRARY_PATH = os.environ.get("KS_SDL2_COMPAT_LIBRARY_PATH", "")
 class Sdl2AudioModelTests(unittest.TestCase):
     library_path = ""
     injection = ""  # the profile's own (preload on Linux and macOS)
+    profiles = PROFILES
+    reopen_profile = REOPEN_PROFILE
 
     def run_profile(self, directory, profile, **audio_env):
         self.assertTrue(probes.LAUNCHER.exists(), f"{probes.LAUNCHER} is missing; run zig build first")
@@ -113,7 +115,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
         return period_ms
 
     def test_tap_matches_tone_with_steady_cadence(self):
-        for profile in PROFILES:
+        for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-model-") as directory:
                 self.run_profile(directory, profile)
                 data, fmt, times = self.tap(1)
@@ -123,7 +125,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
                 self.assert_cadence(data, fmt, times, "tap")
 
     def test_gain_zero_silences_the_device_but_not_the_tap(self):
-        for profile in PROFILES:
+        for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-model-") as directory:
                 self.run_profile(directory, profile, KATZENSTEG_AUDIO_VOLUME="0")
                 data, fmt, _ = self.tap(1)
@@ -132,7 +134,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
 
     def test_close_and_reopen_keeps_the_hooks(self):
         with tempfile.TemporaryDirectory(prefix="ks-audio-model-") as directory:
-            self.run_profile(directory, REOPEN_PROFILE, KATZENSTEG_AUDIO_VOLUME="0")
+            self.run_profile(directory, self.reopen_profile, KATZENSTEG_AUDIO_VOLUME="0")
             periods = []
             for sequence in (1, 2):
                 data, fmt, times = self.tap(sequence)
@@ -171,7 +173,7 @@ class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
         return period_ms
 
     def test_tap_matches_tone_with_steady_cadence(self):
-        for profile in PROFILES:
+        for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-virtual-") as directory:
                 self.run_virtual(directory, profile)
                 data, fmt, times = self.tap(1)
@@ -183,7 +185,7 @@ class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
 
     def test_close_and_reopen_keeps_the_hooks(self):
         with tempfile.TemporaryDirectory(prefix="ks-audio-virtual-") as directory:
-            self.run_virtual(directory, REOPEN_PROFILE)
+            self.run_virtual(directory, self.reopen_profile)
             periods = []
             for sequence in (1, 2):
                 data, fmt, times = self.tap(sequence)

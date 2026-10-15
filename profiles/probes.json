@@ -140,6 +140,17 @@
         "--reopen"
       ]
     },
+    "probe.audio.sdl3.app_postmix": {
+      "extends": [
+        "app.audio_probe_sdl3",
+        "adapter.sdl3_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "bound",
+        "--app-postmix"
+      ]
+    },
     "probe.embed.basic_sdl": {
       "hidden": true,
       "extends": [
