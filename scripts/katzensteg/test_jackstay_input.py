@@ -55,7 +55,9 @@ class Client:
         assert (label.value.startswith(b"test.input"), clock.value) == (True, 3), (label.value, clock.value)
         # Require cooperative input alone; the input channel must survive the
         # media connection, which this controller abandons.
-        selection = TrackSelection(id=next(tracks[i].id for i in range(count.value) if tracks[i].kind == b"input"), required=1, write=1)
+        inputs = [tracks[i].id for i in range(count.value) if tracks[i].kind == b"input"]
+        assert inputs, "publisher offered no input track"
+        selection = TrackSelection(id=inputs[0], required=1, write=1)
         admission, media, affordances, input_status = TrackAdmission(), C.c_void_p(), C.c_void_p(), C.c_int32()
         status = library.ft_handshake_select(C.byref(offer), C.byref(selection), 1, 4, C.byref(admission), C.byref(media), C.byref(self.handle), C.byref(input_status), C.byref(affordances))
         library.ft_local_connection_destroy(C.byref(media))
@@ -112,11 +114,11 @@ class Client:
         self.lib.ft_input_client_destroy(C.byref(self.handle))
 
 class App:
-    def __init__(self, folder, version, allow_input=True):
+    def __init__(self, folder, version, allow_input=True, height=480):
         self.source = folder / f"source{version}"
         self.stdout = open(folder / f"app{version}.jsonl", "w+")
         self.stderr = open(folder / f"app{version}.err", "w+")
-        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), f"test.input{version}"], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_PROFILE_DIR=f"{ROOT / 'profiles'}:{folder}", KATZENSTEG_REPO=str(ROOT), KATZENSTEG_TARGET=f"jackstay:{self.source}", KATZENSTEG_PUBLISH_INPUT="1" if allow_input else "0", SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide"), start_new_session=True)
+        self.process = subprocess.Popen([str(ROOT / "zig-out/bin/katzensteg"), f"test.input{version}"], stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr, env=dict(os.environ, KATZENSTEG_PROFILE_DIR=f"{ROOT / 'profiles'}:{folder}", KATZENSTEG_REPO=str(ROOT), KATZENSTEG_TARGET=f"jackstay:{self.source}", KATZENSTEG_PUBLISH_INPUT="1" if allow_input else "0", JACKSTAY_INPUT_APP_HEIGHT=str(height), SDL_VIDEODRIVER="dummy", SDL_RENDER_DRIVER="software", KATZENSTEG_REAL_WINDOW="hide"), start_new_session=True)
         try:
             self.wait(lambda events: any(e["event"] == "ready" for e in events) and self.source.exists())
         except Exception:
@@ -259,13 +261,13 @@ class PublisherInput(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.temp.cleanup()
-    def app(self, version, allow_input=True):
+    def app(self, version, allow_input=True, height=480):
         # Unique endpoints/logs for each test, sharing only compiled fixture profiles.
         directory = tempfile.TemporaryDirectory(prefix="ks-input-case-", dir="/tmp")
         self.addCleanup(directory.cleanup)
         folder = Path(directory.name)
         (folder / "profiles.json").write_text((self.folder / "profiles.json").read_text())
-        app = App(folder, version, allow_input)
+        app = App(folder, version, allow_input, height)
         self.addCleanup(app.cleanup)
         return app
     def client(self, app):
@@ -654,19 +656,19 @@ class PublisherInput(unittest.TestCase):
         for version in (2, 3):
             for abrupt in (False, True):
                 with self.subTest(sdl=version, abrupt=abrupt):
-                    app = self.app(version)
+                    # The viewer's 320x180 window drops its self-test click at
+                    # (20, 30) outside the fitted frame, so match its aspect.
+                    app = self.app(version, height=360)
                     viewer = subprocess.Popen([os.environ["JACKSTAY_REFERENCE_VIEWER"], "--source-socket", str(app.source), "--input-self-test", "--frames", "0" if abrupt else "60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, SDL_VIDEODRIVER="dummy"))
                     def stop_viewer(viewer=viewer):
                         if viewer.poll() is None: viewer.kill()
                         viewer.communicate(timeout=5)
                     self.addCleanup(stop_viewer)
-                    # The viewer drops its self-test click at (20, 30): that lands
-                    # in the pillarbox of this 4:3 app in its 16:9 window.
-                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es))
+                    app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and e["down"] for e in es) and any(e["event"] == "button" and e["down"] for e in es))
                     if abrupt: viewer.kill()
                     stdout, stderr = viewer.communicate(timeout=10)
                     if not abrupt: self.assertEqual(viewer.returncode, 0, f"stdout:\n{stdout.decode()}\nstderr:\n{stderr.decode()}")
-                    events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es))
+                    events = app.wait(lambda es: any(e["event"] == "key" and e["scan"] == 225 and not e["down"] for e in es) and any(e["event"] == "button" and not e["down"] for e in es))
                     self.assertTrue(any(e["event"] == "key" and e["repeat"] for e in events))
                     self.assertEqual(b"".join(bytes.fromhex(e["hex"]) for e in events if e["event"] == "text"), "hé🙂".encode() + b"x" * 1024)
 

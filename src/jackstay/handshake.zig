@@ -37,12 +37,12 @@ pub fn connect(fd: *i32, request: Request) !Connected {
     try input.check(c.ft_handshake_offer_describe(offer, &label, &clock, &tracks, &count));
     var selections: [2]c.ft_track_selection = undefined;
     var selected: usize = 0;
-    var video = false;
+    var video: ?u64 = null;
     var input_offered = false;
     for (tracks[0..count]) |track| {
         const kind = std.mem.span(track.kind);
-        if (!video and std.mem.eql(u8, kind, c.FT_TRACK_KIND_VIDEO)) {
-            video = true;
+        if (video == null and std.mem.eql(u8, kind, c.FT_TRACK_KIND_VIDEO)) {
+            video = track.id;
             selections[selected] = .{ .id = track.id, .required = 1, .write = 0 };
             selected += 1;
         } else if (request != .observe and !input_offered and std.mem.eql(u8, kind, c.FT_TRACK_KIND_INPUT)) {
@@ -51,22 +51,30 @@ pub fn connect(fd: *i32, request: Request) !Connected {
             selected += 1;
         }
     }
-    if (!video) return error.VideoNotOffered;
+    if (video == null) return error.VideoNotOffered;
     if (request == .required and !input_offered) return error.InputNotOffered;
     var admissions: [2]c.ft_track_admission = undefined;
     var connected = Connected{ .local = null, .host_time = clock == c.FT_CLOCK_DOMAIN_HOST_TIME, .client = null, .refusal = if (request != .observe and !input_offered) error.InputNotOffered else null };
     var handle: ?*c.ft_input_client = null;
     // The C contract writes input status on every successful return.
     var status: c.ft_status = undefined;
+    // Never selected, so always null; destroy keeps any handle from leaking.
     var affordances: ?*c.ft_affordances_host = null;
+    defer c.ft_affordances_host_destroy(&affordances);
     try input.check(c.ft_handshake_select(&offer, &selections, selected, if (input_offered) c.FT_INPUT_MODE_COOPERATIVE else 0, &admissions, &connected.local, &handle, &status, &affordances));
+    if (handle != null) connected.client = .{ .handle = handle };
     for (admissions[0..selected]) |admission| if (admission.result != c.FT_TRACK_ADMITTED) {
+        // Required video normally fails select itself; never report it as input.
+        if (admission.id == video.?) {
+            if (connected.client) |*client| client.deinit();
+            connected.close();
+            return error.VideoRefused;
+        }
         connected.refusal = error.InputRefused;
     };
     if (status != c.FT_STATUS_EMPTY) input.check(status) catch |err| {
         connected.refusal = err;
     };
-    if (handle != null) connected.client = .{ .handle = handle };
     return connected;
 }
 
@@ -94,7 +102,9 @@ pub fn accept(fd: *i32, label: [*:0]const u8, target: ?*input.Target) !Accepted 
     var admissions: [tracks.len]c.ft_track_admission = undefined;
     var count: usize = 0;
     var server: ?*c.ft_input_server = null;
+    // Never offered, so always null; destroy keeps any handle from leaking.
     var affordances: ?*c.ft_affordances_producer = null;
+    defer c.ft_affordances_producer_destroy(&affordances);
     try input.check(c.ft_handshake_accept_local(&accepted.local, label, c.FT_CLOCK_DOMAIN_HOST_TIME, &tracks, if (target != null) 2 else 1, if (target) |t| t.handle else null, &admissions, &count, &server, &affordances));
     for (admissions[0..count]) |admission| {
         if (admission.id == video_track and admission.result == c.FT_TRACK_ADMITTED) accepted.video = true;
