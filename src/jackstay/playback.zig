@@ -61,17 +61,28 @@ pub const Track = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const wanted = format.toC();
+        // Every C call succeeds before any state changes, so a failure leaves
+        // the track as it was.
+        var descriptor: c.ft_audio_descriptor = undefined;
         if (self.id == 0) {
+            var writer: ?*c.ft_playback_writer = null;
+            var playback: ?*c.ft_playback = null;
+            try check(c.ft_playback_writer_create(self.next_id, &wanted, block_frames, c.FT_AUDIO_MIN_DEPTH_NS, &writer, &playback));
+            errdefer c.ft_playback_writer_destroy(&writer);
+            errdefer c.ft_playback_destroy(&playback);
+            try check(c.ft_playback_writer_descriptor(writer, &descriptor));
             c.ft_playback_writer_destroy(&self.writer);
             c.ft_playback_destroy(&self.playback);
-            try check(c.ft_playback_writer_create(self.next_id, &wanted, block_frames, c.FT_AUDIO_MIN_DEPTH_NS, &self.writer, &self.playback));
+            self.writer = writer;
+            self.playback = playback;
             self.id = self.next_id;
             self.next_id += 1;
         } else {
             if (!std.meta.eql(wanted, self.descriptor.format)) try check(c.ft_playback_writer_reconfigure(self.writer, &wanted));
             try check(c.ft_playback_writer_discontinuity(self.writer));
+            try check(c.ft_playback_writer_descriptor(self.writer, &descriptor));
         }
-        try check(c.ft_playback_writer_descriptor(self.writer, &self.descriptor));
+        self.descriptor = descriptor;
         const len = @min(label.len, self.label.len);
         @memcpy(self.label[0..len], label[0..len]);
         self.label[len] = 0;

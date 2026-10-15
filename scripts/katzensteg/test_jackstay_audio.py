@@ -113,6 +113,8 @@ class Consumer:
         return True
 
     def close(self):
+        # Jackstay's destroy functions accept a NULL handle (capture_transfer.h),
+        # so handles this consumer never received are fine here.
         for name, handle in (("ft_playback_reader_destroy", self.reader), ("ft_playback_ring_destroy", self.ring),
                              ("ft_playback_doorbell_destroy", self.doorbell), ("ft_tracks_destroy", self.tracks)):
             getattr(self.lib, name)(C.byref(handle))
