@@ -72,6 +72,53 @@ SDL2 renderer capture samples `SDL_GetRendererOutputSize` on the app thread and 
 
 SDL2 polling and waiting consume the same canonical input model. `SDL_WaitEvent` and `SDL_WaitEventTimeout` use native waits of at most 8 ms between checks for terminal or host input. Native window and application events remain available, including streaming clients' frame-ready notifications. Null event pointers check availability without consuming an event.
 
+### Audio
+
+Audio is an adapter, model and sink pipeline, the counterpart of the input
+pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
+
+- **Adapter.** `sdl2_audio_adapter.zig` wraps `SDL_OpenAudioDevice` and
+  `SDL_OpenAudio`. A playback device with an app callback gets a trampoline
+  that runs it and hands the filled buffer to the model; a queue-mode device
+  (NULL callback) gets a drain callback over a fixed-capacity queue the adapter
+  owns (`audio_byte_queue.zig`: the larger of 2 s of audio and 256 KiB,
+  allocated at open). `SDL_QueueAudio`, `SDL_GetQueuedAudioSize` and
+  `SDL_ClearQueuedAudio` are served from that queue; queuing past its capacity
+  fails with `SDL_SetError` and -1, as SDL does when it cannot allocate.
+  `SDL_CloseAudioDevice`, `SDL_CloseAudio` and the `SDL_Quit` /
+  `SDL_QuitSubSystem(SDL_INIT_AUDIO)` wrappers close the model stream once SDL
+  can no longer run the callback. Capture devices pass through. The same
+  wrappers serve preload and `SDL_DYNAMIC_API`, classic SDL2 and sdl2-compat.
+  There is no SDL3 adapter yet.
+- **Model.** `audio_model.zig` owns one stream per open playback device (a
+  reopen is a new stream with the next sequence number), the gain, the mute
+  and the routing (two booleans: local device and tap). It has no SDL or
+  Jackstay types. All controls are atomics read at the start of each block, so
+  a change applies at a block boundary. Blocks carry the model's injected clock
+  (host monotonic time in production).
+- **Sinks.** The tap sees each block unscaled; then the local device sink
+  (`audio_local_device_sink.zig`) scales the device's own buffer in place.
+  Gain and mute reach only the local device sink, and mute is gain 0, never a
+  pause. Gain scales S16 and F32; other formats play at unity gain (logged
+  once), and gain 0 writes every format's silence byte. The tap is where the
+  virtual paced device and the published track will attach; today only the
+  diagnostic tap file sink (`audio_tap_file_sink.zig`) uses it.
+- **Audio thread.** Callbacks never allocate, block, log or take a Katzensteg
+  lock. Device records, queues and tap buffers are allocated on the app thread
+  at open; the adapter's device table lock is taken only by app threads.
+
+`audio_process.zig` composes the model when the app opens its first device.
+Until command mode and the WM drive them, the controls come from
+`KATZENSTEG_AUDIO_VOLUME` (0 to 1, or 0% to 100%; default 1) and
+`KATZENSTEG_AUDIO_MUTE=1`. `KATZENSTEG_AUDIO_TAP_FILE=<base>` adds the tap file
+sink, which writes `<base>.<sequence>.raw` and `.times` when each stream closes.
+
+The model is tested in Zig with a fake adapter, fake sinks and an injected
+clock (`audio_tests.zig`). `scripts/katzensteg/test_sdl2_audio_model.py` runs
+the SDL2 callback, queue, `SDL_OpenAudio` and reopen probes on SDL's `disk`
+driver and compares the tap with the disk output, through preload,
+`SDL_DYNAMIC_API` and, with `KS_SDL2_COMPAT_LIBRARY_PATH`, sdl2-compat.
+
 ### Window Manager Sessions
 
 The WM host keeps window state separate from the producer's channel and optional owned child process. `wm/client.zig` owns channel descriptors: separate control/presentation pipes for WM-launched producers, or one duplex socket. Closing socket control half-closes the write direction so final presentation batches can still be drained. Borrowed channel files must not be closed directly.

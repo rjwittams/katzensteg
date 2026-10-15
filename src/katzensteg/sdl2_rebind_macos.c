@@ -69,6 +69,14 @@ KS_DECLARE_REPLACEMENT(SDL_CreateColorCursor);
 KS_DECLARE_REPLACEMENT(SDL_SetCursor);
 KS_DECLARE_REPLACEMENT(SDL_ShowCursor);
 KS_DECLARE_REPLACEMENT(SDL_FreeCursor);
+KS_DECLARE_REPLACEMENT(SDL_OpenAudio);
+KS_DECLARE_REPLACEMENT(SDL_OpenAudioDevice);
+KS_DECLARE_REPLACEMENT(SDL_QueueAudio);
+KS_DECLARE_REPLACEMENT(SDL_GetQueuedAudioSize);
+KS_DECLARE_REPLACEMENT(SDL_ClearQueuedAudio);
+KS_DECLARE_REPLACEMENT(SDL_CloseAudioDevice);
+KS_DECLARE_REPLACEMENT(SDL_CloseAudio);
+KS_DECLARE_CAPTURE(SDL_SetError);
 
 KS_DECLARE_CAPTURE(SDL_GetWindowID);
 KS_DECLARE_CAPTURE(SDL_QueryTexture);
@@ -153,6 +161,14 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_CAPTURE(SDL_GetRendererOutputSize),
     KS_CAPTURE(SDL_ClearError),
     KS_CAPTURE(SDL_QueryTexture),
+    KS_REPLACE(SDL_OpenAudio),
+    KS_REPLACE(SDL_OpenAudioDevice),
+    KS_REPLACE(SDL_QueueAudio),
+    KS_REPLACE(SDL_GetQueuedAudioSize),
+    KS_REPLACE(SDL_ClearQueuedAudio),
+    KS_REPLACE(SDL_CloseAudioDevice),
+    KS_REPLACE(SDL_CloseAudio),
+    KS_CAPTURE(SDL_SetError),
     { "dlopen", (void *)ks_macos_dlopen, &ks_real_macos_slot_dlopen },
 };
 

@@ -18,6 +18,7 @@ struct SDL_Rect;
 struct SDL_Point;
 struct SDL_RendererInfo;
 union SDL_Event;
+struct SDL_AudioSpec;
 
 extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
@@ -76,6 +77,13 @@ extern struct SDL_Cursor *ks_SDL_CreateColorCursor(struct SDL_Surface *, int, in
 extern void ks_SDL_SetCursor(struct SDL_Cursor *);
 extern int ks_SDL_ShowCursor(int);
 extern void ks_SDL_FreeCursor(struct SDL_Cursor *);
+extern int ks_SDL_OpenAudio(struct SDL_AudioSpec *, struct SDL_AudioSpec *);
+extern unsigned int ks_SDL_OpenAudioDevice(const char *, int, const struct SDL_AudioSpec *, struct SDL_AudioSpec *, int);
+extern int ks_SDL_QueueAudio(unsigned int, const void *, unsigned int);
+extern unsigned int ks_SDL_GetQueuedAudioSize(unsigned int);
+extern void ks_SDL_ClearQueuedAudio(unsigned int);
+extern void ks_SDL_CloseAudioDevice(unsigned int);
+extern void ks_SDL_CloseAudio(void);
 extern void ks_katzensteg_shutdown(void);
 #include "dlopen_macos.h"
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -143,6 +151,13 @@ extern struct SDL_Cursor *SDL_CreateColorCursor(struct SDL_Surface *, int, int);
 extern void SDL_SetCursor(struct SDL_Cursor *);
 extern int SDL_ShowCursor(int);
 extern void SDL_FreeCursor(struct SDL_Cursor *);
+extern int SDL_OpenAudio(struct SDL_AudioSpec *, struct SDL_AudioSpec *);
+extern unsigned int SDL_OpenAudioDevice(const char *, int, const struct SDL_AudioSpec *, struct SDL_AudioSpec *, int);
+extern int SDL_QueueAudio(unsigned int, const void *, unsigned int);
+extern unsigned int SDL_GetQueuedAudioSize(unsigned int);
+extern void SDL_ClearQueuedAudio(unsigned int);
+extern void SDL_CloseAudioDevice(unsigned int);
+extern void SDL_CloseAudio(void);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
 extern int SDL_SetHint(const char *, const char *);
@@ -208,6 +223,13 @@ DYLD_INTERPOSE(ks_SDL_CreateColorCursor, SDL_CreateColorCursor)
 DYLD_INTERPOSE(ks_SDL_SetCursor, SDL_SetCursor)
 DYLD_INTERPOSE(ks_SDL_ShowCursor, SDL_ShowCursor)
 DYLD_INTERPOSE(ks_SDL_FreeCursor, SDL_FreeCursor)
+DYLD_INTERPOSE(ks_SDL_OpenAudio, SDL_OpenAudio)
+DYLD_INTERPOSE(ks_SDL_OpenAudioDevice, SDL_OpenAudioDevice)
+DYLD_INTERPOSE(ks_SDL_QueueAudio, SDL_QueueAudio)
+DYLD_INTERPOSE(ks_SDL_GetQueuedAudioSize, SDL_GetQueuedAudioSize)
+DYLD_INTERPOSE(ks_SDL_ClearQueuedAudio, SDL_ClearQueuedAudio)
+DYLD_INTERPOSE(ks_SDL_CloseAudioDevice, SDL_CloseAudioDevice)
+DYLD_INTERPOSE(ks_SDL_CloseAudio, SDL_CloseAudio)
 DYLD_INTERPOSE(ks_macos_dlopen, dlopen)
 
 #endif

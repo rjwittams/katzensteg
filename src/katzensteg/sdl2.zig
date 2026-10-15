@@ -251,6 +251,7 @@ pub extern fn SDL_GetTicks() Uint32;
 pub extern fn SDL_ClearError() void;
 pub extern fn SDL_GetError() [*:0]const u8;
 
+pub const SDL_INIT_AUDIO: Uint32 = 0x00000010;
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;
 pub const SDL_INIT_JOYSTICK: Uint32 = 0x00000200;
 pub const SDL_INIT_GAMECONTROLLER: Uint32 = 0x00002000;
@@ -261,8 +262,44 @@ pub const SDL_GETEVENT: c_int = 2;
 pub const SDL_WINDOWPOS_CENTERED_MASK: Uint32 = 0x2FFF0000;
 pub const SDL_WINDOWPOS_CENTERED: c_int = @bitCast(SDL_WINDOWPOS_CENTERED_MASK);
 
+// Audio (SDL 2.32 include/SDL_audio.h).
+pub const SDL_AudioDeviceID = Uint32;
+pub const SDL_AudioFormat = u16;
+pub const SDL_AudioCallback = ?*const fn (userdata: ?*anyopaque, stream: ?[*]Uint8, len: c_int) callconv(.c) void;
+
+pub const SDL_AudioSpec = extern struct {
+    freq: c_int,
+    format: SDL_AudioFormat,
+    channels: Uint8,
+    silence: Uint8,
+    samples: u16,
+    padding: u16,
+    size: Uint32,
+    callback: SDL_AudioCallback,
+    userdata: ?*anyopaque,
+};
+
+// The native-endian S16 and F32 formats, the ones the audio model scales.
+const native_little = @import("builtin").cpu.arch.endian() == .little;
+pub const AUDIO_S16SYS: SDL_AudioFormat = if (native_little) 0x8010 else 0x9010;
+pub const AUDIO_F32SYS: SDL_AudioFormat = if (native_little) 0x8120 else 0x9120;
+
+pub extern fn SDL_OpenAudio(desired: ?*SDL_AudioSpec, obtained: ?*SDL_AudioSpec) c_int;
+pub extern fn SDL_OpenAudioDevice(device: ?[*:0]const u8, iscapture: c_int, desired: ?*const SDL_AudioSpec, obtained: ?*SDL_AudioSpec, allowed_changes: c_int) SDL_AudioDeviceID;
+pub extern fn SDL_QueueAudio(dev: SDL_AudioDeviceID, data: ?*const anyopaque, len: Uint32) c_int;
+pub extern fn SDL_GetQueuedAudioSize(dev: SDL_AudioDeviceID) Uint32;
+pub extern fn SDL_ClearQueuedAudio(dev: SDL_AudioDeviceID) void;
+pub extern fn SDL_CloseAudioDevice(dev: SDL_AudioDeviceID) void;
+pub extern fn SDL_CloseAudio() void;
+pub extern fn SDL_SetError(fmt: [*:0]const u8, ...) c_int;
+
 pub fn sdlError() []const u8 {
     return std.mem.span(SDL_GetError());
+}
+
+test "SDL_AudioSpec binding matches SDL2 ABI layout" {
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(SDL_AudioSpec, "callback"));
+    try std.testing.expectEqual(@as(usize, 16 + 2 * @sizeOf(usize)), @sizeOf(SDL_AudioSpec));
 }
 
 test "SDL_Event binding matches SDL2 ABI size" {

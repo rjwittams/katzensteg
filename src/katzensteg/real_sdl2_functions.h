@@ -14,6 +14,7 @@ struct SDL_Point;
 struct SDL_RendererInfo;
 struct SDL_Color;
 union SDL_Event;
+struct SDL_AudioSpec;
 
 KS_REAL(SDL_Init, int, (unsigned int flags), (flags))
 KS_REAL(SDL_InitSubSystem, int, (unsigned int flags), (flags))
@@ -84,3 +85,12 @@ KS_REAL_VOID(SDL_SetCursor, (struct SDL_Cursor *cursor), (cursor))
 KS_REAL(SDL_ShowCursor, int, (int toggle), (toggle))
 KS_REAL_VOID(SDL_FreeCursor, (struct SDL_Cursor *cursor), (cursor))
 KS_REAL(SDL_GetError, const char *, (void), ())
+KS_REAL(SDL_OpenAudio, int, (struct SDL_AudioSpec *desired, struct SDL_AudioSpec *obtained), (desired, obtained))
+KS_REAL(SDL_OpenAudioDevice, unsigned int, (const char *device, int iscapture, const struct SDL_AudioSpec *desired, struct SDL_AudioSpec *obtained, int allowed_changes), (device, iscapture, desired, obtained, allowed_changes))
+KS_REAL(SDL_QueueAudio, int, (unsigned int dev, const void *data, unsigned int len), (dev, data, len))
+KS_REAL(SDL_GetQueuedAudioSize, unsigned int, (unsigned int dev), (dev))
+KS_REAL_VOID(SDL_ClearQueuedAudio, (unsigned int dev), (dev))
+KS_REAL_VOID(SDL_CloseAudioDevice, (unsigned int dev), (dev))
+KS_REAL_VOID(SDL_CloseAudio, (void), ())
+/* Called with a message that has no conversions, so no varargs to forward. */
+KS_REAL(SDL_SetError, int, (const char *fmt, ...), (fmt))

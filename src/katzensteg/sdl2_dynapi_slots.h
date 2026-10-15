@@ -72,6 +72,14 @@
 #define KS_SDL2_SLOT_SDL_ShowCursor 221
 #define KS_SDL2_SLOT_SDL_FreeCursor 220
 #define KS_SDL2_SLOT_SDL_GetError 76
+#define KS_SDL2_SLOT_SDL_OpenAudio 41
+#define KS_SDL2_SLOT_SDL_OpenAudioDevice 44
+#define KS_SDL2_SLOT_SDL_QueueAudio 544
+#define KS_SDL2_SLOT_SDL_GetQueuedAudioSize 545
+#define KS_SDL2_SLOT_SDL_ClearQueuedAudio 546
+#define KS_SDL2_SLOT_SDL_CloseAudioDevice 60
+#define KS_SDL2_SLOT_SDL_CloseAudio 59
+#define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 86
 #elif defined(__linux__) /* linux */
 #define KS_SDL2_SLOT_SDL_Init 13
@@ -143,6 +151,14 @@
 #define KS_SDL2_SLOT_SDL_ShowCursor 217
 #define KS_SDL2_SLOT_SDL_FreeCursor 216
 #define KS_SDL2_SLOT_SDL_GetError 72
+#define KS_SDL2_SLOT_SDL_OpenAudio 37
+#define KS_SDL2_SLOT_SDL_OpenAudioDevice 40
+#define KS_SDL2_SLOT_SDL_QueueAudio 539
+#define KS_SDL2_SLOT_SDL_GetQueuedAudioSize 540
+#define KS_SDL2_SLOT_SDL_ClearQueuedAudio 541
+#define KS_SDL2_SLOT_SDL_CloseAudioDevice 56
+#define KS_SDL2_SLOT_SDL_CloseAudio 55
+#define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 82
 #elif defined(__APPLE__) /* macos */
 #define KS_SDL2_SLOT_SDL_Init 13
@@ -214,6 +230,14 @@
 #define KS_SDL2_SLOT_SDL_ShowCursor 217
 #define KS_SDL2_SLOT_SDL_FreeCursor 216
 #define KS_SDL2_SLOT_SDL_GetError 72
+#define KS_SDL2_SLOT_SDL_OpenAudio 37
+#define KS_SDL2_SLOT_SDL_OpenAudioDevice 40
+#define KS_SDL2_SLOT_SDL_QueueAudio 539
+#define KS_SDL2_SLOT_SDL_GetQueuedAudioSize 540
+#define KS_SDL2_SLOT_SDL_ClearQueuedAudio 541
+#define KS_SDL2_SLOT_SDL_CloseAudioDevice 56
+#define KS_SDL2_SLOT_SDL_CloseAudio 55
+#define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 82
 #else
 #error "no SDL2 dynamic API slot numbers for this platform"

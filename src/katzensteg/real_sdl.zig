@@ -195,3 +195,21 @@ pub const SDL_WaitEventTimeout = if (use_c_real) ks_real_SDL_WaitEventTimeout el
 
 extern fn ks_real_SDL_ClearError() void;
 pub const SDL_ClearError = if (use_c_real) ks_real_SDL_ClearError else sdl.SDL_ClearError;
+
+// Audio: the SDL2 audio adapter (sdl2_audio_adapter.zig) calls these.
+extern fn ks_real_SDL_OpenAudio(desired: ?*sdl.SDL_AudioSpec, obtained: ?*sdl.SDL_AudioSpec) c_int;
+extern fn ks_real_SDL_OpenAudioDevice(device: ?[*:0]const u8, iscapture: c_int, desired: ?*const sdl.SDL_AudioSpec, obtained: ?*sdl.SDL_AudioSpec, allowed_changes: c_int) sdl.SDL_AudioDeviceID;
+extern fn ks_real_SDL_QueueAudio(dev: sdl.SDL_AudioDeviceID, data: ?*const anyopaque, len: sdl.Uint32) c_int;
+extern fn ks_real_SDL_GetQueuedAudioSize(dev: sdl.SDL_AudioDeviceID) sdl.Uint32;
+extern fn ks_real_SDL_ClearQueuedAudio(dev: sdl.SDL_AudioDeviceID) void;
+extern fn ks_real_SDL_CloseAudioDevice(dev: sdl.SDL_AudioDeviceID) void;
+extern fn ks_real_SDL_CloseAudio() void;
+extern fn ks_real_SDL_SetError(fmt: [*:0]const u8, ...) c_int;
+pub const SDL_OpenAudio = if (use_c_real) ks_real_SDL_OpenAudio else sdl.SDL_OpenAudio;
+pub const SDL_OpenAudioDevice = if (use_c_real) ks_real_SDL_OpenAudioDevice else sdl.SDL_OpenAudioDevice;
+pub const SDL_QueueAudio = if (use_c_real) ks_real_SDL_QueueAudio else sdl.SDL_QueueAudio;
+pub const SDL_GetQueuedAudioSize = if (use_c_real) ks_real_SDL_GetQueuedAudioSize else sdl.SDL_GetQueuedAudioSize;
+pub const SDL_ClearQueuedAudio = if (use_c_real) ks_real_SDL_ClearQueuedAudio else sdl.SDL_ClearQueuedAudio;
+pub const SDL_CloseAudioDevice = if (use_c_real) ks_real_SDL_CloseAudioDevice else sdl.SDL_CloseAudioDevice;
+pub const SDL_CloseAudio = if (use_c_real) ks_real_SDL_CloseAudio else sdl.SDL_CloseAudio;
+pub const SDL_SetError = if (use_c_real) ks_real_SDL_SetError else sdl.SDL_SetError;

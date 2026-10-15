@@ -10,6 +10,7 @@ struct SDL_Point;
 struct SDL_RendererInfo;
 struct SDL_Color;
 union SDL_Event;
+struct SDL_AudioSpec;
 
 extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
@@ -68,6 +69,13 @@ extern struct SDL_Cursor *ks_SDL_CreateColorCursor(struct SDL_Surface *, int, in
 extern void ks_SDL_SetCursor(struct SDL_Cursor *);
 extern int ks_SDL_ShowCursor(int);
 extern void ks_SDL_FreeCursor(struct SDL_Cursor *);
+extern int ks_SDL_OpenAudio(struct SDL_AudioSpec *, struct SDL_AudioSpec *);
+extern unsigned int ks_SDL_OpenAudioDevice(const char *, int, const struct SDL_AudioSpec *, struct SDL_AudioSpec *, int);
+extern int ks_SDL_QueueAudio(unsigned int, const void *, unsigned int);
+extern unsigned int ks_SDL_GetQueuedAudioSize(unsigned int);
+extern void ks_SDL_ClearQueuedAudio(unsigned int);
+extern void ks_SDL_CloseAudioDevice(unsigned int);
+extern void ks_SDL_CloseAudio(void);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -139,6 +147,13 @@ struct SDL_Cursor *SDL_CreateColorCursor(struct SDL_Surface *surface, int hot_x,
 void SDL_SetCursor(struct SDL_Cursor *cursor) { ks_SDL_SetCursor(cursor); }
 int SDL_ShowCursor(int toggle) { return ks_SDL_ShowCursor(toggle); }
 void SDL_FreeCursor(struct SDL_Cursor *cursor) { ks_SDL_FreeCursor(cursor); }
+int SDL_OpenAudio(struct SDL_AudioSpec *desired, struct SDL_AudioSpec *obtained) { return ks_SDL_OpenAudio(desired, obtained); }
+unsigned int SDL_OpenAudioDevice(const char *device, int iscapture, const struct SDL_AudioSpec *desired, struct SDL_AudioSpec *obtained, int allowed_changes) { return ks_SDL_OpenAudioDevice(device, iscapture, desired, obtained, allowed_changes); }
+int SDL_QueueAudio(unsigned int dev, const void *data, unsigned int len) { return ks_SDL_QueueAudio(dev, data, len); }
+unsigned int SDL_GetQueuedAudioSize(unsigned int dev) { return ks_SDL_GetQueuedAudioSize(dev); }
+void SDL_ClearQueuedAudio(unsigned int dev) { ks_SDL_ClearQueuedAudio(dev); }
+void SDL_CloseAudioDevice(unsigned int dev) { ks_SDL_CloseAudioDevice(dev); }
+void SDL_CloseAudio(void) { ks_SDL_CloseAudio(); }
 void *dlopen(const char *path, int mode) { return ks_dlopen(path, mode); }
 
 #endif

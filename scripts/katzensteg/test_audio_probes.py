@@ -5,8 +5,9 @@ Each `probe.audio.*` profile in profiles/probes.json runs one SDL audio model
 (examples/probes/*/audio_probe.c) through the launcher with its SDL adapter
 injected. SDL's `disk` driver writes the device output to a file, and the
 analysis in audio_tone_analysis.py checks it is the probe's 440 Hz tone.
-Katzensteg does not intercept audio yet; this is the seam later audio work
-checks its taps and sinks against.
+With the SDL2 adapter's default volume the device plays the app's samples
+unchanged, so these checks hold with audio interception on;
+test_sdl2_audio_model.py checks the interception itself.
 
 Needs `zig build` first.
 """

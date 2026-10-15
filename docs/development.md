@@ -139,9 +139,26 @@ SDL_DISKAUDIOFILE=/tmp/tone.raw SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/tone.raw \
 python3 scripts/katzensteg/audio_tone_analysis.py /tmp/tone.raw
 ```
 
-Katzensteg does not intercept audio yet, so these runs check that the tone
-survives launching with the SDL adapter injected; later audio work checks its
-taps and sinks against the same probes.
+The SDL2 profiles now run through Katzensteg's audio model (see "Audio" in
+`docs/architecture.md`); at the default volume the device plays the app's
+samples unchanged, so these checks hold with interception on. The SDL3
+profiles are not intercepted yet.
+
+`test_sdl2_audio_model.py` checks the SDL2 pipeline itself on the same
+probes. It sets `KATZENSTEG_AUDIO_TAP_FILE` so the preload records the audio
+tap (`<base>.<sequence>.raw` and `.times`, written when each stream closes)
+and checks that the tap is the tone and appears byte for byte in the disk
+output at unity gain, that `KATZENSTEG_AUDIO_VOLUME=0` silences the disk file
+but not the tap, that the tap's block times follow the device period, and
+that a close and reopen produces a second tapped stream. It repeats the
+gain-0 and reopen checks through `SDL_DYNAMIC_API`. To run it on sdl2-compat
+as well, point `KS_SDL2_COMPAT_LIBRARY_PATH` at sdl2-compat and its SDL3, for
+example the research build from `docs/research/sdl-audio-probes.md`:
+
+```sh
+KS_SDL2_COMPAT_LIBRARY_PATH=$WORK/prefix/compat/lib:$WORK/prefix/sdl3/lib \
+  python3 scripts/katzensteg/test_sdl2_audio_model.py
+```
 
 ## Windows
 
