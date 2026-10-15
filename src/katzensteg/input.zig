@@ -7,6 +7,7 @@ const terminal_keys = @import("terminal_keys.zig");
 
 const command_binding = @import("command_key.zig");
 const command_menu = @import("command_menu.zig");
+const audio_model = @import("audio_model.zig");
 pub const RoutingMode = enum { app, command };
 
 pub const NativeKey = native_key.Key;
@@ -204,6 +205,8 @@ pub const InputModel = struct {
     source_focus_owned: bool = false,
     command_hint: bool = false,
     command_pointer_action: ?command_menu.Action = null,
+    /// The audio model command mode controls, installed with the command key.
+    audio: ?*audio_model.Model = null,
     consumed_terminal_buttons: u32 = 0,
     paste_active: bool = false,
     paste_drop: bool = false,
@@ -938,6 +941,9 @@ pub const InputModel = struct {
                 if (armed and action != null and action == hit) switch (action.?) {
                     .quit => try self.requestQuit(),
                     .cancel => try self.leaveCommandMode(),
+                    .mute => self.controlAudio(.toggle_mute),
+                    .volume_up => self.controlAudio(.volume_up),
+                    .volume_down => self.controlAudio(.volume_down),
                 };
             }
         }
@@ -1173,13 +1179,32 @@ pub const InputModel = struct {
             },
             .cancel => try self.leaveCommandMode(),
             .quit => try self.requestQuit(),
+            .mute => self.controlAudio(.toggle_mute),
+            .volume_up => self.controlAudio(.volume_up),
+            .volume_down => self.controlAudio(.volume_down),
             else => self.command_hint = true,
         }
         return true;
     }
 
+    /// Audio keys act only while the app has audio open; command mode stays armed.
+    fn controlAudio(self: *InputModel, command: audio_model.Model.Control) void {
+        const audio = self.playingAudio() orelse {
+            self.command_hint = true;
+            return;
+        };
+        audio.control(command);
+        self.command_hint = false;
+    }
+
+    fn playingAudio(self: *const InputModel) ?*audio_model.Model {
+        const audio = self.audio orelse return null;
+        return if (audio.playing()) audio else null;
+    }
+
     pub fn commandMenuSnapshot(self: *const InputModel, cols: u16, rows: u16) command_menu.Snapshot {
-        return .{ .active = self.routing_mode == .command, .hint = self.command_hint, .quitting = self.quit_requested, .binding = self.command_key orelse ']', .cols = cols, .rows = rows };
+        const audio: ?command_menu.Audio = if (self.playingAudio()) |model| .{ .percent = model.volumePercent(), .muted = model.muted.load(.acquire) } else null;
+        return .{ .active = self.routing_mode == .command, .hint = self.command_hint, .quitting = self.quit_requested, .binding = self.command_key orelse ']', .audio = audio, .cols = cols, .rows = rows };
     }
 
     pub fn applicationFocused(self: *const InputModel) bool {
@@ -2541,4 +2566,37 @@ test "command pixel clicks respect both axes at zero and one based cell boundari
         try std.testing.expect(model.pop().?.focus);
         try std.testing.expect(model.pop() == null);
     }
+}
+
+test "command mode audio keys and clicks drive the model and stay armed" {
+    var model = InputModel.init(std.testing.allocator);
+    defer model.deinit();
+    model.command_key = ']';
+    var audio: audio_model.Model = .{ .clock = .monotonic, .local = @import("audio_local_device_sink.zig").sink };
+    model.audio = &audio;
+    audio.setGain(0.5);
+    // No audio open: the keys are unknown and the row has no audio entries.
+    try model.feed("\x1dm");
+    try std.testing.expect(model.command_hint and !audio.muted.load(.acquire));
+    try std.testing.expect(model.commandMenuSnapshot(80, 24).audio == null);
+    try model.feed("\x1b");
+    try model.flushStandaloneEscape();
+    try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
+
+    _ = audio.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).?;
+    // Entering command mode leaves the sound alone.
+    try model.feed("\x1d");
+    try std.testing.expectEqual(@as(f32, 0.5), audio.gain());
+    try std.testing.expect(!audio.muted.load(.acquire));
+    try model.feed("m++-+");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try std.testing.expect(audio.muted.load(.acquire) and !model.command_hint);
+    try std.testing.expectEqual(command_menu.Audio{ .percent = 70, .muted = true }, model.commandMenuSnapshot(80, 24).audio.?);
+    // Clicks: Unmute (columns 24 to 31), then `-`, back at 35 under `m Mute`.
+    try model.feed("\x1b[<0;24;24M\x1b[<0;24;24m\x1b[<0;35;24M\x1b[<0;35;24m");
+    try std.testing.expectEqual(RoutingMode.command, model.routing_mode);
+    try std.testing.expectEqual(command_menu.Audio{ .percent = 60, .muted = false }, model.commandMenuSnapshot(80, 24).audio.?);
+    try model.feed("\x1b");
+    try model.flushStandaloneEscape();
+    try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
 }
