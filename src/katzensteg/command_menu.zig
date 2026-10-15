@@ -63,7 +63,7 @@ pub const Snapshot = struct {
         // 24, then the `+` and `-` glyphs.
         const audio = self.audio orelse return null;
         const mute_end: i32 = @intCast(23 + audio.muteLabel().len);
-        if (col >= 24 and col <= mute_end) return .mute;
+        if (self.cols >= mute_end and col >= 24 and col <= mute_end) return .mute;
         if (col == mute_end + 4) return .volume_up;
         if (col == mute_end + 6) return .volume_down;
         return null;
@@ -121,6 +121,9 @@ test "the audio entries follow Return and their glyphs are click targets" {
     try std.testing.expectEqual(Action.volume_down, menu.hit(37, 24).?);
     menu.cols = 36;
     try std.testing.expect(menu.hit(37, 24) == null);
+    // A mute label clipped by a narrow terminal is not a target.
+    menu.cols = 28;
+    try std.testing.expect(menu.hit(25, 24) == null);
 }
 
 test "direct content stays below text backgrounds in its original order" {

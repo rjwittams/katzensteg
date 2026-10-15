@@ -129,6 +129,7 @@ pub const Model = struct {
         switch (command) {
             .toggle_mute => self.muted.store(!self.muted.load(.acquire), .release),
             .volume_up, .volume_down => {
+                // Snap to the nearest 10% step, then step: 0.34 goes up to 0.4.
                 const step = @round(self.gain() * 10) + @as(f32, if (command == .volume_up) 1 else -1);
                 self.setGain(std.math.clamp(step, 0, 10) / 10);
             },

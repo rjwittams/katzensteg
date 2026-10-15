@@ -50,6 +50,8 @@ pub fn model() *audio_model.Model {
 
 /// The model without composing it, for the control path: a control acts only
 /// while a stream is open, and the first open composes the model.
+/// Skipping `compose_mutex` is safe because the `playing()` guard means
+/// composition has already finished before any control fires.
 pub fn controls() *audio_model.Model {
     return &model_storage;
 }
