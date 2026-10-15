@@ -59,9 +59,7 @@ fn postmix(userdata: ?*anyopaque, spec: ?*const sdl.SDL_AudioSpec, buffer: ?[*]f
     if (buflen > 0) device.model.processBlock(device.stream.id, @as([*]u8, @ptrCast(samples))[0..@intCast(buflen)], false);
 }
 
-fn find(id: sdl.SDL_AudioDeviceID) ?*Device {
-    devices_mutex.lock();
-    defer devices_mutex.unlock();
+fn findLocked(id: sdl.SDL_AudioDeviceID) ?*Device {
     for (&devices) |*device| if (id != 0 and device.id == id) return device;
     return null;
 }
@@ -71,6 +69,10 @@ fn find(id: sdl.SDL_AudioDeviceID) ?*Device {
 fn attach(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream) void {
     var spec: sdl.SDL_AudioSpec = undefined;
     if (!real_sdl.SDL_IsAudioDevicePlayback(id) or !real_sdl.SDL_GetAudioDeviceFormat(id, &spec, null)) return;
+    // SDL3 mixes at most 8 channels.
+    if (spec.channels < 1 or spec.channels > 8 or spec.freq <= 0) {
+        return log.warn("id={d} channels={d} freq={d}: unexpected device format; playing it unmodified", .{ id, spec.channels, spec.freq });
+    }
     const device = reserve(id, device_stream, &spec) orelse return;
     if (!real_sdl.SDL_SetAudioPostmixCallback(id, postmix, device)) {
         log.warn("id={d}: SDL_SetAudioPostmixCallback failed: {s}; playing it unmodified", .{ id, std.mem.span(real_sdl.SDL_GetError()) });
@@ -88,7 +90,7 @@ fn reserve(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream, spec
         if (device.id != 0) continue;
         const model = audio_process.model();
         // The postmix buffer is always F32 at the device's channels and rate.
-        const stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 4 * @as(u32, @intCast(@max(spec.channels, 0))), .rate = @intCast(@max(spec.freq, 0)) }) orelse break;
+        const stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 4 * @as(u32, @intCast(spec.channels)), .rate = @intCast(spec.freq) }) orelse break;
         device.* = .{ .id = id, .device_stream = device_stream, .model = model, .stream = stream };
         return device;
     }
@@ -139,8 +141,13 @@ pub export fn ks_SDL_OpenAudioDeviceStream(devid: sdl.SDL_AudioDeviceID, spec: ?
 pub export fn ks_SDL_SetAudioPostmixCallback(devid: sdl.SDL_AudioDeviceID, callback: sdl.SDL_AudioPostmixCallback, userdata: ?*anyopaque) callconv(.c) sdl.SDL_bool {
     postmix_mutex.lock();
     defer postmix_mutex.unlock();
-    const device = find(devid) orelse return real_sdl.SDL_SetAudioPostmixCallback(devid, callback, userdata);
-    device.setApp(.{ .callback = callback, .userdata = userdata });
+    const device = hooked: {
+        devices_mutex.lock();
+        defer devices_mutex.unlock();
+        const device = findLocked(devid) orelse break :hooked null;
+        device.setApp(.{ .callback = callback, .userdata = userdata });
+        break :hooked device;
+    } orelse return real_sdl.SDL_SetAudioPostmixCallback(devid, callback, userdata);
     // Reinstalling takes SDL's device lock, so once it returns no postmix
     // still reads the previous slot and the next set may overwrite it.
     return real_sdl.SDL_SetAudioPostmixCallback(devid, postmix, device);
