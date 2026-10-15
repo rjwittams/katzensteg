@@ -7,6 +7,7 @@ const sdl_adapter = @import("sdl2_adapter.zig");
 const real_gl = @import("real_gl.zig");
 const real_sdl = @import("real_sdl.zig");
 const sdl_input = @import("sdl2_input_adapter.zig");
+const sdl_audio = @import("sdl2_audio_adapter.zig");
 const log_mod = @import("log.zig");
 const runtime = @import("runtime.zig");
 const sink = @import("intercept_sink.zig");
@@ -18,6 +19,8 @@ const core_exports = @import("core_exports.zig");
 
 comptime {
     _ = core_exports;
+    // The SDL2 audio adapter exports its own ks_SDL_* audio wrappers.
+    _ = sdl_audio;
     // SDL_DYNAMIC_API builds export SDL_DYNAPI_entry (dynapi_sdl2.c), which
     // installs wrappers through dynapi.zig.
     if (@import("katzensteg_build_options").dynapi) _ = @import("dynapi.zig");
@@ -438,12 +441,14 @@ pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
     traceSdlLifecycle("SDL_QuitSubSystem flags=0x{x} video={}", .{ flags, (flags & sdl.SDL_INIT_VIDEO) != 0 });
     if ((flags & sdl.SDL_INIT_VIDEO) != 0) runtime.shutdownGlobal();
     real_sdl.SDL_QuitSubSystem(flags);
+    if ((flags & sdl.SDL_INIT_AUDIO) != 0) sdl_audio.noteAudioQuit();
 }
 
 pub export fn ks_SDL_Quit() callconv(.c) void {
     traceSdlLifecycle("SDL_Quit called; shutting down Katzensteg runtime", .{});
     runtime.shutdownGlobal();
     real_sdl.SDL_Quit();
+    sdl_audio.noteAudioQuit();
 }
 
 pub export fn ks_SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: sdl.Uint32) callconv(.c) ?*sdl.SDL_Window {

@@ -26,6 +26,11 @@ The audio sink that stands in for a real device when nothing plays locally,
 draining the app's audio on Katzensteg's own clock.
 _Avoid_: dummy driver, which is SDL's own and paces inexactly
 
+**Audio tap**:
+The point in the audio model where every block is handed, unscaled and before
+the local device sink applies gain, to the sinks that attach there.
+_Avoid_: capture, which SDL uses for recording devices
+
 **Published track**:
 The audio sink that writes the app's unscaled playback into a Jackstay playback
 track. See Jackstay's glossary for the track itself.

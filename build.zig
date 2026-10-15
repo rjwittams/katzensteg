@@ -1024,6 +1024,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .link_sdl2 = true,
     });
+    addUnitTest(b, test_step, "katzensteg-audio-test", "src/katzensteg/audio_tests.zig", target, optimize, use_llvm, test_library_dir, .{ .link_libc = true });
     addUnitTest(b, test_step, "katzensteg-sdl3-input-adapter-test", "src/katzensteg/sdl3_input_adapter.zig", target, optimize, use_llvm, test_library_dir, .{
         .termscene = termscene_mod,
         .katzensteg_sdl = katzensteg_sdl3_mod,
