@@ -94,8 +94,7 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   logical device, which hands the F32 mix of its streams to the model. An app's
   own `SDL_SetAudioPostmixCallback` on such a device is recorded and runs
   first, inside Katzensteg's. `SDL_CloseAudioDevice`, `SDL_DestroyAudioStream`
-  (of a device stream) and the quit wrappers close the model stream. The
-  virtual paced device is SDL2-only so far.
+  (of a device stream) and the quit wrappers close the model stream.
 - **Model.** `audio_model.zig` owns one stream per open playback device (a
   reopen is a new stream with the next sequence number), the gain, the mute
   and the routing (two booleans: local device and tap). It has no SDL or
@@ -111,7 +110,8 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   (`audio_tap_file_sink.zig`) uses it.
 - **Pacing.** Exactly one pacer, fixed when the model is composed. By default
   the app's real device paces it. With `KATZENSTEG_AUDIO_DEVICE=virtual`
-  (the launcher sets it, with `SDL_AUDIODRIVER=dummy`, for a Jackstay target)
+  (the launcher sets it, with SDL2's `SDL_AUDIODRIVER=dummy` and SDL3's
+  `SDL_AUDIO_DRIVER=dummy`, for a Jackstay target)
   nothing plays locally: the SDL2 adapter grants the desired spec under its
   own device ID, never opens a real playback device, and serves pause,
   status, lock and close for it. The virtual paced device
@@ -120,7 +120,12 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   t0 + frames × 10⁹ / rate on the model's clock, under a recursive device
   lock that `SDL_LockAudioDevice` takes. Blocks up to 2 periods late run back
   to back; later than that the deadlines rebase with a discontinuity, as they
-  do on unpause and reopen.
+  do on unpause and reopen. The SDL3 adapter keeps SDL's logical device
+  paused, so it plays silence, and its virtual device pulls the device's
+  streams (real SDL objects, tracked through the bind, unbind and destroy
+  wrappers) with `SDL_GetAudioStreamData`, mixes them in F32 and runs the
+  postmix; it serves pause, resume and paused for the device and its
+  device stream.
 - **Audio thread.** Callbacks never allocate, block, log or take a Katzensteg
   lock. Device records, queues and tap buffers are allocated on the app thread
   at open; the adapter's device table lock is taken only by app threads.

@@ -91,6 +91,16 @@ extern struct SDL_AudioStream *ks_SDL_OpenAudioDeviceStream(unsigned int, const 
 extern _Bool ks_SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
 extern void ks_SDL_CloseAudioDevice(unsigned int);
 extern void ks_SDL_DestroyAudioStream(struct SDL_AudioStream *);
+extern _Bool ks_SDL_PauseAudioDevice(unsigned int);
+extern _Bool ks_SDL_ResumeAudioDevice(unsigned int);
+extern _Bool ks_SDL_AudioDevicePaused(unsigned int);
+extern _Bool ks_SDL_PauseAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool ks_SDL_ResumeAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool ks_SDL_AudioStreamDevicePaused(struct SDL_AudioStream *);
+extern _Bool ks_SDL_BindAudioStream(unsigned int, struct SDL_AudioStream *);
+extern _Bool ks_SDL_BindAudioStreams(unsigned int, struct SDL_AudioStream *const *, int);
+extern void ks_SDL_UnbindAudioStream(struct SDL_AudioStream *);
+extern void ks_SDL_UnbindAudioStreams(struct SDL_AudioStream *const *, int);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -180,6 +190,16 @@ struct SDL_AudioStream *SDL_OpenAudioDeviceStream(unsigned int devid, const stru
 _Bool SDL_SetAudioPostmixCallback(unsigned int devid, void *callback, void *userdata) { return ks_SDL_SetAudioPostmixCallback(devid, callback, userdata); }
 void SDL_CloseAudioDevice(unsigned int devid) { ks_SDL_CloseAudioDevice(devid); }
 void SDL_DestroyAudioStream(struct SDL_AudioStream *stream) { ks_SDL_DestroyAudioStream(stream); }
+_Bool SDL_PauseAudioDevice(unsigned int devid) { return ks_SDL_PauseAudioDevice(devid); }
+_Bool SDL_ResumeAudioDevice(unsigned int devid) { return ks_SDL_ResumeAudioDevice(devid); }
+_Bool SDL_AudioDevicePaused(unsigned int devid) { return ks_SDL_AudioDevicePaused(devid); }
+_Bool SDL_PauseAudioStreamDevice(struct SDL_AudioStream *stream) { return ks_SDL_PauseAudioStreamDevice(stream); }
+_Bool SDL_ResumeAudioStreamDevice(struct SDL_AudioStream *stream) { return ks_SDL_ResumeAudioStreamDevice(stream); }
+_Bool SDL_AudioStreamDevicePaused(struct SDL_AudioStream *stream) { return ks_SDL_AudioStreamDevicePaused(stream); }
+_Bool SDL_BindAudioStream(unsigned int devid, struct SDL_AudioStream *stream) { return ks_SDL_BindAudioStream(devid, stream); }
+_Bool SDL_BindAudioStreams(unsigned int devid, struct SDL_AudioStream *const *streams, int num_streams) { return ks_SDL_BindAudioStreams(devid, streams, num_streams); }
+void SDL_UnbindAudioStream(struct SDL_AudioStream *stream) { ks_SDL_UnbindAudioStream(stream); }
+void SDL_UnbindAudioStreams(struct SDL_AudioStream *const *streams, int num_streams) { ks_SDL_UnbindAudioStreams(streams, num_streams); }
 void *dlopen(const char *path, int mode) { return ks_dlopen(path, mode); }
 
 #endif

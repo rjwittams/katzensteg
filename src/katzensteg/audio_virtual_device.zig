@@ -132,10 +132,11 @@ pub const VirtualDevice = struct {
 
 const testing = std.testing;
 
-const FakeClock = struct {
+/// Shared with the adapters' tests, which drive their render through `step`.
+pub const FakeClock = struct {
     now_ns: u64 = 5_000,
 
-    fn clock(self: *FakeClock) audio_model.Clock {
+    pub fn clock(self: *FakeClock) audio_model.Clock {
         return .{ .context = self, .now_fn = now, .sleep_until_fn = sleepUntil };
     }
 
