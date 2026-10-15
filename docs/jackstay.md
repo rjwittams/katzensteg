@@ -77,8 +77,20 @@ selection and authorization preface is not implemented here. The existing
 
 `src/jackstay/` owns the C handles, setup endpoints and frame leases. The publisher
 runs in the app process, after source composition and before terminal layout or
-Kitty encoding. It publishes source dimensions and Unix-time nanoseconds. Native
-app input stays enabled. Audio is not transported by these connectors.
+Kitty encoding. It publishes source dimensions and a source presentation time in
+the `HostTime` clock domain (flotilla-org/jackstay#99): the platform monotonic
+clock in nanoseconds (`CLOCK_MONOTONIC` on Linux, `mach_absolute_time` on macOS,
+`QueryPerformanceCounter` on Windows), read by `platform.time.hostTimeNs`. The
+time is taken on entry to the app's present hook, before capture or composition:
+`SDL_RenderPresent` and `SDL_GL_SwapWindow` in the SDL2 and SDL3 adapters,
+`vkQueuePresentKHR` in the Vulkan layer and `presentDrawable:` in the Metal layer.
+Queued replay carries the stamp in the present command, so worker delay does not
+move it. GL PBO capture publishes a frame one swap late and keeps the stamp of
+the swap that drew it. Capture layers read the clock through the core export
+`ks_katzensteg_host_time_ns` and pass it to
+`ks_katzensteg_present_external_framebuffer_at`. The older
+`ks_katzensteg_present_external_framebuffer` entry point stamps a frame when it
+is called. Native app input stays enabled. Audio is not transported by these connectors.
 The consumer acquires on a worker, copies into a bounded latest-frame mailbox,
 then releases the lease before presentation. Bootstrap runs on a setup worker:
 its absolute timeout is five seconds, with up to five more seconds for input

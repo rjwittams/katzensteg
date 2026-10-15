@@ -35,6 +35,9 @@ pub const PboState = struct {
     len: usize = 0,
     index: usize = 0,
     primed: bool = false,
+    // Host time of the swap whose pixels each buffer holds. Readback lags a
+    // swap, so the mapped frame keeps the stamp of the swap that drew it.
+    present_host_ns: [2]u64 = .{ 0, 0 },
 
     pub fn reset(self: *PboState) void {
         self.* = .{};

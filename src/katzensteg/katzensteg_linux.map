@@ -4,6 +4,8 @@ KATZENSTEG_1.0 {
         dlopen;
         ks_katzensteg_log_c;
         ks_katzensteg_present_external_framebuffer;
+        ks_katzensteg_present_external_framebuffer_at;
+        ks_katzensteg_host_time_ns;
         ks_katzensteg_present_external_rgba;
     local:
         *;

@@ -38,7 +38,10 @@
 #define PATH_MAX 4096
 #endif
 
-typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len);
+/* present_host_ns is the core's host time (ks_katzensteg_host_time_ns) read
+   on entry to vkQueuePresentKHR, before readback; 0 means unknown. */
+typedef void (*ks_present_external_framebuffer_fn)(int32_t width, int32_t height, int32_t format, const uint8_t *pixels, size_t len, uint64_t present_host_ns);
+typedef uint64_t (*ks_host_time_fn)(void);
 typedef void (*ks_log_c_fn)(const char *scope, const char *message);
 
 enum {
@@ -144,6 +147,7 @@ static SwapchainRecord g_swapchains[KS_MAX_SWAPCHAINS];
 static void *g_core_handle;
 static bool g_core_lookup_attempted;
 static ks_present_external_framebuffer_fn g_present_external_framebuffer;
+static ks_host_time_fn g_host_time;
 static ks_log_c_fn g_log_c;
 static bool g_capture_enabled;
 static bool g_trace_enabled;
@@ -237,21 +241,46 @@ static void *open_core_library(void)
     return handle;
 }
 
-static ks_present_external_framebuffer_fn present_fn(void)
+#define KS_PRESENT_SYMBOL "ks_katzensteg_present_external_framebuffer_at"
+#define KS_HOST_TIME_SYMBOL "ks_katzensteg_host_time_ns"
+
+/* Resolves the present callback and the host-time clock from one core
+   module, so the stamp and the frame always share a clock. */
+static void resolve_core(void)
 {
-    if (g_present_external_framebuffer) return g_present_external_framebuffer;
-    if (g_core_lookup_attempted) return NULL;
+    if (g_present_external_framebuffer || g_core_lookup_attempted) return;
     g_core_lookup_attempted = true;
 
-    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol("ks_katzensteg_present_external_framebuffer");
-    if (g_present_external_framebuffer) return g_present_external_framebuffer;
+    g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol(KS_PRESENT_SYMBOL);
+    if (g_present_external_framebuffer) {
+        g_host_time = (ks_host_time_fn)ks_layer_os_global_symbol(KS_HOST_TIME_SYMBOL);
+        return;
+    }
 
     g_core_handle = open_core_library();
-    if (g_core_handle)
-        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_symbol(g_core_handle, "ks_katzensteg_present_external_framebuffer");
-    if (!g_present_external_framebuffer)
-        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol("ks_katzensteg_present_external_framebuffer");
+    if (g_core_handle) {
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_symbol(g_core_handle, KS_PRESENT_SYMBOL);
+        g_host_time = (ks_host_time_fn)ks_layer_os_symbol(g_core_handle, KS_HOST_TIME_SYMBOL);
+    }
+    if (!g_present_external_framebuffer) {
+        g_present_external_framebuffer = (ks_present_external_framebuffer_fn)ks_layer_os_global_symbol(KS_PRESENT_SYMBOL);
+        g_host_time = (ks_host_time_fn)ks_layer_os_global_symbol(KS_HOST_TIME_SYMBOL);
+    }
+}
+
+static ks_present_external_framebuffer_fn present_fn(void)
+{
+    resolve_core();
     return g_present_external_framebuffer;
+}
+
+/* Host time on entry to the present hook: the frame's source presentation
+   time. 0 when capture is off or the core is missing. */
+static uint64_t present_host_time(void)
+{
+    if (!capture_enabled()) return 0;
+    resolve_core();
+    return g_host_time ? g_host_time() : 0;
 }
 
 static VkLayerInstanceCreateInfo *instance_link_info(const VkInstanceCreateInfo *create_info)
@@ -590,7 +619,7 @@ int ks_vulkan_test_trace_enabled(void) { return trace_enabled(); }
 int ks_vulkan_test_external_format_for_vk(int format) { return external_format_for_vk((VkFormat)format); }
 #endif
 
-static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, SwapchainRecord *swapchain, uint32_t image_index, const VkPresentInfoKHR *present_info)
+static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, SwapchainRecord *swapchain, uint32_t image_index, const VkPresentInfoKHR *present_info, uint64_t present_host_ns)
 {
     if (!capture_enabled()) return false;
     if (!swapchain) return false;
@@ -728,7 +757,7 @@ static bool capture_swapchain_image(DeviceRecord *dev, QueueRecord *queue, Swapc
         dev->UnmapMemory(dev->device, res->memory);
         return false;
     }
-    present_fn()((int32_t)swapchain->extent.width, (int32_t)swapchain->extent.height, external_format, (const uint8_t *)mapped, (size_t)res->byte_len);
+    present_fn()((int32_t)swapchain->extent.width, (int32_t)swapchain->extent.height, external_format, (const uint8_t *)mapped, (size_t)res->byte_len, present_host_ns);
     dev->UnmapMemory(dev->device, res->memory);
 
     if (!swapchain->logged_capture_success) {
@@ -948,6 +977,7 @@ static VkResult VKAPI_CALL ks_vkGetSwapchainImagesKHR(VkDevice device, VkSwapcha
 
 static VkResult VKAPI_CALL ks_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *present_info)
 {
+    const uint64_t present_host_ns = present_host_time();
     PFN_vkQueuePresentKHR real = NULL;
     DeviceRecord *dev = NULL;
     QueueRecord *queue_rec = NULL;
@@ -977,7 +1007,7 @@ static VkResult VKAPI_CALL ks_vkQueuePresentKHR(VkQueue queue, const VkPresentIn
 
     bool consumed_waits = false;
     if (dev && queue_rec && swapchain) {
-        consumed_waits = capture_swapchain_image(dev, queue_rec, swapchain, image_index, present_info);
+        consumed_waits = capture_swapchain_image(dev, queue_rec, swapchain, image_index, present_info, present_host_ns);
     } else {
         if (!queue_rec && !g_logged_present_missing_queue) {
             tracef("present queue not remembered; queue=%p", (void *)queue);

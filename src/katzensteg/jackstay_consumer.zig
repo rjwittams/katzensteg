@@ -148,7 +148,9 @@ pub fn main(init: std.process.Init) !void {
                 // Source pixels define the view mapping; input geometry remains
                 // the target's independent logical extent in the controller.
                 rt.noteInputWindowSize(@intCast(frame.width), @intCast(frame.height));
-                rt.presentExternalFramebuffer(@intCast(frame.width), @intCast(frame.height), if (frame.format == .rgba8) .rgba8 else .bgra8, displayed.items);
+                // The consumer only displays; it never republishes, so the
+                // stamp is just this local present.
+                rt.presentExternalFramebuffer(@intCast(frame.width), @intCast(frame.height), if (frame.format == .rgba8) .rgba8 else .bgra8, displayed.items, os.time.hostTimeNs());
             }
         }
         if (shared.done.load(.acquire)) break;

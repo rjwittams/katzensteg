@@ -6,6 +6,8 @@ KATZENSTEG_CORE_1.0 {
         ks_katzensteg_log_retain;
         ks_katzensteg_log_release;
         ks_katzensteg_present_external_framebuffer;
+        ks_katzensteg_present_external_framebuffer_at;
+        ks_katzensteg_host_time_ns;
         ks_katzensteg_present_external_rgba;
     local:
         *;

@@ -162,3 +162,15 @@ test "runOnLargeStack runs on a helper thread only on Windows and waits for it" 
         try std.testing.expectEqual(std.Thread.getCurrentId(), ran_on);
     }
 }
+
+test "host time is a nonzero clock that never runs backwards" {
+    var previous = platform.time.hostTimeNs();
+    try std.testing.expect(previous > 0);
+    for (0..1000) |_| {
+        const now = platform.time.hostTimeNs();
+        try std.testing.expect(now >= previous);
+        previous = now;
+    }
+    platform.time.sleep(2 * std.time.ns_per_ms);
+    try std.testing.expect(platform.time.hostTimeNs() > previous);
+}
