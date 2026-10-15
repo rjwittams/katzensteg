@@ -283,6 +283,14 @@ pub const SDL_AudioSpec = extern struct {
 const native_little = @import("builtin").cpu.arch.endian() == .little;
 pub const AUDIO_S16SYS: SDL_AudioFormat = if (native_little) 0x8010 else 0x9010;
 pub const AUDIO_F32SYS: SDL_AudioFormat = if (native_little) 0x8120 else 0x9120;
+pub const AUDIO_U8: SDL_AudioFormat = 0x0008;
+pub const AUDIO_U16LSB: SDL_AudioFormat = 0x0010;
+pub const AUDIO_U16MSB: SDL_AudioFormat = 0x1010;
+pub const AUDIO_S16LSB: SDL_AudioFormat = 0x8010;
+
+pub const SDL_AudioStatus = c_int;
+pub const SDL_AUDIO_PLAYING: SDL_AudioStatus = 1;
+pub const SDL_AUDIO_PAUSED: SDL_AudioStatus = 2;
 
 pub extern fn SDL_OpenAudio(desired: ?*SDL_AudioSpec, obtained: ?*SDL_AudioSpec) c_int;
 pub extern fn SDL_OpenAudioDevice(device: ?[*:0]const u8, iscapture: c_int, desired: ?*const SDL_AudioSpec, obtained: ?*SDL_AudioSpec, allowed_changes: c_int) SDL_AudioDeviceID;
@@ -291,6 +299,14 @@ pub extern fn SDL_GetQueuedAudioSize(dev: SDL_AudioDeviceID) Uint32;
 pub extern fn SDL_ClearQueuedAudio(dev: SDL_AudioDeviceID) void;
 pub extern fn SDL_CloseAudioDevice(dev: SDL_AudioDeviceID) void;
 pub extern fn SDL_CloseAudio() void;
+pub extern fn SDL_PauseAudioDevice(dev: SDL_AudioDeviceID, pause_on: c_int) void;
+pub extern fn SDL_PauseAudio(pause_on: c_int) void;
+pub extern fn SDL_GetAudioDeviceStatus(dev: SDL_AudioDeviceID) SDL_AudioStatus;
+pub extern fn SDL_GetAudioStatus() SDL_AudioStatus;
+pub extern fn SDL_LockAudioDevice(dev: SDL_AudioDeviceID) void;
+pub extern fn SDL_UnlockAudioDevice(dev: SDL_AudioDeviceID) void;
+pub extern fn SDL_LockAudio() void;
+pub extern fn SDL_UnlockAudio() void;
 pub extern fn SDL_SetError(fmt: [*:0]const u8, ...) c_int;
 
 pub fn sdlError() []const u8 {

@@ -40,18 +40,41 @@ pub const Block = struct {
     bytes: []const u8,
     /// Injected clock at the start of the block.
     time_ns: u64,
+    /// The pacing clock restarted or rebased before this block: it does not
+    /// follow the previous block in time.
+    discontinuity: bool = false,
 };
 
 pub const Clock = struct {
     context: ?*anyopaque = null,
     now_fn: *const fn (?*anyopaque) u64,
+    /// Returns at or after the absolute time `deadline_ns`.
+    sleep_until_fn: *const fn (?*anyopaque, deadline_ns: u64) void = hostSleepUntil,
 
     pub const monotonic: Clock = .{ .now_fn = hostNow };
+
+    pub fn now(self: Clock) u64 {
+        return self.now_fn(self.context);
+    }
+
+    pub fn sleepUntil(self: Clock, deadline_ns: u64) void {
+        self.sleep_until_fn(self.context, deadline_ns);
+    }
 
     fn hostNow(_: ?*anyopaque) u64 {
         return system_io.time.hostTimeNs();
     }
+
+    fn hostSleepUntil(_: ?*anyopaque, deadline_ns: u64) void {
+        const now_ns = system_io.time.hostTimeNs();
+        if (deadline_ns > now_ns) system_io.time.sleep(deadline_ns - now_ns);
+    }
 };
+
+/// What paces the app's audio, fixed when the model is composed: the app's
+/// real device, or the virtual paced device on the model's clock when nothing
+/// plays locally.
+pub const Pacing = enum { local_device, virtual_device };
 
 /// Sees every block unscaled: where later sinks (a published track) attach.
 /// `opened` and `closed` run on an app thread; `consume` on the audio thread.
@@ -77,6 +100,7 @@ pub const Model = struct {
     clock: Clock,
     local: LocalSink,
     tap: ?TapSink = null,
+    pacing: Pacing = .local_device,
 
     gain_bits: std.atomic.Value(u32) = .init(@bitCast(@as(f32, 1.0))),
     muted: std.atomic.Value(bool) = .init(false),
@@ -119,14 +143,14 @@ pub const Model = struct {
 
     /// Audio thread. `buffer` holds a block the app just produced; on return
     /// it holds what the device should play.
-    pub fn processBlock(self: *Model, id: StreamId, buffer: []u8) void {
+    pub fn processBlock(self: *Model, id: StreamId, buffer: []u8, discontinuity: bool) void {
         const stream = &self.streams[id];
         if (!stream.open.load(.acquire)) return;
         const to_tap = self.route_tap.load(.acquire);
         const silent = !self.route_local_device.load(.acquire) or self.muted.load(.acquire);
         const local_gain: f32 = if (silent) 0 else self.gain();
 
-        const block: Block = .{ .stream = stream.info, .bytes = buffer, .time_ns = self.clock.now_fn(self.clock.context) };
+        const block: Block = .{ .stream = stream.info, .bytes = buffer, .time_ns = self.clock.now(), .discontinuity = discontinuity };
         if (to_tap) if (self.tap) |tap| tap.consume(tap.context, &block);
         self.local.play(self.local.context, &block, buffer, local_gain);
     }
@@ -206,7 +230,7 @@ const FakeAdapter = struct {
     fn callback(self: *FakeAdapter) [8]u8 {
         for (0..4) |i| std.mem.writeInt(i16, self.device[i * 2 ..][0..2], @intCast(1000 * (i + 1)), .little);
         const produced = self.device;
-        self.model.processBlock(self.stream.id, &self.device);
+        self.model.processBlock(self.stream.id, &self.device, false);
         return produced;
     }
 };

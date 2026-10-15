@@ -4,6 +4,9 @@
 //!   KATZENSTEG_AUDIO_VOLUME    0 to 1, or 0% to 100% (default 1)
 //!   KATZENSTEG_AUDIO_MUTE      1/true/on/yes starts muted
 //!   KATZENSTEG_AUDIO_TAP_FILE  base path for audio_tap_file_sink.zig
+//!   KATZENSTEG_AUDIO_DEVICE    `virtual`: nothing plays locally and the
+//!                              virtual paced device paces the app (the
+//!                              launcher sets it for a Jackstay target)
 
 const std = @import("std");
 const system_io = @import("platform");
@@ -29,12 +32,17 @@ pub fn model() *audio_model.Model {
     const muted = if (getenv("KATZENSTEG_AUDIO_MUTE")) |text| parseEnabled(text) else false;
     model_storage.setGain(volume);
     model_storage.muted.store(muted, .release);
+    const virtual = if (getenv("KATZENSTEG_AUDIO_DEVICE")) |text| std.mem.eql(u8, text, "virtual") else false;
+    if (virtual) {
+        model_storage.pacing = .virtual_device;
+        model_storage.route_local_device.store(false, .release);
+    }
     const tap_path = getenv("KATZENSTEG_AUDIO_TAP_FILE") orelse "";
     if (tap_path.len > 0) {
         tap_file = .{ .base_path = tap_path };
         model_storage.tap = tap_file.sink();
     }
-    log.info("audio model: volume={d:.2} (KATZENSTEG_AUDIO_VOLUME={s}) muted={} tap_file={s}", .{ volume, volume_text orelse "", muted, tap_path });
+    log.info("audio model: volume={d:.2} (KATZENSTEG_AUDIO_VOLUME={s}) muted={} pacing={s} tap_file={s}", .{ volume, volume_text orelse "", muted, @tagName(model_storage.pacing), tap_path });
     return &model_storage;
 }
 

@@ -10,9 +10,15 @@
 //! - `SDL_CloseAudioDevice`, `SDL_CloseAudio` and `noteAudioQuit` close the
 //!   model stream once SDL can no longer run the callback.
 //!
-//! Capture devices pass through. Callbacks run on SDL's audio thread and never
-//! allocate, block or take a Katzensteg lock; the device table lock is taken
-//! only by app threads.
+//! When the model is paced by the virtual device, a playback open never
+//! reaches SDL: the adapter grants the desired spec, hands out its own ID and
+//! runs the callback or drain on a virtual paced device
+//! (audio_virtual_device.zig). It then serves pause, status, lock and close
+//! for that ID; every other ID passes through.
+//!
+//! Capture devices pass through. Callbacks run on SDL's audio thread (or the
+//! virtual device's) and never allocate, block or take a Katzensteg lock; the
+//! device table lock is taken only by app threads.
 
 const std = @import("std");
 const system_io = @import("platform");
@@ -21,10 +27,14 @@ const real_sdl = @import("real_sdl.zig");
 const audio_model = @import("audio_model.zig");
 const audio_process = @import("audio_process.zig");
 const ByteQueue = @import("audio_byte_queue.zig").ByteQueue;
+const VirtualDevice = @import("audio_virtual_device.zig").VirtualDevice;
 
 const log = std.log.scoped(.audio);
 
 const legacy_device_id: sdl.SDL_AudioDeviceID = 1;
+/// Virtual device IDs sit far above SDL2's own (it opens at most 16 devices),
+/// so a capture device SDL opens never collides with one.
+const virtual_id_base: sdl.SDL_AudioDeviceID = 0x10000;
 /// Queue capacity: two seconds of audio, and at least this much.
 const min_queue_bytes = 256 * 1024;
 
@@ -40,6 +50,10 @@ const Device = struct {
     stream: audio_model.StreamInfo = undefined,
     /// Set once `stream` is open in the model.
     ready: std.atomic.Value(bool) = .init(false),
+    virtual: ?VirtualDevice = null,
+    /// The ID while `virtual` runs: read without the table lock, since an app
+    /// may lock its device from inside the callback.
+    virtual_id: std.atomic.Value(sdl.SDL_AudioDeviceID) = .init(0),
 };
 
 var devices: [audio_model.max_streams]Device = [_]Device{.{}} ** audio_model.max_streams;
@@ -64,23 +78,20 @@ fn specFromSdl2(spec: *const sdl.SDL_AudioSpec) audio_model.Spec {
 
 // Audio-thread callbacks.
 
-fn handToModel(device: *Device, buffer: []u8) void {
-    if (device.ready.load(.acquire)) device.model.processBlock(device.stream.id, buffer);
+/// Fills `buffer` from the app's callback, or for queue mode its queue, then
+/// hands it to the model.
+fn render(context: *anyopaque, buffer: []u8, discontinuity: bool) void {
+    const device: *Device = @ptrCast(@alignCast(context));
+    if (device.queue) |*queue| {
+        const filled = queue.pop(buffer);
+        @memset(buffer[filled..], if (device.ready.load(.acquire)) device.stream.spec.silence else 0);
+    } else if (device.app_callback) |callback| callback(device.app_userdata, buffer.ptr, @intCast(buffer.len));
+    if (device.ready.load(.acquire)) device.model.processBlock(device.stream.id, buffer, discontinuity);
 }
 
-fn trampolineCallback(userdata: ?*anyopaque, stream: ?[*]sdl.Uint8, len: c_int) callconv(.c) void {
-    const device: *Device = @ptrCast(@alignCast(userdata.?));
-    if (device.app_callback) |callback| callback(device.app_userdata, stream, len);
-    if (stream != null and len > 0) handToModel(device, stream.?[0..@intCast(len)]);
-}
-
-fn drainCallback(userdata: ?*anyopaque, stream: ?[*]sdl.Uint8, len: c_int) callconv(.c) void {
-    const device: *Device = @ptrCast(@alignCast(userdata.?));
-    if (stream == null or len <= 0) return;
-    const buffer = stream.?[0..@intCast(len)];
-    const filled = device.queue.?.pop(buffer);
-    @memset(buffer[filled..], if (device.ready.load(.acquire)) device.stream.spec.silence else 0);
-    handToModel(device, buffer);
+/// The callback a real SDL device runs in place of the app's.
+fn deviceCallback(userdata: ?*anyopaque, stream: ?[*]sdl.Uint8, len: c_int) callconv(.c) void {
+    if (stream != null and len > 0) render(userdata.?, stream.?[0..@intCast(len)], false);
 }
 
 // Device table (app threads only).
@@ -130,6 +141,11 @@ fn attach(device: *Device, id: sdl.SDL_AudioDeviceID, used: *const sdl.SDL_Audio
 
 /// Frees a record and closes its stream; its callback can no longer run.
 fn releaseLocked(device: *Device) void {
+    if (device.virtual) |*virtual| {
+        device.virtual_id.store(0, .release);
+        virtual.stop();
+        std.heap.c_allocator.free(virtual.buffer);
+    }
     if (device.ready.load(.acquire)) {
         device.model.closeStream(device.stream.id);
         log.info("closed id={d} sequence={d}", .{ device.id, device.stream.sequence });
@@ -162,9 +178,50 @@ pub fn noteAudioQuit() void {
 
 fn substitute(device: *Device, want: *const sdl.SDL_AudioSpec) sdl.SDL_AudioSpec {
     var spec = want.*;
-    spec.callback = if (device.queue != null) drainCallback else trampolineCallback;
+    spec.callback = deviceCallback;
     spec.userdata = device;
     return spec;
+}
+
+/// The spec SDL2 would obtain for `want` with no changes allowed: its
+/// defaults for unset fields, then the computed silence and size.
+fn grantedSpec(want: *const sdl.SDL_AudioSpec) sdl.SDL_AudioSpec {
+    var spec = want.*;
+    if (spec.freq <= 0) spec.freq = 22050;
+    if (spec.format == 0) spec.format = sdl.AUDIO_S16LSB;
+    if (spec.channels == 0) spec.channels = 2;
+    if (spec.samples == 0) spec.samples = std.math.ceilPowerOfTwo(u16, @intCast(@min(@divTrunc(spec.freq, 1000) * 46, 32768))) catch 32768;
+    spec.silence = switch (spec.format) {
+        sdl.AUDIO_U8, sdl.AUDIO_U16LSB, sdl.AUDIO_U16MSB => 0x80,
+        else => 0,
+    };
+    spec.size = @as(u32, spec.format & 0xff) / 8 * spec.channels * spec.samples;
+    return spec;
+}
+
+/// Opens `device` as a virtual paced device under `id`. Returns the granted
+/// spec, or null after setting the SDL error; the caller then releases it.
+fn openVirtual(device: *Device, id: sdl.SDL_AudioDeviceID, want: *const sdl.SDL_AudioSpec) ?sdl.SDL_AudioSpec {
+    const spec = grantedSpec(want);
+    const buffer = std.heap.c_allocator.alloc(u8, spec.size) catch {
+        _ = real_sdl.SDL_SetError("Out of memory");
+        return null;
+    };
+    device.virtual = .{ .clock = device.model.clock, .rate = @intCast(spec.freq), .samples = spec.samples, .buffer = buffer, .context = device, .render = render };
+    attach(device, id, &spec);
+    device.virtual.?.start() catch {
+        _ = real_sdl.SDL_SetError("Katzensteg could not start the virtual audio device");
+        return null;
+    };
+    device.virtual_id.store(id, .release);
+    return spec;
+}
+
+fn findVirtual(id: sdl.SDL_AudioDeviceID) ?*VirtualDevice {
+    for (&devices) |*device| {
+        if (id != 0 and device.virtual_id.load(.acquire) == id) return &device.virtual.?;
+    }
+    return null;
 }
 
 /// Attaches the opened device, hiding the substituted callback from the app.
@@ -184,6 +241,15 @@ pub export fn ks_SDL_OpenAudioDevice(name: ?[*:0]const u8, iscapture: c_int, des
     const want = desired orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     if (iscapture != 0 or opening) return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     const device = reserve(want) orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
+    if (device.model.pacing == .virtual_device) {
+        const id: sdl.SDL_AudioDeviceID = @intCast(virtual_id_base + (@intFromPtr(device) - @intFromPtr(&devices)) / @sizeOf(Device));
+        const spec = openVirtual(device, id, want) orelse {
+            release(device);
+            return 0;
+        };
+        if (obtained) |granted| granted.* = spec;
+        return id;
+    }
     var substituted = substitute(device, want);
     opening = true;
     const id = real_sdl.SDL_OpenAudioDevice(name, iscapture, &substituted, obtained, allowed_changes);
@@ -196,6 +262,22 @@ pub export fn ks_SDL_OpenAudio(desired: ?*sdl.SDL_AudioSpec, obtained: ?*sdl.SDL
     const want = desired orelse return real_sdl.SDL_OpenAudio(desired, obtained);
     if (opening) return real_sdl.SDL_OpenAudio(desired, obtained);
     const device = reserve(want) orelse return real_sdl.SDL_OpenAudio(desired, obtained);
+    if (device.model.pacing == .virtual_device) {
+        if (findVirtual(legacy_device_id) != null) {
+            release(device);
+            _ = real_sdl.SDL_SetError("Audio device is already opened");
+            return -1;
+        }
+        const spec = openVirtual(device, legacy_device_id, want) orelse {
+            release(device);
+            return -1;
+        };
+        if (obtained) |granted| granted.* = spec else {
+            want.size = spec.size;
+            want.silence = spec.silence;
+        }
+        return 0;
+    }
     var substituted = substitute(device, want);
     opening = true;
     // `obtained` stays as given: SDL_OpenAudio allows format changes only
@@ -254,11 +336,49 @@ pub export fn ks_SDL_ClearQueuedAudio(id: sdl.SDL_AudioDeviceID) callconv(.c) vo
 }
 
 pub export fn ks_SDL_CloseAudioDevice(id: sdl.SDL_AudioDeviceID) callconv(.c) void {
-    real_sdl.SDL_CloseAudioDevice(id);
+    if (findVirtual(id) == null) real_sdl.SDL_CloseAudioDevice(id);
     releaseId(id);
 }
 
 pub export fn ks_SDL_CloseAudio() callconv(.c) void {
-    real_sdl.SDL_CloseAudio();
+    if (findVirtual(legacy_device_id) == null) real_sdl.SDL_CloseAudio();
     releaseId(legacy_device_id);
+}
+
+pub export fn ks_SDL_PauseAudioDevice(id: sdl.SDL_AudioDeviceID, pause_on: c_int) callconv(.c) void {
+    const virtual = findVirtual(id) orelse return real_sdl.SDL_PauseAudioDevice(id, pause_on);
+    virtual.pause(pause_on != 0);
+}
+
+pub export fn ks_SDL_PauseAudio(pause_on: c_int) callconv(.c) void {
+    const virtual = findVirtual(legacy_device_id) orelse return real_sdl.SDL_PauseAudio(pause_on);
+    virtual.pause(pause_on != 0);
+}
+
+fn virtualStatus(virtual: *VirtualDevice) sdl.SDL_AudioStatus {
+    return if (virtual.paused.load(.acquire)) sdl.SDL_AUDIO_PAUSED else sdl.SDL_AUDIO_PLAYING;
+}
+
+pub export fn ks_SDL_GetAudioDeviceStatus(id: sdl.SDL_AudioDeviceID) callconv(.c) sdl.SDL_AudioStatus {
+    return virtualStatus(findVirtual(id) orelse return real_sdl.SDL_GetAudioDeviceStatus(id));
+}
+
+pub export fn ks_SDL_GetAudioStatus() callconv(.c) sdl.SDL_AudioStatus {
+    return virtualStatus(findVirtual(legacy_device_id) orelse return real_sdl.SDL_GetAudioStatus());
+}
+
+pub export fn ks_SDL_LockAudioDevice(id: sdl.SDL_AudioDeviceID) callconv(.c) void {
+    (findVirtual(id) orelse return real_sdl.SDL_LockAudioDevice(id)).lock.lock();
+}
+
+pub export fn ks_SDL_UnlockAudioDevice(id: sdl.SDL_AudioDeviceID) callconv(.c) void {
+    (findVirtual(id) orelse return real_sdl.SDL_UnlockAudioDevice(id)).lock.unlock();
+}
+
+pub export fn ks_SDL_LockAudio() callconv(.c) void {
+    (findVirtual(legacy_device_id) orelse return real_sdl.SDL_LockAudio()).lock.lock();
+}
+
+pub export fn ks_SDL_UnlockAudio() callconv(.c) void {
+    (findVirtual(legacy_device_id) orelse return real_sdl.SDL_UnlockAudio()).lock.unlock();
 }

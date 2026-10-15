@@ -101,8 +101,20 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   Gain and mute reach only the local device sink, and mute is gain 0, never a
   pause. Gain scales S16 and F32; other formats play at unity gain (logged
   once), and gain 0 writes every format's silence byte. The tap is where the
-  virtual paced device and the published track will attach; today only the
-  diagnostic tap file sink (`audio_tap_file_sink.zig`) uses it.
+  published track will attach; today only the diagnostic tap file sink
+  (`audio_tap_file_sink.zig`) uses it.
+- **Pacing.** Exactly one pacer, fixed when the model is composed. By default
+  the app's real device paces it. With `KATZENSTEG_AUDIO_DEVICE=virtual`
+  (the launcher sets it, with `SDL_AUDIODRIVER=dummy`, for a Jackstay target)
+  nothing plays locally: the SDL2 adapter grants the desired spec under its
+  own device ID, never opens a real playback device, and serves pause,
+  status, lock and close for it. The virtual paced device
+  (`audio_virtual_device.zig`) runs the callback or queue drain on its own
+  thread, `samples` frames per block, at absolute deadlines
+  t0 + frames × 10⁹ / rate on the model's clock, under a recursive device
+  lock that `SDL_LockAudioDevice` takes. Blocks up to 2 periods late run back
+  to back; later than that the deadlines rebase with a discontinuity, as they
+  do on unpause and reopen.
 - **Audio thread.** Callbacks never allocate, block, log or take a Katzensteg
   lock. Device records, queues and tap buffers are allocated on the app thread
   at open; the adapter's device table lock is taken only by app threads.

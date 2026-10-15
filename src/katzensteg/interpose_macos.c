@@ -84,6 +84,14 @@ extern unsigned int ks_SDL_GetQueuedAudioSize(unsigned int);
 extern void ks_SDL_ClearQueuedAudio(unsigned int);
 extern void ks_SDL_CloseAudioDevice(unsigned int);
 extern void ks_SDL_CloseAudio(void);
+extern void ks_SDL_PauseAudioDevice(unsigned int, int);
+extern void ks_SDL_PauseAudio(int);
+extern int ks_SDL_GetAudioDeviceStatus(unsigned int);
+extern int ks_SDL_GetAudioStatus(void);
+extern void ks_SDL_LockAudioDevice(unsigned int);
+extern void ks_SDL_UnlockAudioDevice(unsigned int);
+extern void ks_SDL_LockAudio(void);
+extern void ks_SDL_UnlockAudio(void);
 extern void ks_katzensteg_shutdown(void);
 #include "dlopen_macos.h"
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -158,6 +166,14 @@ extern unsigned int SDL_GetQueuedAudioSize(unsigned int);
 extern void SDL_ClearQueuedAudio(unsigned int);
 extern void SDL_CloseAudioDevice(unsigned int);
 extern void SDL_CloseAudio(void);
+extern void SDL_PauseAudioDevice(unsigned int, int);
+extern void SDL_PauseAudio(int);
+extern int SDL_GetAudioDeviceStatus(unsigned int);
+extern int SDL_GetAudioStatus(void);
+extern void SDL_LockAudioDevice(unsigned int);
+extern void SDL_UnlockAudioDevice(unsigned int);
+extern void SDL_LockAudio(void);
+extern void SDL_UnlockAudio(void);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
 extern int SDL_SetHint(const char *, const char *);
@@ -230,6 +246,14 @@ DYLD_INTERPOSE(ks_SDL_GetQueuedAudioSize, SDL_GetQueuedAudioSize)
 DYLD_INTERPOSE(ks_SDL_ClearQueuedAudio, SDL_ClearQueuedAudio)
 DYLD_INTERPOSE(ks_SDL_CloseAudioDevice, SDL_CloseAudioDevice)
 DYLD_INTERPOSE(ks_SDL_CloseAudio, SDL_CloseAudio)
+DYLD_INTERPOSE(ks_SDL_PauseAudioDevice, SDL_PauseAudioDevice)
+DYLD_INTERPOSE(ks_SDL_PauseAudio, SDL_PauseAudio)
+DYLD_INTERPOSE(ks_SDL_GetAudioDeviceStatus, SDL_GetAudioDeviceStatus)
+DYLD_INTERPOSE(ks_SDL_GetAudioStatus, SDL_GetAudioStatus)
+DYLD_INTERPOSE(ks_SDL_LockAudioDevice, SDL_LockAudioDevice)
+DYLD_INTERPOSE(ks_SDL_UnlockAudioDevice, SDL_UnlockAudioDevice)
+DYLD_INTERPOSE(ks_SDL_LockAudio, SDL_LockAudio)
+DYLD_INTERPOSE(ks_SDL_UnlockAudio, SDL_UnlockAudio)
 DYLD_INTERPOSE(ks_macos_dlopen, dlopen)
 
 #endif
