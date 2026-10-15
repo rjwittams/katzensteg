@@ -346,7 +346,9 @@ pub const Runtime = struct {
                         break :blk null;
                     };
                 }
-                runtime.publisher = jackstay.Publisher.create(io, allocator, std.mem.span(path), .{}, if (runtime.input_executor) |executor| executor.authority() else null) catch |err| {
+                // The launcher names the source after the profile title.
+                const label = std.c.getenv("KATZENSTEG_PUBLISH_LABEL") orelse "katzensteg";
+                runtime.publisher = jackstay.Publisher.create(io, allocator, std.mem.span(path), label, .{}, if (runtime.input_executor) |executor| executor.authority() else null) catch |err| {
                     if (runtime.input_executor) |executor| executor.close() catch {};
                     runtime.input_executor = null;
                     log.err("Jackstay publisher init failed: {any}", .{err});
@@ -1088,7 +1090,6 @@ pub const Runtime = struct {
                 .format = .rgba8,
                 .pixels = pixels,
                 .sequence = self.publication_sequence,
-                .clock = .host_time,
                 .timestamp_ns = present_host_ns,
             }) catch |err| log.warn("Jackstay publication failed: {any}", .{err});
         }
@@ -3041,12 +3042,14 @@ test "published frames carry host time read on present-hook entry, before compos
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/ks-host-time-{d}-{d}.sock", .{ std.c.getpid(), system_io.time.hostTimeNs() });
     runtime.active = true;
     runtime.intercept_mode = .queued_replay;
-    runtime.publisher = try jackstay.Publisher.create(std.testing.io, std.testing.allocator, path, .{}, null);
+    runtime.publisher = try jackstay.Publisher.create(std.testing.io, std.testing.allocator, path, "test", .{}, null);
 
     var fd = try jackstay.endpoint.connect(path);
     defer if (fd >= 0) system_io.posix.close(fd);
-    _ = try jackstay.bootstrap.connect(&fd, .observe);
-    var connection = try jackstay.media.Connection.init(&fd);
+    var connected = try jackstay.handshake.connect(&fd, .observe);
+    defer connected.close();
+    try std.testing.expect(connected.host_time);
+    var connection = try jackstay.media.Connection.init(&connected.local);
     defer connection.deinit();
     try connection.attach();
 
@@ -3081,7 +3084,6 @@ test "published frames carry host time read on present-hook entry, before compos
         var frame = acquired orelse continue;
         defer frame.release();
         const image = try frame.image();
-        try std.testing.expectEqual(.host_time, image.clock);
         // Latest-frame acquisition returns this present, stamped at hook entry.
         try std.testing.expectEqual(hook_entry_ns, image.timestamp_ns);
         try std.testing.expect(image.timestamp_ns < composition_start_ns);

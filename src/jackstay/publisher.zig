@@ -2,7 +2,7 @@ const std = @import("std");
 const os = @import("platform");
 const media = @import("media.zig");
 const endpoint = @import("endpoint.zig");
-const bootstrap = @import("bootstrap.zig");
+const handshake = @import("handshake.zig");
 const log = std.log.scoped(.jackstay);
 
 pub const Publisher = struct {
@@ -13,7 +13,8 @@ pub const Publisher = struct {
     failure: ?anyerror = null,
     stopped: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
-    authority: ?bootstrap.Authority,
+    authority: ?handshake.Authority,
+    label: [*:0]const u8,
     setups: [8]Setup = @splat(.{}),
 
     const Setup = struct {
@@ -25,11 +26,12 @@ pub const Publisher = struct {
         fn run(self: *Setup, publisher: *Publisher) void {
             defer self.done.store(true, .release);
             defer if (self.fd >= 0) os.posix.close(self.fd);
-            var input_server = bootstrap.accept(&self.fd, if (publisher.authority) |a| a.target else null) catch |err| {
-                log.debug("source bootstrap failed: {any}", .{err});
+            var accepted = handshake.accept(&self.fd, publisher.label, if (publisher.authority) |a| a.target else null) catch |err| {
+                log.debug("source handshake failed: {any}", .{err});
                 return;
             };
-            if (input_server) |*server| {
+            defer accepted.close();
+            if (accepted.input) |*server| {
                 // Input owns a separate lifetime, including when media setup
                 // fails. Executor teardown stops it and settles target cleanup.
                 publisher.authority.?.servers.adopt(server.*) catch |err| {
@@ -38,10 +40,10 @@ pub const Publisher = struct {
                     return;
                 };
             }
-            if (publisher.stopped.load(.acquire)) return;
+            if (!accepted.video or publisher.stopped.load(.acquire)) return;
             publisher.mutex.lock();
             defer publisher.mutex.unlock();
-            self.server = publisher.producer.serve(&self.fd) catch null;
+            self.server = publisher.producer.serve(&accepted.local) catch null;
         }
 
         fn retire(self: *Setup) void {
@@ -51,7 +53,8 @@ pub const Publisher = struct {
         }
     };
 
-    pub fn create(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: media.Producer.Options, authority: ?bootstrap.Authority) !*Publisher {
+    /// The source label is borrowed for the publisher's lifetime.
+    pub fn create(io: std.Io, allocator: std.mem.Allocator, path: []const u8, label: [*:0]const u8, options: media.Producer.Options, authority: ?handshake.Authority) !*Publisher {
         const self = try allocator.create(Publisher);
         errdefer allocator.destroy(self);
         var producer = try media.Producer.initWithOptions(4, options);
@@ -60,7 +63,7 @@ pub const Publisher = struct {
         }
         var listener = try endpoint.Listener.init(io, allocator, path);
         errdefer listener.deinit();
-        self.* = .{ .allocator = allocator, .producer = producer, .listener = listener, .authority = authority };
+        self.* = .{ .allocator = allocator, .producer = producer, .listener = listener, .authority = authority, .label = label };
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -101,7 +104,7 @@ pub const Publisher = struct {
             self.mutex.unlock();
             os.time.sleep(10 * std.time.ns_per_ms);
         }
-        // Bounded bootstrap calls have no cancellation handle. Join them
+        // Bounded handshake calls have no cancellation handle. Join them
         // before releasing the borrowed input authority or media producer.
         for (&self.setups) |*setup| setup.retire();
     }

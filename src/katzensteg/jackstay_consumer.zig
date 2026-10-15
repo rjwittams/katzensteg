@@ -10,7 +10,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = log_mod.std
 const Shared = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
-    request: js.bootstrap.Request,
+    request: js.handshake.Request,
     connection: ?js.media.Connection = null,
     client: ?js.input.Client = null,
     refusal: ?anyerror = null,
@@ -31,18 +31,19 @@ const Shared = struct {
     }
 
     fn receive(self: *Shared) !void {
-        // Bootstrap and admission are bounded but synchronous. The main loop
-        // remains responsive to host control throughout setup.
+        // The handshake and admission are bounded but synchronous. The main
+        // loop remains responsive to host control throughout setup.
         var fd = try js.endpoint.connect(self.path);
         defer if (fd >= 0) os.posix.close(fd);
-        const connected = try js.bootstrap.connect(&fd, self.request);
+        var connected = try js.handshake.connect(&fd, self.request);
+        defer connected.close();
         self.client = connected.client;
         self.refusal = connected.refusal;
         {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.stopped.load(.acquire)) return;
-            self.connection = try js.media.Connection.init(&fd);
+            self.connection = try js.media.Connection.init(&connected.local);
         }
         self.setup_done.store(true, .release);
         try self.connection.?.attach();
@@ -79,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.gpa);
     defer init.gpa.free(args);
     if (args.len < 2 or args.len > 3) return error.ExpectedSourceSocket;
-    const request: js.bootstrap.Request = if (args.len == 2) .optional else if (std.mem.eql(u8, args[2], "--observe")) .observe else if (std.mem.eql(u8, args[2], "--require-input")) .required else return error.InvalidInputMode;
+    const request: js.handshake.Request = if (args.len == 2) .optional else if (std.mem.eql(u8, args[2], "--observe")) .observe else if (std.mem.eql(u8, args[2], "--require-input")) .required else return error.InvalidInputMode;
     var shared = Shared{ .allocator = init.gpa, .path = args[1], .request = request };
     defer shared.mutex.deinit();
     defer shared.pixels.deinit(init.gpa);

@@ -1,7 +1,7 @@
 //! Owned CPU media handles. No grants, mappings or frame pointers escape here.
 const std = @import("std");
-const c = @cImport({
-    @cInclude("capture_transfer.h");
+pub const c = @cImport({
+    @cInclude("jackstay_handshake.h");
 });
 
 pub const Format = enum { rgba8, bgra8 };
@@ -11,13 +11,24 @@ pub const Image = struct {
     stride: u32,
     format: Format,
     pixels: []const u8,
+    /// Host time, the offered clock; 0 asks Jackstay to stamp it at publish.
     timestamp_ns: u64 = 0,
     sequence: u64 = 0,
-    clock: enum { unknown, unix_time, media_time, host_time } = .unknown,
 };
 
 pub fn checkAbi() !void {
-    if (c.FT_ABI_VERSION != 8 or c.ft_abi_version() != 8) return error.JackstayAbiMismatch;
+    if (c.FT_ABI_VERSION != 16 or c.ft_abi_version() != 16) return error.JackstayAbiMismatch;
+}
+
+/// An unconsumed Local Endpoint connection; null once a setup call consumed it.
+pub const Local = ?*c.ft_local_connection;
+
+/// Wraps a connected stream whose peer the caller verified. Consumes fd after
+/// basic checks.
+pub fn adopt(fd: *i32) !Local {
+    var local: Local = null;
+    try check(c.ft_local_connection_adopt(fd, &local));
+    return local;
 }
 
 fn check(status: c.ft_status) !void {
@@ -54,12 +65,7 @@ pub const Frame = struct {
         const row = try std.math.mul(usize, desc.width, 4);
         const size = try std.math.mul(usize, desc.stride, desc.height);
         if (desc.width == 0 or desc.height == 0 or desc.stride < row or size > len) return error.InvalidFrame;
-        return .{ .width = desc.width, .height = desc.height, .stride = desc.stride, .format = format, .pixels = bytes[0..size], .timestamp_ns = desc.timestamp_ns, .sequence = desc.sequence, .clock = switch (desc.clock_domain) {
-            c.FT_CLOCK_DOMAIN_UNIX_TIME => .unix_time,
-            c.FT_CLOCK_DOMAIN_MEDIA_TIME => .media_time,
-            c.FT_CLOCK_DOMAIN_HOST_TIME => .host_time,
-            else => .unknown,
-        } };
+        return .{ .width = desc.width, .height = desc.height, .stride = desc.stride, .format = format, .pixels = bytes[0..size], .timestamp_ns = desc.timestamp_ns, .sequence = desc.sequence };
     }
 };
 
@@ -67,21 +73,17 @@ pub const Connection = struct {
     handle: ?*c.ft_cpu_acquisition_connection = null,
     cancellation: ?*c.ft_acquisition_cancellation = null,
     consumer: ?*c.ft_acquisition_consumer = null,
-    setup_fd: i32 = -1,
     cancelled: std.atomic.Value(bool) = .init(false),
     cursor: u64 = 0,
     requested_epoch: ?u64 = null,
 
-    // Consumes fd according to Jackstay's documented transfer rules, including
-    // failure after basic validation. Caller must check the updated fd.
-    pub fn init(fd: *i32) !Connection {
+    // Consumes the connection after basic validation, including on failure.
+    pub fn init(local: *Local) !Connection {
         try checkAbi();
         var self = Connection{};
         errdefer self.deinit();
         try check(c.ft_acquisition_cancellation_create(&self.cancellation));
-        const setup_fd = fd.*;
-        try check(c.ft_acquisition_cpu_connection_create(fd, &self.handle));
-        self.setup_fd = setup_fd;
+        try check(c.ft_acquisition_cpu_connection_create_local(local, &self.handle));
         return self;
     }
 
@@ -105,21 +107,13 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         c.ft_acquisition_consumer_destroy(&self.consumer);
         c.ft_acquisition_cpu_connection_destroy(&self.handle);
-        self.setup_fd = -1;
         c.ft_acquisition_cancellation_destroy(&self.cancellation);
     }
 
-    // The setup socket remains owned by the C connection. Peeking only detects
-    // disconnect; it never reads setup bytes or treats EOF as lease retirement.
+    // Detects producer disconnect only; EOF is not lease retirement.
     fn checkConnected(self: *Connection) !void {
         if (self.cancelled.load(.acquire)) return error.Cancelled;
-        var byte: [1]u8 = undefined;
-        const count = std.c.recv(self.setup_fd, &byte, 1, std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT);
-        if (count == 0) return error.Closed;
-        if (count < 0) switch (std.posix.errno(count)) {
-            .AGAIN, .INTR => {},
-            else => return error.Closed,
-        };
+        try check(c.ft_acquisition_cpu_connection_alive(self.handle));
     }
 
     pub fn next(self: *Connection, timeout_ns: u64) !?Frame {
@@ -205,12 +199,6 @@ pub const Producer = struct {
         desc.height = image.height;
         desc.stride = image.stride;
         desc.pixel_format = if (image.format == .rgba8) c.FT_PIXEL_FORMAT_RGBA8_UNORM else c.FT_PIXEL_FORMAT_BGRA8_UNORM;
-        desc.clock_domain = switch (image.clock) {
-            .unknown => c.FT_CLOCK_DOMAIN_UNKNOWN,
-            .unix_time => c.FT_CLOCK_DOMAIN_UNIX_TIME,
-            .media_time => c.FT_CLOCK_DOMAIN_MEDIA_TIME,
-            .host_time => c.FT_CLOCK_DOMAIN_HOST_TIME,
-        };
         desc.timestamp_ns = image.timestamp_ns;
         desc.sequence = image.sequence;
         var cursor: u64 = 0;
@@ -232,9 +220,9 @@ pub const Producer = struct {
         }
     }
 
-    pub fn serve(self: *Producer, fd: *i32) !Server {
+    pub fn serve(self: *Producer, local: *Local) !Server {
         var server = Server{};
-        try check(c.ft_cpu_producer_serve(self.handle, fd, &server.handle));
+        try check(c.ft_cpu_producer_serve_local(self.handle, local, &server.handle));
         return server;
     }
 

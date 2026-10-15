@@ -32,12 +32,14 @@ static void text_hex(const char *text) {
 int main(void) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   if (!INIT_OK) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+  /* A 16:9 height keeps a viewer's click inside its aspect-fitted frame. */
+  const int height = getenv("JACKSTAY_INPUT_APP_HEIGHT") ? atoi(getenv("JACKSTAY_INPUT_APP_HEIGHT")) : 480;
 #ifdef USE_SDL3
-  SDL_Window *window = SDL_CreateWindow("Jackstay input acceptance", 640, 480, 0);
+  SDL_Window *window = SDL_CreateWindow("Jackstay input acceptance", 640, height, 0);
   SDL_Renderer *renderer = SDL_CreateRenderer(window, "software");
   SDL_StartTextInput(window);
 #else
-  SDL_Window *window = SDL_CreateWindow("Jackstay input acceptance", 0, 0, 640, 480, 0);
+  SDL_Window *window = SDL_CreateWindow("Jackstay input acceptance", 0, 0, 640, height, 0);
   SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
   SDL_StartTextInput();
 #endif

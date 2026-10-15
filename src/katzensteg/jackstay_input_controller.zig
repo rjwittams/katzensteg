@@ -22,7 +22,7 @@ pub const Controller = struct {
     pointer: wire.Position = .{ .x = 0, .y = 0, .revision = 1 },
     outstanding: std.ArrayList(Pending) = .empty,
     const Press = struct { id: u64, confirmed: bool = false, releasing: bool = false };
-    const Pending = struct { sequence: u64, press: ?u64 = null, button: ?wire.Button = null, pointer_generation: u64 = 0, action: wire.Action = .down };
+    const Pending = struct { sequence: u64, press: ?u64 = null, button: ?wire.Button = null, pointer_generation: u64 = 0, action: wire.Action = .down, motion: bool = false };
     const allocator = std.heap.c_allocator;
 
     pub fn init(client: wire.Client) !Controller {
@@ -39,6 +39,13 @@ pub const Controller = struct {
     pub fn poll(self: *Controller, model: *input.InputModel) !void {
         while (try self.client.poll()) |status| switch (status) {
             .completed => |result| {
+                // Results arrive in order and superseded motions never
+                // complete, so a completion settles every earlier motion.
+                var i: usize = 0;
+                while (i < self.outstanding.items.len) {
+                    const item = self.outstanding.items[i];
+                    if (item.motion and item.sequence < result.sequence) _ = self.outstanding.swapRemove(i) else i += 1;
+                }
                 const release_failed = self.completed(result.sequence, result.outcome == .executed);
                 if (result.outcome != .executed) {
                     std.log.warn("Jackstay input sequence={d} outcome={s}", .{ result.sequence, @tagName(result.outcome) });
@@ -79,6 +86,8 @@ pub const Controller = struct {
                 model.discardLocalInput(false);
                 std.log.info("Jackstay input closed clean={any} reason={s}", .{ result.clean, @tagName(result.reason) });
             },
+            // Settled by the surviving motion's completion above.
+            .coalesced => {},
         };
     }
     fn completed(self: *Controller, sequence: u64, executed: bool) bool {
@@ -228,6 +237,7 @@ pub const Controller = struct {
                 if (!caps.pointer) return error.Unsupported;
                 self.pointer = self.position(motion.x, motion.y, target);
                 try self.send(.{ .motion = self.pointer });
+                self.outstanding.items[self.outstanding.items.len - 1].motion = true;
             },
             .mouse_button => |button| {
                 if (!caps.pointer) return error.Unsupported;

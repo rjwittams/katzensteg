@@ -50,7 +50,7 @@ pub const Executor = struct {
         self.servers.maintain(true);
     }
 
-    pub fn authority(self: *Executor) js.bootstrap.Authority {
+    pub fn authority(self: *Executor) js.handshake.Authority {
         return .{ .target = &self.target, .servers = &self.servers };
     }
 
