@@ -89,7 +89,13 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   `SDL_QuitSubSystem(SDL_INIT_AUDIO)` wrappers close the model stream once SDL
   can no longer run the callback. Capture devices pass through. The same
   wrappers serve preload and `SDL_DYNAMIC_API`, classic SDL2 and sdl2-compat.
-  There is no SDL3 adapter yet.
+  `sdl3_audio_adapter.zig` wraps `SDL_OpenAudioDevice` and
+  `SDL_OpenAudioDeviceStream` and installs a postmix callback on each playback
+  logical device, which hands the F32 mix of its streams to the model. An app's
+  own `SDL_SetAudioPostmixCallback` on such a device is recorded and runs
+  first, inside Katzensteg's. `SDL_CloseAudioDevice`, `SDL_DestroyAudioStream`
+  (of a device stream) and the quit wrappers close the model stream. The
+  virtual paced device is SDL2-only so far.
 - **Model.** `audio_model.zig` owns one stream per open playback device (a
   reopen is a new stream with the next sequence number), the gain, the mute
   and the routing (two booleans: local device and tap). It has no SDL or
@@ -129,7 +135,9 @@ The model is tested in Zig with a fake adapter, fake sinks and an injected
 clock (`audio_tests.zig`). `scripts/katzensteg/test_sdl2_audio_model.py` runs
 the SDL2 callback, queue, `SDL_OpenAudio` and reopen probes on SDL's `disk`
 driver and compares the tap with the disk output, through preload,
-`SDL_DYNAMIC_API` and, with `KS_SDL2_COMPAT_LIBRARY_PATH`, sdl2-compat.
+`SDL_DYNAMIC_API` and, with `KS_SDL2_COMPAT_LIBRARY_PATH`, sdl2-compat;
+`test_sdl3_audio_model.py` runs the same checks on the SDL3 probes, plus one
+whose own postmix must still run.
 
 ### Window Manager Sessions
 

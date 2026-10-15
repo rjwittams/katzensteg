@@ -302,6 +302,22 @@ pub extern fn SDL_Delay(ms: Uint32) void;
 pub extern fn SDL_GetTicks() Uint64;
 pub extern fn SDL_GetError() [*:0]const u8;
 
+// Audio (SDL 3.2 include/SDL3/SDL_audio.h).
+pub const SDL_AudioDeviceID = Uint32;
+pub const SDL_AudioStream = opaque {};
+pub const SDL_AudioSpec = extern struct { format: c_int, channels: c_int, freq: c_int };
+pub const SDL_AudioStreamCallback = ?*const fn (userdata: ?*anyopaque, stream: ?*SDL_AudioStream, additional_amount: c_int, total_amount: c_int) callconv(.c) void;
+pub const SDL_AudioPostmixCallback = ?*const fn (userdata: ?*anyopaque, spec: ?*const SDL_AudioSpec, buffer: ?[*]f32, buflen: c_int) callconv(.c) void;
+pub extern fn SDL_OpenAudioDevice(devid: SDL_AudioDeviceID, spec: ?*const SDL_AudioSpec) SDL_AudioDeviceID;
+pub extern fn SDL_OpenAudioDeviceStream(devid: SDL_AudioDeviceID, spec: ?*const SDL_AudioSpec, callback: SDL_AudioStreamCallback, userdata: ?*anyopaque) ?*SDL_AudioStream;
+pub extern fn SDL_SetAudioPostmixCallback(devid: SDL_AudioDeviceID, callback: SDL_AudioPostmixCallback, userdata: ?*anyopaque) SDL_bool;
+pub extern fn SDL_CloseAudioDevice(devid: SDL_AudioDeviceID) void;
+pub extern fn SDL_DestroyAudioStream(stream: ?*SDL_AudioStream) void;
+pub extern fn SDL_GetAudioStreamDevice(stream: ?*SDL_AudioStream) SDL_AudioDeviceID;
+pub extern fn SDL_GetAudioDeviceFormat(devid: SDL_AudioDeviceID, spec: ?*SDL_AudioSpec, sample_frames: ?*c_int) SDL_bool;
+pub extern fn SDL_IsAudioDevicePlayback(devid: SDL_AudioDeviceID) SDL_bool;
+
+pub const SDL_INIT_AUDIO: Uint32 = 0x00000010;
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;
 pub const SDL_INIT_JOYSTICK: Uint32 = 0x00000200;
 pub const SDL_INIT_GAMECONTROLLER: Uint32 = 0x00002000;

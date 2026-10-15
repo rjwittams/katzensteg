@@ -13,6 +13,8 @@ struct SDL_FColor;
 struct SDL_RendererInfo;
 struct SDL_Color;
 union SDL_Event;
+struct SDL_AudioSpec;
+struct SDL_AudioStream;
 
 extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
@@ -84,6 +86,11 @@ extern _Bool ks_SDL_SetCursor(struct SDL_Cursor *);
 extern _Bool ks_SDL_ShowCursor(void);
 extern _Bool ks_SDL_HideCursor(void);
 extern void ks_SDL_DestroyCursor(struct SDL_Cursor *);
+extern unsigned int ks_SDL_OpenAudioDevice(unsigned int, const struct SDL_AudioSpec *);
+extern struct SDL_AudioStream *ks_SDL_OpenAudioDeviceStream(unsigned int, const struct SDL_AudioSpec *, void *, void *);
+extern _Bool ks_SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
+extern void ks_SDL_CloseAudioDevice(unsigned int);
+extern void ks_SDL_DestroyAudioStream(struct SDL_AudioStream *);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -168,6 +175,11 @@ _Bool SDL_SetCursor(struct SDL_Cursor *cursor) { return ks_SDL_SetCursor(cursor)
 _Bool SDL_ShowCursor(void) { return ks_SDL_ShowCursor(); }
 _Bool SDL_HideCursor(void) { return ks_SDL_HideCursor(); }
 void SDL_DestroyCursor(struct SDL_Cursor *cursor) { ks_SDL_DestroyCursor(cursor); }
+unsigned int SDL_OpenAudioDevice(unsigned int devid, const struct SDL_AudioSpec *spec) { return ks_SDL_OpenAudioDevice(devid, spec); }
+struct SDL_AudioStream *SDL_OpenAudioDeviceStream(unsigned int devid, const struct SDL_AudioSpec *spec, void *callback, void *userdata) { return ks_SDL_OpenAudioDeviceStream(devid, spec, callback, userdata); }
+_Bool SDL_SetAudioPostmixCallback(unsigned int devid, void *callback, void *userdata) { return ks_SDL_SetAudioPostmixCallback(devid, callback, userdata); }
+void SDL_CloseAudioDevice(unsigned int devid) { ks_SDL_CloseAudioDevice(devid); }
+void SDL_DestroyAudioStream(struct SDL_AudioStream *stream) { ks_SDL_DestroyAudioStream(stream); }
 void *dlopen(const char *path, int mode) { return ks_dlopen(path, mode); }
 
 #endif

@@ -18,6 +18,8 @@ struct SDL_FColor;
 struct SDL_RendererInfo;
 struct SDL_Color;
 union SDL_Event;
+struct SDL_AudioSpec;
+struct SDL_AudioStream;
 
 extern void ks_katzensteg_log_c(const char *, const char *);
 
@@ -163,6 +165,14 @@ KS_REAL(SDL_ShowCursor, _Bool, (void), ())
 KS_REAL(SDL_HideCursor, _Bool, (void), ())
 KS_REAL_VOID(SDL_DestroyCursor, (struct SDL_Cursor *cursor), (cursor))
 KS_REAL(SDL_GetError, const char *, (void), ())
+KS_REAL(SDL_OpenAudioDevice, unsigned int, (unsigned int devid, const struct SDL_AudioSpec *spec), (devid, spec))
+KS_REAL(SDL_OpenAudioDeviceStream, struct SDL_AudioStream *, (unsigned int devid, const struct SDL_AudioSpec *spec, void *callback, void *userdata), (devid, spec, callback, userdata))
+KS_REAL(SDL_SetAudioPostmixCallback, _Bool, (unsigned int devid, void *callback, void *userdata), (devid, callback, userdata))
+KS_REAL_VOID(SDL_CloseAudioDevice, (unsigned int devid), (devid))
+KS_REAL_VOID(SDL_DestroyAudioStream, (struct SDL_AudioStream *stream), (stream))
+KS_REAL(SDL_GetAudioStreamDevice, unsigned int, (struct SDL_AudioStream *stream), (stream))
+KS_REAL(SDL_GetAudioDeviceFormat, _Bool, (unsigned int devid, struct SDL_AudioSpec *spec, int *sample_frames), (devid, spec, sample_frames))
+KS_REAL(SDL_IsAudioDevicePlayback, _Bool, (unsigned int devid), (devid))
 
 void *ks_real_macos_slot_dlopen = NULL;
 

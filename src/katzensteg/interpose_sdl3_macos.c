@@ -21,6 +21,8 @@ struct SDL_FRect;
 struct SDL_FColor;
 struct SDL_RendererInfo;
 union SDL_Event;
+struct SDL_AudioSpec;
+struct SDL_AudioStream;
 
 extern void ks_SDL_QuitSubSystem(unsigned int);
 extern void ks_SDL_Quit(void);
@@ -92,6 +94,11 @@ extern _Bool ks_SDL_SetCursor(struct SDL_Cursor *);
 extern _Bool ks_SDL_ShowCursor(void);
 extern _Bool ks_SDL_HideCursor(void);
 extern void ks_SDL_DestroyCursor(struct SDL_Cursor *);
+extern unsigned int ks_SDL_OpenAudioDevice(unsigned int, const struct SDL_AudioSpec *);
+extern struct SDL_AudioStream *ks_SDL_OpenAudioDeviceStream(unsigned int, const struct SDL_AudioSpec *, void *, void *);
+extern _Bool ks_SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
+extern void ks_SDL_CloseAudioDevice(unsigned int);
+extern void ks_SDL_DestroyAudioStream(struct SDL_AudioStream *);
 extern void ks_katzensteg_shutdown(void);
 #include "dlopen_macos.h"
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -172,6 +179,11 @@ extern _Bool SDL_SetCursor(struct SDL_Cursor *);
 extern _Bool SDL_ShowCursor(void);
 extern _Bool SDL_HideCursor(void);
 extern void SDL_DestroyCursor(struct SDL_Cursor *);
+extern unsigned int SDL_OpenAudioDevice(unsigned int, const struct SDL_AudioSpec *);
+extern struct SDL_AudioStream *SDL_OpenAudioDeviceStream(unsigned int, const struct SDL_AudioSpec *, void *, void *);
+extern _Bool SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
+extern void SDL_CloseAudioDevice(unsigned int);
+extern void SDL_DestroyAudioStream(struct SDL_AudioStream *);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
 extern int SDL_SetHint(const char *, const char *);
@@ -248,6 +260,11 @@ DYLD_INTERPOSE(ks_SDL_SetCursor, SDL_SetCursor)
 DYLD_INTERPOSE(ks_SDL_ShowCursor, SDL_ShowCursor)
 DYLD_INTERPOSE(ks_SDL_HideCursor, SDL_HideCursor)
 DYLD_INTERPOSE(ks_SDL_DestroyCursor, SDL_DestroyCursor)
+DYLD_INTERPOSE(ks_SDL_OpenAudioDevice, SDL_OpenAudioDevice)
+DYLD_INTERPOSE(ks_SDL_OpenAudioDeviceStream, SDL_OpenAudioDeviceStream)
+DYLD_INTERPOSE(ks_SDL_SetAudioPostmixCallback, SDL_SetAudioPostmixCallback)
+DYLD_INTERPOSE(ks_SDL_CloseAudioDevice, SDL_CloseAudioDevice)
+DYLD_INTERPOSE(ks_SDL_DestroyAudioStream, SDL_DestroyAudioStream)
 DYLD_INTERPOSE(ks_macos_dlopen, dlopen)
 
 #endif

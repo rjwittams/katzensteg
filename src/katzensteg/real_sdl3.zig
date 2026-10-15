@@ -196,6 +196,24 @@ pub const SDL_HideCursor = if (use_c_real) ks_real_SDL_HideCursor else sdl.SDL_H
 pub const SDL_DestroyCursor = if (use_c_real) ks_real_SDL_DestroyCursor else sdl.SDL_DestroyCursor;
 pub const SDL_GetError = if (use_c_real) ks_real_SDL_GetError else sdl.SDL_GetError;
 
+// Audio: the SDL3 audio adapter (sdl3_audio_adapter.zig) calls these.
+extern fn ks_real_SDL_OpenAudioDevice(devid: sdl.SDL_AudioDeviceID, spec: ?*const sdl.SDL_AudioSpec) sdl.SDL_AudioDeviceID;
+extern fn ks_real_SDL_OpenAudioDeviceStream(devid: sdl.SDL_AudioDeviceID, spec: ?*const sdl.SDL_AudioSpec, callback: sdl.SDL_AudioStreamCallback, userdata: ?*anyopaque) ?*sdl.SDL_AudioStream;
+extern fn ks_real_SDL_SetAudioPostmixCallback(devid: sdl.SDL_AudioDeviceID, callback: sdl.SDL_AudioPostmixCallback, userdata: ?*anyopaque) sdl.SDL_bool;
+extern fn ks_real_SDL_CloseAudioDevice(devid: sdl.SDL_AudioDeviceID) void;
+extern fn ks_real_SDL_DestroyAudioStream(stream: ?*sdl.SDL_AudioStream) void;
+extern fn ks_real_SDL_GetAudioStreamDevice(stream: ?*sdl.SDL_AudioStream) sdl.SDL_AudioDeviceID;
+extern fn ks_real_SDL_GetAudioDeviceFormat(devid: sdl.SDL_AudioDeviceID, spec: ?*sdl.SDL_AudioSpec, sample_frames: ?*c_int) sdl.SDL_bool;
+extern fn ks_real_SDL_IsAudioDevicePlayback(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bool;
+pub const SDL_OpenAudioDevice = if (use_c_real) ks_real_SDL_OpenAudioDevice else sdl.SDL_OpenAudioDevice;
+pub const SDL_OpenAudioDeviceStream = if (use_c_real) ks_real_SDL_OpenAudioDeviceStream else sdl.SDL_OpenAudioDeviceStream;
+pub const SDL_SetAudioPostmixCallback = if (use_c_real) ks_real_SDL_SetAudioPostmixCallback else sdl.SDL_SetAudioPostmixCallback;
+pub const SDL_CloseAudioDevice = if (use_c_real) ks_real_SDL_CloseAudioDevice else sdl.SDL_CloseAudioDevice;
+pub const SDL_DestroyAudioStream = if (use_c_real) ks_real_SDL_DestroyAudioStream else sdl.SDL_DestroyAudioStream;
+pub const SDL_GetAudioStreamDevice = if (use_c_real) ks_real_SDL_GetAudioStreamDevice else sdl.SDL_GetAudioStreamDevice;
+pub const SDL_GetAudioDeviceFormat = if (use_c_real) ks_real_SDL_GetAudioDeviceFormat else sdl.SDL_GetAudioDeviceFormat;
+pub const SDL_IsAudioDevicePlayback = if (use_c_real) ks_real_SDL_IsAudioDevicePlayback else sdl.SDL_IsAudioDevicePlayback;
+
 /// Windows has no dlopen to interpose; the Vulkan loader override is
 /// POSIX-only.
 pub fn realDlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque {

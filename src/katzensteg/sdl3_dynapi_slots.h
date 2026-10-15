@@ -85,4 +85,12 @@
 #define KS_SDL3_SLOT_SDL_HideCursor 595
 #define KS_SDL3_SLOT_SDL_DestroyCursor 135
 #define KS_SDL3_SLOT_SDL_GetError 294
+#define KS_SDL3_SLOT_SDL_OpenAudioDevice 656
+#define KS_SDL3_SLOT_SDL_OpenAudioDeviceStream 657
+#define KS_SDL3_SLOT_SDL_SetAudioPostmixCallback 788
+#define KS_SDL3_SLOT_SDL_CloseAudioDevice 66
+#define KS_SDL3_SLOT_SDL_DestroyAudioStream 133
+#define KS_SDL3_SLOT_SDL_GetAudioStreamDevice 240
+#define KS_SDL3_SLOT_SDL_GetAudioDeviceFormat 231
+#define KS_SDL3_SLOT_SDL_IsAudioDevicePlayback 1186
 #define KS_SDL3_SLOT_SDL_UpperBlit 0xffffffffu /* not in this SDL's dynamic API */
