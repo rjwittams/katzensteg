@@ -55,8 +55,8 @@ fn specFromSdl2(spec: *const sdl.SDL_AudioSpec) audio_model.Spec {
             sdl.AUDIO_F32SYS => .f32,
             else => .other,
         },
-        // SDL's own silence value: 0x80 for the unsigned formats.
-        .silence = if (spec.format & 0x8000 == 0) 0x80 else 0,
+        // The silence byte SDL computed for the obtained format.
+        .silence = spec.silence,
         .frame_bytes = @as(u32, spec.format & 0xff) / 8 * spec.channels,
         .rate = @intCast(@max(spec.freq, 0)),
     };
@@ -221,7 +221,11 @@ pub export fn ks_SDL_QueueAudio(id: sdl.SDL_AudioDeviceID, data: ?*const anyopaq
         defer devices_mutex.unlock();
         if (findLocked(id)) |device| if (device.queue) |*queue| {
             if (len == 0) return 0;
-            const bytes = @as([*]const u8, @ptrCast(data orelse return -1))[0..len];
+            const ptr = data orelse {
+                _ = real_sdl.SDL_SetError("SDL_QueueAudio: data is NULL");
+                return -1;
+            };
+            const bytes = @as([*]const u8, @ptrCast(ptr))[0..len];
             if (queue.push(bytes)) return 0;
             // What SDL itself does when it cannot grow its queue.
             _ = real_sdl.SDL_SetError("Katzensteg audio queue is full");
