@@ -420,12 +420,20 @@ fn callerSummary(return_addr: usize) struct { image: []const u8, symbol: []const
 
 pub export fn ks_SDL_Init(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
+    startPublicationForAudio(flags);
     return real_sdl.SDL_Init(flags);
 }
 
 pub export fn ks_SDL_InitSubSystem(flags: sdl.Uint32) callconv(.c) c_int {
     applyBackgroundGamepadHint();
+    startPublicationForAudio(flags);
     return real_sdl.SDL_InitSubSystem(flags);
+}
+
+/// With a Jackstay target, an app that only plays audio still publishes: the
+/// runtime, which owns the publication, starts when the app inits audio.
+fn startPublicationForAudio(flags: sdl.Uint32) void {
+    if ((flags & sdl.SDL_INIT_AUDIO) != 0 and std.c.getenv("KATZENSTEG_PUBLISH") != null) _ = runtime.get();
 }
 
 pub export fn ks_SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) callconv(.c) sdl.SDL_bool {

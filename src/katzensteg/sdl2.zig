@@ -283,6 +283,7 @@ pub const SDL_AudioSpec = extern struct {
 const native_little = @import("builtin").cpu.arch.endian() == .little;
 pub const AUDIO_S16SYS: SDL_AudioFormat = if (native_little) 0x8010 else 0x9010;
 pub const AUDIO_F32SYS: SDL_AudioFormat = if (native_little) 0x8120 else 0x9120;
+pub const AUDIO_S32SYS: SDL_AudioFormat = if (native_little) 0x8020 else 0x9020;
 pub const AUDIO_U8: SDL_AudioFormat = 0x0008;
 pub const AUDIO_U16LSB: SDL_AudioFormat = 0x0010;
 pub const AUDIO_U16MSB: SDL_AudioFormat = 0x1010;

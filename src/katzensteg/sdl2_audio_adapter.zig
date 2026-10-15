@@ -50,6 +50,9 @@ const Device = struct {
     queue: ?ByteQueue = null,
     model: *audio_model.Model = undefined,
     stream: audio_model.StreamInfo = undefined,
+    /// The device name the app opened, or "default".
+    label: [128]u8 = undefined,
+    label_len: usize = 0,
     /// Set once `stream` is open in the model.
     ready: std.atomic.Value(bool) = .init(false),
     virtual: ?VirtualDevice = null,
@@ -67,12 +70,15 @@ var warned_unscaled = false;
 fn specFromSdl2(spec: *const sdl.SDL_AudioSpec) audio_model.Spec {
     return .{
         .format = switch (spec.format) {
+            sdl.AUDIO_U8 => .u8,
             sdl.AUDIO_S16SYS => .s16,
+            sdl.AUDIO_S32SYS => .s32,
             sdl.AUDIO_F32SYS => .f32,
             else => .other,
         },
         // The silence byte SDL computed for the obtained format.
         .silence = spec.silence,
+        .channels = spec.channels,
         .frame_bytes = @as(u32, spec.format & 0xff) / 8 * spec.channels,
         .rate = @intCast(@max(spec.freq, 0)),
     };
@@ -88,7 +94,10 @@ fn render(context: *anyopaque, buffer: []u8, discontinuity: bool) void {
         const filled = queue.pop(buffer);
         @memset(buffer[filled..], if (device.ready.load(.acquire)) device.stream.spec.silence else 0);
     } else if (device.app_callback) |callback| callback(device.app_userdata, buffer.ptr, @intCast(buffer.len));
-    if (device.ready.load(.acquire)) device.model.processBlock(device.stream.id, buffer, discontinuity);
+    if (!device.ready.load(.acquire)) return;
+    // A virtual device's block plays at its deadline.
+    const time_ns = if (device.virtual) |*virtual| virtual.deadline_ns else device.model.clock.now();
+    device.model.processBlockAt(device.stream.id, buffer, discontinuity, time_ns);
 }
 
 /// The callback a real SDL device runs in place of the app's.
@@ -105,7 +114,7 @@ fn findLocked(id: sdl.SDL_AudioDeviceID) ?*Device {
     return null;
 }
 
-fn reserve(desired: *const sdl.SDL_AudioSpec) ?*Device {
+fn reserve(name: ?[*:0]const u8, desired: *const sdl.SDL_AudioSpec) ?*Device {
     devices_mutex.lock();
     defer devices_mutex.unlock();
     for (&devices) |*device| {
@@ -117,6 +126,9 @@ fn reserve(desired: *const sdl.SDL_AudioSpec) ?*Device {
             queue = .{ .buffer = std.heap.c_allocator.alloc(u8, capacity) catch return null };
         }
         device.* = .{ .in_use = true, .app_callback = desired.callback, .app_userdata = desired.userdata, .queue = queue, .model = audio_process.model() };
+        const label = if (name) |text| std.mem.span(text) else "default";
+        device.label_len = @min(label.len, device.label.len);
+        @memcpy(device.label[0..device.label_len], label[0..device.label_len]);
         return device;
     }
     log.warn("more than {d} open devices; passing the next one through", .{devices.len});
@@ -129,7 +141,7 @@ fn attach(device: *Device, id: sdl.SDL_AudioDeviceID, used: *const sdl.SDL_Audio
     defer devices_mutex.unlock();
     device.id = id;
     const spec = specFromSdl2(used);
-    device.stream = device.model.openStream(spec) orelse return log.warn("id={d}: no free model stream; playing it unmodified", .{id});
+    device.stream = device.model.openStream(spec, device.label[0..device.label_len]) orelse return log.warn("id={d}: no free model stream; playing it unmodified", .{id});
     device.ready.store(true, .release);
     const gain = device.model.gain();
     if (spec.format == .other and gain != 0 and gain != 1 and !warned_unscaled) {
@@ -217,6 +229,7 @@ pub fn noteAudioQuit() void {
     for (&devices, joins) |*device, join| {
         if (join) finishRelease(device);
     }
+    audio_process.quit();
 }
 
 fn substitute(device: *Device, want: *const sdl.SDL_AudioSpec) sdl.SDL_AudioSpec {
@@ -283,7 +296,7 @@ fn finishOpen(device: *Device, id: sdl.SDL_AudioDeviceID, obtained: ?*sdl.SDL_Au
 pub export fn ks_SDL_OpenAudioDevice(name: ?[*:0]const u8, iscapture: c_int, desired: ?*const sdl.SDL_AudioSpec, obtained: ?*sdl.SDL_AudioSpec, allowed_changes: c_int) callconv(.c) sdl.SDL_AudioDeviceID {
     const want = desired orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     if (iscapture != 0 or opening) return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
-    const device = reserve(want) orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
+    const device = reserve(name, want) orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     if (device.model.pacing == .virtual_device) {
         // The virtual ID is the base plus the record's slot index.
         const id: sdl.SDL_AudioDeviceID = @intCast(virtual_id_base + (@intFromPtr(device) - @intFromPtr(&devices)) / @sizeOf(Device));
@@ -305,7 +318,7 @@ pub export fn ks_SDL_OpenAudioDevice(name: ?[*:0]const u8, iscapture: c_int, des
 pub export fn ks_SDL_OpenAudio(desired: ?*sdl.SDL_AudioSpec, obtained: ?*sdl.SDL_AudioSpec) callconv(.c) c_int {
     const want = desired orelse return real_sdl.SDL_OpenAudio(desired, obtained);
     if (opening) return real_sdl.SDL_OpenAudio(desired, obtained);
-    const device = reserve(want) orelse return real_sdl.SDL_OpenAudio(desired, obtained);
+    const device = reserve(null, want) orelse return real_sdl.SDL_OpenAudio(desired, obtained);
     if (device.model.pacing == .virtual_device) {
         if (findVirtual(legacy_device_id) != null) {
             release(device);

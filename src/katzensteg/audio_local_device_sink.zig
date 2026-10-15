@@ -19,14 +19,14 @@ fn play(_: ?*anyopaque, block: *const audio_model.Block, buffer: []u8, gain: f32
         .f32 => for (std.mem.bytesAsSlice(f32, buffer[0 .. buffer.len & ~@as(usize, 3)])) |*sample| {
             sample.* *= gain;
         },
-        .other => {},
+        .u8, .s32, .other => {},
     }
 }
 
 test "S16 and F32 scale, other formats play at unity, gain 0 is the silence byte" {
     const block = struct {
         fn of(format: audio_model.SampleFormat, silence: u8) audio_model.Block {
-            return .{ .stream = .{ .id = 0, .sequence = 1, .spec = .{ .format = format, .silence = silence, .frame_bytes = 4, .rate = 48000 } }, .bytes = &.{}, .time_ns = 0 };
+            return .{ .stream = .{ .id = 0, .sequence = 1, .spec = .{ .format = format, .silence = silence, .channels = 2, .frame_bytes = 4, .rate = 48000 } }, .bytes = &.{}, .time_ns = 0 };
         }
     }.of;
     var s16 align(2) = [_]u8{0} ** 4;

@@ -1,18 +1,22 @@
 //! Composes the process's audio model when the app opens its first device:
-//! the local device sink, the starting controls and, for tests, the tap file
-//! sink. Until command mode and the WM drive them, the controls come from
+//! the local device sink, the starting controls, and the published track with
+//! a Jackstay target or else, for tests, the tap file sink. Until command mode
+//! and the WM drive them, the controls come from
 //!   KATZENSTEG_AUDIO_VOLUME    0 to 1, or 0% to 100% (default 1)
 //!   KATZENSTEG_AUDIO_MUTE      1/true/on/yes starts muted
 //!   KATZENSTEG_AUDIO_TAP_FILE  base path for audio_tap_file_sink.zig
 //!   KATZENSTEG_AUDIO_DEVICE    `virtual`: nothing plays locally and the
 //!                              virtual paced device paces the app (the
 //!                              launcher sets it for a Jackstay target)
+//!   KATZENSTEG_PUBLISH         a Jackstay target: publish the playback track
+//!   KATZENSTEG_PUBLISH_AUDIO   `0` publishes video only
 
 const std = @import("std");
 const system_io = @import("platform");
 const audio_model = @import("audio_model.zig");
 const local_device_sink = @import("audio_local_device_sink.zig");
 const TapFileSink = @import("audio_tap_file_sink.zig").TapFileSink;
+const jackstay = @import("jackstay");
 
 const log = std.log.scoped(.audio);
 
@@ -37,13 +41,24 @@ pub fn model() *audio_model.Model {
         model_storage.pacing = .virtual_device;
         model_storage.route_local_device.store(false, .release);
     }
+    const publish = getenv("KATZENSTEG_PUBLISH") != null and !std.mem.eql(u8, getenv("KATZENSTEG_PUBLISH_AUDIO") orelse "", "0");
     const tap_path = getenv("KATZENSTEG_AUDIO_TAP_FILE") orelse "";
-    if (tap_path.len > 0) {
+    if (comptime jackstay.enabled) if (publish) {
+        model_storage.tap = @import("audio_published_track_sink.zig").sink;
+    };
+    if (model_storage.tap == null and tap_path.len > 0) {
         tap_file = .{ .base_path = tap_path };
         model_storage.tap = tap_file.sink();
     }
-    log.info("audio model: volume={d:.2} (KATZENSTEG_AUDIO_VOLUME={s}) muted={} pacing={s} tap_file={s}", .{ volume, volume_text orelse "", muted, @tagName(model_storage.pacing), tap_path });
+    log.info("audio model: volume={d:.2} (KATZENSTEG_AUDIO_VOLUME={s}) muted={} pacing={s} publish={} tap_file={s}", .{ volume, volume_text orelse "", muted, @tagName(model_storage.pacing), publish and jackstay.enabled, tap_path });
     return &model_storage;
+}
+
+/// After the app quits audio; a model never composed has nothing to tell.
+pub fn quit() void {
+    compose_mutex.lock();
+    defer compose_mutex.unlock();
+    if (composed) model_storage.quit();
 }
 
 fn getenv(name: [*:0]const u8) ?[]const u8 {

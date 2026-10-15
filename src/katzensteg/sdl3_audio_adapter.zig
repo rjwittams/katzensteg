@@ -90,7 +90,8 @@ fn reserve(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream, spec
         if (device.id != 0) continue;
         const model = audio_process.model();
         // The postmix buffer is always F32 at the device's channels and rate.
-        const stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 4 * @as(u32, @intCast(spec.channels)), .rate = @intCast(spec.freq) }) orelse break;
+        // Labelled "default": the adapter does not resolve SDL3 device names.
+        const stream = model.openStream(.{ .format = .f32, .silence = 0, .channels = @intCast(spec.channels), .frame_bytes = 4 * @as(u32, @intCast(spec.channels)), .rate = @intCast(spec.freq) }, "default") orelse break;
         device.* = .{ .id = id, .device_stream = device_stream, .model = model, .stream = stream };
         return device;
     }
@@ -122,6 +123,7 @@ pub fn noteAudioQuit() void {
     }
     var spec: sdl.SDL_AudioSpec = undefined;
     for (ids) |id| if (id != 0 and !real_sdl.SDL_GetAudioDeviceFormat(id, &spec, null)) release(id, null);
+    audio_process.quit();
 }
 
 // Wrappers.
@@ -172,9 +174,10 @@ const FakeTap = struct {
     samples: [4]f32 = undefined,
 
     fn sink(self: *FakeTap) audio_model.TapSink {
-        return .{ .context = self, .opened = ignore, .consume = consume, .closed = ignore };
+        return .{ .context = self, .opened = opened, .consume = consume, .closed = ignore };
     }
 
+    fn opened(_: *anyopaque, _: audio_model.StreamInfo, _: []const u8) void {}
     fn ignore(_: *anyopaque, _: audio_model.StreamInfo) void {}
 
     fn consume(context: *anyopaque, block: *const audio_model.Block) void {
@@ -204,7 +207,7 @@ test "the app's postmix runs first, the tap sees its output unscaled and the dev
     var tap: FakeTap = .{};
     var model: audio_model.Model = .{ .clock = .monotonic, .local = local_device_sink.sink, .tap = tap.sink() };
     model.setGain(0.5);
-    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 8, .rate = 48000 }).? };
+    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .channels = 2, .frame_bytes = 8, .rate = 48000 }, "default").? };
 
     var buffer: [4]f32 = .{ 0.1, 0.2, 0.3, 0.4 };
     testPostmix(&device, &buffer);

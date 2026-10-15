@@ -249,10 +249,10 @@ class CpuConnections(unittest.TestCase):
                 connection, server, affordances = C.c_void_p(), C.c_void_p(), C.c_void_p()
                 self.assertEqual(library.ft_local_connection_adopt(C.byref(fd), C.byref(connection)), 0)
                 class Track(C.Structure):  # ft_track_offer
-                    _fields_ = [("id", C.c_uint64), ("kind", C.c_char_p), ("label", C.c_char_p), ("descriptor", C.c_void_p), ("descriptor_len", C.c_size_t), ("direction", C.c_uint32), ("reserved", C.c_uint32)]
+                    _fields_ = [("id", C.c_uint64), ("kind", C.c_char_p), ("label", C.c_char_p), ("descriptor", C.c_void_p), ("descriptor_len", C.c_size_t), ("direction", C.c_uint32), ("reserved", C.c_uint32), ("audio", C.c_uint32 * 4)]
                 admission, count = (C.c_uint64 * 2)(), C.c_size_t()  # ft_track_admission {id, result, reserved}
                 # Offer video only, in host time (3), and admit the consumer's selection.
-                self.assertEqual(library.ft_handshake_accept_local(C.byref(connection), b"stalled", 3, C.byref(Track(id=1, kind=b"video", label=b"video")), C.c_size_t(1), None, admission, C.byref(count), C.byref(server), C.byref(affordances)), 0)
+                self.assertEqual(library.ft_handshake_accept_local(C.byref(connection), b"stalled", 3, C.byref(Track(id=1, kind=b"video", label=b"video")), C.c_size_t(1), None, C.c_size_t(0), None, admission, C.byref(count), C.byref(server), C.byref(affordances), None), 0)
                 self.assertEqual((count.value, admission[1] & 0xFFFFFFFF), (1, 0))
                 # The handshake is complete; deliberately stall cancellable CPU setup.
                 try:

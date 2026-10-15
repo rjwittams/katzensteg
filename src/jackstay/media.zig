@@ -17,7 +17,7 @@ pub const Image = struct {
 };
 
 pub fn checkAbi() !void {
-    if (c.FT_ABI_VERSION != 16 or c.ft_abi_version() != 16) return error.JackstayAbiMismatch;
+    if (c.FT_ABI_VERSION != 17 or c.ft_abi_version() != 17) return error.JackstayAbiMismatch;
 }
 
 /// An unconsumed Local Endpoint connection; null once a setup call consumed it.
