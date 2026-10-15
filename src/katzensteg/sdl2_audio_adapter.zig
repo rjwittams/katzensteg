@@ -40,6 +40,8 @@ const min_queue_bytes = 256 * 1024;
 
 const Device = struct {
     in_use: bool = false,
+    /// Detached for release: hidden from lookups while its thread is joined.
+    closing: bool = false,
     /// SDL's device ID once the real open returned; 0 before.
     id: sdl.SDL_AudioDeviceID = 0,
     app_callback: sdl.SDL_AudioCallback = null,
@@ -98,7 +100,7 @@ fn deviceCallback(userdata: ?*anyopaque, stream: ?[*]sdl.Uint8, len: c_int) call
 
 fn findLocked(id: sdl.SDL_AudioDeviceID) ?*Device {
     for (&devices) |*device| {
-        if (id != 0 and device.in_use and device.id == id) return device;
+        if (id != 0 and device.in_use and !device.closing and device.id == id) return device;
     }
     return null;
 }
@@ -139,11 +141,33 @@ fn attach(device: *Device, id: sdl.SDL_AudioDeviceID, used: *const sdl.SDL_Audio
     });
 }
 
-/// Frees a record and closes its stream; its callback can no longer run.
+/// First half of a release, under the table lock: hides the record from
+/// lookups and asks a virtual device's thread to stop. The slot stays in use,
+/// so it cannot be reused, until `finishRelease`. Returns whether a thread
+/// must be joined first, which the caller does after dropping the table lock:
+/// the app's callback may call a wrapper that takes it.
+fn detachLocked(device: *Device) bool {
+    const virtual = if (device.virtual) |*virtual| virtual else return false;
+    device.virtual_id.store(0, .release);
+    device.closing = true;
+    virtual.requestStop();
+    return true;
+}
+
+/// Joins a detached record's device thread, then frees the record. Takes the
+/// table lock itself.
+fn finishRelease(device: *Device) void {
+    device.virtual.?.join();
+    devices_mutex.lock();
+    defer devices_mutex.unlock();
+    releaseLocked(device);
+}
+
+/// Frees a record and closes its stream; its callback can no longer run (a
+/// virtual device's thread has been joined).
 fn releaseLocked(device: *Device) void {
     if (device.virtual) |*virtual| {
-        device.virtual_id.store(0, .release);
-        virtual.stop();
+        std.debug.assert(virtual.thread == null);
         std.heap.c_allocator.free(virtual.buffer);
     }
     if (device.ready.load(.acquire)) {
@@ -156,23 +180,42 @@ fn releaseLocked(device: *Device) void {
 
 fn release(device: *Device) void {
     devices_mutex.lock();
-    defer devices_mutex.unlock();
-    releaseLocked(device);
+    if (!detachLocked(device)) {
+        releaseLocked(device);
+        return devices_mutex.unlock();
+    }
+    devices_mutex.unlock();
+    finishRelease(device);
 }
 
 fn releaseId(id: sdl.SDL_AudioDeviceID) void {
     devices_mutex.lock();
-    defer devices_mutex.unlock();
-    if (findLocked(id)) |device| releaseLocked(device);
+    const device = findLocked(id) orelse return devices_mutex.unlock();
+    if (!detachLocked(device)) {
+        releaseLocked(device);
+        return devices_mutex.unlock();
+    }
+    devices_mutex.unlock();
+    finishRelease(device);
 }
 
 /// SDL closes every device at `SDL_Quit` and when the audio subsystem quits.
 /// Call after the real quit returns.
 pub fn noteAudioQuit() void {
-    devices_mutex.lock();
-    defer devices_mutex.unlock();
-    for (&devices) |*device| {
-        if (device.in_use and device.id != 0) releaseLocked(device);
+    // Pass 1, locked: release real devices and stop every virtual thread.
+    var joins: [devices.len]bool = @splat(false);
+    {
+        devices_mutex.lock();
+        defer devices_mutex.unlock();
+        for (&devices, &joins) |*device, *join| {
+            if (!device.in_use or device.closing or device.id == 0) continue;
+            join.* = detachLocked(device);
+            if (!join.*) releaseLocked(device);
+        }
+    }
+    // Pass 2, unlocked: join the virtual threads, then free their records.
+    for (&devices, joins) |*device, join| {
+        if (join) finishRelease(device);
     }
 }
 
@@ -242,6 +285,7 @@ pub export fn ks_SDL_OpenAudioDevice(name: ?[*:0]const u8, iscapture: c_int, des
     if (iscapture != 0 or opening) return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     const device = reserve(want) orelse return real_sdl.SDL_OpenAudioDevice(name, iscapture, desired, obtained, allowed_changes);
     if (device.model.pacing == .virtual_device) {
+        // The virtual ID is the base plus the record's slot index.
         const id: sdl.SDL_AudioDeviceID = @intCast(virtual_id_base + (@intFromPtr(device) - @intFromPtr(&devices)) / @sizeOf(Device));
         const spec = openVirtual(device, id, want) orelse {
             release(device);

@@ -16,11 +16,16 @@ const system_io = @import("platform");
 const audio_model = @import("audio_model.zig");
 
 pub const max_late_periods = 2;
+/// The longest single sleep, so a stop request is seen within this long even
+/// when a period is long or the device is paused.
+pub const max_sleep_ns = 5 * std.time.ns_per_ms;
 
 /// SDL's device lock is recursive: an app may nest it, or take it inside its
 /// own callback.
 pub const Lock = struct {
     mutex: system_io.Mutex = .{},
+    /// Monotonic suffices: only the owning thread ever stores its own ID, and
+    /// the mutex orders everything the lock protects.
     owner: std.atomic.Value(std.Thread.Id) = .init(0),
     depth: u32 = 0,
 
@@ -69,7 +74,19 @@ pub const VirtualDevice = struct {
 
     /// App thread: returns once no further block can render.
     pub fn stop(self: *VirtualDevice) void {
+        self.requestStop();
+        self.join();
+    }
+
+    /// App thread: asks the device thread to exit within `max_sleep_ns` or
+    /// one block. Safe under a lock the device thread never takes.
+    pub fn requestStop(self: *VirtualDevice) void {
         self.stopping.store(true, .release);
+    }
+
+    /// App thread, after `requestStop`: waits for the device thread to exit.
+    /// Call it without any lock the app's callback might take.
+    pub fn join(self: *VirtualDevice) void {
         if (self.thread) |thread| thread.join();
         self.thread = null;
     }
@@ -87,10 +104,10 @@ pub const VirtualDevice = struct {
     /// renders the block that is due.
     pub fn step(self: *VirtualDevice) void {
         const now = self.clock.now();
-        if (self.paused.load(.acquire)) return self.clock.sleepUntil(now + self.framesNs(self.samples));
+        if (self.paused.load(.acquire)) return self.clock.sleepUntil(now + @min(self.framesNs(self.samples), max_sleep_ns));
         if (self.restart.swap(false, .acq_rel)) self.rebase(now);
         const deadline = self.origin_ns + self.framesNs(self.frames);
-        if (now < deadline) return self.clock.sleepUntil(deadline);
+        if (now < deadline) return self.clock.sleepUntil(@min(deadline, now + max_sleep_ns));
         if (now - deadline > max_late_periods * self.framesNs(self.samples)) self.rebase(now);
         self.lock.lock();
         self.render(self.context, self.buffer, self.discontinuity);
