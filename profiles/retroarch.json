@@ -44,7 +44,7 @@
       "seed_files": [
         {
           "path": "/tmp/retroarch-sdl2.cfg",
-          "content": "video_driver = \"sdl2\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\n"
+          "content": "video_driver = \"sdl2\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\naudio_driver = \"sdl2\"\naudio_sync = \"true\"\naudio_latency = \"32\"\nvrr_runloop_enable = \"false\"\nvideo_frame_delay = \"0\"\nrun_ahead_enabled = \"false\"\n"
         }
       ]
     },
@@ -62,7 +62,7 @@
       "seed_files": [
         {
           "path": "/tmp/retroarch-sdl2-vulkan.cfg",
-          "content": "video_driver = \"vulkan\"\nvideo_context_driver = \"sdl_vk\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\nlog_verbosity = \"true\"\n"
+          "content": "video_driver = \"vulkan\"\nvideo_context_driver = \"sdl_vk\"\ninput_driver = \"sdl2\"\njoypad_driver = \"sdl2\"\npause_nonactive = \"false\"\nlog_verbosity = \"true\"\naudio_driver = \"sdl2\"\naudio_sync = \"true\"\naudio_latency = \"32\"\nvrr_runloop_enable = \"false\"\nvideo_frame_delay = \"0\"\nrun_ahead_enabled = \"false\"\n"
         }
       ]
     },

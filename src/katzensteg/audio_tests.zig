@@ -5,4 +5,5 @@ test {
     _ = @import("audio_local_device_sink.zig");
     _ = @import("audio_byte_queue.zig");
     _ = @import("audio_process.zig");
+    _ = @import("audio_virtual_device.zig");
 }

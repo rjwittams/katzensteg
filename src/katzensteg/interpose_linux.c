@@ -76,6 +76,14 @@ extern unsigned int ks_SDL_GetQueuedAudioSize(unsigned int);
 extern void ks_SDL_ClearQueuedAudio(unsigned int);
 extern void ks_SDL_CloseAudioDevice(unsigned int);
 extern void ks_SDL_CloseAudio(void);
+extern void ks_SDL_PauseAudioDevice(unsigned int, int);
+extern void ks_SDL_PauseAudio(int);
+extern int ks_SDL_GetAudioDeviceStatus(unsigned int);
+extern int ks_SDL_GetAudioStatus(void);
+extern void ks_SDL_LockAudioDevice(unsigned int);
+extern void ks_SDL_UnlockAudioDevice(unsigned int);
+extern void ks_SDL_LockAudio(void);
+extern void ks_SDL_UnlockAudio(void);
 extern void ks_katzensteg_shutdown(void);
 extern void *ks_dlopen(const char *, int);
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -154,6 +162,14 @@ unsigned int SDL_GetQueuedAudioSize(unsigned int dev) { return ks_SDL_GetQueuedA
 void SDL_ClearQueuedAudio(unsigned int dev) { ks_SDL_ClearQueuedAudio(dev); }
 void SDL_CloseAudioDevice(unsigned int dev) { ks_SDL_CloseAudioDevice(dev); }
 void SDL_CloseAudio(void) { ks_SDL_CloseAudio(); }
+void SDL_PauseAudioDevice(unsigned int dev, int pause_on) { ks_SDL_PauseAudioDevice(dev, pause_on); }
+void SDL_PauseAudio(int pause_on) { ks_SDL_PauseAudio(pause_on); }
+int SDL_GetAudioDeviceStatus(unsigned int dev) { return ks_SDL_GetAudioDeviceStatus(dev); }
+int SDL_GetAudioStatus(void) { return ks_SDL_GetAudioStatus(); }
+void SDL_LockAudioDevice(unsigned int dev) { ks_SDL_LockAudioDevice(dev); }
+void SDL_UnlockAudioDevice(unsigned int dev) { ks_SDL_UnlockAudioDevice(dev); }
+void SDL_LockAudio(void) { ks_SDL_LockAudio(); }
+void SDL_UnlockAudio(void) { ks_SDL_UnlockAudio(); }
 void *dlopen(const char *path, int mode) { return ks_dlopen(path, mode); }
 
 #endif

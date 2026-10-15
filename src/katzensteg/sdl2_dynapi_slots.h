@@ -79,6 +79,14 @@
 #define KS_SDL2_SLOT_SDL_ClearQueuedAudio 546
 #define KS_SDL2_SLOT_SDL_CloseAudioDevice 60
 #define KS_SDL2_SLOT_SDL_CloseAudio 59
+#define KS_SDL2_SLOT_SDL_PauseAudioDevice 48
+#define KS_SDL2_SLOT_SDL_PauseAudio 47
+#define KS_SDL2_SLOT_SDL_GetAudioDeviceStatus 46
+#define KS_SDL2_SLOT_SDL_GetAudioStatus 45
+#define KS_SDL2_SLOT_SDL_LockAudioDevice 56
+#define KS_SDL2_SLOT_SDL_UnlockAudioDevice 58
+#define KS_SDL2_SLOT_SDL_LockAudio 55
+#define KS_SDL2_SLOT_SDL_UnlockAudio 57
 #define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 86
 #elif defined(__linux__) /* linux */
@@ -158,6 +166,14 @@
 #define KS_SDL2_SLOT_SDL_ClearQueuedAudio 541
 #define KS_SDL2_SLOT_SDL_CloseAudioDevice 56
 #define KS_SDL2_SLOT_SDL_CloseAudio 55
+#define KS_SDL2_SLOT_SDL_PauseAudioDevice 44
+#define KS_SDL2_SLOT_SDL_PauseAudio 43
+#define KS_SDL2_SLOT_SDL_GetAudioDeviceStatus 42
+#define KS_SDL2_SLOT_SDL_GetAudioStatus 41
+#define KS_SDL2_SLOT_SDL_LockAudioDevice 52
+#define KS_SDL2_SLOT_SDL_UnlockAudioDevice 54
+#define KS_SDL2_SLOT_SDL_LockAudio 51
+#define KS_SDL2_SLOT_SDL_UnlockAudio 53
 #define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 82
 #elif defined(__APPLE__) /* macos */
@@ -237,6 +253,14 @@
 #define KS_SDL2_SLOT_SDL_ClearQueuedAudio 541
 #define KS_SDL2_SLOT_SDL_CloseAudioDevice 56
 #define KS_SDL2_SLOT_SDL_CloseAudio 55
+#define KS_SDL2_SLOT_SDL_PauseAudioDevice 44
+#define KS_SDL2_SLOT_SDL_PauseAudio 43
+#define KS_SDL2_SLOT_SDL_GetAudioDeviceStatus 42
+#define KS_SDL2_SLOT_SDL_GetAudioStatus 41
+#define KS_SDL2_SLOT_SDL_LockAudioDevice 52
+#define KS_SDL2_SLOT_SDL_UnlockAudioDevice 54
+#define KS_SDL2_SLOT_SDL_LockAudio 51
+#define KS_SDL2_SLOT_SDL_UnlockAudio 53
 #define KS_SDL2_SLOT_SDL_SetError 0
 #define KS_SDL2_SLOT_SDL_WaitEvent 82
 #else

@@ -145,6 +145,59 @@ class Sdl2AudioModelTests(unittest.TestCase):
                 self.assert_silent(path)
 
 
+# The virtual paced device sleeps to absolute deadlines on the monotonic
+# clock, so its blocks keep the nominal rate far tighter than SDL's drivers
+# (the dummy and disk drivers drift 0.7% to 4%).
+VIRTUAL_RATE_TOLERANCE = 0.002
+VIRTUAL_GAP_TOLERANCE = 0.02
+
+
+class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
+    """KATZENSTEG_AUDIO_DEVICE=virtual: nothing reaches SDL's (disk) device,
+    and the virtual paced device drains the app on Katzensteg's clock."""
+
+    def run_virtual(self, directory, profile):
+        self.run_profile(directory, profile, KATZENSTEG_AUDIO_DEVICE="virtual")
+        self.assertFalse((self.dir / "disk.raw").exists(), f"a real device was opened\n{self.context}")
+
+    def assert_exact_cadence(self, data, fmt, times, label):
+        period_ms = self.assert_cadence(data, fmt, times, label)
+        # The fitted block period is immune to the jitter of single wakeups.
+        slope_ms = statistics.linear_regression(range(len(times)), times).slope / 1e6
+        median = statistics.median((b - a) / 1e6 for a, b in zip(times, times[1:]))
+        summary = f"{label}: period {period_ms:.3f} ms, fitted {slope_ms:.4f} ms, median gap {median:.3f} ms\n{self.context}"
+        self.assertAlmostEqual(slope_ms / period_ms, 1.0, delta=VIRTUAL_RATE_TOLERANCE, msg=summary)
+        self.assertAlmostEqual(median / period_ms, 1.0, delta=VIRTUAL_GAP_TOLERANCE, msg=summary)
+        return period_ms
+
+    def test_tap_matches_tone_with_steady_cadence(self):
+        for profile in PROFILES:
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-virtual-") as directory:
+                self.run_virtual(directory, profile)
+                data, fmt, times = self.tap(1)
+                self.assert_tone(data, fmt, "tap", 1)
+                self.assert_exact_cadence(data, fmt, times, "tap")
+
+    def test_gain_zero_silences_the_device_but_not_the_tap(self):
+        self.skipTest("no local device plays")
+
+    def test_close_and_reopen_keeps_the_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="ks-audio-virtual-") as directory:
+            self.run_virtual(directory, REOPEN_PROFILE)
+            periods = []
+            for sequence in (1, 2):
+                data, fmt, times = self.tap(sequence)
+                self.assert_tone(data, fmt, f"tap {sequence}", 2)
+                periods.append(self.assert_exact_cadence(data, fmt, times, f"tap {sequence}"))
+            self.assertAlmostEqual(periods[0], 2 * periods[1], delta=0.01, msg=self.context)
+
+
+class Sdl2DynapiVirtualDeviceTests(Sdl2VirtualDeviceTests):
+    """The virtual device's open, pause and close through SDL_DYNAMIC_API."""
+
+    injection = "dynapi"
+
+
 class Sdl2DynapiAudioModelTests(Sdl2AudioModelTests):
     """The same wrappers through SDL_DYNAMIC_API; device-facing checks only."""
 

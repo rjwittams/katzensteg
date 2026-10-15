@@ -151,7 +151,10 @@ and checks that the tap is the tone and appears byte for byte in the disk
 output at unity gain, that `KATZENSTEG_AUDIO_VOLUME=0` silences the disk file
 but not the tap, that the tap's block times follow the device period, and
 that a close and reopen produces a second tapped stream. It repeats the
-gain-0 and reopen checks through `SDL_DYNAMIC_API`. To run it on sdl2-compat
+gain-0 and reopen checks through `SDL_DYNAMIC_API`. With
+`KATZENSTEG_AUDIO_DEVICE=virtual`, through preload and `SDL_DYNAMIC_API`, it
+checks that no disk file is written and that the tap's fitted block period is
+within 0.2% of nominal. To run it on sdl2-compat
 as well, point `KS_SDL2_COMPAT_LIBRARY_PATH` at sdl2-compat and its SDL3, for
 example the research build from `docs/research/sdl-audio-probes.md`:
 

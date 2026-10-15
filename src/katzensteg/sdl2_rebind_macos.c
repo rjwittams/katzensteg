@@ -76,6 +76,14 @@ KS_DECLARE_REPLACEMENT(SDL_GetQueuedAudioSize);
 KS_DECLARE_REPLACEMENT(SDL_ClearQueuedAudio);
 KS_DECLARE_REPLACEMENT(SDL_CloseAudioDevice);
 KS_DECLARE_REPLACEMENT(SDL_CloseAudio);
+KS_DECLARE_REPLACEMENT(SDL_PauseAudioDevice);
+KS_DECLARE_REPLACEMENT(SDL_PauseAudio);
+KS_DECLARE_REPLACEMENT(SDL_GetAudioDeviceStatus);
+KS_DECLARE_REPLACEMENT(SDL_GetAudioStatus);
+KS_DECLARE_REPLACEMENT(SDL_LockAudioDevice);
+KS_DECLARE_REPLACEMENT(SDL_UnlockAudioDevice);
+KS_DECLARE_REPLACEMENT(SDL_LockAudio);
+KS_DECLARE_REPLACEMENT(SDL_UnlockAudio);
 KS_DECLARE_CAPTURE(SDL_SetError);
 
 KS_DECLARE_CAPTURE(SDL_GetWindowID);
@@ -168,6 +176,14 @@ static const struct ks_darwin_rebinding sdl2_rebindings[] = {
     KS_REPLACE(SDL_ClearQueuedAudio),
     KS_REPLACE(SDL_CloseAudioDevice),
     KS_REPLACE(SDL_CloseAudio),
+    KS_REPLACE(SDL_PauseAudioDevice),
+    KS_REPLACE(SDL_PauseAudio),
+    KS_REPLACE(SDL_GetAudioDeviceStatus),
+    KS_REPLACE(SDL_GetAudioStatus),
+    KS_REPLACE(SDL_LockAudioDevice),
+    KS_REPLACE(SDL_UnlockAudioDevice),
+    KS_REPLACE(SDL_LockAudio),
+    KS_REPLACE(SDL_UnlockAudio),
     KS_CAPTURE(SDL_SetError),
     { "dlopen", (void *)ks_macos_dlopen, &ks_real_macos_slot_dlopen },
 };
