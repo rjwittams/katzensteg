@@ -136,6 +136,13 @@ pub const Model = struct {
         }
     }
 
+    /// The desktop WM's effective gain, with its mute and solo folded in. It
+    /// replaces the gain and clears mute, so the WM's policy is the only one.
+    pub fn applyPolicyGain(self: *Model, value: f32) void {
+        self.setGain(std.math.clamp(value, 0, 1));
+        self.muted.store(false, .release);
+    }
+
     pub fn volumePercent(self: *const Model) u8 {
         return @intFromFloat(@round(std.math.clamp(self.gain(), 0, 1) * 100));
     }
@@ -337,4 +344,17 @@ test "the control path steps volume by 10% within 0 to 100% and toggles mute" {
     try testing.expect(!model.muted.load(.acquire));
     model.closeStream(stream.id);
     try testing.expect(!model.playing());
+}
+
+test "the WM's policy gain replaces the gain and clears mute at the local sink" {
+    var clock: FakeClock = .{};
+    var local: RecordingLocalSink = .{};
+    var model: Model = .{ .clock = clock.clock(), .local = local.sink() };
+    var adapter = FakeAdapter.open(&model);
+    model.muted.store(true, .release);
+    model.applyPolicyGain(0.4);
+    _ = adapter.callback();
+    model.applyPolicyGain(0);
+    _ = adapter.callback();
+    try testing.expectEqualSlices(f32, &.{ 0.4, 0 }, local.gains[0..local.count]);
 }

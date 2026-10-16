@@ -3,6 +3,7 @@ const std = @import("std");
 const system_io = @import("platform");
 const xev = @import("xev");
 const producer_control = @import("wm/producer_control.zig");
+const wm_audio = @import("wm/audio.zig");
 const Producer = @import("wm/producer.zig").Producer;
 const Listener = @import("wm/listener.zig").Listener;
 const ClientChannel = @import("wm/client.zig").ClientChannel;
@@ -59,6 +60,7 @@ pub const EventKind = enum {
     connection_closed,
     parse_error,
     focus_changed,
+    audio,
 };
 
 pub const ProtocolEvent = struct {
@@ -243,6 +245,8 @@ pub const ChromeOptions = struct {
     outer: Rect,
     title: []const u8,
     focused: bool = true,
+    /// The speaker glyph, shown while the window's producer has audio open.
+    audio: ?wm_audio.Glyph = null,
     // When set, chrome writes outside the terminal viewport are clipped so a
     // window dragged off the edge doesn't wrap onto the wrong terminal row.
     terminal: ?TerminalSize = null,
@@ -279,6 +283,8 @@ pub const WmDesktopRedrawState = struct {
     cover_policy: cover.Policy = .{},
     menu: command_menu.Snapshot = .{},
     session_error: ?[]const u8 = null,
+    /// Only the focused window is audible; Ctrl-] `s` toggles it.
+    audio_solo: bool = true,
     previous_chrome: [default_wm_session_capacity]WmChromeSnapshot = undefined,
     previous_count: usize = 0,
 
@@ -504,6 +510,7 @@ const WmWindow = struct {
     stdout_poll_completion: xev.Completion = .{},
     wait_state: ChildWaitState = .{},
     state: ProducerSessionState = .launching,
+    audio: wm_audio.Window = .{},
 
     fn focusedContent(self: WmWindow) Rect {
         return contentRectForOuter(self.window.outer);
@@ -889,6 +896,7 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
     defer launch_prompt.deinit(allocator);
     while ((!shutdown_sent and keep_alive_when_empty) or !allSessionsDrained(sessions[0..initialized])) {
         syncInputFocus(sessions[0..initialized], if (command_input.armed or command_input.prompt or !command_input.terminal_focused) null else focused_index);
+        syncAudioGains(sessions[0..initialized], focused_index, redraw_state.audio_solo);
         armWmEventSources(&wm_events, &tty, sessions[0..initialized]);
         try wm_events.loop.run(.once);
         for (sessions[0..initialized]) |*session| {
@@ -1222,6 +1230,11 @@ fn runMultiProfile(io: std.Io, allocator: std.mem.Allocator, producer_exe: []con
                         };
                         if (applyWindowActionWithPresentation(&focused.window, action, terminal, presentation_status)) {
                             try sendViewportZOrderForSessions(sessions[0..initialized], z_order[0..initialized], terminal, .fit, &event_log, &logger);
+                            try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
+                        }
+                    },
+                    .audio => |command| {
+                        if (try applyAudioCommand(sessions[0..initialized], focused_index, &redraw_state, command, &event_log)) {
                             try redrawDesktopManyLocked(&tty_lock, writer, terminal, sessions[0..initialized], z_order[0..initialized], focused_index, &event_log, &redraw_state);
                         }
                     },
@@ -1838,10 +1851,20 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     try emitter.cell(writer, " ");
     const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
+    // The speaker glyph takes the last title cell, at `speakerCol`.
+    const text_space = if (options.audio != null and title_space >= 6) title_space - 2 else title_space;
     var written: usize = @min(3, title_space);
-    written += try emitter.bytes(writer, label_prefix, title_space -| written);
-    written += try emitter.bytes(writer, options.title, title_space -| written);
-    if (written < title_space) try emitter.repeat(writer, " ", title_space - written);
+    written += try emitter.bytes(writer, label_prefix, text_space -| written);
+    written += try emitter.bytes(writer, options.title, text_space -| written);
+    if (written < text_space) try emitter.repeat(writer, " ", text_space - written);
+    if (text_space < title_space) {
+        try emitter.cell(writer, " ");
+        try emitter.cell(writer, switch (options.audio.?) {
+            .normal => "♪",
+            .muted => "⊘",
+            .soloed_out => "◌",
+        });
+    }
     try emitter.cell(writer, text_box.vertical);
 
     // Separator row
@@ -1883,6 +1906,10 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     } else {
         try moveCursor(writer, @max(1, content.row), @max(1, content.col));
     }
+}
+
+fn speakerCol(outer: Rect) i32 {
+    return outer.col + outer.cols - 2;
 }
 
 const ChromeEmitter = struct {
@@ -2090,7 +2117,7 @@ fn applyPeerLine(allocator: std.mem.Allocator, writer: anytype, line: []const u8
             .placements = batch.groups.placements,
             .after = batch.groups.after,
         }),
-        .detached, .presentation_status, .observation => {},
+        .detached, .presentation_status, .observation, .audio => {},
     }
 }
 
@@ -2116,6 +2143,10 @@ fn applyPeerLineLocked(allocator: std.mem.Allocator, writer: anytype, tty_lock: 
                 producer.presentation_status = next_status;
                 if (redraw_requested) |flag| flag.store(true, .seq_cst);
             }
+        },
+        .audio => |report| if (session) |producer| {
+            producer.audio.reported(report.open, report.volume, report.muted);
+            if (redraw_requested) |flag| flag.store(true, .seq_cst);
         },
         .detached, .observation => {},
     }
@@ -2373,6 +2404,33 @@ fn syncInputFocus(sessions: []WmWindow, focused: ?usize) void {
     }
 }
 
+/// Sends each producer with audio open the gain the WM's policy resolves for it.
+fn syncAudioGains(sessions: []WmWindow, focused: usize, solo: bool) void {
+    for (sessions, 0..) |*session, i| {
+        if (!session.audio.open or session.producer.channel.controlFile() == null) continue;
+        const gain = session.audio.gain(i == focused, solo);
+        if (session.audio.sent) |sent| if (sent == gain) continue;
+        producer_control.writeAudioControl(session.producer.channel.writer(), gain) catch continue;
+        session.audio.sent = gain;
+    }
+}
+
+/// Applies an audio command: solo for the desktop, the rest to the focused
+/// window while it has audio open. Records the status-row detail.
+fn applyAudioCommand(sessions: []WmWindow, focused: usize, redraw_state: *WmDesktopRedrawState, command: command_binding.Command, events: *ProtocolEventLog) !bool {
+    var detail: [32]u8 = undefined;
+    if (command == .solo) {
+        redraw_state.audio_solo = !redraw_state.audio_solo;
+        try events.record(.audio, if (redraw_state.audio_solo) "Solo on" else "Solo off");
+        return true;
+    }
+    if (focused >= sessions.len or !sessions[focused].audio.open) return false;
+    const audio = &sessions[focused].audio;
+    if (command == .mute) audio.muted = !audio.muted else audio.step(command == .volume_up);
+    try events.record(.audio, try std.fmt.bufPrint(&detail, "Vol {d}%{s}", .{ audio.percent(), if (audio.muted) " muted" else "" }));
+    return true;
+}
+
 fn forwardInputToSession(session: *WmWindow, bytes: []const u8, terminal: TerminalSize, keyboard_flags: u32, events: *ProtocolEventLog, logger: *Logger) !void {
     if (session.content == .session) {
         if (!sessionIsVisible(session)) return;
@@ -2573,6 +2631,7 @@ const InputAction = union(enum) {
     window: WindowAction,
     layout: LayoutAction,
     mouse_drag: Rect,
+    audio: command_binding.Command,
 };
 
 const InputRead = struct {
@@ -2598,6 +2657,10 @@ fn readInputForSessionsBytes(bytes: []u8, mouse: *WmMouseInputState, sessions: [
                         bringWindowToFront(z_order, hit_index);
                         mouse.* = .{};
                         changed_focus = true;
+                    }
+                    const outer = sessions[hit_index].window.outer;
+                    if (sessions[hit_index].audio.open and outer.cols >= 8 and cell.row == outer.row + 1 and cell.col == speakerCol(outer)) {
+                        return .{ .action = .{ .audio = .mute }, .focus_changed = changed_focus };
                     }
                 }
             }
@@ -2635,6 +2698,7 @@ fn desktopCommandAction(action: command_binding.Command) InputAction {
         .resize_wider => .{ .window = .resize_wider },
         .cascade => .{ .layout = .cascade },
         .tile => .{ .layout = .tile },
+        .mute, .volume_up, .volume_down, .solo => .{ .audio = action },
         else => .consume,
     };
 }
@@ -2888,6 +2952,7 @@ fn renderDesktopMany(writer: anytype, terminal: TerminalSize, sessions: []const 
             .outer = session.window.outer,
             .title = title,
             .focused = session_index == focused_index,
+            .audio = if (session.audio.open) session.audio.glyph(session_index == focused_index, redraw_state.audio_solo) else null,
             .terminal = windowAreaForTerminal(terminal),
         });
     }
@@ -5197,4 +5262,88 @@ test "WM root status bytes" {
     try program_status.write(&out.writer, .{ .state = .clear });
     try std.testing.expectEqualStrings("\x1b]7501;state=idle:app=katzensteg:title=a2F0emVuc3RlZw==\x1b\\" ++
         "\x1b]7501;state=clear:app=katzensteg\x1b\\", out.written());
+}
+
+fn expectAudioSent(session: *WmWindow, read_end: system_io.fs.File, expected: []const u8) !void {
+    try session.producer.channel.flushControl();
+    var buf: [256]u8 = undefined;
+    const n = read_end.read(&buf) catch |err| switch (err) {
+        error.WouldBlock => 0,
+        else => return err,
+    };
+    try std.testing.expectEqualStrings(expected, buf[0..n]);
+}
+
+test "WM audio policy sends each producer its effective gain" {
+    const io = std.testing.io;
+    var sessions: [2]WmWindow = undefined;
+    var reads: [2]system_io.fs.File = undefined;
+    for (&sessions, &reads, [_][]const u8{ "{\"type\":\"audio\",\"open\":true,\"volume\":0.5,\"muted\":false}", "{\"type\":\"audio\",\"open\":true,\"volume\":1}" }) |*session, *read_end, report| {
+        const pipe = try system_io.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        read_end.* = .{ .io = io, .handle = pipe[0] };
+        session.* = .{
+            .profile_name = "game",
+            .window = WmWindowState.init("main", .{ .row = 1, .col = 1, .rows = 10, .cols = 30 }),
+            .upload = .{ .profile = .direct_apc },
+            .producer = .{ .channel = .{ .stdio = .{ .control = .{ .io = io, .handle = pipe[1] }, .allocator = std.testing.allocator } } },
+        };
+        var discard = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer discard.deinit();
+        var tty_lock = system_io.Mutex{};
+        try applyPeerLineLocked(std.testing.allocator, &discard.writer, &tty_lock, session, null, report);
+    }
+    defer for (&sessions, &reads) |*session, read_end| {
+        session.producer.channel.deinit();
+        read_end.close();
+    };
+    var log = try ProtocolEventLog.init(std.testing.allocator, 4);
+    defer log.deinit();
+    var state = WmDesktopRedrawState{};
+
+    // Solo by default: only the focused window is audible.
+    syncAudioGains(&sessions, 0, state.audio_solo);
+    try expectAudioSent(&sessions[0], reads[0], "{\"type\":\"audio\",\"gain\":0.5}\n");
+    try expectAudioSent(&sessions[1], reads[1], "{\"type\":\"audio\",\"gain\":0}\n");
+    // Focus moves the solo.
+    syncAudioGains(&sessions, 1, state.audio_solo);
+    try expectAudioSent(&sessions[0], reads[0], "{\"type\":\"audio\",\"gain\":0}\n");
+    try expectAudioSent(&sessions[1], reads[1], "{\"type\":\"audio\",\"gain\":1}\n");
+    // Solo off: every window plays at its own volume; unchanged gains are not resent.
+    try std.testing.expect(try applyAudioCommand(&sessions, 1, &state, .solo, &log));
+    syncAudioGains(&sessions, 1, state.audio_solo);
+    try expectAudioSent(&sessions[0], reads[0], "{\"type\":\"audio\",\"gain\":0.5}\n");
+    try expectAudioSent(&sessions[1], reads[1], "");
+    // Mute and volume act on the focused window only.
+    try std.testing.expect(try applyAudioCommand(&sessions, 1, &state, .mute, &log));
+    try std.testing.expectEqualStrings("Vol 100% muted", log.last().?.detail);
+    syncAudioGains(&sessions, 1, state.audio_solo);
+    try expectAudioSent(&sessions[1], reads[1], "{\"type\":\"audio\",\"gain\":0}\n");
+    try std.testing.expect(try applyAudioCommand(&sessions, 1, &state, .mute, &log));
+    try std.testing.expect(try applyAudioCommand(&sessions, 1, &state, .volume_down, &log));
+    try std.testing.expectEqualStrings("Vol 90%", log.last().?.detail);
+    syncAudioGains(&sessions, 1, state.audio_solo);
+    try expectAudioSent(&sessions[0], reads[0], "");
+    try expectAudioSent(&sessions[1], reads[1], "{\"type\":\"audio\",\"gain\":0.9}\n");
+    // A window without audio open ignores the keys and gets no gain.
+    sessions[1].audio.open = false;
+    try std.testing.expect(!try applyAudioCommand(&sessions, 1, &state, .volume_up, &log));
+}
+
+test "WM chrome shows the speaker glyph only for windows with audio open" {
+    var bytes = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bytes.deinit();
+    const outer = Rect{ .row = 1, .col = 1, .rows = 8, .cols = 30 };
+    try renderChrome(&bytes.writer, .{ .outer = outer, .title = "game", .audio = .soloed_out });
+    try std.testing.expect(std.mem.indexOf(u8, bytes.written(), "◌│") != null);
+    bytes.clearRetainingCapacity();
+    try renderChrome(&bytes.writer, .{ .outer = outer, .title = "game" });
+    try std.testing.expect(std.mem.indexOf(u8, bytes.written(), "◌") == null);
+
+    var sessions = [_]WmWindow{.{ .profile_name = "game", .window = WmWindowState.init("main", outer), .upload = .{ .profile = .direct_apc }, .state = .running, .presentation_status = .{ .ready_to_show = true }, .audio = .{ .open = true }, .producer = .{ .child = system_io.process.Child.init(std.testing.io, &.{"true"}, std.testing.allocator) } }};
+    var z_order = [_]usize{0};
+    var focused: usize = 0;
+    var mouse = WmMouseInputState{};
+    var click = "\x1b[<0;29;2M".*;
+    const read = readInputForSessionsBytes(&click, &mouse, &sessions, &z_order, &focused, .{ .rows = 24, .cols = 80 });
+    try std.testing.expectEqual(InputAction{ .audio = .mute }, read.action);
 }

@@ -466,7 +466,7 @@ const Host = struct {
                         session.wrote_terminal = true;
                     }
                 },
-                .detached => {},
+                .detached, .audio => {},
             }
         }
     }

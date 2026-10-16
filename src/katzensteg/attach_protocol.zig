@@ -62,15 +62,18 @@ pub const Observation = struct {
     failed: bool = false,
 };
 
+pub const Audio = struct { open: bool, volume: f32 = 1, muted: bool = false };
+
 pub const PeerMessage = union(enum) {
     observation: Observation,
     frame_batch: FrameBatch,
     detached: Detached,
     presentation_status: PresentationStatus,
+    audio: Audio,
 
     pub fn deinit(self: *PeerMessage, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .observation => {},
+            .observation, .audio => {},
             .frame_batch => |*batch| batch.deinit(allocator),
             .detached => |*detached| detached.deinit(allocator),
             .presentation_status => |*status| status.deinit(allocator),
@@ -102,6 +105,12 @@ pub fn parsePeerMessage(allocator: std.mem.Allocator, line: []const u8) !PeerMes
         const r = reply.value;
         if (r.@"error" == null and (r.width <= 0 or r.height <= 0 or r.frame_id == 0)) return error.InvalidMessage;
         return .{ .observation = .{ .request_id = r.request_id, .width = r.width, .height = r.height, .frame_id = r.frame_id, .timestamp_ms = r.timestamp_ms, .failed = r.@"error" != null } };
+    }
+
+    if (std.mem.eql(u8, type_value.string, "audio")) {
+        const reply = try std.json.parseFromSlice(Audio, allocator, line, .{ .ignore_unknown_fields = true });
+        defer reply.deinit();
+        return .{ .audio = reply.value };
     }
 
     const window_value = root.get("window_id") orelse return error.InvalidMessage;
@@ -254,4 +263,17 @@ test "observation-only capability survives the producer protocol" {
     var message = try parsePeerMessage(std.testing.allocator, out.written());
     defer message.deinit(std.testing.allocator);
     try std.testing.expect(!message.presentation_status.input_supported);
+}
+
+test "the producer's audio report and the WM's gain round-trip" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try render_batch_protocol.writeAudioStatusJsonl(&out.writer, true, 0.5, true);
+    var message = try parsePeerMessage(std.testing.allocator, out.written());
+    defer message.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Audio{ .open = true, .volume = 0.5, .muted = true }, message.audio);
+
+    var control = try render_batch_protocol.parseControlMessage(std.testing.allocator, "{\"type\":\"audio\",\"gain\":0.4}");
+    defer render_batch_protocol.deinitControlMessage(std.testing.allocator, &control);
+    try std.testing.expectEqual(@as(f32, 0.4), control.audio);
 }

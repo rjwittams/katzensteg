@@ -143,6 +143,7 @@ pub const Runtime = struct {
     // app-side SDL input queries wait behind presentation/reproject work.
     input_mutex: system_io.Mutex = .{},
     batch_presentation_reset_pending: bool = false,
+    batch_audio_open: bool = false,
     last_batch_presentation_status: ?render_batch_protocol.PresentationStatusView = null,
     frame_builder: FrameBuilder,
     cursor_state: cursor_mod.State,
@@ -1180,6 +1181,7 @@ pub const Runtime = struct {
 
     fn pollBatchControlLocked(self: *Runtime) void {
         const file = &(self.batch_control orelse return);
+        self.reportBatchAudio();
         var buf: [1024]u8 = undefined;
         while (true) {
             const n = file.read(&buf) catch |err| switch (err) {
@@ -1206,6 +1208,18 @@ pub const Runtime = struct {
             }
             if (n < buf.len) return;
         }
+    }
+
+    /// Tells the WM when the app's audio opens or closes. The WM answers with
+    /// its effective gain, which `.audio` applies through the audio model.
+    fn reportBatchAudio(self: *Runtime) void {
+        const model = audio_process.controls();
+        const open = model.playing();
+        if (open == self.batch_audio_open) return;
+        const writer = self.batch_writer orelse return;
+        var output_writer = writer.writerStreaming(&.{});
+        render_batch_protocol.writeAudioStatusJsonl(&output_writer.interface, open, model.gain(), model.muted.load(.acquire)) catch return;
+        self.batch_audio_open = open;
     }
 
     fn processBatchControlLine(self: *Runtime, line: []const u8) void {
@@ -1411,6 +1425,7 @@ pub const Runtime = struct {
                 self.placeholder_scene.valid = false;
                 self.detachBatchWindow(sink, "main");
             },
+            .audio => |gain| audio_process.controls().applyPolicyGain(gain),
             .shutdown => {
                 self.input_mutex.lock();
                 if (self.input_parser) |*model| model.requestQuit() catch {};
@@ -2586,6 +2601,40 @@ test "batch input poll drains control pipe before SDL event reads" {
     runtime.pollBatchControl();
     try std.testing.expectEqual(@as(usize, 1), runtime.input_parser.?.pendingCount());
 }
+test "a WM producer reports audio open and closed and applies the WM's gain through the model" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var runtime = Runtime.initShutdownStub();
+    defer runtime.deinit();
+    const control = try system_io.posix.pipe();
+    runtime.batch_control = .{ .io = io, .handle = control[0] };
+    setNonblocking(control[0]);
+    const control_writer = system_io.fs.File{ .io = io, .handle = control[1] };
+    defer control_writer.close();
+    const output = try system_io.posix.pipe();
+    defer system_io.posix.close(output[0]);
+    runtime.batch_writer = .{ .io = io, .handle = output[1] };
+    runtime.batch_sink = RenderBatchSink.init(io, runtime.allocator, "main");
+
+    const model = audio_process.controls();
+    defer model.setGain(1);
+    const stream = model.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).?;
+    model.setGain(0.5);
+    model.muted.store(true, .release);
+    runtime.pollBatchControl();
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("{\"type\":\"audio\",\"open\":true,\"volume\":0.5,\"muted\":true}\n", buf[0..try system_io.posix.read(output[0], &buf)]);
+
+    try control_writer.writeAll("{\"type\":\"audio\",\"gain\":0.3}\n");
+    runtime.pollBatchControl();
+    try std.testing.expectEqual(@as(f32, 0.3), model.gain());
+    try std.testing.expect(!model.muted.load(.acquire));
+
+    model.closeStream(stream.id);
+    runtime.pollBatchControl();
+    try std.testing.expectEqualStrings("{\"type\":\"audio\",\"open\":false,\"volume\":0.3,\"muted\":false}\n", buf[0..try system_io.posix.read(output[0], &buf)]);
+}
+
 fn buildInputTarget(tty: *const DirectTty, w: i32, h: i32, layout: presentation_layout_mod.PresentationLayout) input_mod.Target {
     return .{
         .cols = tty.cols,
