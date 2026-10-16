@@ -2618,7 +2618,7 @@ test "a WM producer reports audio open and closed and applies the WM's gain thro
 
     const model = audio_process.controls();
     defer model.setGain(1);
-    const stream = model.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).?;
+    const stream = model.openStream(.{ .format = .s16, .silence = 0, .channels = 2, .frame_bytes = 4, .rate = 48000 }, "default").?;
     model.setGain(0.5);
     model.muted.store(true, .release);
     runtime.pollBatchControl();
