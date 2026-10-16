@@ -190,7 +190,7 @@ fn startVirtual(device: *Device, sample_frames: u32) void {
         device.virtual = null;
         return;
     };
-    _ = real_sdl.SDL_PauseAudioDevice(device.id);
+    if (!real_sdl.SDL_PauseAudioDevice(device.id)) log.warn("id={d}: SDL_PauseAudioDevice failed: {s}; SDL's device may run alongside the virtual one", .{ device.id, std.mem.span(real_sdl.SDL_GetError()) });
     if (device.device_stream == null) device.virtual.?.pause(false);
 }
 
@@ -268,7 +268,8 @@ pub export fn ks_SDL_SetAudioPostmixCallback(devid: sdl.SDL_AudioDeviceID, callb
     } orelse return real_sdl.SDL_SetAudioPostmixCallback(devid, callback, userdata);
     // Reinstalling takes SDL's device lock, so once it returns no postmix
     // still reads the previous slot and the next set may overwrite it. A
-    // virtual device reads it under its own lock.
+    // virtual device reads it under its own lock: taking and releasing that
+    // lock waits for any in-progress render still reading the previous slot.
     if (device.virtual) |*virtual| {
         virtual.lock.lock();
         virtual.lock.unlock();
@@ -330,10 +331,12 @@ pub export fn ks_SDL_BindAudioStreams(devid: sdl.SDL_AudioDeviceID, streams: ?[*
     const count: usize = @intCast(@max(num_streams, 0));
     if (device.bound_len + count > max_bound_streams) return real_sdl.SDL_SetError("Katzensteg's virtual audio device takes at most 64 streams");
     if (!real_sdl.SDL_BindAudioStreams(devid, streams, num_streams)) return false;
-    for (streams.?[0..count]) |stream| {
+    // SDL accepted the call, so every listed stream is non-null; a NULL
+    // list with no streams is a successful no-op.
+    if (streams) |list| for (list[0..count]) |stream| {
         device.bound[device.bound_len] = stream.?;
         device.bound_len += 1;
-    }
+    };
     return true;
 }
 
