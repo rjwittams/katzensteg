@@ -143,3 +143,7 @@ pub fn writeInputControl(writer: anytype, bytes: []const u8) !void {
 pub fn writeShutdownControl(writer: anytype) !void {
     try writer.writeAll("{\"type\":\"shutdown\"}\n");
 }
+
+pub fn writeAudioControl(writer: anytype, gain: f32) !void {
+    try writer.print("{{\"type\":\"audio\",\"gain\":{d}}}\n", .{gain});
+}

@@ -223,6 +223,8 @@ pub const ControlMessage = union(enum) {
     shutdown,
     discard_batch: u64,
     observe: ObserveMessage,
+    /// The desktop WM's effective gain for the producer's audio, 0 to 1.
+    audio: f32,
 };
 
 pub const ParseError = error{
@@ -248,6 +250,12 @@ pub fn writeDetachedJsonl(writer: anytype, window_id: []const u8) !void {
     try writer.writeAll("{\"type\":\"detached\",\"window_id\":");
     try writeJsonString(writer, window_id);
     try writer.writeAll("}\n");
+}
+
+/// The producer's audio report to the WM: a playback device opened or the
+/// last one closed, with the model's volume and mute when it opened.
+pub fn writeAudioStatusJsonl(writer: anytype, open: bool, volume: f32, muted: bool) !void {
+    try writer.print("{{\"type\":\"audio\",\"open\":{},\"volume\":{d},\"muted\":{}}}\n", .{ open, volume, muted });
 }
 
 pub fn writePresentationStatusJsonl(writer: anytype, status: PresentationStatusView) !void {
@@ -318,6 +326,9 @@ pub fn parseControlMessage(allocator: std.mem.Allocator, bytes: []const u8) !Con
 
     if (std.mem.eql(u8, type_value.string, "shutdown")) {
         return .shutdown;
+    }
+    if (std.mem.eql(u8, type_value.string, "audio")) {
+        return .{ .audio = @floatCast(std.math.clamp(try jsonF64(root.get("gain") orelse return error.InvalidMessage), 0, 1)) };
     }
 
     const window_value = root.get("window_id") orelse return error.InvalidMessage;
@@ -497,7 +508,7 @@ pub fn deinitControlMessage(allocator: std.mem.Allocator, control: *ControlMessa
         },
         .observe => |observe| allocator.free(observe.path),
         .detach => {},
-        .shutdown, .discard_batch => {},
+        .shutdown, .discard_batch, .audio => {},
     }
 }
 
