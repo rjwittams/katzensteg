@@ -99,15 +99,17 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   reopen is a new stream with the next sequence number), the gain, the mute
   and the routing (two booleans: local device and tap). It has no SDL or
   Jackstay types. All controls are atomics read at the start of each block, so
-  a change applies at a block boundary. Blocks carry the model's injected clock
-  (host monotonic time in production).
+  a change applies at a block boundary. Blocks carry the time their first
+  sample plays: the virtual device's deadline, otherwise the model's injected
+  clock (host monotonic time in production).
 - **Sinks.** The tap sees each block unscaled; then the local device sink
   (`audio_local_device_sink.zig`) scales the device's own buffer in place.
   Gain and mute reach only the local device sink, and mute is gain 0, never a
   pause. Gain scales S16 and F32; other formats play at unity gain (logged
-  once), and gain 0 writes every format's silence byte. The tap is where the
-  published track will attach; today only the diagnostic tap file sink
-  (`audio_tap_file_sink.zig`) uses it.
+  once), and gain 0 writes every format's silence byte. With a Jackstay target
+  the tap is the published track (`audio_published_track_sink.zig`, see
+  `docs/jackstay.md`); otherwise the diagnostic tap file sink
+  (`audio_tap_file_sink.zig`) can use it.
 - **Pacing.** Exactly one pacer, fixed when the model is composed. By default
   the app's real device paces it. With `KATZENSTEG_AUDIO_DEVICE=virtual`
   (the launcher sets it, with SDL2's `SDL_AUDIODRIVER=dummy` and SDL3's

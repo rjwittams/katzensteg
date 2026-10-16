@@ -161,24 +161,33 @@ fn attach(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream) void 
         return log.warn("id={d} channels={d} freq={d}: unexpected device format; playing it unmodified", .{ id, spec.channels, spec.freq });
     }
     const device = reserve(id, device_stream, &spec) orelse return;
+    // A virtual device paces the app, so SDL's own device must never run our
+    // postmix: pause it before installing the postmix, not after.
+    const virtual = device.model.pacing == .virtual_device;
+    if (virtual and !real_sdl.SDL_PauseAudioDevice(id)) log.warn("id={d}: SDL_PauseAudioDevice failed: {s}; SDL's device may run alongside the virtual one", .{ id, std.mem.span(real_sdl.SDL_GetError()) });
     if (!real_sdl.SDL_SetAudioPostmixCallback(id, postmix, device)) {
         log.warn("id={d}: SDL_SetAudioPostmixCallback failed: {s}; playing it unmodified", .{ id, std.mem.span(real_sdl.SDL_GetError()) });
+        if (virtual) resumeReal(device);
         return release(id, null);
     }
     // Our postmix also keeps SDL off its single-stream fast path, so every
     // bound stream outputs F32 at the device's channels and rate.
-    if (device.model.pacing == .virtual_device) startVirtual(device, @intCast(@max(sample_frames, 1)));
+    if (virtual) startVirtual(device, @intCast(@max(sample_frames, 1)));
     log.info("opened id={d} mode={s} freq={d} channels={d} sequence={d} virtual={}", .{
         id, if (device_stream != null) "devstream" else "device", spec.freq, spec.channels, device.stream.sequence, device.virtual != null,
     });
 }
 
-/// Pauses SDL's device and pulls its streams on a virtual device instead,
-/// which starts paused for a device stream and playing otherwise, as SDL
-/// does. On failure SDL's device keeps pacing.
+/// Pulls the streams of SDL's (already paused) device on a virtual device
+/// instead, which starts paused for a device stream and playing otherwise, as
+/// SDL does. On failure SDL's device is resumed and keeps pacing.
 fn startVirtual(device: *Device, sample_frames: u32) void {
     const f32_per_block = sample_frames * device.stream.spec.frame_bytes / 4;
-    device.scratch = std.heap.c_allocator.alloc(f32, 2 * f32_per_block) catch return log.warn("id={d}: out of memory for the virtual device", .{device.id});
+    device.scratch = std.heap.c_allocator.alloc(f32, 2 * f32_per_block) catch {
+        log.warn("id={d}: out of memory for the virtual device", .{device.id});
+        resumeReal(device);
+        return;
+    };
     device.virtual = .{ .clock = device.model.clock, .rate = device.stream.spec.rate, .samples = sample_frames, .buffer = std.mem.sliceAsBytes(device.scratch[0..f32_per_block]), .context = device, .render = render };
     if (device.device_stream) |stream| {
         device.bound[0] = stream;
@@ -188,10 +197,16 @@ fn startVirtual(device: *Device, sample_frames: u32) void {
         log.warn("id={d}: could not start the virtual device", .{device.id});
         std.heap.c_allocator.free(device.scratch);
         device.virtual = null;
+        resumeReal(device);
         return;
     };
-    if (!real_sdl.SDL_PauseAudioDevice(device.id)) log.warn("id={d}: SDL_PauseAudioDevice failed: {s}; SDL's device may run alongside the virtual one", .{ device.id, std.mem.span(real_sdl.SDL_GetError()) });
     if (device.device_stream == null) device.virtual.?.pause(false);
+}
+
+/// After a failed start: SDL's device paces again, unless it is a device
+/// stream's, which SDL opens paused for the app to resume.
+fn resumeReal(device: *Device) void {
+    if (device.device_stream == null) _ = real_sdl.SDL_ResumeAudioDevice(device.id);
 }
 
 fn reserve(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream, spec: *const sdl.SDL_AudioSpec) ?*Device {
@@ -201,7 +216,8 @@ fn reserve(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream, spec
         if (device.id != 0) continue;
         const model = audio_process.model();
         // The postmix buffer is always F32 at the device's channels and rate.
-        const stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 4 * @as(u32, @intCast(spec.channels)), .rate = @intCast(spec.freq) }) orelse break;
+        // Labelled "default": the adapter does not resolve SDL3 device names.
+        const stream = model.openStream(.{ .format = .f32, .silence = 0, .channels = @intCast(spec.channels), .frame_bytes = 4 * @as(u32, @intCast(spec.channels)), .rate = @intCast(spec.freq) }, "default") orelse break;
         device.* = .{ .id = id, .device_stream = device_stream, .model = model, .stream = stream };
         return device;
     }
@@ -240,6 +256,7 @@ pub fn noteAudioQuit() void {
     }
     var spec: sdl.SDL_AudioSpec = undefined;
     for (ids) |id| if (id != 0 and !real_sdl.SDL_GetAudioDeviceFormat(id, &spec, null)) release(id, null);
+    audio_process.quit();
 }
 
 // Wrappers.
@@ -366,9 +383,10 @@ const FakeTap = struct {
     discontinuity: bool = false,
 
     fn sink(self: *FakeTap) audio_model.TapSink {
-        return .{ .context = self, .opened = ignore, .consume = consume, .closed = ignore };
+        return .{ .context = self, .opened = opened, .consume = consume, .closed = ignore };
     }
 
+    fn opened(_: *anyopaque, _: audio_model.StreamInfo, _: []const u8) void {}
     fn ignore(_: *anyopaque, _: audio_model.StreamInfo) void {}
 
     fn consume(context: *anyopaque, block: *const audio_model.Block) void {
@@ -401,7 +419,7 @@ test "the app's postmix runs first, the tap sees its output unscaled and the dev
     var tap: FakeTap = .{};
     var model: audio_model.Model = .{ .clock = .monotonic, .local = local_device_sink.sink, .tap = tap.sink() };
     model.setGain(0.5);
-    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 8, .rate = 48000 }).? };
+    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .channels = 2, .frame_bytes = 8, .rate = 48000 }, "default").? };
 
     var buffer: [4]f32 = .{ 0.1, 0.2, 0.3, 0.4 };
     testPostmix(&device, &buffer);
@@ -437,7 +455,7 @@ test "the virtual device mixes its bound SDL streams on its own deadlines" {
     try testing.expect(sdl.SDL_PutAudioStreamData(streams[1], &[4]f32{ 0.25, 0.25, 0.25, 0.25 }, 16));
 
     var scratch: [8]f32 = undefined;
-    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .frame_bytes = 8, .rate = 48000 }).?, .scratch = &scratch, .bound_len = 2 };
+    var device: Device = .{ .id = 2, .model = &model, .stream = model.openStream(.{ .format = .f32, .silence = 0, .channels = 2, .frame_bytes = 8, .rate = 48000 }, "default").?, .scratch = &scratch, .bound_len = 2 };
     device.bound[0..2].* = streams;
     device.virtual = .{ .clock = model.clock, .rate = 48000, .samples = 2, .buffer = std.mem.sliceAsBytes(scratch[0..4]), .context = &device, .render = render };
     var app: AppEffect = .{ .offset = 0 };

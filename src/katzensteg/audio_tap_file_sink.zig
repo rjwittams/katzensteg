@@ -27,7 +27,7 @@ pub const TapFileSink = struct {
         return .{ .context = self, .opened = opened, .consume = consume, .closed = closed };
     }
 
-    fn opened(context: *anyopaque, stream: audio_model.StreamInfo) void {
+    fn opened(context: *anyopaque, stream: audio_model.StreamInfo, _: []const u8) void {
         const self: *TapFileSink = @ptrCast(@alignCast(context));
         self.captures[stream.id] = .{
             .bytes = allocator.alloc(u8, @as(usize, seconds) * stream.spec.rate * stream.spec.frame_bytes) catch &.{},

@@ -33,7 +33,7 @@ class Event(C.Structure):
 class Status(C.Structure):
     _fields_ = [("kind", C.c_uint32), ("result", C.c_int32), ("sequence", C.c_uint64), ("epoch", C.c_uint64), ("reason", C.c_uint32), ("clean", C.c_uint32), ("geometry", Geometry)]
 class TrackOffer(C.Structure):
-    _fields_ = [("id", C.c_uint64), ("kind", C.c_char_p), ("label", C.c_char_p), ("descriptor", C.c_void_p), ("descriptor_len", C.c_size_t), ("direction", C.c_uint32), ("reserved", C.c_uint32)]
+    _fields_ = [("id", C.c_uint64), ("kind", C.c_char_p), ("label", C.c_char_p), ("descriptor", C.c_void_p), ("descriptor_len", C.c_size_t), ("direction", C.c_uint32), ("reserved", C.c_uint32), ("audio", C.c_uint32 * 4)]
 class TrackSelection(C.Structure):
     _fields_ = [("id", C.c_uint64), ("required", C.c_uint32), ("write", C.c_uint32)]
 class TrackAdmission(C.Structure):
@@ -59,7 +59,7 @@ class Client:
         assert inputs, "publisher offered no input track"
         selection = TrackSelection(id=inputs[0], required=1, write=1)
         admission, media, affordances, input_status = TrackAdmission(), C.c_void_p(), C.c_void_p(), C.c_int32()
-        status = library.ft_handshake_select(C.byref(offer), C.byref(selection), 1, 4, C.byref(admission), C.byref(media), C.byref(self.handle), C.byref(input_status), C.byref(affordances))
+        status = library.ft_handshake_select(C.byref(offer), C.byref(selection), 1, 4, C.byref(admission), C.byref(media), C.byref(self.handle), C.byref(input_status), C.byref(affordances), None, None, None)
         library.ft_local_connection_destroy(C.byref(media))
         assert status == 0, status
         self.config = Config()
@@ -232,7 +232,7 @@ class PublisherInput(unittest.TestCase):
             "ft_local_connection_destroy": [C.POINTER(C.c_void_p)],
             "ft_handshake_connect_local": [C.POINTER(C.c_void_p), C.POINTER(C.c_void_p)],
             "ft_handshake_offer_describe": [C.c_void_p, C.POINTER(C.c_char_p), C.POINTER(C.c_uint32), C.POINTER(C.POINTER(TrackOffer)), C.POINTER(C.c_size_t)],
-            "ft_handshake_select": [C.POINTER(C.c_void_p), C.POINTER(TrackSelection), C.c_size_t, C.c_uint32, C.POINTER(TrackAdmission), C.POINTER(C.c_void_p), C.POINTER(C.c_void_p), C.POINTER(C.c_int32), C.POINTER(C.c_void_p)],
+            "ft_handshake_select": [C.POINTER(C.c_void_p), C.POINTER(TrackSelection), C.c_size_t, C.c_uint32, C.POINTER(TrackAdmission), C.POINTER(C.c_void_p), C.POINTER(C.c_void_p), C.POINTER(C.c_int32), C.POINTER(C.c_void_p), C.c_void_p, C.c_void_p, C.c_void_p],
             "ft_input_client_describe": [C.c_void_p, C.POINTER(Config), C.POINTER(C.c_uint64), C.POINTER(C.c_uint64)],
             "ft_input_client_send": [C.c_void_p, C.POINTER(Event), C.POINTER(C.c_uint64)],
             "ft_input_client_poll": [C.c_void_p, C.POINTER(Status)],
@@ -242,8 +242,8 @@ class PublisherInput(unittest.TestCase):
         }.items():
             fn = getattr(cls.lib, name); fn.argtypes = args
             fn.restype = None if name.endswith(("close", "destroy")) else C.c_int32
-        assert (C.sizeof(Config), C.sizeof(Event), C.sizeof(Status), C.sizeof(TrackOffer)) == (56, 168, 56, 48)
-        assert cls.lib.ft_abi_version() == 16
+        assert (C.sizeof(Config), C.sizeof(Event), C.sizeof(Status), C.sizeof(TrackOffer)) == (56, 168, 56, 64)
+        assert cls.lib.ft_abi_version() == 17
         cls.temp = tempfile.TemporaryDirectory(prefix="ks-input-", dir="/tmp")
         cls.folder = Path(cls.temp.name)
         profiles = {}

@@ -4,6 +4,7 @@ pub const handshake = if (enabled) @import("handshake.zig") else struct {};
 pub const input = if (enabled) @import("input.zig") else struct {};
 pub const media = if (enabled) @import("media.zig") else struct {};
 pub const endpoint = if (enabled) @import("endpoint.zig") else struct {};
+pub const playback = if (enabled) @import("playback.zig") else struct {};
 pub const Publisher = if (enabled) @import("publisher.zig").Publisher else void;
 
 pub fn checkAvailable() !void {

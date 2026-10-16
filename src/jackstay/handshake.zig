@@ -61,7 +61,7 @@ pub fn connect(fd: *i32, request: Request) !Connected {
     // Never selected, so always null; destroy keeps any handle from leaking.
     var affordances: ?*c.ft_affordances_host = null;
     defer c.ft_affordances_host_destroy(&affordances);
-    try input.check(c.ft_handshake_select(&offer, &selections, selected, if (input_offered) c.FT_INPUT_MODE_COOPERATIVE else 0, &admissions, &connected.local, &handle, &status, &affordances));
+    try input.check(c.ft_handshake_select(&offer, &selections, selected, if (input_offered) c.FT_INPUT_MODE_COOPERATIVE else 0, &admissions, &connected.local, &handle, &status, &affordances, null, null, null));
     if (handle != null) connected.client = .{ .handle = handle };
     for (admissions[0..selected]) |admission| if (admission.result != c.FT_TRACK_ADMITTED) {
         // Required video normally fails select itself; never report it as input.
@@ -83,17 +83,21 @@ pub const Accepted = struct {
     local: media.Local,
     video: bool,
     input: ?input.Server,
+    /// Announces later track changes and serves late selections; it also
+    /// holds the playback doorbell, so keep it for the consumer's lifetime.
+    notices: ?*c.ft_track_notices,
 
     pub fn close(self: *Accepted) void {
         c.ft_local_connection_destroy(&self.local);
     }
 };
 
-/// Offers video, and input only with a target, in host time. A returned server
-/// is a transport owner, not evidence of controller admission.
+/// Offers video, and input only with a target, in host time. A playback track
+/// is announced afterwards on the returned notices. A returned server is a
+/// transport owner, not evidence of controller admission.
 pub fn accept(fd: *i32, label: [*:0]const u8, target: ?*input.Target) !Accepted {
     try media.checkAbi();
-    var accepted = Accepted{ .local = try media.adopt(fd), .video = false, .input = null };
+    var accepted = Accepted{ .local = try media.adopt(fd), .video = false, .input = null, .notices = null };
     errdefer accepted.close();
     const tracks = [_]c.ft_track_offer{
         std.mem.zeroInit(c.ft_track_offer, .{ .id = video_track, .kind = c.FT_TRACK_KIND_VIDEO, .label = "video", .direction = c.FT_TRACK_FROM_SOURCE }),
@@ -105,7 +109,7 @@ pub fn accept(fd: *i32, label: [*:0]const u8, target: ?*input.Target) !Accepted 
     // Never offered, so always null; destroy keeps any handle from leaking.
     var affordances: ?*c.ft_affordances_producer = null;
     defer c.ft_affordances_producer_destroy(&affordances);
-    try input.check(c.ft_handshake_accept_local(&accepted.local, label, c.FT_CLOCK_DOMAIN_HOST_TIME, &tracks, if (target != null) 2 else 1, if (target) |t| t.handle else null, &admissions, &count, &server, &affordances));
+    try input.check(c.ft_handshake_accept_local(&accepted.local, label, c.FT_CLOCK_DOMAIN_HOST_TIME, &tracks, if (target != null) 2 else 1, null, 0, if (target) |t| t.handle else null, &admissions, &count, &server, &affordances, &accepted.notices));
     for (admissions[0..count]) |admission| {
         if (admission.id == video_track and admission.result == c.FT_TRACK_ADMITTED) accepted.video = true;
     }

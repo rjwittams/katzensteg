@@ -75,8 +75,8 @@ int main(int argc, char **argv) {
   ft_track_offer tracks[2] = {{1, FT_TRACK_KIND_VIDEO, "default", NULL, 0, FT_TRACK_FROM_SOURCE, 0},
                               {2, FT_TRACK_KIND_INPUT, "default", NULL, 0, FT_TRACK_TO_SOURCE, 0}};
   ft_track_admission admissions[2]; size_t admitted = 0; ft_affordances_producer *affordances = NULL;
-  checked(ft_handshake_accept_local(&connection, "reference input source", FT_CLOCK_DOMAIN_HOST_TIME, tracks, 2,
-                                    observe_only ? NULL : target, admissions, &admitted, &input_server, &affordances));
+  checked(ft_handshake_accept_local(&connection, "reference input source", FT_CLOCK_DOMAIN_HOST_TIME, tracks, 2, NULL, 0,
+                                    observe_only ? NULL : target, admissions, &admitted, &input_server, &affordances, NULL));
   if (reject_media) ft_local_connection_destroy(&connection);
   else checked(ft_cpu_producer_serve_local(producer, &connection, &media_server));
   close(media_listener); unlink(argv[1]);

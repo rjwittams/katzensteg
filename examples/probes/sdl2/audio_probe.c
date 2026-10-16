@@ -1,7 +1,7 @@
 /* SDL2 audio probe: plays a 440 Hz sine (amplitude 0.5, 48 kHz stereo)
  * through one SDL2 audio model, then exits.
  *
- * usage: katzensteg-audio-probe callback|queue|legacy [--f32] [--reopen] [--secs S] [--samples N]
+ * usage: katzensteg-audio-probe callback|queue|legacy [--f32] [--reopen] [--reopen-f32] [--secs S] [--samples N]
  *   callback  SDL_OpenAudioDevice with an app callback
  *   queue     SDL_OpenAudioDevice with callback NULL, fed with SDL_QueueAudio
  *             and paced on SDL_GetQueuedAudioSize
@@ -10,6 +10,7 @@
  *             size (as Flycast does on timing changes). With the disk driver
  *             the second segment goes to $SDL_DISKAUDIOFILE.seg2, because
  *             reopening truncates the first file.
+ *   --reopen-f32  as --reopen, reopening in F32 (a format change)
  * Default format S16 (AUDIO_S16SYS), --f32 for AUDIO_F32SYS.
  *
  * The tone constants live in examples/probes/common/audio_tone.h. */
@@ -99,7 +100,7 @@ int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "callback";
     if (strcmp(mode, "callback") != 0 && strcmp(mode, "queue") != 0 && strcmp(mode, "legacy") != 0) {
-        fprintf(stderr, "usage: %s callback|queue|legacy [--f32] [--reopen] [--secs S] [--samples N]\n", argv[0]);
+        fprintf(stderr, "usage: %s callback|queue|legacy [--f32] [--reopen] [--reopen-f32] [--secs S] [--samples N]\n", argv[0]);
         return 2;
     }
     int reopen = 0;
@@ -108,6 +109,7 @@ int main(int argc, char **argv)
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--f32")) use_f32 = 1;
         else if (!strcmp(argv[i], "--reopen")) reopen = 1;
+        else if (!strcmp(argv[i], "--reopen-f32")) reopen = 2;
         else if (!strcmp(argv[i], "--secs") && i + 1 < argc) secs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--samples") && i + 1 < argc) samples = atoi(argv[++i]);
         else {
@@ -135,6 +137,7 @@ int main(int argc, char **argv)
                 SDL_SetHint("SDL_DISKAUDIOFILE", path);
             }
         }
+        if (seg == 1 && reopen == 2) use_f32 = 1;
         SDL_AudioSpec have;
         SDL_zero(have);
         const int seg_samples = seg == 0 ? samples : samples / 2;
