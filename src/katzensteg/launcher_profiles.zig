@@ -53,6 +53,8 @@ pub const LaunchProfile = struct {
     seed_files: []const SeedFile = &.{},
     runtime: config.RuntimeConfig = .{},
     runtime_fields: RuntimeFieldSet = .{},
+    /// `runtime.audio.volume`: the starting volume, 0 to 1.
+    audio_volume: ?f32 = null,
     /// How the SDL adapter gets into the process; null means `auto`.
     injection: ?injection.Injection = null,
     /// The SDL adapter libraries for this platform, per mechanism.
@@ -284,6 +286,7 @@ fn parseProfile(allocator: std.mem.Allocator, name: []const u8, value: std.json.
         const parsed_runtime = try parseRuntimeObject(runtime_value, platform);
         profile.runtime = parsed_runtime.config;
         profile.runtime_fields = parsed_runtime.fields;
+        profile.audio_volume = try parseAudioVolume(runtime_value);
     }
     return profile;
 }
@@ -452,6 +455,18 @@ fn parseSeedFiles(allocator: std.mem.Allocator, value: std.json.Value, platform:
         try seed_files.append(allocator, seed_file);
     }
     return seed_files.toOwnedSlice(allocator);
+}
+
+fn parseAudioVolume(runtime: std.json.Value) !?f32 {
+    const audio = runtime.object.get("audio") orelse return null;
+    if (audio != .object) return error.InvalidRuntime;
+    const volume: f64 = switch (audio.object.get("volume") orelse return null) {
+        .integer => |n| @floatFromInt(n),
+        .float => |f| f,
+        else => return error.InvalidRuntime,
+    };
+    if (!(volume >= 0 and volume <= 1)) return error.InvalidRuntime;
+    return @floatCast(volume);
 }
 
 const ParsedRuntime = struct {
@@ -644,6 +659,7 @@ fn inheritFrom(allocator: std.mem.Allocator, child: *LaunchProfile, parent: *con
     try inheritEnv(allocator, child, parent);
     try inheritSeedFiles(allocator, child, parent);
     inheritRuntime(child, parent);
+    if (child.audio_volume == null) child.audio_volume = parent.audio_volume;
     if (child.injection == null) child.injection = parent.injection;
     if (child.sdl_adapter == null) {
         if (parent.sdl_adapter) |adapter| child.sdl_adapter = try dupeSdlAdapter(allocator, adapter);
@@ -1520,6 +1536,21 @@ fn colonEnvContains(value: []const u8, needle: []const u8) bool {
             return false;
         }
     }
+}
+
+test "runtime audio volume parses, inherits and rejects values outside 0 to 1" {
+    var catalog = try ProfileCatalog.parse(std.testing.allocator,
+        \\{"profiles": {
+        \\  "base": {"target":"/bin/echo", "runtime":{"audio":{"volume":0.4}}},
+        \\  "child": {"extends":["base"]},
+        \\  "loud": {"extends":["base"], "runtime":{"audio":{"volume":1}}},
+        \\  "bad": {"target":"/bin/echo", "runtime":{"audio":{"volume":1.5}}}
+        \\}}
+    );
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(?f32, 0.4), catalog.find("child").?.audio_volume);
+    try std.testing.expectEqual(@as(?f32, 1), catalog.find("loud").?.audio_volume);
+    try std.testing.expect(catalog.find("bad").?.isBroken());
 }
 
 test "command key inherits and explicit none overrides the parent" {

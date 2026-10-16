@@ -70,13 +70,14 @@ pub const ResolvedLaunchPlan = struct {
             try plan.addEnvUnlessSet(setting.name, try context.expandString(allocator, setting.library, expansion));
             plan.injection = setting.mechanism;
         }
+        if (profile.audio_volume) |volume| try plan.addEnvUnlessSet("KATZENSTEG_AUDIO_VOLUME", try std.fmt.allocPrint(allocator, "{d}", .{volume}));
         plan.seed_files = try expandProfileSeedFiles(allocator, profile.seed_files, expansion);
         return plan;
     }
 
     /// Adds `name`, taking ownership of `value`, unless the profile's `env`
     /// already sets it: an explicit variable keeps precedence over the
-    /// adapter library the mechanism selects.
+    /// adapter library the mechanism selects and `runtime.audio.volume`.
     fn addEnvUnlessSet(self: *ResolvedLaunchPlan, name: []const u8, value: []const u8) !void {
         errdefer self.allocator.free(value);
         for (self.env) |entry| {
@@ -316,4 +317,19 @@ test "an explicit loader variable in the profile's env wins over the adapter lib
     defer plan.deinit();
     try std.testing.expectEqual(@as(usize, 1), plan.env.len);
     try std.testing.expectEqualStrings("/build/libks.so", plan.env[0].value);
+}
+
+test "runtime audio volume sets the starting volume unless the profile's env does" {
+    const expansion = context.ExpansionContext{ .home = "/home/test", .repo = "/repo" };
+    var profile = profiles.LaunchProfile{ .allocator = std.testing.allocator, .name = "demo", .target = "/bin/demo", .audio_volume = 0.4 };
+    var plan = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer plan.deinit();
+    try std.testing.expectEqualStrings("KATZENSTEG_AUDIO_VOLUME", plan.env[0].name);
+    try std.testing.expectEqualStrings("0.4", plan.env[0].value);
+
+    profile.env = &.{.{ .name = "KATZENSTEG_AUDIO_VOLUME", .value = "20%" }};
+    var explicit = try ResolvedLaunchPlan.fromProfile(std.testing.allocator, &profile, expansion, &.{});
+    defer explicit.deinit();
+    try std.testing.expectEqual(@as(usize, 1), explicit.env.len);
+    try std.testing.expectEqualStrings("20%", explicit.env[0].value);
 }

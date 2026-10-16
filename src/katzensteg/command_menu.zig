@@ -1,7 +1,17 @@
 const std = @import("std");
 const layout = @import("presentation_layout.zig");
 
-pub const Action = enum { quit, cancel };
+pub const Action = enum { quit, cancel, mute, volume_up, volume_down };
+
+/// The app's audio controls, present while it has audio open.
+pub const Audio = struct {
+    percent: u8,
+    muted: bool,
+
+    fn muteLabel(self: Audio) []const u8 {
+        return if (self.muted) "m Unmute" else "m Mute";
+    }
+};
 
 /// Immutable input-owned state sent to presentation; coordinates are terminal cells.
 pub const Snapshot = struct {
@@ -10,6 +20,7 @@ pub const Snapshot = struct {
     hint: bool = false,
     quitting: bool = false,
     binding: u8 = ']',
+    audio: ?Audio = null,
     cols: u16 = 0,
     rows: u16 = 0,
 
@@ -37,7 +48,9 @@ pub const Snapshot = struct {
         } else if (self.quitting) {
             writer.writeAll(" Quitting... waiting for app") catch {};
         } else {
-            writer.print(" q Quit | Esc Return | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch {};
+            writer.writeAll(" q Quit | Esc Return") catch {};
+            if (self.audio) |audio| writer.print(" | {s} | +/- Vol {d}%", .{ audio.muteLabel(), audio.percent }) catch {};
+            writer.print(" | ^{c} Literal{s}", .{ std.ascii.toUpper(self.binding), if (self.hint) " | Unknown key" else "" }) catch {};
         }
         return out;
     }
@@ -46,6 +59,13 @@ pub const Snapshot = struct {
         if (!self.active or self.quitting or row != self.rows or col < 1 or col > self.cols) return null;
         if (self.cols >= 7 and col >= 2 and col <= 7) return .quit;
         if (self.cols >= 20 and col >= 11 and col <= 20) return .cancel;
+        // " | m Mute | +/- Vol NN%" follows Return: the mute label from column
+        // 24, then the `+` and `-` glyphs.
+        const audio = self.audio orelse return null;
+        const mute_end: i32 = @intCast(23 + audio.muteLabel().len);
+        if (self.cols >= mute_end and col >= 24 and col <= mute_end) return .mute;
+        if (col == mute_end + 4) return .volume_up;
+        if (col == mute_end + 6) return .volume_down;
         return null;
     }
 };
@@ -81,6 +101,29 @@ test "command menu clips safely and only offers visible click targets" {
     try std.testing.expect(menu.hit(3, 23) == null);
     try std.testing.expect((Snapshot{ .active = true, .cols = 4, .rows = 24 }).hit(3, 24) == null);
     try std.testing.expectEqual(@as(usize, 0), menu.line(buffer[0..0]).len);
+}
+
+test "the audio entries follow Return and their glyphs are click targets" {
+    var menu = Snapshot{ .active = true, .cols = 80, .rows = 24, .audio = .{ .percent = 70, .muted = false } };
+    var buffer: [80]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, menu.line(&buffer), " q Quit | Esc Return | m Mute | +/- Vol 70% | ^] Literal "));
+    try std.testing.expectEqual(Action.mute, menu.hit(24, 24).?);
+    try std.testing.expectEqual(Action.mute, menu.hit(29, 24).?);
+    try std.testing.expect(menu.hit(30, 24) == null);
+    try std.testing.expectEqual(Action.volume_up, menu.hit(33, 24).?);
+    try std.testing.expect(menu.hit(34, 24) == null);
+    try std.testing.expectEqual(Action.volume_down, menu.hit(35, 24).?);
+    try std.testing.expect(menu.hit(36, 24) == null);
+    menu.audio = .{ .percent = 0, .muted = true };
+    try std.testing.expect(std.mem.startsWith(u8, menu.line(&buffer), " q Quit | Esc Return | m Unmute | +/- Vol 0% | ^] Literal "));
+    try std.testing.expectEqual(Action.mute, menu.hit(31, 24).?);
+    try std.testing.expectEqual(Action.volume_up, menu.hit(35, 24).?);
+    try std.testing.expectEqual(Action.volume_down, menu.hit(37, 24).?);
+    menu.cols = 36;
+    try std.testing.expect(menu.hit(37, 24) == null);
+    // A mute label clipped by a narrow terminal is not a target.
+    menu.cols = 28;
+    try std.testing.expect(menu.hit(25, 24) == null);
 }
 
 test "direct content stays below text backgrounds in its original order" {

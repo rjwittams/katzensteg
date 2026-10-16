@@ -126,10 +126,11 @@ pipeline (see the audio boundary in `CLAUDE.md` and the terms in `CONTEXT.md`).
   at open; the adapter's device table lock is taken only by app threads.
 
 `audio_process.zig` composes the model when the app opens its first device.
-Until command mode and the WM drive them, the controls come from
-`KATZENSTEG_AUDIO_VOLUME` (0 to 1, or 0% to 100%; default 1) and
-`KATZENSTEG_AUDIO_MUTE=1`. `KATZENSTEG_AUDIO_TAP_FILE=<base>` adds the tap file
-sink, which writes `<base>.<sequence>.raw` and `.times` when each stream closes.
+The starting controls come from `KATZENSTEG_AUDIO_VOLUME` (0 to 1, or 0% to
+100%; default 1; the launcher sets it from `runtime.audio.volume`) and
+`KATZENSTEG_AUDIO_MUTE=1`. Command mode then drives them through the model's
+control path, `Model.control`, which steps the gain and mute atomics.
+`KATZENSTEG_AUDIO_TAP_FILE=<base>` adds the tap file sink, which writes `<base>.<sequence>.raw` and `.times` when each stream closes.
 
 The model is tested in Zig with a fake adapter, fake sinks and an injected
 clock (`audio_tests.zig`). `scripts/katzensteg/test_sdl2_audio_model.py` runs
