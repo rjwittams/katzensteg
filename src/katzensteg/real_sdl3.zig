@@ -211,6 +211,7 @@ extern fn ks_real_SDL_AudioDevicePaused(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bo
 extern fn ks_real_SDL_BindAudioStreams(devid: sdl.SDL_AudioDeviceID, streams: ?[*]const ?*sdl.SDL_AudioStream, num_streams: c_int) sdl.SDL_bool;
 extern fn ks_real_SDL_UnbindAudioStreams(streams: ?[*]const ?*sdl.SDL_AudioStream, num_streams: c_int) void;
 extern fn ks_real_SDL_GetAudioStreamData(stream: ?*sdl.SDL_AudioStream, buf: ?*anyopaque, len: c_int) c_int;
+/// The C wrapper forwards only `fmt`, so pass a literal without format specifiers.
 extern fn ks_real_SDL_SetError(fmt: [*:0]const u8, ...) sdl.SDL_bool;
 pub const SDL_OpenAudioDevice = if (use_c_real) ks_real_SDL_OpenAudioDevice else sdl.SDL_OpenAudioDevice;
 pub const SDL_OpenAudioDeviceStream = if (use_c_real) ks_real_SDL_OpenAudioDeviceStream else sdl.SDL_OpenAudioDeviceStream;

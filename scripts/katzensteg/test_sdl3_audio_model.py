@@ -51,7 +51,8 @@ class Sdl3VirtualDeviceTests(sdl2.Sdl2VirtualDeviceTests):
     test_app_postmix_is_chained = Sdl3AudioModelTests.test_app_postmix_is_chained
 
     def run_profile(self, directory, profile, **audio_env):
-        super().run_profile(directory, profile, KATZENSTEG_AUDIO_DEVICE="virtual", **audio_env)
+        audio_env.setdefault("KATZENSTEG_AUDIO_DEVICE", "virtual")
+        super().run_profile(directory, profile, **audio_env)
         self.assert_silent(self.dir / "disk.raw")
 
     def run_virtual(self, directory, profile):

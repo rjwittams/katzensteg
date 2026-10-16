@@ -177,9 +177,9 @@ fn attach(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream) void 
 /// which starts paused for a device stream and playing otherwise, as SDL
 /// does. On failure SDL's device keeps pacing.
 fn startVirtual(device: *Device, sample_frames: u32) void {
-    const block = sample_frames * device.stream.spec.frame_bytes / 4;
-    device.scratch = std.heap.c_allocator.alloc(f32, 2 * block) catch return log.warn("id={d}: out of memory for the virtual device", .{device.id});
-    device.virtual = .{ .clock = device.model.clock, .rate = device.stream.spec.rate, .samples = sample_frames, .buffer = std.mem.sliceAsBytes(device.scratch[0..block]), .context = device, .render = render };
+    const f32_per_block = sample_frames * device.stream.spec.frame_bytes / 4;
+    device.scratch = std.heap.c_allocator.alloc(f32, 2 * f32_per_block) catch return log.warn("id={d}: out of memory for the virtual device", .{device.id});
+    device.virtual = .{ .clock = device.model.clock, .rate = device.stream.spec.rate, .samples = sample_frames, .buffer = std.mem.sliceAsBytes(device.scratch[0..f32_per_block]), .context = device, .render = render };
     if (device.device_stream) |stream| {
         device.bound[0] = stream;
         device.bound_len = 1;
