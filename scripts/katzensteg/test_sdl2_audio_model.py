@@ -4,7 +4,8 @@
 Runs the SDL2 `probe.audio.*` profiles through the launcher on SDL's `disk`
 driver, as test_audio_probes.py does. The disk file is what the local device
 sink played; KATZENSTEG_AUDIO_TAP_FILE makes the preload record the tap as
-<base>.<sequence>.raw and .times (one u64 nanosecond time per block) when each
+<base>.<sequence>.raw and .times (one u64 nanosecond time per block, bit 63
+marking a block after a discontinuity) when each
 stream closes. The dynapi class repeats the gain-0 and reopen checks through
 SDL_DYNAMIC_API. Set KS_SDL2_COMPAT_LIBRARY_PATH to an LD_LIBRARY_PATH that
 puts sdl2-compat's libSDL2 (and its SDL3) first to run on sdl2-compat too.
@@ -38,6 +39,9 @@ MAX_GAP_PERIODS = 4
 # short (10 ms) periods; a real stall in the audio path is far longer, and
 # the median and data/wall checks still pin the cadence.
 MIN_MAX_GAP_MS = 100
+
+# Bit 63 of a tapped block time marks a block after a discontinuity.
+DISCONTINUITY = 1 << 63
 
 COMPAT_LIBRARY_PATH = os.environ.get("KS_SDL2_COMPAT_LIBRARY_PATH", "")
 
@@ -74,12 +78,15 @@ class Sdl2AudioModelTests(unittest.TestCase):
         """Classic SDL2 here; the sdl2-compat subclass checks for sdl2-compat."""
 
     def tap(self, sequence):
-        """The tap's bytes, format and block times for one stream."""
+        """The tap's bytes, format and block times for one stream, and the
+        indices of the blocks after a discontinuity."""
         times_path = self.dir / f"tap.{sequence}.times"
         self.assertTrue(times_path.exists(), f"{times_path.name} was not written\n{self.context}")
         data = (self.dir / f"tap.{sequence}.raw").read_bytes()
         times = times_path.read_bytes()
-        return data, tone.guess_format(data), struct.unpack(f"={len(times) // 8}Q", times)
+        times = struct.unpack(f"={len(times) // 8}Q", times)
+        breaks = [index for index, time in enumerate(times) if time & DISCONTINUITY]
+        return data, tone.guess_format(data), [time & ~DISCONTINUITY for time in times], breaks
 
     def assert_tone(self, data, fmt, label, segments):
         stats = tone.tone_stats(tone.decode_raw(data, fmt))
@@ -118,7 +125,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
         for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-model-") as directory:
                 self.run_profile(directory, profile)
-                data, fmt, times = self.tap(1)
+                data, fmt, times, _ = self.tap(1)
                 self.assert_tone(data, fmt, "tap", 1)
                 # At unity gain the device plays exactly what was tapped.
                 self.assertGreaterEqual((self.dir / "disk.raw").read_bytes().find(data), 0, f"tap not in disk output\n{self.context}")
@@ -128,7 +135,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
         for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-model-") as directory:
                 self.run_profile(directory, profile, KATZENSTEG_AUDIO_VOLUME="0")
-                data, fmt, _ = self.tap(1)
+                data, fmt, _, _ = self.tap(1)
                 self.assert_tone(data, fmt, "tap", 1)
                 self.assert_silent(self.dir / "disk.raw")
 
@@ -137,7 +144,7 @@ class Sdl2AudioModelTests(unittest.TestCase):
             self.run_profile(directory, self.reopen_profile, KATZENSTEG_AUDIO_VOLUME="0")
             periods = []
             for sequence in (1, 2):
-                data, fmt, times = self.tap(sequence)
+                data, fmt, times, _ = self.tap(sequence)
                 self.assert_tone(data, fmt, f"tap {sequence}", 2)
                 periods.append(self.assert_cadence(data, fmt, times, f"tap {sequence}"))
             self.assertFalse((self.dir / "tap.3.times").exists(), self.context)
@@ -152,6 +159,11 @@ class Sdl2AudioModelTests(unittest.TestCase):
 # (the dummy and disk drivers drift 0.7% to 4%).
 VIRTUAL_RATE_TOLERANCE = 0.002
 VIRTUAL_GAP_TOLERANCE = 0.02
+# A discontinuity (the first block, an unpause, or a wakeup more than two
+# periods late, as a host stall causes) restarts the deadlines, so the
+# cadence checks fit each segment between discontinuities on its own.
+# Shorter segments are skipped (assert_cadence needs more than 10 blocks).
+MIN_SEGMENT_BLOCKS = 11
 
 
 class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
@@ -162,23 +174,35 @@ class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
         self.run_profile(directory, profile, KATZENSTEG_AUDIO_DEVICE="virtual")
         self.assertFalse((self.dir / "disk.raw").exists(), f"a real device was opened\n{self.context}")
 
-    def assert_exact_cadence(self, data, fmt, times, label):
-        period_ms = self.assert_cadence(data, fmt, times, label)
-        # The fitted block period is immune to the jitter of single wakeups.
-        slope_ms = statistics.linear_regression(range(len(times)), times).slope / 1e6
-        median = statistics.median((b - a) / 1e6 for a, b in zip(times, times[1:]))
-        summary = f"{label}: period {period_ms:.3f} ms, fitted {slope_ms:.4f} ms, median gap {median:.3f} ms\n{self.context}"
-        self.assertAlmostEqual(slope_ms / period_ms, 1.0, delta=VIRTUAL_RATE_TOLERANCE, msg=summary)
-        self.assertAlmostEqual(median / period_ms, 1.0, delta=VIRTUAL_GAP_TOLERANCE, msg=summary)
-        return period_ms
+    def assert_exact_cadence(self, data, fmt, times, breaks, label):
+        bounds = sorted({0, *breaks, len(times)})
+        segments = [(a, b) for a, b in zip(bounds, bounds[1:]) if b - a >= MIN_SEGMENT_BLOCKS]
+        # The fitted segments must hold most of the run, so the checks cannot
+        # pass vacuously.
+        fitted = sum(b - a for a, b in segments)
+        self.assertGreaterEqual(4 * fitted, 3 * len(times), f"{label}: discontinuities at {breaks} of {len(times)} blocks\n{self.context}")
+        block_bytes = len(data) // len(times)
+        periods = {}
+        for a, b in segments:
+            span = times[a:b]
+            period_ms = periods[a, b] = self.assert_cadence(data[a * block_bytes:b * block_bytes], fmt, span, f"{label} blocks {a}-{b}")
+            # The median of the pairwise slopes (Theil-Sen) is immune to a few
+            # late wakeups, which a least-squares fit is not near a segment's ends.
+            slope_ms = statistics.median((span[j] - span[i]) / (j - i) for i in range(len(span)) for j in range(i + 1, len(span))) / 1e6
+            median = statistics.median((y - x) / 1e6 for x, y in zip(span, span[1:]))
+            summary = (f"{label} blocks {a}-{b} of {len(times)}: period {period_ms:.3f} ms, fitted {slope_ms:.4f} ms, "
+                       f"median gap {median:.3f} ms\n{self.context}")
+            self.assertAlmostEqual(slope_ms / period_ms, 1.0, delta=VIRTUAL_RATE_TOLERANCE, msg=summary)
+            self.assertAlmostEqual(median / period_ms, 1.0, delta=VIRTUAL_GAP_TOLERANCE, msg=summary)
+        return max(periods.items(), key=lambda item: item[0][1] - item[0][0])[1]
 
     def test_tap_matches_tone_with_steady_cadence(self):
         for profile in self.profiles:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="ks-audio-virtual-") as directory:
                 self.run_virtual(directory, profile)
-                data, fmt, times = self.tap(1)
+                data, fmt, times, breaks = self.tap(1)
                 self.assert_tone(data, fmt, "tap", 1)
-                self.assert_exact_cadence(data, fmt, times, "tap")
+                self.assert_exact_cadence(data, fmt, times, breaks, "tap")
 
     def test_gain_zero_silences_the_device_but_not_the_tap(self):
         self.skipTest("no local device plays")
@@ -188,9 +212,9 @@ class Sdl2VirtualDeviceTests(Sdl2AudioModelTests):
             self.run_virtual(directory, self.reopen_profile)
             periods = []
             for sequence in (1, 2):
-                data, fmt, times = self.tap(sequence)
+                data, fmt, times, breaks = self.tap(sequence)
                 self.assert_tone(data, fmt, f"tap {sequence}", 2)
-                periods.append(self.assert_exact_cadence(data, fmt, times, f"tap {sequence}"))
+                periods.append(self.assert_exact_cadence(data, fmt, times, breaks, f"tap {sequence}"))
             self.assertAlmostEqual(periods[0], 2 * periods[1], delta=0.01, msg=self.context)
 
 

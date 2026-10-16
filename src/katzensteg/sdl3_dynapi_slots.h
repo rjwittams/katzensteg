@@ -93,4 +93,16 @@
 #define KS_SDL3_SLOT_SDL_GetAudioStreamDevice 240
 #define KS_SDL3_SLOT_SDL_GetAudioDeviceFormat 231
 #define KS_SDL3_SLOT_SDL_IsAudioDevicePlayback 1186
+#define KS_SDL3_SLOT_SDL_PauseAudioDevice 672
+#define KS_SDL3_SLOT_SDL_ResumeAudioDevice 761
+#define KS_SDL3_SLOT_SDL_AudioDevicePaused 29
+#define KS_SDL3_SLOT_SDL_BindAudioStreams 34
+#define KS_SDL3_SLOT_SDL_UnbindAudioStreams 939
+#define KS_SDL3_SLOT_SDL_GetAudioStreamData 239
+#define KS_SDL3_SLOT_SDL_SetError 10
 #define KS_SDL3_SLOT_SDL_UpperBlit 0xffffffffu /* not in this SDL's dynamic API */
+#define KS_SDL3_SLOT_SDL_PauseAudioStreamDevice 673
+#define KS_SDL3_SLOT_SDL_ResumeAudioStreamDevice 762
+#define KS_SDL3_SLOT_SDL_AudioStreamDevicePaused 1228
+#define KS_SDL3_SLOT_SDL_BindAudioStream 33
+#define KS_SDL3_SLOT_SDL_UnbindAudioStream 938

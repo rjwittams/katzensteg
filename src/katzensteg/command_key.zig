@@ -32,6 +32,9 @@ pub const Command = enum {
     literal,
     cancel,
     quit,
+    mute,
+    volume_up,
+    volume_down,
     quit_host,
     launch,
     focus_next,
@@ -56,7 +59,12 @@ pub fn decode(binding: u8, key: native.Key, context: Context) Command {
     if (std.mem.eql(u8, key.name.slice(), "Escape")) return .cancel;
     if (key.modifiers.suppressText()) return .unknown;
     if (key.codepoint() == 'q') return .quit;
-    if (context == .direct) return .unknown;
+    if (context == .direct) return switch (key.codepoint() orelse return .unknown) {
+        'm' => .mute,
+        '+' => .volume_up,
+        '-' => .volume_down,
+        else => .unknown,
+    };
     if (std.mem.eql(u8, key.name.slice(), "Tab")) return .focus_next;
     return switch (key.codepoint() orelse return .unknown) {
         'Q' => .quit_host,

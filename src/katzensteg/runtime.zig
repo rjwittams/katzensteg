@@ -13,6 +13,7 @@ const DirectTty = @import("direct_tty.zig").DirectTty;
 const frame_builder_mod = @import("frame_builder.zig");
 const inspect_model = @import("inspect_model.zig");
 const input_mod = @import("input.zig");
+const audio_process = @import("audio_process.zig");
 const gl_capture_mod = @import("gl_capture.zig");
 const presentation_layout_mod = @import("presentation_layout.zig");
 const present_job_mod = @import("present_job.zig");
@@ -443,7 +444,10 @@ pub const Runtime = struct {
         }
         if (runtime.input_enabled) {
             runtime.input_parser = input_mod.TerminalInputParser.init(allocator);
-            if (runtime.input_claimed) runtime.input_parser.?.command_key = config.command_key;
+            if (runtime.input_claimed) {
+                runtime.input_parser.?.command_key = config.command_key;
+                runtime.input_parser.?.audio = audio_process.controls();
+            }
             runtime.frame_builder.direct_text_overlay = runtime.input_parser.?.command_key != null;
             runtime.command_notify_fd = command_lifetime.adoptNotifier(config.command_notify_fd);
             runtime.updateInputTarget();

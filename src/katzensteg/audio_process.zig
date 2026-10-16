@@ -1,8 +1,10 @@
 //! Composes the process's audio model when the app opens its first device:
 //! the local device sink, the starting controls, and the published track with
-//! a Jackstay target or else, for tests, the tap file sink. Until command mode
-//! and the WM drive them, the controls come from
-//!   KATZENSTEG_AUDIO_VOLUME    0 to 1, or 0% to 100% (default 1)
+//! a Jackstay target or else, for tests, the tap file sink. The starting
+//! controls come from the environment; command mode then drives them through
+//! `audio_model.Model.control`.
+//!   KATZENSTEG_AUDIO_VOLUME    0 to 1, or 0% to 100% (default 1); the
+//!                              launcher sets it from `runtime.audio.volume`
 //!   KATZENSTEG_AUDIO_MUTE      1/true/on/yes starts muted
 //!   KATZENSTEG_AUDIO_TAP_FILE  base path for audio_tap_file_sink.zig
 //!   KATZENSTEG_AUDIO_DEVICE    `virtual`: nothing plays locally and the
@@ -59,6 +61,14 @@ pub fn quit() void {
     compose_mutex.lock();
     defer compose_mutex.unlock();
     if (composed) model_storage.quit();
+}
+
+/// The model without composing it, for the control path: a control acts only
+/// while a stream is open, and the first open composes the model.
+/// Skipping `compose_mutex` is safe because the `playing()` guard means
+/// composition has already finished before any control fires.
+pub fn controls() *audio_model.Model {
+    return &model_storage;
 }
 
 fn getenv(name: [*:0]const u8) ?[]const u8 {

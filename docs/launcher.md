@@ -290,6 +290,20 @@ prefix and decoder, with its own commands shown in the existing status row.
 Bare letters and Tab reach the focused producer. The launch prompt accepts
 both legacy bytes and Kitty keyboard reports.
 
+While the app has audio open, `m` mutes or unmutes it and `+` / `-` step the
+volume by 10% within 0 to 100%. Command mode stays armed, so presses repeat
+until Escape. The row then also shows `m Mute` (`m Unmute` while muted) and
+`+/- Vol NN%`, with the current level; click the label, `+` or `-`. Entering
+command mode never changes the sound. A profile sets the starting volume with
+the inheritable field `runtime.audio.volume`, a number from 0 to 1:
+
+```json
+"runtime": { "audio": { "volume": 0.5 } }
+```
+
+The launcher passes it to the app as `KATZENSTEG_AUDIO_VOLUME`, unless the
+profile's `env` sets that variable itself.
+
 With a cleat-enabled build, the desktop launch prompt accepts spaces and shell
 punctuation as well as profile names:
 

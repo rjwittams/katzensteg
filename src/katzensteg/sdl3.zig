@@ -316,6 +316,17 @@ pub extern fn SDL_DestroyAudioStream(stream: ?*SDL_AudioStream) void;
 pub extern fn SDL_GetAudioStreamDevice(stream: ?*SDL_AudioStream) SDL_AudioDeviceID;
 pub extern fn SDL_GetAudioDeviceFormat(devid: SDL_AudioDeviceID, spec: ?*SDL_AudioSpec, sample_frames: ?*c_int) SDL_bool;
 pub extern fn SDL_IsAudioDevicePlayback(devid: SDL_AudioDeviceID) SDL_bool;
+pub extern fn SDL_PauseAudioDevice(devid: SDL_AudioDeviceID) SDL_bool;
+pub extern fn SDL_ResumeAudioDevice(devid: SDL_AudioDeviceID) SDL_bool;
+pub extern fn SDL_AudioDevicePaused(devid: SDL_AudioDeviceID) SDL_bool;
+pub extern fn SDL_BindAudioStreams(devid: SDL_AudioDeviceID, streams: ?[*]const ?*SDL_AudioStream, num_streams: c_int) SDL_bool;
+pub extern fn SDL_UnbindAudioStreams(streams: ?[*]const ?*SDL_AudioStream, num_streams: c_int) void;
+pub extern fn SDL_GetAudioStreamData(stream: ?*SDL_AudioStream, buf: ?*anyopaque, len: c_int) c_int;
+pub extern fn SDL_CreateAudioStream(src_spec: ?*const SDL_AudioSpec, dst_spec: ?*const SDL_AudioSpec) ?*SDL_AudioStream;
+pub extern fn SDL_PutAudioStreamData(stream: ?*SDL_AudioStream, buf: ?*const anyopaque, len: c_int) SDL_bool;
+pub extern fn SDL_SetError(fmt: [*:0]const u8, ...) SDL_bool;
+/// Native-endian F32 on the little-endian hosts Katzensteg supports.
+pub const SDL_AUDIO_F32: c_int = 0x8120;
 
 pub const SDL_INIT_AUDIO: Uint32 = 0x00000010;
 pub const SDL_INIT_VIDEO: Uint32 = 0x00000020;

@@ -99,6 +99,16 @@ extern struct SDL_AudioStream *ks_SDL_OpenAudioDeviceStream(unsigned int, const 
 extern _Bool ks_SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
 extern void ks_SDL_CloseAudioDevice(unsigned int);
 extern void ks_SDL_DestroyAudioStream(struct SDL_AudioStream *);
+extern _Bool ks_SDL_PauseAudioDevice(unsigned int);
+extern _Bool ks_SDL_ResumeAudioDevice(unsigned int);
+extern _Bool ks_SDL_AudioDevicePaused(unsigned int);
+extern _Bool ks_SDL_PauseAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool ks_SDL_ResumeAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool ks_SDL_AudioStreamDevicePaused(struct SDL_AudioStream *);
+extern _Bool ks_SDL_BindAudioStream(unsigned int, struct SDL_AudioStream *);
+extern _Bool ks_SDL_BindAudioStreams(unsigned int, struct SDL_AudioStream *const *, int);
+extern void ks_SDL_UnbindAudioStream(struct SDL_AudioStream *);
+extern void ks_SDL_UnbindAudioStreams(struct SDL_AudioStream *const *, int);
 extern void ks_katzensteg_shutdown(void);
 #include "dlopen_macos.h"
 extern void ks_scrub_preload_env_for_loaded_symbol(const void *);
@@ -184,6 +194,16 @@ extern struct SDL_AudioStream *SDL_OpenAudioDeviceStream(unsigned int, const str
 extern _Bool SDL_SetAudioPostmixCallback(unsigned int, void *, void *);
 extern void SDL_CloseAudioDevice(unsigned int);
 extern void SDL_DestroyAudioStream(struct SDL_AudioStream *);
+extern _Bool SDL_PauseAudioDevice(unsigned int);
+extern _Bool SDL_ResumeAudioDevice(unsigned int);
+extern _Bool SDL_AudioDevicePaused(unsigned int);
+extern _Bool SDL_PauseAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool SDL_ResumeAudioStreamDevice(struct SDL_AudioStream *);
+extern _Bool SDL_AudioStreamDevicePaused(struct SDL_AudioStream *);
+extern _Bool SDL_BindAudioStream(unsigned int, struct SDL_AudioStream *);
+extern _Bool SDL_BindAudioStreams(unsigned int, struct SDL_AudioStream *const *, int);
+extern void SDL_UnbindAudioStream(struct SDL_AudioStream *);
+extern void SDL_UnbindAudioStreams(struct SDL_AudioStream *const *, int);
 extern int SDL_Init(unsigned int);
 extern int SDL_InitSubSystem(unsigned int);
 extern int SDL_SetHint(const char *, const char *);
@@ -265,6 +285,16 @@ DYLD_INTERPOSE(ks_SDL_OpenAudioDeviceStream, SDL_OpenAudioDeviceStream)
 DYLD_INTERPOSE(ks_SDL_SetAudioPostmixCallback, SDL_SetAudioPostmixCallback)
 DYLD_INTERPOSE(ks_SDL_CloseAudioDevice, SDL_CloseAudioDevice)
 DYLD_INTERPOSE(ks_SDL_DestroyAudioStream, SDL_DestroyAudioStream)
+DYLD_INTERPOSE(ks_SDL_PauseAudioDevice, SDL_PauseAudioDevice)
+DYLD_INTERPOSE(ks_SDL_ResumeAudioDevice, SDL_ResumeAudioDevice)
+DYLD_INTERPOSE(ks_SDL_AudioDevicePaused, SDL_AudioDevicePaused)
+DYLD_INTERPOSE(ks_SDL_PauseAudioStreamDevice, SDL_PauseAudioStreamDevice)
+DYLD_INTERPOSE(ks_SDL_ResumeAudioStreamDevice, SDL_ResumeAudioStreamDevice)
+DYLD_INTERPOSE(ks_SDL_AudioStreamDevicePaused, SDL_AudioStreamDevicePaused)
+DYLD_INTERPOSE(ks_SDL_BindAudioStream, SDL_BindAudioStream)
+DYLD_INTERPOSE(ks_SDL_BindAudioStreams, SDL_BindAudioStreams)
+DYLD_INTERPOSE(ks_SDL_UnbindAudioStream, SDL_UnbindAudioStream)
+DYLD_INTERPOSE(ks_SDL_UnbindAudioStreams, SDL_UnbindAudioStreams)
 DYLD_INTERPOSE(ks_macos_dlopen, dlopen)
 
 #endif

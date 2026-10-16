@@ -125,6 +125,32 @@ pub const Model = struct {
         return @bitCast(self.gain_bits.load(.acquire));
     }
 
+    /// The control path for command mode and the WM, on app threads that the
+    /// caller serializes; the audio thread only loads the atomics. Volume steps
+    /// by 10% within 0 to 100%, and mute is gain 0 at the local device sink.
+    pub const Control = enum { toggle_mute, volume_up, volume_down };
+
+    pub fn control(self: *Model, command: Control) void {
+        switch (command) {
+            .toggle_mute => self.muted.store(!self.muted.load(.acquire), .release),
+            .volume_up, .volume_down => {
+                // Snap to the nearest 10% step, then step: 0.34 goes up to 0.4.
+                const step = @round(self.gain() * 10) + @as(f32, if (command == .volume_up) 1 else -1);
+                self.setGain(std.math.clamp(step, 0, 10) / 10);
+            },
+        }
+    }
+
+    pub fn volumePercent(self: *const Model) u8 {
+        return @intFromFloat(@round(std.math.clamp(self.gain(), 0, 1) * 100));
+    }
+
+    /// Whether the app has a playback stream open.
+    pub fn playing(self: *const Model) bool {
+        for (&self.streams) |*stream| if (stream.open.load(.acquire)) return true;
+        return false;
+    }
+
     /// App thread; the caller serializes opens and closes. `label` names the
     /// device ("default" for the default one). Null when every stream slot is
     /// in use.
@@ -327,4 +353,27 @@ test "a quit reaches the tap once every stream has closed" {
     model.closeStream(second.stream.id);
     model.quit();
     try testing.expectEqual(@as(usize, 1), tap.quits);
+}
+
+test "the control path steps volume by 10% within 0 to 100% and toggles mute" {
+    var clock: FakeClock = .{};
+    var model: Model = .{ .clock = clock.clock(), .local = local_device_sink.sink };
+    try testing.expect(!model.playing());
+    const stream = model.openStream(.{ .format = .s16, .silence = 0, .channels = 2, .frame_bytes = 4, .rate = 48000 }, "default").?;
+    try testing.expect(model.playing());
+
+    model.setGain(0.34);
+    model.control(.volume_up);
+    try testing.expectEqual(@as(u8, 40), model.volumePercent());
+    for (0..8) |_| model.control(.volume_up);
+    try testing.expectEqual(@as(f32, 1), model.gain());
+    for (0..12) |_| model.control(.volume_down);
+    try testing.expectEqual(@as(f32, 0), model.gain());
+
+    model.control(.toggle_mute);
+    try testing.expect(model.muted.load(.acquire));
+    model.control(.toggle_mute);
+    try testing.expect(!model.muted.load(.acquire));
+    model.closeStream(stream.id);
+    try testing.expect(!model.playing());
 }
