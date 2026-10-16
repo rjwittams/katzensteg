@@ -205,6 +205,14 @@ extern fn ks_real_SDL_DestroyAudioStream(stream: ?*sdl.SDL_AudioStream) void;
 extern fn ks_real_SDL_GetAudioStreamDevice(stream: ?*sdl.SDL_AudioStream) sdl.SDL_AudioDeviceID;
 extern fn ks_real_SDL_GetAudioDeviceFormat(devid: sdl.SDL_AudioDeviceID, spec: ?*sdl.SDL_AudioSpec, sample_frames: ?*c_int) sdl.SDL_bool;
 extern fn ks_real_SDL_IsAudioDevicePlayback(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bool;
+extern fn ks_real_SDL_PauseAudioDevice(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bool;
+extern fn ks_real_SDL_ResumeAudioDevice(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bool;
+extern fn ks_real_SDL_AudioDevicePaused(devid: sdl.SDL_AudioDeviceID) sdl.SDL_bool;
+extern fn ks_real_SDL_BindAudioStreams(devid: sdl.SDL_AudioDeviceID, streams: ?[*]const ?*sdl.SDL_AudioStream, num_streams: c_int) sdl.SDL_bool;
+extern fn ks_real_SDL_UnbindAudioStreams(streams: ?[*]const ?*sdl.SDL_AudioStream, num_streams: c_int) void;
+extern fn ks_real_SDL_GetAudioStreamData(stream: ?*sdl.SDL_AudioStream, buf: ?*anyopaque, len: c_int) c_int;
+/// The C wrapper forwards only `fmt`, so pass a literal without format specifiers.
+extern fn ks_real_SDL_SetError(fmt: [*:0]const u8, ...) sdl.SDL_bool;
 pub const SDL_OpenAudioDevice = if (use_c_real) ks_real_SDL_OpenAudioDevice else sdl.SDL_OpenAudioDevice;
 pub const SDL_OpenAudioDeviceStream = if (use_c_real) ks_real_SDL_OpenAudioDeviceStream else sdl.SDL_OpenAudioDeviceStream;
 pub const SDL_SetAudioPostmixCallback = if (use_c_real) ks_real_SDL_SetAudioPostmixCallback else sdl.SDL_SetAudioPostmixCallback;
@@ -213,6 +221,13 @@ pub const SDL_DestroyAudioStream = if (use_c_real) ks_real_SDL_DestroyAudioStrea
 pub const SDL_GetAudioStreamDevice = if (use_c_real) ks_real_SDL_GetAudioStreamDevice else sdl.SDL_GetAudioStreamDevice;
 pub const SDL_GetAudioDeviceFormat = if (use_c_real) ks_real_SDL_GetAudioDeviceFormat else sdl.SDL_GetAudioDeviceFormat;
 pub const SDL_IsAudioDevicePlayback = if (use_c_real) ks_real_SDL_IsAudioDevicePlayback else sdl.SDL_IsAudioDevicePlayback;
+pub const SDL_PauseAudioDevice = if (use_c_real) ks_real_SDL_PauseAudioDevice else sdl.SDL_PauseAudioDevice;
+pub const SDL_ResumeAudioDevice = if (use_c_real) ks_real_SDL_ResumeAudioDevice else sdl.SDL_ResumeAudioDevice;
+pub const SDL_AudioDevicePaused = if (use_c_real) ks_real_SDL_AudioDevicePaused else sdl.SDL_AudioDevicePaused;
+pub const SDL_BindAudioStreams = if (use_c_real) ks_real_SDL_BindAudioStreams else sdl.SDL_BindAudioStreams;
+pub const SDL_UnbindAudioStreams = if (use_c_real) ks_real_SDL_UnbindAudioStreams else sdl.SDL_UnbindAudioStreams;
+pub const SDL_GetAudioStreamData = if (use_c_real) ks_real_SDL_GetAudioStreamData else sdl.SDL_GetAudioStreamData;
+pub const SDL_SetError = if (use_c_real) ks_real_SDL_SetError else sdl.SDL_SetError;
 
 /// Windows has no dlopen to interpose; the Vulkan loader override is
 /// POSIX-only.

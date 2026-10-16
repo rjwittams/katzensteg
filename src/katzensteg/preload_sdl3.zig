@@ -450,6 +450,7 @@ pub export fn ks_SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) callconv
 pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
     traceSdlLifecycle("SDL_QuitSubSystem flags=0x{x} video={}", .{ flags, (flags & sdl.SDL_INIT_VIDEO) != 0 });
     if ((flags & sdl.SDL_INIT_VIDEO) != 0) runtime.shutdownGlobal();
+    if ((flags & sdl.SDL_INIT_AUDIO) != 0) sdl_audio.noteAudioQuitting();
     real_sdl.SDL_QuitSubSystem(flags);
     if ((flags & sdl.SDL_INIT_AUDIO) != 0) sdl_audio.noteAudioQuit();
 }
@@ -457,6 +458,7 @@ pub export fn ks_SDL_QuitSubSystem(flags: sdl.Uint32) callconv(.c) void {
 pub export fn ks_SDL_Quit() callconv(.c) void {
     traceSdlLifecycle("SDL_Quit called; shutting down Katzensteg runtime", .{});
     runtime.shutdownGlobal();
+    sdl_audio.noteAudioQuitting();
     real_sdl.SDL_Quit();
     sdl_audio.noteAudioQuit();
 }
