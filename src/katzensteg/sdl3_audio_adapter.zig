@@ -167,6 +167,7 @@ fn attach(id: sdl.SDL_AudioDeviceID, device_stream: ?*sdl.SDL_AudioStream) void 
     if (virtual and !real_sdl.SDL_PauseAudioDevice(id)) log.warn("id={d}: SDL_PauseAudioDevice failed: {s}; SDL's device may run alongside the virtual one", .{ id, std.mem.span(real_sdl.SDL_GetError()) });
     if (!real_sdl.SDL_SetAudioPostmixCallback(id, postmix, device)) {
         log.warn("id={d}: SDL_SetAudioPostmixCallback failed: {s}; playing it unmodified", .{ id, std.mem.span(real_sdl.SDL_GetError()) });
+        if (virtual) resumeReal(device);
         return release(id, null);
     }
     // Our postmix also keeps SDL off its single-stream fast path, so every
