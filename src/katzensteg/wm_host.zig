@@ -1852,6 +1852,7 @@ pub fn renderChrome(writer: anytype, options: ChromeOptions) !void {
     const label_prefix = if (options.focused) "*katzensteg wm " else " katzensteg wm ";
     const title_space: usize = @intCast(@max(0, options.outer.cols - 2));
     // The speaker glyph takes the last title cell, at `speakerCol`.
+    // `title_space >= 6` is the click handler's `outer.cols >= 8`.
     const text_space = if (options.audio != null and title_space >= 6) title_space - 2 else title_space;
     var written: usize = @min(3, title_space);
     written += try emitter.bytes(writer, label_prefix, text_space -| written);
@@ -2409,6 +2410,8 @@ fn syncAudioGains(sessions: []WmWindow, focused: usize, solo: bool) void {
     for (sessions, 0..) |*session, i| {
         if (!session.audio.open or session.producer.channel.controlFile() == null) continue;
         const gain = session.audio.gain(i == focused, solo);
+        // Exact equality is safe: `sent` only ever holds an earlier `gain()`
+        // result, so an unchanged policy reproduces the same bits.
         if (session.audio.sent) |sent| if (sent == gain) continue;
         producer_control.writeAudioControl(session.producer.channel.writer(), gain) catch continue;
         session.audio.sent = gain;
@@ -2416,7 +2419,8 @@ fn syncAudioGains(sessions: []WmWindow, focused: usize, solo: bool) void {
 }
 
 /// Applies an audio command: solo for the desktop, the rest to the focused
-/// window while it has audio open. Records the status-row detail.
+/// window while it has audio open. Records the status-row detail. It only
+/// changes policy state; the next `syncAudioGains` sends the new gain.
 fn applyAudioCommand(sessions: []WmWindow, focused: usize, redraw_state: *WmDesktopRedrawState, command: command_binding.Command, events: *ProtocolEventLog) !bool {
     var detail: [32]u8 = undefined;
     if (command == .solo) {

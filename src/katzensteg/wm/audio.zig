@@ -7,6 +7,8 @@
 
 const std = @import("std");
 
+/// The title-bar speaker: `normal` is `♪` (audible), `muted` is `⊘`, and
+/// `soloed_out` is `◌` (silenced because another window has solo).
 pub const Glyph = enum { normal, muted, soloed_out };
 
 pub const Window = struct {

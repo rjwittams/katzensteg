@@ -60,6 +60,8 @@ pub fn decode(binding: u8, key: native.Key, context: Context) Command {
     if (std.mem.eql(u8, key.name.slice(), "Escape")) return .cancel;
     if (key.modifiers.suppressText()) return .unknown;
     if (key.codepoint() == 'q') return .quit;
+    // Audio keys decode in both contexts: direct takeover steps its own
+    // model, the desktop steps the focused window's policy.
     switch (key.codepoint() orelse 0) {
         'm' => return .mute,
         '+' => return .volume_up,

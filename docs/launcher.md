@@ -305,14 +305,15 @@ The launcher passes it to the app as `KATZENSTEG_AUDIO_VOLUME`, unless the
 profile's `env` sets that variable itself.
 
 In the desktop WM only the focused window is audible by default: Ctrl-] `s`
-toggles solo; with it off, every window plays at its own volume. Ctrl-] `m` mutes the
-focused window and `+` / `-` step its volume by 10% within 0 to 100%; the
-status row then shows `Vol NN%`. Windows with audio open show a speaker in
-the title bar's last cell: `♪` audible, `⊘` muted, `◌` silenced by solo.
-Clicking it mutes or unmutes that window. A window starts at its profile's
-`runtime.audio.volume`. Producers, including external `--listen` ones, report
-audio open and closed, and the WM sends each one its effective gain
-(`{"type":"audio","gain":0.4}`), which replaces the app's own volume and mute.
+toggles solo; with it off, every window plays at its own volume. Ctrl-] `m`
+mutes the focused window and `+` / `-` step its volume by 10% within 0 to
+100%; the status row then shows `Vol NN%`. Windows with audio open show a
+speaker in the title bar's last cell: `♪` audible, `⊘` muted, `◌` silenced by
+solo. Clicking it mutes or unmutes that window. A window starts at its
+profile's `runtime.audio.volume`. Producers, including external `--listen`
+ones, report audio open and closed, and the WM sends each one its effective
+gain (`{"type":"audio","gain":0.4}`), which replaces the app's own volume and
+mute.
 
 With a cleat-enabled build, the desktop launch prompt accepts spaces and shell
 punctuation as well as profile names:
