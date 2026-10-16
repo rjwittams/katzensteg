@@ -3,6 +3,8 @@ const os = @import("platform");
 const media = @import("media.zig");
 const endpoint = @import("endpoint.zig");
 const handshake = @import("handshake.zig");
+const playback = @import("playback.zig");
+const c = media.c;
 const log = std.log.scoped(.jackstay);
 
 pub const Publisher = struct {
@@ -22,6 +24,10 @@ pub const Publisher = struct {
         done: std.atomic.Value(bool) = .init(false),
         server: ?media.Server = null,
         fd: i32 = -1,
+        /// The playback track as this consumer last heard of it: nothing yet.
+        notices: ?*c.ft_track_notices = null,
+        announced_id: u64 = 0,
+        announced_version: u64 = 0,
 
         fn run(self: *Setup, publisher: *Publisher) void {
             defer self.done.store(true, .release);
@@ -30,6 +36,9 @@ pub const Publisher = struct {
                 log.debug("source handshake failed: {any}", .{err});
                 return;
             };
+            // The run loop announces the playback track, so a stalled peer
+            // never holds the track's lock through its handshake.
+            self.notices = accepted.notices;
             defer accepted.close();
             if (accepted.input) |*server| {
                 // Input owns a separate lifetime, including when media setup
@@ -46,9 +55,44 @@ pub const Publisher = struct {
             self.server = publisher.producer.serve(&accepted.local) catch null;
         }
 
+        /// After setup: announces track changes, then answers a late
+        /// selection. A failure ends the consumer's notices.
+        fn syncTrack(self: *Setup) void {
+            const notices = self.notices orelse return;
+            const track = &playback.track;
+            const announced = blk: {
+                track.mutex.lock();
+                defer track.mutex.unlock();
+                if (self.announced_version == track.version) break :blk true;
+                if (self.announced_id != 0 and self.announced_id != track.id) {
+                    if (c.ft_track_notices_remove(notices, self.announced_id) != c.FT_STATUS_OK) break :blk false;
+                }
+                if (track.id != 0) {
+                    const offer = track.offer();
+                    const status = if (self.announced_id == track.id) c.ft_track_notices_update(notices, &offer) else c.ft_track_notices_add(notices, &offer, track.playback);
+                    if (status != c.FT_STATUS_OK) break :blk false;
+                }
+                self.announced_id = track.id;
+                self.announced_version = track.version;
+                break :blk true;
+            };
+            if (announced) switch (c.ft_track_notices_serve(notices, 0)) {
+                c.FT_STATUS_OK, c.FT_STATUS_EMPTY => return,
+                else => {},
+            };
+            c.ft_track_notices_destroy(&self.notices);
+        }
+
+        fn finished(self: *Setup) bool {
+            return self.notices == null and (self.server == null or self.server.?.finished());
+        }
+
         fn retire(self: *Setup) void {
             if (self.thread) |thread| thread.join();
+            // A consumer still listening at shutdown hears the track withdrawn.
+            if (self.notices != null and self.announced_id != 0) _ = c.ft_track_notices_remove(self.notices, self.announced_id);
             if (self.server) |*server| server.close();
+            c.ft_track_notices_destroy(&self.notices);
             self.* = .{};
         }
     };
@@ -79,7 +123,8 @@ pub const Publisher = struct {
         while (!self.stopped.load(.acquire)) {
             for (&self.setups) |*setup| {
                 if (setup.thread != null and setup.done.load(.acquire)) {
-                    if (setup.server == null or setup.server.?.finished()) setup.retire();
+                    setup.syncTrack();
+                    if (setup.finished()) setup.retire();
                 }
             }
             if (self.listener.accept() catch null) |accepted| {

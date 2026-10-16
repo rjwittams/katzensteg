@@ -99,6 +99,17 @@
         "--reopen"
       ]
     },
+    "probe.audio.reopen_f32": {
+      "extends": [
+        "app.audio_probe",
+        "adapter.sdl2_preload",
+        "runtime.fullscreen_file"
+      ],
+      "args": [
+        "callback",
+        "--reopen-f32"
+      ]
+    },
     "probe.audio.sdl3.bound": {
       "extends": [
         "app.audio_probe_sdl3",

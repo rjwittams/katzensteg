@@ -2583,7 +2583,7 @@ test "command mode audio keys and clicks drive the model and stay armed" {
     try model.flushStandaloneEscape();
     try std.testing.expectEqual(RoutingMode.app, model.routing_mode);
 
-    _ = audio.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).?;
+    _ = audio.openStream(.{ .format = .s16, .silence = 0, .channels = 2, .frame_bytes = 4, .rate = 48000 }, "default").?;
     // Entering command mode leaves the sound alone.
     try model.feed("\x1d");
     try std.testing.expectEqual(@as(f32, 0.5), audio.gain());

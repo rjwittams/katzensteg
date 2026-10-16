@@ -12,7 +12,7 @@ jobs:
   linux:
     name: Linux build and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -115,6 +115,7 @@ jobs:
           KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay \
             JACKSTAY_REFERENCE_VIEWER=/tmp/ks-reference-viewer/capture-viewer-sdl \
             python3 scripts/katzensteg/test_jackstay_input.py
+          KATZENSTEG_JACKSTAY_PREFIX=/tmp/ks-jackstay python3 scripts/katzensteg/test_jackstay_audio.py
           python3 scripts/katzensteg/test_injected_io.py
 
       - name: Prepare optional cleat dependency

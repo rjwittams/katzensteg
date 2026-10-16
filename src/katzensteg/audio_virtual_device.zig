@@ -66,6 +66,8 @@ pub const VirtualDevice = struct {
     origin_ns: u64 = 0,
     frames: u64 = 0,
     discontinuity: bool = false,
+    /// The deadline of the block rendering now: when its first sample plays.
+    deadline_ns: u64 = 0,
 
     /// App thread. The device must not move until `stop` returns.
     pub fn start(self: *VirtualDevice) !void {
@@ -111,6 +113,7 @@ pub const VirtualDevice = struct {
         const deadline = self.origin_ns + self.framesNs(self.frames);
         if (now < deadline) return self.clock.sleepUntil(@min(deadline, now + max_sleep_ns));
         if (now - deadline > max_late_periods * self.framesNs(self.samples)) self.rebase(now);
+        self.deadline_ns = self.origin_ns + self.framesNs(self.frames);
         self.lock.lock();
         self.render(self.context, self.buffer, self.discontinuity);
         self.lock.unlock();
@@ -209,6 +212,8 @@ test "overdue blocks up to two periods late run back to back" {
     clock.now_ns = deadlineOf(5_000, 4, 480, 48000);
     recorder.renderBlocks(&device, 3);
     try testing.expectEqualSlices(u64, &.{ clock.now_ns, clock.now_ns, clock.now_ns }, recorder.times[2..5]);
+    // Overdue blocks are still stamped at their own deadlines.
+    try testing.expectEqual(deadlineOf(5_000, 4, 480, 48000), device.deadline_ns);
     recorder.renderBlocks(&device, 1);
     try testing.expectEqual(deadlineOf(5_000, 5, 480, 48000), recorder.times[5]);
     try testing.expect(std.mem.allEqual(bool, recorder.discontinuities[1..6], false));
@@ -224,6 +229,7 @@ test "a block more than two periods late rebases the deadlines with a discontinu
     clock.now_ns = stalled;
     recorder.renderBlocks(&device, 2);
     try testing.expectEqualSlices(u64, &.{ stalled, deadlineOf(stalled, 1, 480, 48000) }, recorder.times[2..4]);
+    try testing.expectEqual(deadlineOf(stalled, 1, 480, 48000), device.deadline_ns);
     try testing.expectEqualSlices(bool, &.{ true, false }, recorder.discontinuities[2..4]);
 }
 

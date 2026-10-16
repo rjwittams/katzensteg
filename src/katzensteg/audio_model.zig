@@ -16,13 +16,14 @@ pub const max_streams = 8;
 
 pub const StreamId = u8;
 
-/// The model scales `s16` and `f32` (native endian). Other formats play at
-/// unity gain, and gain 0 writes their silence byte.
-pub const SampleFormat = enum { s16, f32, other };
+/// Native-endian samples. The model scales `s16` and `f32`; other formats
+/// play at unity gain, and gain 0 writes their silence byte.
+pub const SampleFormat = enum { u8, s16, s32, f32, other };
 
 pub const Spec = struct {
     format: SampleFormat,
     silence: u8,
+    channels: u16,
     frame_bytes: u32,
     rate: u32,
 };
@@ -38,7 +39,8 @@ pub const Block = struct {
     stream: StreamInfo,
     /// Unscaled samples, valid only during the sink call.
     bytes: []const u8,
-    /// Injected clock at the start of the block.
+    /// When the block's first sample plays: the virtual device's deadline,
+    /// otherwise the injected clock at the start of the block.
     time_ns: u64,
     /// The pacing clock restarted or rebased before this block: it does not
     /// follow the previous block in time.
@@ -76,13 +78,16 @@ pub const Clock = struct {
 /// plays locally.
 pub const Pacing = enum { local_device, virtual_device };
 
-/// Sees every block unscaled: where later sinks (a published track) attach.
-/// `opened` and `closed` run on an app thread; `consume` on the audio thread.
+/// Sees every block unscaled: the published track, or the test tap file.
+/// `opened`, `closed` and `quit` run on an app thread; `consume` on the audio
+/// thread. `label` names the device the app opened, valid during the call.
 pub const TapSink = struct {
     context: *anyopaque,
-    opened: *const fn (context: *anyopaque, stream: StreamInfo) void,
+    opened: *const fn (context: *anyopaque, stream: StreamInfo, label: []const u8) void,
     consume: *const fn (context: *anyopaque, block: *const Block) void,
     closed: *const fn (context: *anyopaque, stream: StreamInfo) void,
+    /// The app quit audio: no stream is open.
+    quit: ?*const fn (context: *anyopaque) void = null,
 };
 
 /// Plays through the app's real device: scales the device's buffer in place.
@@ -146,14 +151,15 @@ pub const Model = struct {
         return false;
     }
 
-    /// App thread; the caller serializes opens and closes. Null when every
-    /// stream slot is in use.
-    pub fn openStream(self: *Model, spec: Spec) ?StreamInfo {
+    /// App thread; the caller serializes opens and closes. `label` names the
+    /// device ("default" for the default one). Null when every stream slot is
+    /// in use.
+    pub fn openStream(self: *Model, spec: Spec, label: []const u8) ?StreamInfo {
         for (&self.streams, 0..) |*stream, index| {
             if (stream.open.load(.acquire)) continue;
             stream.info = .{ .id = @intCast(index), .sequence = self.next_sequence, .spec = spec };
             self.next_sequence += 1;
-            if (self.tap) |tap| tap.opened(tap.context, stream.info);
+            if (self.tap) |tap| tap.opened(tap.context, stream.info, label);
             stream.open.store(true, .release);
             return stream.info;
         }
@@ -167,16 +173,28 @@ pub const Model = struct {
         if (self.tap) |tap| tap.closed(tap.context, stream.info);
     }
 
+    /// App thread, after the app quit audio. Tells the tap only once every
+    /// stream has closed: a nested init keeps its devices.
+    pub fn quit(self: *Model) void {
+        for (&self.streams) |*stream| if (stream.open.load(.acquire)) return;
+        if (self.tap) |tap| if (tap.quit) |quit_fn| quit_fn(tap.context);
+    }
+
     /// Audio thread. `buffer` holds a block the app just produced; on return
     /// it holds what the device should play.
     pub fn processBlock(self: *Model, id: StreamId, buffer: []u8, discontinuity: bool) void {
+        self.processBlockAt(id, buffer, discontinuity, self.clock.now());
+    }
+
+    /// `processBlock` for a block whose first sample plays at `time_ns`.
+    pub fn processBlockAt(self: *Model, id: StreamId, buffer: []u8, discontinuity: bool, time_ns: u64) void {
         const stream = &self.streams[id];
         if (!stream.open.load(.acquire)) return;
         const to_tap = self.route_tap.load(.acquire);
         const silent = !self.route_local_device.load(.acquire) or self.muted.load(.acquire);
         const local_gain: f32 = if (silent) 0 else self.gain();
 
-        const block: Block = .{ .stream = stream.info, .bytes = buffer, .time_ns = self.clock.now(), .discontinuity = discontinuity };
+        const block: Block = .{ .stream = stream.info, .bytes = buffer, .time_ns = time_ns, .discontinuity = discontinuity };
         if (to_tap) if (self.tap) |tap| tap.consume(tap.context, &block);
         self.local.play(self.local.context, &block, buffer, local_gain);
     }
@@ -206,14 +224,20 @@ const FakeTap = struct {
     blocks: [8][8]u8 = undefined,
     times: [8]u64 = undefined,
     count: usize = 0,
+    quits: usize = 0,
     /// Posted from inside `consume`, as a concurrent poster would mid-block.
     route_local_device_mid_block: ?struct { model: *Model, value: bool } = null,
 
     fn sink(self: *FakeTap) TapSink {
-        return .{ .context = self, .opened = ignore, .consume = consume, .closed = ignore };
+        return .{ .context = self, .opened = opened, .consume = consume, .closed = ignore, .quit = quit };
     }
 
+    fn opened(_: *anyopaque, _: StreamInfo, _: []const u8) void {}
     fn ignore(_: *anyopaque, _: StreamInfo) void {}
+
+    fn quit(context: *anyopaque) void {
+        @as(*FakeTap, @ptrCast(@alignCast(context))).quits += 1;
+    }
 
     fn consume(context: *anyopaque, block: *const Block) void {
         const self: *FakeTap = @ptrCast(@alignCast(context));
@@ -249,7 +273,7 @@ const FakeAdapter = struct {
     device: [8]u8 = undefined,
 
     fn open(model: *Model) FakeAdapter {
-        return .{ .model = model, .stream = model.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).? };
+        return .{ .model = model, .stream = model.openStream(.{ .format = .s16, .silence = 0, .channels = 2, .frame_bytes = 4, .rate = 48000 }, "default").? };
     }
 
     /// Returns what the app produced; `self.device` holds what plays.
@@ -316,11 +340,26 @@ test "routing changes apply at a block boundary" {
     try testing.expectEqualSlices(u8, &produced, &adapter.device);
 }
 
+test "a quit reaches the tap once every stream has closed" {
+    var clock: FakeClock = .{};
+    var local: RecordingLocalSink = .{};
+    var tap: FakeTap = .{};
+    var model: Model = .{ .clock = clock.clock(), .local = local.sink(), .tap = tap.sink() };
+    const first = FakeAdapter.open(&model);
+    const second = FakeAdapter.open(&model);
+    model.closeStream(first.stream.id);
+    model.quit();
+    try testing.expectEqual(@as(usize, 0), tap.quits);
+    model.closeStream(second.stream.id);
+    model.quit();
+    try testing.expectEqual(@as(usize, 1), tap.quits);
+}
+
 test "the control path steps volume by 10% within 0 to 100% and toggles mute" {
     var clock: FakeClock = .{};
     var model: Model = .{ .clock = clock.clock(), .local = local_device_sink.sink };
     try testing.expect(!model.playing());
-    const stream = model.openStream(.{ .format = .s16, .silence = 0, .frame_bytes = 4, .rate = 48000 }).?;
+    const stream = model.openStream(.{ .format = .s16, .silence = 0, .channels = 2, .frame_bytes = 4, .rate = 48000 }, "default").?;
     try testing.expect(model.playing());
 
     model.setGain(0.34);

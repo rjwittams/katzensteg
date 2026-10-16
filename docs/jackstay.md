@@ -12,7 +12,7 @@ input by default and remains observation-only when the source refuses it cleanly
 
 The dependency revision and C ABI are pinned in
 [`profiles/jackstay-dependency.json`](../profiles/jackstay-dependency.json).
-Prepare the ABI 0.16 headers and shared library, then enable the connectors:
+Prepare the ABI 0.17 headers and shared library, then enable the connectors:
 
 ```sh
 ks_jackstay_prefix="${XDG_CACHE_HOME:-$HOME/.cache}/katzensteg/jackstay"
@@ -90,7 +90,7 @@ the swap that drew it. Capture layers read the clock through the core export
 `ks_katzensteg_host_time_ns` and pass it to
 `ks_katzensteg_present_external_framebuffer_at`. The older
 `ks_katzensteg_present_external_framebuffer` entry point stamps a frame when it
-is called. Native app input stays enabled. Audio is not transported by these connectors.
+is called. Native app input stays enabled.
 The consumer acquires on a worker, copies into a bounded latest-frame mailbox,
 then releases the lease before presentation. The handshake runs on a setup worker:
 its absolute timeout is five seconds, with up to five more seconds for input
@@ -120,8 +120,29 @@ storage. Retrying such retained owners during a long-lived app unload is future
 work. The consumer checks setup disconnect at acquisition boundaries, including
 the one-second frame-wait timeout.
 
-Registration, graph management, source activation, remote credentials, audio,
-GPU transport are outside this implementation. Direct
+## Audio
+
+With a Jackstay target the app's first playback device is published as a
+playback track (`src/jackstay/playback.zig`, composed by
+`audio_published_track_sink.zig`); `KATZENSTEG_PUBLISH_AUDIO=0` publishes video
+only. Nothing plays locally: the virtual paced device paces SDL2 apps, and SDL3
+apps run on SDL's dummy driver until the SDL3 virtual device lands (#176). The
+audio thread copies each block, unscaled and in the app's obtained format (F32
+for SDL3), into the track's ring, stamped in host time at the device deadline
+(SDL3: when its postmix runs). Device periods longer than 1024 frames are
+written as several ring blocks.
+
+The track is labelled with the SDL2 device name, or `default` (always for
+SDL3). It is announced to each consumer on its tracks channel after the
+handshake, never in the offer, so a stalled peer cannot hold up an app's audio
+open. It is added on the first open; a reopen updates it, with a discontinuity
+and, if the format changed, a reconfiguration; it idles while no device is
+open; and it is removed when the app quits audio or the publication ends.
+Consumers select it late (`ft_tracks_select`). `test_jackstay_audio.py` reads
+each probe's track back through the C ABI.
+
+Registration, graph management, source activation, remote credentials,
+recording audio and GPU transport are outside this implementation. Direct
 endpoints work without a registry.
 
 ## Cooperative input to an app
